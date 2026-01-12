@@ -3,8 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { eq, sql } from "drizzle-orm";
 
-import { db } from "../../../lib/db";
-import { tenants, tenantSettings } from "../../../lib/db/schema";
+// ✅ Correct relative imports from src/app/api/tenant/me-settings -> src/lib/...
+import { db } from "../../../../lib/db";
+import { tenants, tenantSettings } from "../../../../lib/db/schema";
 
 export const runtime = "nodejs";
 
