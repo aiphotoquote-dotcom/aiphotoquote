@@ -36,6 +36,12 @@ function pick<T = any>(obj: any, keys: string[], fallback: T): T {
   return fallback;
 }
 
+function toNumOrBlank(v: any): number | "" {
+  if (v === null || v === undefined || v === "") return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? n : "";
+}
+
 function Chip({
   tone = "neutral",
   children,
@@ -51,7 +57,9 @@ function Chip({
       : "border-gray-200 bg-white text-gray-700";
 
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}>
+    <span
+      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}
+    >
       <span className="inline-block h-2 w-2 rounded-full bg-current opacity-60" />
       {children}
     </span>
@@ -98,7 +106,7 @@ export default function TenantOnboardingForm() {
   const publicQuoteHref = `/q/${effectiveSlug}`;
 
   function currentSnapshot() {
-    // Only track page-level settings (not openaiKey input itself).
+    // Track page-level settings (not openaiKey input itself).
     return JSON.stringify({
       name,
       slug,
@@ -134,6 +142,7 @@ export default function TenantOnboardingForm() {
         const t = json.tenant ?? {};
         const s = json.settings ?? {};
         const sec = json.secrets ?? {};
+        const p = json.pricing ?? {};
 
         setName(pick<string>(t, ["name"], ""));
         setSlug(pick<string>(t, ["slug"], ""));
@@ -141,6 +150,12 @@ export default function TenantOnboardingForm() {
         setIndustryKey(pick<string>(s, ["industryKey", "industry_key"], "upholstery"));
         setRedirectUrl(pick<string>(s, ["redirectUrl", "redirect_url"], ""));
         setThankYouUrl(pick<string>(s, ["thankYouUrl", "thank_you_url"], ""));
+
+        // ✅ Populate pricing (coerce strings -> numbers)
+        setMinJob(toNumOrBlank(pick<any>(p, ["minJob", "min_job"], "")));
+        setTypLow(toNumOrBlank(pick<any>(p, ["typicalLow", "typical_low"], "")));
+        setTypHigh(toNumOrBlank(pick<any>(p, ["typicalHigh", "typical_high"], "")));
+        setMaxWOI(toNumOrBlank(pick<any>(p, ["maxWithoutInspection", "max_without_inspection"], "")));
 
         setHasOpenaiKey(Boolean(sec?.hasOpenaiKey));
         setKeyVerified(false);
@@ -255,16 +270,12 @@ export default function TenantOnboardingForm() {
         throw new Error(detail);
       }
 
-      // If user submitted a key, mark as stored
       if (openaiKey) setHasOpenaiKey(true);
 
-      // Reset dirty baseline
       baselineRef.current = currentSnapshot();
       setDirty(false);
 
-      // Clear key input so it doesn't sit there
       setOpenaiKey("");
-
       setMsg(null);
       flashSaved();
     } catch (e: any) {
