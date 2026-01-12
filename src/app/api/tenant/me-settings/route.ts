@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { eq, sql } from "drizzle-orm";
 
-// ✅ Use explicit relative imports so build can’t mis-resolve aliases.
 import { db } from "../../../lib/db";
 import { tenants, tenantSettings } from "../../../lib/db/schema";
 
@@ -13,7 +12,10 @@ export async function GET(req: NextRequest) {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "UNAUTHORIZED" },
+        { status: 401 }
+      );
     }
 
     const tenant = await db.query.tenants.findFirst({
@@ -22,7 +24,10 @@ export async function GET(req: NextRequest) {
     });
 
     if (!tenant?.id) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+      return NextResponse.json(
+        { ok: false, error: "TENANT_NOT_FOUND" },
+        { status: 404 }
+      );
     }
 
     const url = new URL(req.url);
@@ -82,4 +87,10 @@ export async function GET(req: NextRequest) {
         ok: false,
         error: {
           code: "INTERNAL",
-          message: err?.message || String(er
+          message: err?.message || String(err),
+        },
+      },
+      { status: 500 }
+    );
+  }
+}
