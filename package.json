@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^6.36.7",
+    "@vercel/blob": "^2.0.0",
     "drizzle-orm": "^0.45.1",
     "next": "16.1.1",
     "openai": "^6.16.0",
