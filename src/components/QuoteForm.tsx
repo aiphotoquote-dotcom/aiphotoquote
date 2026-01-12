@@ -9,6 +9,8 @@ function formatMoney(n: number) {
 }
 
 export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
+  const MIN_PHOTOS = 2; // Maggio-style: require at least 2 for usable estimates
+
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
@@ -24,6 +26,11 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     if (files.length > 0) return 2;
     return 1;
   }, [files.length, result?.output]);
+
+  const progressText = useMemo(() => {
+    if (files.length >= MIN_PHOTOS) return `✅ ${files.length} photo${files.length === 1 ? "" : "s"} added`;
+    return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
+  }, [files.length]);
 
   function rebuildPreviews(nextFiles: File[]) {
     previews.forEach((p) => URL.revokeObjectURL(p));
@@ -48,8 +55,8 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     setError(null);
     setResult(null);
 
-    if (!files.length) {
-      setError("Please add at least 1 photo.");
+    if (files.length < MIN_PHOTOS) {
+      setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
       return;
     }
     if (files.length > 12) {
@@ -107,6 +114,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
           {step === 2 && "2 / 3 — Add details"}
           {step === 3 && "3 / 3 — Your estimate"}
         </div>
+        <div className="mt-1 text-xs text-gray-700">{progressText}</div>
         {working && (
           <div className="mt-1 text-xs text-gray-600">
             {phase === "uploading" && "Uploading photos…"}
@@ -115,13 +123,34 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         )}
       </div>
 
-      {/* Photos */}
+      {/* Guidance cards (Maggio style) */}
       <section className="rounded-2xl border p-5 space-y-4">
         <div>
-          <h2 className="font-semibold">Photos</h2>
+          <h2 className="font-semibold">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600">
-            Best results: 1 wide shot + 1–2 close-ups + one from an angle. Max 12.
+            These two shots give the best accuracy. Add more if you want (max 12).
           </p>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-semibold">1) Wide shot</div>
+            <p className="mt-1 text-xs text-gray-600">
+              Step back. Capture the full seat/cushion/panel.
+            </p>
+          </div>
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-semibold">2) Close-up</div>
+            <p className="mt-1 text-xs text-gray-600">
+              Get the damage/stitching/material texture clearly.
+            </p>
+          </div>
+          <div className="rounded-xl border p-4">
+            <div className="text-sm font-semibold">Optional: Context</div>
+            <p className="mt-1 text-xs text-gray-600">
+              Any labels, mounting points, or access constraints.
+            </p>
+          </div>
         </div>
 
         {/* Mobile-first capture buttons */}
@@ -165,28 +194,58 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
           </label>
         </div>
 
-        {previews.length > 0 && (
-          <div className="grid grid-cols-3 gap-3">
-            {previews.map((src, idx) => (
-              <div key={`${src}-${idx}`} className="relative rounded-xl border overflow-hidden">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
-                <button
-                  type="button"
-                  className="absolute top-2 right-2 rounded-md bg-white/90 border px-2 py-1 text-xs disabled:opacity-50"
-                  onClick={() => removeFileAt(idx)}
-                  disabled={working}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Quick checklist */}
+        <div className="rounded-xl bg-gray-50 p-4 text-sm">
+          <div className="font-semibold">Checklist</div>
+          <ul className="mt-2 space-y-1 text-gray-700">
+            <li>
+              {files.length >= 1 ? "✅" : "⬜️"} Wide shot added
+            </li>
+            <li>
+              {files.length >= 2 ? "✅" : "⬜️"} Close-up added
+            </li>
+            <li className="text-xs text-gray-600 pt-1">
+              Tip: If you’re unsure, take 1 extra photo from an angle.
+            </li>
+          </ul>
+        </div>
 
-        {files.length > 0 && (
-          <div className="text-xs text-gray-600">
-            Added <b>{files.length}</b> photo{files.length === 1 ? "" : "s"}.
+        {/* Previews */}
+        {previews.length > 0 && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              {previews.map((src, idx) => (
+                <div
+                  key={`${src}-${idx}`}
+                  className="relative rounded-xl border overflow-hidden"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={src}
+                    alt={`photo ${idx + 1}`}
+                    className="h-28 w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    className="absolute top-2 right-2 rounded-md bg-white/90 border px-2 py-1 text-xs disabled:opacity-50"
+                    onClick={() => removeFileAt(idx)}
+                    disabled={working}
+                  >
+                    Remove
+                  </button>
+                  <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[11px] px-2 py-1">
+                    Photo {idx + 1}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Maggio-like “add another” nudge */}
+            {files.length < 12 && (
+              <div className="text-center text-xs text-gray-600">
+                Want better accuracy? Add one more photo from a different angle.
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -196,7 +255,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         <div>
           <h2 className="font-semibold">Details (optional)</h2>
           <p className="mt-1 text-xs text-gray-600">
-            A sentence or two helps us estimate faster.
+            One sentence helps us estimate faster.
           </p>
         </div>
 
@@ -215,18 +274,25 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
           <div className="font-semibold">Estimate disclaimer</div>
           <p className="mt-1">
-            This is a photo-based estimate range. Final pricing can change after inspection,
-            measurements, and material selection.
+            This is a photo-based estimate range. Final pricing can change after
+            inspection, measurements, and material selection.
           </p>
         </div>
 
+        {/* Sticky-ish big CTA (mobile friendly) */}
         <button
           className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50"
           onClick={onSubmit}
-          disabled={working || files.length === 0}
+          disabled={working || files.length < MIN_PHOTOS}
         >
           {working ? "Working…" : "Get Estimate"}
         </button>
+
+        {files.length < MIN_PHOTOS && (
+          <p className="text-center text-xs text-gray-600">
+            Add at least <b>{MIN_PHOTOS}</b> photos to unlock estimate.
+          </p>
+        )}
 
         {error && (
           <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
@@ -248,7 +314,8 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
           <div className="rounded-xl bg-gray-50 p-4">
             <div className="text-sm font-medium">Estimated Price Range</div>
             <div className="mt-1 text-2xl font-semibold">
-              {formatMoney(result.output.estimate.low)} – {formatMoney(result.output.estimate.high)}
+              {formatMoney(result.output.estimate.low)} –{" "}
+              {formatMoney(result.output.estimate.high)}
             </div>
             {result.output.inspection_required && (
               <p className="mt-2 text-xs text-gray-600">
