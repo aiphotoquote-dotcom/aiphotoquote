@@ -18,16 +18,16 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ✅ Use db.select() so we don't depend on db.query typing
+    // ✅ Use db.select() + camelCase schema properties
     const tenantRows = await db
       .select({
         id: tenants.id,
         name: tenants.name,
         slug: tenants.slug,
-        owner_clerk_user_id: tenants.owner_clerk_user_id,
+        ownerClerkUserId: tenants.ownerClerkUserId,
       })
       .from(tenants)
-      .where(eq(tenants.owner_clerk_user_id, userId))
+      .where(eq(tenants.ownerClerkUserId, userId))
       .limit(1);
 
     const tenant = tenantRows[0];
