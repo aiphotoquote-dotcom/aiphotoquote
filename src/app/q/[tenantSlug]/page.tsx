@@ -1,19 +1,121 @@
+import { notFound } from "next/navigation";
 import QuoteForm from "@/components/QuoteForm";
+import { db } from "../../../lib/db/client";
+import { sql } from "drizzle-orm";
 
-export default async function Page({ params }: { params: Promise<{ tenantSlug: string }> }) {
-  const { tenantSlug } = await params;
+export default async function Page({
+  params,
+}: {
+  params: { tenantSlug: string };
+}) {
+  const tenantSlug = params.tenantSlug;
+
+  // Server-side tenant lookup (raw SQL to avoid schema-typing friction)
+  const tenantRows = await db.execute(sql`
+    select "id", "name", "slug"
+    from "tenants"
+    where "slug" = ${tenantSlug}
+    limit 1
+  `);
+
+  const tenant = (tenantRows as any)?.[0] as
+    | { id: string; name: string; slug: string }
+    | undefined;
+
+  if (!tenant?.id) notFound();
+
+  // Optional: pull tenant settings for future use (copy / redirects)
+  const settingsRows = await db.execute(sql`
+    select "industry_key", "redirect_url", "thank_you_url"
+    from "tenant_settings"
+    where "tenant_id" = ${tenant.id}::uuid
+    limit 1
+  `);
+
+  const settings = (settingsRows as any)?.[0] as
+    | {
+        industry_key: string | null;
+        redirect_url: string | null;
+        thank_you_url: string | null;
+      }
+    | undefined;
+
+  const industry = settings?.industry_key ?? "service";
 
   return (
-    <main className="min-h-screen p-6 md:p-10">
-      <div className="max-w-3xl mx-auto">
-        <div className="rounded-2xl border p-6 md:p-8 shadow-sm">
-          <h1 className="text-2xl font-semibold">Get a Photo Quote</h1>
-          <p className="mt-2 text-sm text-gray-600">
-            Upload a few clear photos and we’ll send back an estimate range.
-          </p>
+    <main className="min-h-screen bg-gray-50 text-gray-900">
+      <div className="mx-auto max-w-5xl px-6 py-12">
+        {/* Hero */}
+        <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
+          <div className="lg:col-span-2">
+            <div className="inline-flex items-center gap-2 rounded-full border bg-white px-3 py-1 text-xs text-gray-700">
+              <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
+              Photo quote powered by AI
+            </div>
 
-          <div className="mt-6">
-            <QuoteForm tenantSlug={tenantSlug} />
+            <h1 className="mt-4 text-4xl font-semibold tracking-tight">
+              {tenant.name}
+            </h1>
+
+            <p className="mt-3 text-base text-gray-700">
+              Get a fast estimate range by uploading a few clear photos. No phone
+              calls required.
+            </p>
+
+            <div className="mt-6 space-y-3 text-sm text-gray-800">
+              <div className="flex gap-3">
+                <div className="mt-1 h-2 w-2 rounded-full bg-black" />
+                <p>
+                  <span className="font-semibold">No obligation.</span> This is an
+                  estimate range — final pricing depends on inspection and scope.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <div className="mt-1 h-2 w-2 rounded-full bg-black" />
+                <p>
+                  <span className="font-semibold">Best results:</span> 2–6 photos,
+                  good lighting, include close-ups + a full view.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <div className="mt-1 h-2 w-2 rounded-full bg-black" />
+                <p>
+                  Tailored for <span className="font-semibold">{industry}</span>{" "}
+                  quotes. We’ll follow up if anything needs clarification.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Form Card */}
+          <div className="lg:col-span-3">
+            <div className="rounded-2xl border bg-white p-6 shadow-sm md:p-8">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-2xl font-semibold">Get a Photo Quote</h2>
+                  <p className="mt-2 text-sm text-gray-700">
+                    Upload photos and add a quick note. We’ll return an estimate
+                    range.
+                  </p>
+                </div>
+
+                <div className="hidden md:flex flex-col items-end text-xs text-gray-600">
+                  <span className="font-semibold text-gray-900">Tenant</span>
+                  <span className="rounded-md bg-gray-50 px-2 py-1">
+                    /q/{tenant.slug}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <QuoteForm tenantSlug={tenantSlug} />
+              </div>
+
+              <p className="mt-6 text-xs text-gray-600">
+                By submitting, you agree we may contact you about this request.
+                Photos are used only to prepare your estimate.
+              </p>
+            </div>
           </div>
         </div>
       </div>
