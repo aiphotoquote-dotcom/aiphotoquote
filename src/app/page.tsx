@@ -70,8 +70,12 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function Dot() {
-  return <span className="mt-1 inline-block h-2 w-2 rounded-full bg-black" />;
+function Check() {
+  return (
+    <span className="mt-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-600/10 text-blue-700">
+      <span className="block h-2 w-2 rounded-full bg-blue-600" />
+    </span>
+  );
 }
 
 export default function HomePage() {
@@ -81,13 +85,13 @@ export default function HomePage() {
 
       {/* HERO */}
       <section className="relative overflow-hidden border-b">
-        {/* Background */}
+        {/* Accent background */}
         <div className="absolute inset-0">
-          <div className="absolute -top-40 left-1/2 h-[520px] w-[520px] -translate-x-1/2 rounded-full bg-gradient-to-br from-gray-200 to-white blur-3xl opacity-80" />
-          <div className="absolute -left-40 top-24 h-[520px] w-[520px] rounded-full bg-gradient-to-br from-gray-100 to-white blur-3xl opacity-90" />
-          <div className="absolute -right-40 top-32 h-[520px] w-[520px] rounded-full bg-gradient-to-br from-gray-100 to-white blur-3xl opacity-90" />
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(0,0,0,0.08),transparent_45%),radial-gradient(circle_at_80%_20%,rgba(0,0,0,0.06),transparent_45%)]" />
-          <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.0),rgba(255,255,255,0.9))]" />
+          <div className="absolute -top-48 left-1/2 h-[620px] w-[620px] -translate-x-1/2 rounded-full bg-gradient-to-br from-blue-500/30 via-cyan-400/20 to-white blur-3xl" />
+          <div className="absolute -left-64 top-24 h-[640px] w-[640px] rounded-full bg-gradient-to-br from-indigo-500/20 via-blue-400/20 to-white blur-3xl" />
+          <div className="absolute -right-64 top-40 h-[640px] w-[640px] rounded-full bg-gradient-to-br from-cyan-400/20 via-blue-500/20 to-white blur-3xl" />
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(37,99,235,0.12),transparent_45%),radial-gradient(circle_at_80%_20%,rgba(34,211,238,0.10),transparent_45%)]" />
+          <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.0),rgba(255,255,255,0.92))]" />
         </div>
 
         <div className="relative mx-auto max-w-6xl px-6 py-16 sm:py-20">
@@ -95,7 +99,7 @@ export default function HomePage() {
             {/* Left */}
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border bg-white/70 px-3 py-1 text-xs text-gray-700 backdrop-blur">
-                <span className="font-semibold">AIPhotoQuote</span>
+                <span className="font-semibold text-blue-700">AIPhotoQuote</span>
                 <span className="text-gray-400">•</span>
                 <span>Photo-based estimates that feel premium</span>
               </div>
@@ -103,7 +107,7 @@ export default function HomePage() {
               <h1 className="mt-6 text-4xl font-semibold tracking-tight sm:text-6xl">
                 Turn customer photos into{" "}
                 <span className="relative inline-block">
-                  <span className="absolute inset-x-0 bottom-2 -z-10 h-3 rounded-full bg-gray-200" />
+                  <span className="absolute inset-x-0 bottom-2 -z-10 h-3 rounded-full bg-blue-200/70" />
                   consistent estimates
                 </span>{" "}
                 in minutes.
@@ -117,7 +121,7 @@ export default function HomePage() {
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Link
                   href="/sign-up"
-                  className="inline-flex items-center justify-center rounded-2xl bg-black px-6 py-3 text-sm font-semibold text-white shadow-sm"
+                  className="inline-flex items-center justify-center rounded-2xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-95"
                 >
                   Start free setup
                 </Link>
@@ -138,7 +142,7 @@ export default function HomePage() {
                 ].map((x) => (
                   <div
                     key={x.k}
-                    className="rounded-2xl border bg-white/60 p-4 backdrop-blur"
+                    className="rounded-2xl border bg-white/65 p-4 backdrop-blur"
                   >
                     <div className="text-sm font-semibold">{x.k}</div>
                     <div className="mt-1 text-xs text-gray-600">{x.v}</div>
@@ -149,24 +153,20 @@ export default function HomePage() {
 
             {/* Right - Hero card */}
             <div className="relative">
-              <div className="absolute -inset-3 rounded-[28px] bg-gradient-to-br from-gray-200 to-white blur-xl opacity-80" />
+              <div className="absolute -inset-4 rounded-[32px] bg-gradient-to-br from-blue-500/25 via-cyan-400/15 to-white blur-2xl" />
               <div className="relative rounded-[28px] border bg-white/80 p-6 shadow-sm backdrop-blur">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <p className="text-xs font-medium text-gray-500">
-                      Example output
-                    </p>
-                    <h3 className="mt-1 text-lg font-semibold">
-                      Photo Estimate Summary
-                    </h3>
+                    <p className="text-xs font-medium text-gray-500">Example output</p>
+                    <h3 className="mt-1 text-lg font-semibold">Photo Estimate Summary</h3>
                   </div>
-                  <span className="rounded-full border bg-white px-3 py-1 text-xs font-medium text-gray-800">
+                  <span className="rounded-full border bg-white px-3 py-1 text-xs font-semibold text-blue-700">
                     Customer-friendly
                   </span>
                 </div>
 
                 <div className="mt-5 space-y-4">
-                  <div className="rounded-2xl border bg-gradient-to-b from-gray-50 to-white p-5">
+                  <div className="rounded-2xl border bg-gradient-to-b from-blue-50 to-white p-5">
                     <p className="text-sm font-semibold">Estimate range</p>
                     <p className="mt-1 text-3xl font-semibold tracking-tight">
                       $650 – $1,250
@@ -186,9 +186,7 @@ export default function HomePage() {
                     </div>
                     <div className="rounded-2xl border bg-white p-4">
                       <p className="text-sm font-semibold">Turnaround</p>
-                      <p className="mt-1 text-sm text-gray-600">
-                        3–7 business days
-                      </p>
+                      <p className="mt-1 text-sm text-gray-600">3–7 business days</p>
                     </div>
                   </div>
 
@@ -204,7 +202,7 @@ export default function HomePage() {
 
                 <div className="mt-6 flex items-center justify-between border-t pt-4 text-xs text-gray-500">
                   <span>Lead emailed + stored in admin</span>
-                  <span>Powered by your guardrails</span>
+                  <span className="text-blue-700">Guardrails applied</span>
                 </div>
               </div>
             </div>
@@ -221,7 +219,7 @@ export default function HomePage() {
                   Your customers don’t know the words. They know how to take pictures.
                 </div>
               </div>
-              <Link href="/sign-up" className="text-sm font-semibold underline">
+              <Link href="/sign-up" className="text-sm font-semibold text-blue-700 underline">
                 Create your tenant →
               </Link>
             </div>
@@ -241,33 +239,19 @@ export default function HomePage() {
                 A quoting experience that feels modern — without losing control.
               </p>
             </div>
-            <Link href="/onboarding" className="text-sm font-semibold underline">
+            <Link href="/onboarding" className="text-sm font-semibold text-blue-700 underline">
               Configure →
             </Link>
           </div>
 
           <div className="mt-10 grid gap-6 lg:grid-cols-3">
             {[
-              {
-                step: "01",
-                title: "Customer uploads photos",
-                desc: "Category + notes + multiple images from any device.",
-              },
-              {
-                step: "02",
-                title: "AI generates estimate range",
-                desc: "Guardrails keep output realistic and margin-safe.",
-              },
-              {
-                step: "03",
-                title: "You get a clean lead",
-                desc: "Photos, notes, estimate, and inspection flags in admin + email.",
-              },
+              { step: "01", title: "Customer uploads photos", desc: "Category + notes + multiple images from any device." },
+              { step: "02", title: "AI generates estimate range", desc: "Guardrails keep output realistic and margin-safe." },
+              { step: "03", title: "You get a clean lead", desc: "Photos, notes, estimate, and inspection flags in admin + email." },
             ].map((x) => (
-              <div key={x.step} className="rounded-[28px] border p-6">
-                <div className="text-xs font-semibold text-gray-500">
-                  Step {x.step}
-                </div>
+              <div key={x.step} className="rounded-[28px] border bg-white p-6">
+                <div className="text-xs font-semibold text-blue-700/80">Step {x.step}</div>
                 <div className="mt-2 text-xl font-semibold">{x.title}</div>
                 <div className="mt-2 text-sm text-gray-600">{x.desc}</div>
               </div>
@@ -276,30 +260,12 @@ export default function HomePage() {
 
           <div className="mt-10 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {[
-              {
-                title: "Pricing guardrails",
-                desc: "Minimums and typical ranges keep AI aligned with your shop.",
-              },
-              {
-                title: "Redirect + thank-you pages",
-                desc: "Route customers back to your site, scheduler, or confirmation.",
-              },
-              {
-                title: "Admin workflow",
-                desc: "Central place to review leads and follow up fast.",
-              },
-              {
-                title: "Customer-friendly language",
-                desc: "Estimate wording avoids overpromising and reduces disputes.",
-              },
-              {
-                title: "Made for photo-first jobs",
-                desc: "Perfect when customers can’t describe the work reliably.",
-              },
-              {
-                title: "Brand-ready experience",
-                desc: "Clean layout, premium feel, and conversion-focused CTAs.",
-              },
+              { title: "Pricing guardrails", desc: "Minimums and typical ranges keep AI aligned with your shop." },
+              { title: "Redirect + thank-you pages", desc: "Route customers back to your site, scheduler, or confirmation." },
+              { title: "Admin workflow", desc: "Central place to review leads and follow up fast." },
+              { title: "Customer-friendly language", desc: "Estimate wording avoids overpromising and reduces disputes." },
+              { title: "Made for photo-first jobs", desc: "Perfect when customers can’t describe the work reliably." },
+              { title: "Brand-ready experience", desc: "Clean layout, premium feel, and conversion-focused CTAs." },
             ].map((f) => (
               <div key={f.title} className="rounded-[28px] border bg-white p-6">
                 <div className="text-lg font-semibold">{f.title}</div>
@@ -320,7 +286,7 @@ export default function HomePage() {
                 Simple tiers — built around the quoting workflow.
               </p>
             </div>
-            <Link href="/sign-up" className="text-sm font-semibold underline">
+            <Link href="/sign-up" className="text-sm font-semibold text-blue-700 underline">
               Start now →
             </Link>
           </div>
@@ -330,12 +296,12 @@ export default function HomePage() {
               <div
                 key={t.name}
                 className={cn(
-                  "relative rounded-[28px] border p-6 bg-white",
-                  t.featured && "border-black shadow-sm"
+                  "relative rounded-[28px] border bg-white p-6",
+                  t.featured && "border-blue-600 shadow-sm"
                 )}
               >
                 {t.featured && (
-                  <div className="absolute -top-3 left-6 rounded-full bg-black px-3 py-1 text-xs font-semibold text-white">
+                  <div className="absolute -top-3 left-6 rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 px-3 py-1 text-xs font-semibold text-white">
                     Most popular
                   </div>
                 )}
@@ -348,16 +314,16 @@ export default function HomePage() {
                 </div>
 
                 <div className="mt-6 flex items-end gap-2">
-                  <div className={cn("text-4xl font-semibold tracking-tight", t.featured && "text-black")}>
+                  <div className={cn("text-4xl font-semibold tracking-tight", t.featured && "text-blue-700")}>
                     {t.price}
                   </div>
                   <div className="pb-1 text-sm text-gray-600">{t.cadence}</div>
                 </div>
 
-                <ul className="mt-6 space-y-2 text-sm text-gray-700">
+                <ul className="mt-6 space-y-3 text-sm text-gray-700">
                   {t.highlights.map((h) => (
                     <li key={h} className="flex gap-3">
-                      <Dot />
+                      <Check />
                       <span>{h}</span>
                     </li>
                   ))}
@@ -369,7 +335,7 @@ export default function HomePage() {
                     className={cn(
                       "inline-flex w-full items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold",
                       t.featured
-                        ? "bg-black text-white shadow-sm"
+                        ? "bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-sm hover:opacity-95"
                         : "border bg-white hover:bg-gray-50"
                     )}
                   >
@@ -393,35 +359,35 @@ export default function HomePage() {
 
           <div className="mt-10 grid gap-6 lg:grid-cols-2">
             {FAQ.map((f) => (
-              <div key={f.q} className="rounded-[28px] border p-6">
+              <div key={f.q} className="rounded-[28px] border bg-white p-6">
                 <div className="text-lg font-semibold">{f.q}</div>
                 <div className="mt-2 text-sm leading-6 text-gray-600">{f.a}</div>
               </div>
             ))}
           </div>
 
-          <div className="mt-14 relative overflow-hidden rounded-[28px] border bg-black p-10 text-white">
-            <div className="absolute -left-24 -top-24 h-72 w-72 rounded-full bg-white/10 blur-2xl" />
-            <div className="absolute -right-24 -bottom-24 h-72 w-72 rounded-full bg-white/10 blur-2xl" />
+          <div className="mt-14 relative overflow-hidden rounded-[28px] border bg-gradient-to-r from-blue-700 to-cyan-600 p-10 text-white">
+            <div className="absolute -left-24 -top-24 h-72 w-72 rounded-full bg-white/15 blur-2xl" />
+            <div className="absolute -right-24 -bottom-24 h-72 w-72 rounded-full bg-white/15 blur-2xl" />
 
             <div className="relative">
               <div className="text-2xl font-semibold tracking-tight">
                 Ready to stop the quoting chaos?
               </div>
-              <div className="mt-2 text-sm text-white/80">
+              <div className="mt-2 text-sm text-white/90">
                 Set guardrails once. Let customers do the photo work. You focus on closing jobs.
               </div>
 
               <div className="mt-6 flex flex-col gap-3 sm:flex-row">
                 <Link
                   href="/sign-up"
-                  className="inline-flex items-center justify-center rounded-2xl bg-white px-6 py-3 text-sm font-semibold text-black"
+                  className="inline-flex items-center justify-center rounded-2xl bg-white px-6 py-3 text-sm font-semibold text-blue-700"
                 >
                   Start free setup
                 </Link>
                 <Link
                   href="/onboarding"
-                  className="inline-flex items-center justify-center rounded-2xl border border-white/30 bg-white/5 px-6 py-3 text-sm font-semibold text-white hover:bg-white/10"
+                  className="inline-flex items-center justify-center rounded-2xl border border-white/40 bg-white/10 px-6 py-3 text-sm font-semibold text-white hover:bg-white/15"
                 >
                   Go to Settings
                 </Link>
