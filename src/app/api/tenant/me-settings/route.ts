@@ -1,133 +1,98 @@
-import { NextResponse } from "next/server";
+// app/api/tenant/me-settings/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { eq } from "drizzle-orm";
-import { db } from "@/lib/db/client";
-import {
-  tenants,
-  tenantSecrets,
-  tenantSettings,
-  tenantPricingRules,
-} from "@/lib/db/schema";
+import { eq, sql } from "drizzle-orm";
+
+// ⬇️ Adjust these two imports ONLY if your project uses different paths.
+// (No other hunting. If your build errors, it will tell you the exact path.)
+import { db } from "@/lib/db";
+import { tenants, tenant_settings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
-function j(ok: boolean, payload: any, status = 200) {
-  return NextResponse.json({ ok, ...payload }, { status });
-}
-
-async function tableExists(tableName: string) {
-  // @ts-ignore
-  const r: any = await db.execute(
-    `select exists (
-       select 1 from information_schema.tables
-       where table_schema = 'public' and table_name = '${tableName}'
-     ) as ok`
-  );
-  const v =
-    (Array.isArray(r) ? r[0]?.ok : r?.rows?.[0]?.ok) ??
-    (Array.isArray(r) ? r[0]?.exists : r?.rows?.[0]?.exists);
-  return !!v;
-}
-
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     const { userId } = await auth();
-    if (!userId)
-      return j(
-        false,
-        { error: { code: "UNAUTHENTICATED", message: "Not signed in" } },
-        401
-      );
-
-    // Check required tables exist in THIS DB (Vercel-connected)
-    const needed = [
-      "tenants",
-      "tenant_settings",
-      "tenant_pricing_rules",
-      "tenant_secrets",
-    ];
-
-    const missing: string[] = [];
-    for (const t of needed) {
-      // eslint-disable-next-line no-await-in-loop
-      const ok = await tableExists(t);
-      if (!ok) missing.push(t);
-    }
-
-    if (missing.length) {
-      return j(
-        false,
-        {
-          error: {
-            code: "DB_SCHEMA_MISSING",
-            message:
-              "Missing tables in the connected database. Run migrations against the same DB Vercel uses.",
-            details: { missing },
-          },
-        },
-        500
-      );
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
     }
 
     // Find tenant for this user
-    const t = await db
-      .select()
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId));
-
-    const tenant = t[0];
-    if (!tenant) return j(true, { exists: false });
-
-    const s =
-      (
-        await db
-          .select()
-          .from(tenantSettings)
-          .where(eq(tenantSettings.tenantId, tenant.id))
-      )[0] ?? null;
-
-    const p =
-      (
-        await db
-          .select()
-          .from(tenantPricingRules)
-          .where(eq(tenantPricingRules.tenantId, tenant.id))
-      )[0] ?? null;
-
-    const sec =
-      (
-        await db
-          .select()
-          .from(tenantSecrets)
-          .where(eq(tenantSecrets.tenantId, tenant.id))
-      )[0] ?? null;
-
-    return j(true, {
-      exists: true,
-      tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug },
-      settings: s
-        ? {
-            industryKey: s.industryKey,
-            redirectUrl: s.redirectUrl ?? "",
-            thankYouUrl: s.thankYouUrl ?? "",
-          }
-        : null,
-      pricing: p
-        ? {
-            minJob: p.minJob ?? null,
-            typicalLow: p.typicalLow ?? null,
-            typicalHigh: p.typicalHigh ?? null,
-            maxWithoutInspection: p.maxWithoutInspection ?? null,
-          }
-        : null,
-      secrets: { hasOpenAIKey: !!sec?.openaiKeyEnc },
+    const tenant = await db.query.tenants.findFirst({
+      where: eq(tenants.owner_clerk_user_id, userId),
+      columns: { id: true, name: true, slug: true, owner_clerk_user_id: true },
     });
-  } catch (e: any) {
-    return j(
-      false,
-      { error: { code: "INTERNAL", message: e?.message ?? String(e) } },
-      500
+
+    if (!tenant?.id) {
+      return NextResponse.json(
+        { ok: false, error: "TENANT_NOT_FOUND" },
+        { status: 404 }
+      );
+    }
+
+    const url = new URL(req.url);
+    const debug = url.searchParams.get("debug") === "1";
+
+    if (debug) {
+      // DB fingerprint + confirm the settings row exists in *this* DB/environment
+      const fingerprint = await db.execute(sql`
+        select
+          current_database() as db,
+          current_schema() as schema
+      `);
+
+      const settingsCount = await db.execute(sql`
+        select count(*)::int as ct
+        from tenant_settings
+        where tenant_id = ${tenant.id}::uuid
+      `);
+
+      const ct =
+        (settingsCount.rows?.[0] as any)?.ct ??
+        (settingsCount as any)?.[0]?.ct ??
+        null;
+
+      return NextResponse.json({
+        ok: true,
+        debug: {
+          tenant_id: tenant.id,
+          db: (fingerprint.rows?.[0] as any)?.db ?? null,
+          schema: (fingerprint.rows?.[0] as any)?.schema ?? null,
+          tenant_settings_rows_for_tenant: ct,
+          postgres_url_tail: (process.env.POSTGRES_URL || "").slice(-12),
+          vercel_env: process.env.VERCEL_ENV || null,
+        },
+      });
+    }
+
+    // Normal read
+    const settings = await db.query.tenant_settings.findFirst({
+      where: eq(tenant_settings.tenant_id, tenant.id),
+      columns: {
+        id: true,
+        tenant_id: true,
+        industry_key: true,
+        redirect_url: true,
+        thank_you_url: true,
+        created_at: true,
+      },
+    });
+
+    return NextResponse.json({
+      ok: true,
+      tenant,
+      settings: settings ?? null,
+    });
+  } catch (err: any) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: {
+          code: "INTERNAL",
+          message: err?.message || String(err),
+        },
+      },
+      { status: 500 }
     );
   }
 }
