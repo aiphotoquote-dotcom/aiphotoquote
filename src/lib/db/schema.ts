@@ -35,11 +35,18 @@ export const tenants = pgTable(
 
 /**
  * Tenant settings (non-sensitive)
+ * DB reality (prod):
+ *  - tenant_id (uuid) PK
+ *  - industry_key (text)
+ *  - redirect_url (text)
+ *  - thank_you_url (text)
+ *  - updated_at (timestamptz)
  */
 export const tenantSettings = pgTable("tenant_settings", {
-  id: uuid("id").defaultRandom().primaryKey(),
+  // ✅ tenant_id is the PK in the live DB
   tenantId: uuid("tenant_id")
     .notNull()
+    .primaryKey()
     .references(() => tenants.id),
 
   industryKey: text("industry_key").notNull(),
@@ -47,9 +54,7 @@ export const tenantSettings = pgTable("tenant_settings", {
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
 
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
 
 /**
