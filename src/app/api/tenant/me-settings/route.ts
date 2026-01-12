@@ -3,8 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { eq, sql } from "drizzle-orm";
 
-import { db } from "@/lib/db";
-import { tenants, tenantSettings } from "@/lib/db/schema";
+// ✅ Use explicit relative imports so build can’t mis-resolve aliases.
+import { db } from "../../../lib/db";
+import { tenants, tenantSettings } from "../../../lib/db/schema";
 
 export const runtime = "nodejs";
 
@@ -15,7 +16,6 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
     }
 
-    // Find tenant for this user
     const tenant = await db.query.tenants.findFirst({
       where: eq(tenants.owner_clerk_user_id, userId),
       columns: { id: true, name: true, slug: true, owner_clerk_user_id: true },
@@ -29,7 +29,6 @@ export async function GET(req: NextRequest) {
     const debug = url.searchParams.get("debug") === "1";
 
     if (debug) {
-      // DB fingerprint + confirm the settings row exists in *this* DB/environment
       const fingerprint = await db.execute(sql`
         select
           current_database() as db,
@@ -60,7 +59,6 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Normal read
     const settings = await db.query.tenantSettings.findFirst({
       where: eq(tenantSettings.tenant_id, tenant.id),
       columns: {
@@ -84,10 +82,4 @@ export async function GET(req: NextRequest) {
         ok: false,
         error: {
           code: "INTERNAL",
-          message: err?.message || String(err),
-        },
-      },
-      { status: 500 }
-    );
-  }
-}
+          message: err?.message || String(er
