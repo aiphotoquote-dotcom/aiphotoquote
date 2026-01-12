@@ -9,16 +9,24 @@ import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 
+const CustomerContext = z
+  .object({
+    // ✅ new fields from QuoteForm
+    name: z.string().min(1).optional(),
+    email: z.string().email().optional(),
+    phone: z.string().min(7).optional(), // we store digits client-side; keep loose
+
+    // existing fields
+    notes: z.string().optional(),
+    service_type: z.string().optional(),
+    category: z.string().optional(),
+  })
+  .optional();
+
 const Req = z.object({
   tenantSlug: z.string().min(3),
   images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
-  customer_context: z
-    .object({
-      notes: z.string().optional(),
-      service_type: z.string().optional(),
-      category: z.string().optional(),
-    })
-    .optional(),
+  customer_context: CustomerContext,
 });
 
 const QuoteOutputSchema = z.object({
@@ -80,7 +88,14 @@ export async function POST(req: Request) {
 
   if (!parsed.success) {
     return NextResponse.json(
-      { ok: false, error: { code: "VALIDATION", message: "Invalid request", details: parsed.error.flatten() } },
+      {
+        ok: false,
+        error: {
+          code: "VALIDATION",
+          message: "Invalid request",
+          details: parsed.error.flatten(),
+        },
+      },
       { status: 400 }
     );
   }
@@ -90,19 +105,34 @@ export async function POST(req: Request) {
   const t = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug));
   const tenant = t[0];
   if (!tenant) {
-    return NextResponse.json({ ok: false, error: { code: "NOT_FOUND", message: "Tenant not found" } }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: { code: "NOT_FOUND", message: "Tenant not found" } },
+      { status: 404 }
+    );
   }
 
-  const settings = await db.select().from(tenantSettings).where(eq(tenantSettings.tenantId, tenant.id));
+  const settings = await db
+    .select()
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, tenant.id));
   const s = settings[0];
   if (!s) {
-    return NextResponse.json({ ok: false, error: { code: "CONFIG", message: "Tenant not onboarded yet" } }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: { code: "CONFIG", message: "Tenant not onboarded yet" } },
+      { status: 400 }
+    );
   }
 
-  const secrets = await db.select().from(tenantSecrets).where(eq(tenantSecrets.tenantId, tenant.id));
+  const secrets = await db
+    .select()
+    .from(tenantSecrets)
+    .where(eq(tenantSecrets.tenantId, tenant.id));
   const sec = secrets[0];
   if (!sec?.openaiKeyEnc) {
-    return NextResponse.json({ ok: false, error: { code: "CONFIG", message: "Tenant OpenAI key not configured" } }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: { code: "CONFIG", message: "Tenant OpenAI key not configured" } },
+      { status: 400 }
+    );
   }
 
   const openaiKey = decryptSecret(sec.openaiKeyEnc);
@@ -143,7 +173,10 @@ export async function POST(req: Request) {
       raw = JSON.parse(text);
     } catch {
       return NextResponse.json(
-        { ok: false, error: { code: "MODEL_BAD_JSON", message: "Model did not return valid JSON", details: text } },
+        {
+          ok: false,
+          error: { code: "MODEL_BAD_JSON", message: "Model did not return valid JSON", details: text },
+        },
         { status: 500 }
       );
     }
