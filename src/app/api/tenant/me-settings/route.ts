@@ -8,20 +8,7 @@ import { tenants } from "../../../../lib/db/schema";
 
 export const runtime = "nodejs";
 
-type ProbeResult =
-  | { ok: true; step: string }
-  | { ok: false; step: string; message: string };
-
-async function probe(step: string, q: any): Promise<ProbeResult> {
-  try {
-    await db.execute(q);
-    return { ok: true, step };
-  } catch (err: any) {
-    return { ok: false, step, message: err?.message ?? String(err) };
-  }
-}
-
-export async function GET(req: NextRequest) {
+export async function GET(_req: NextRequest) {
   try {
     const { userId } = await auth();
     if (!userId) {
@@ -29,7 +16,7 @@ export async function GET(req: NextRequest) {
     }
 
     const tenantRows = await db
-      .select({ id: tenants.id })
+      .select({ id: tenants.id, name: tenants.name, slug: tenants.slug })
       .from(tenants)
       .where(eq(tenants.ownerClerkUserId, userId))
       .limit(1);
@@ -39,66 +26,21 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    const url = new URL(req.url);
-    const debug = url.searchParams.get("debug") === "1";
-    if (!debug) {
-      return NextResponse.json(
-        { ok: false, error: "Add ?debug=1 temporarily" },
-        { status: 400 }
-      );
-    }
+    // ✅ Query ONLY what we have proven exists: tenant_id
+    // Next step we’ll expand after we inspect actual column names.
+    const settingsRows = await db.execute(sql`
+      select "tenant_id"
+      from "tenant_settings"
+      where "tenant_id" = ${tenant.id}::uuid
+      limit 1
+    `);
 
-    const tid = tenant.id;
-
-    const results: ProbeResult[] = [];
-    // Baseline: table + where works?
-    results.push(
-      await probe(
-        "select tenant_id only",
-        sql`select "tenant_id" from "tenant_settings" where "tenant_id" = ${tid}::uuid limit 1`
-      )
-    );
-
-    // Now add columns one by one (these match the failing query)
-    results.push(
-      await probe(
-        "select id + tenant_id",
-        sql`select "id","tenant_id" from "tenant_settings" where "tenant_id" = ${tid}::uuid limit 1`
-      )
-    );
-
-    results.push(
-      await probe(
-        "add industry_key",
-        sql`select "id","tenant_id","industry_key" from "tenant_settings" where "tenant_id" = ${tid}::uuid limit 1`
-      )
-    );
-
-    results.push(
-      await probe(
-        "add redirect_url",
-        sql`select "id","tenant_id","industry_key","redirect_url" from "tenant_settings" where "tenant_id" = ${tid}::uuid limit 1`
-      )
-    );
-
-    results.push(
-      await probe(
-        "add thank_you_url",
-        sql`select "id","tenant_id","industry_key","redirect_url","thank_you_url" from "tenant_settings" where "tenant_id" = ${tid}::uuid limit 1`
-      )
-    );
-
-    results.push(
-      await probe(
-        "add created_at",
-        sql`select "id","tenant_id","industry_key","redirect_url","thank_you_url","created_at" from "tenant_settings" where "tenant_id" = ${tid}::uuid limit 1`
-      )
-    );
+    const s0 = (settingsRows as any)?.[0] ?? null;
 
     return NextResponse.json({
       ok: true,
-      tenant_id: tid,
-      probe: results,
+      tenant,
+      settings: s0, // currently { tenant_id: ... }
     });
   } catch (err: any) {
     return NextResponse.json(
