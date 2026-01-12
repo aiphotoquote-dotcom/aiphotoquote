@@ -8,7 +8,6 @@ import {
   tenantSettings,
   tenantPricingRules,
 } from "@/lib/db/schema";
-import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 
@@ -21,17 +20,41 @@ export async function GET() {
     );
   }
 
-  // Assumption: tenants has ownerUserId (Clerk userId)
-  const t = await db.select().from(tenants).where(eq(tenants.ownerUserId, userId));
+  // Tenant is owned by the signed-in Clerk user
+  const t = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.ownerClerkUserId, userId));
+
   const tenant = t[0];
 
   if (!tenant) {
     return NextResponse.json({ ok: true, exists: false });
   }
 
-  const s = (await db.select().from(tenantSettings).where(eq(tenantSettings.tenantId, tenant.id)))[0];
-  const p = (await db.select().from(tenantPricingRules).where(eq(tenantPricingRules.tenantId, tenant.id)))[0];
-  const sec = (await db.select().from(tenantSecrets).where(eq(tenantSecrets.tenantId, tenant.id)))[0];
+  const s =
+    (
+      await db
+        .select()
+        .from(tenantSettings)
+        .where(eq(tenantSettings.tenantId, tenant.id))
+    )[0] ?? null;
+
+  const p =
+    (
+      await db
+        .select()
+        .from(tenantPricingRules)
+        .where(eq(tenantPricingRules.tenantId, tenant.id))
+    )[0] ?? null;
+
+  const sec =
+    (
+      await db
+        .select()
+        .from(tenantSecrets)
+        .where(eq(tenantSecrets.tenantId, tenant.id))
+    )[0] ?? null;
 
   return NextResponse.json({
     ok: true,
@@ -56,9 +79,6 @@ export async function GET() {
           maxWithoutInspection: p.maxWithoutInspection ?? null,
         }
       : null,
-    // We never return raw keys. This is just for UI display.
-    secrets: sec?.openaiKeyEnc
-      ? { hasOpenAIKey: true }
-      : { hasOpenAIKey: false },
+    secrets: { hasOpenAIKey: !!sec?.openaiKeyEnc },
   });
 }
