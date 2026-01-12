@@ -51,9 +51,7 @@ function Chip({
       : "border-gray-200 bg-white text-gray-700";
 
   return (
-    <span
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}
-    >
+    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}>
       <span className="inline-block h-2 w-2 rounded-full bg-current opacity-60" />
       {children}
     </span>
@@ -91,10 +89,16 @@ export default function TenantOnboardingForm() {
   const baselineReadyRef = useRef<boolean>(false);
   const [dirty, setDirty] = useState(false);
 
+  // Saved toast
+  const [showSaved, setShowSaved] = useState(false);
+  const savedTimerRef = useRef<any>(null);
+
   const suggestedSlug = useMemo(() => slugify(name), [name]);
+  const effectiveSlug = slug || suggestedSlug || "your-slug";
+  const publicQuoteHref = `/q/${effectiveSlug}`;
 
   function currentSnapshot() {
-    // Only track the page-level settings (not openaiKey input itself).
+    // Only track page-level settings (not openaiKey input itself).
     return JSON.stringify({
       name,
       slug,
@@ -173,6 +177,19 @@ export default function TenantOnboardingForm() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, slug, industryKey, redirectUrl, thankYouUrl, minJob, typLow, typHigh, maxWOI, loading]);
 
+  // Cleanup toast timer
+  useEffect(() => {
+    return () => {
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
+  }, []);
+
+  function flashSaved() {
+    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    setShowSaved(true);
+    savedTimerRef.current = setTimeout(() => setShowSaved(false), 2000);
+  }
+
   async function testKey() {
     setMsg(null);
     setTesting(true);
@@ -248,7 +265,8 @@ export default function TenantOnboardingForm() {
       // Clear key input so it doesn't sit there
       setOpenaiKey("");
 
-      setMsg("✅ Settings saved");
+      setMsg(null);
+      flashSaved();
     } catch (e: any) {
       setMsg(`❌ ${e.message}`);
     } finally {
@@ -264,6 +282,13 @@ export default function TenantOnboardingForm() {
       {loading && (
         <div className="rounded-2xl border bg-white p-4 text-sm text-gray-700">
           Loading your current settings…
+        </div>
+      )}
+
+      {/* Saved toast */}
+      {showSaved && (
+        <div className="fixed left-1/2 top-6 z-50 -translate-x-1/2 rounded-full border border-green-300 bg-green-50 px-4 py-2 text-sm font-semibold text-green-800 shadow-sm">
+          ✅ Saved
         </div>
       )}
 
@@ -295,12 +320,19 @@ export default function TenantOnboardingForm() {
               onChange={(e) => setSlug(e.target.value)}
               placeholder={suggestedSlug || "your-slug"}
             />
-            <span className="text-xs text-gray-700">
+
+            <div className="text-xs text-gray-700">
               Public quote page:{" "}
-              <code className="rounded-md bg-gray-50 px-2 py-1">
-                /q/{slug || suggestedSlug || "your-slug"}
-              </code>
-            </span>
+              <a
+                href={publicQuoteHref}
+                target="_blank"
+                rel="noreferrer"
+                className="underline font-medium"
+                title="Open public quote page"
+              >
+                {publicQuoteHref}
+              </a>
+            </div>
           </label>
 
           <label className="grid gap-1">
