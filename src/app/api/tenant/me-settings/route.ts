@@ -10,56 +10,67 @@ import {
 } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
-// Helpful while debugging API routes on Vercel
 export const dynamic = "force-dynamic";
 
 function j(ok: boolean, payload: any, status = 200) {
   return NextResponse.json({ ok, ...payload }, { status });
 }
 
+async function tableExists(tableName: string) {
+  // @ts-ignore
+  const r: any = await db.execute(
+    `select exists (
+       select 1 from information_schema.tables
+       where table_schema = 'public' and table_name = '${tableName}'
+     ) as ok`
+  );
+  const v =
+    (Array.isArray(r) ? r[0]?.ok : r?.rows?.[0]?.ok) ??
+    (Array.isArray(r) ? r[0]?.exists : r?.rows?.[0]?.exists);
+  return !!v;
+}
+
 export async function GET() {
   try {
     const { userId } = await auth();
-    if (!userId) return j(false, { error: { code: "UNAUTHENTICATED", message: "Not signed in" } }, 401);
+    if (!userId)
+      return j(
+        false,
+        { error: { code: "UNAUTHENTICATED", message: "Not signed in" } },
+        401
+      );
 
-    // Quick sanity: confirm the app has a DB url at runtime in Vercel
-    const hasDbUrl = !!(process.env.POSTGRES_URL || process.env.DATABASE_URL);
-    if (!hasDbUrl) {
-      return j(false, {
-        error: {
-          code: "CONFIG_ERROR",
-          message:
-            "Missing POSTGRES_URL (or DATABASE_URL) in Vercel environment variables.",
-        },
-      }, 500);
+    // Check required tables exist in THIS DB (Vercel-connected)
+    const needed = [
+      "tenants",
+      "tenant_settings",
+      "tenant_pricing_rules",
+      "tenant_secrets",
+    ];
+
+    const missing: string[] = [];
+    for (const t of needed) {
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await tableExists(t);
+      if (!ok) missing.push(t);
     }
 
-    // Validate the column exists in THIS database (helps detect DB mismatch)
-    // @ts-ignore - drizzle execute typing varies by driver
-    const colCheck: any = await db.execute(`
-      select exists(
-        select 1
-        from information_schema.columns
-        where table_name='tenants'
-          and column_name='owner_clerk_user_id'
-      ) as has_owner_col
-    `);
-
-    const hasOwnerCol =
-      (Array.isArray(colCheck) ? colCheck[0]?.has_owner_col : colCheck?.rows?.[0]?.has_owner_col) ??
-      false;
-
-    if (!hasOwnerCol) {
-      return j(false, {
-        error: {
-          code: "DB_SCHEMA_MISMATCH",
-          message:
-            "This database does not have tenants.owner_clerk_user_id. You likely updated a different DB than the one Vercel is using.",
+    if (missing.length) {
+      return j(
+        false,
+        {
+          error: {
+            code: "DB_SCHEMA_MISSING",
+            message:
+              "Missing tables in the connected database. Run migrations against the same DB Vercel uses.",
+            details: { missing },
+          },
         },
-      }, 500);
+        500
+      );
     }
 
-    // Tenant is owned by signed-in Clerk user
+    // Find tenant for this user
     const t = await db
       .select()
       .from(tenants)
@@ -113,12 +124,10 @@ export async function GET() {
       secrets: { hasOpenAIKey: !!sec?.openaiKeyEnc },
     });
   } catch (e: any) {
-    // Return the actual error so you can see it in the browser
-    return j(false, {
-      error: {
-        code: "INTERNAL",
-        message: e?.message ?? String(e),
-      },
-    }, 500);
+    return j(
+      false,
+      { error: { code: "INTERNAL", message: e?.message ?? String(e) } },
+      500
+    );
   }
 }
