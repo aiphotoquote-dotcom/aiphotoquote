@@ -1,27 +1,12 @@
 // src/app/api/tenant/me-settings/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { db } from "../../../../lib/db/client";
 import { tenants, tenantSettings } from "../../../../lib/db/schema";
 
 export const runtime = "nodejs";
-
-function safeDbError(err: any) {
-  return {
-    message: err?.message ?? String(err),
-    code: err?.code ?? null,
-    detail: err?.detail ?? null,
-    hint: err?.hint ?? null,
-    where: err?.where ?? null,
-    routine: err?.routine ?? null,
-    schema: err?.schema ?? null,
-    table: err?.table ?? null,
-    column: err?.column ?? null,
-    constraint: err?.constraint ?? null,
-  };
-}
 
 export async function GET(_req: NextRequest) {
   try {
@@ -45,7 +30,7 @@ export async function GET(_req: NextRequest) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    // This is the query that is currently failing in prod. We'll surface the REAL error.
+    // ✅ Key fix: explicit ::uuid cast (we already proved this works in debug SQL)
     const settingsRows = await db
       .select({
         id: tenantSettings.id,
@@ -56,7 +41,7 @@ export async function GET(_req: NextRequest) {
         createdAt: tenantSettings.createdAt,
       })
       .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenant.id))
+      .where(sql`${tenantSettings.tenantId} = ${tenant.id}::uuid`)
       .limit(1);
 
     const settings = settingsRows[0] ?? null;
@@ -64,7 +49,7 @@ export async function GET(_req: NextRequest) {
     return NextResponse.json({ ok: true, tenant, settings });
   } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: { code: "INTERNAL", db: safeDbError(err) } },
+      { ok: false, error: { code: "INTERNAL", message: err?.message || String(err) } },
       { status: 500 }
     );
   }
