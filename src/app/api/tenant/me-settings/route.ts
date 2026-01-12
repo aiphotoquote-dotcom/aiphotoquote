@@ -73,14 +73,14 @@ export async function GET(req: NextRequest) {
     const settingsRows = await db
       .select({
         id: tenantSettings.id,
-        tenant_id: tenantSettings.tenant_id,
-        industry_key: tenantSettings.industry_key,
-        redirect_url: tenantSettings.redirect_url,
-        thank_you_url: tenantSettings.thank_you_url,
-        created_at: tenantSettings.created_at,
+        tenantId: tenantSettings.tenantId,
+        industryKey: tenantSettings.industryKey,
+        redirectUrl: tenantSettings.redirectUrl,
+        thankYouUrl: tenantSettings.thankYouUrl,
+        createdAt: tenantSettings.createdAt,
       })
       .from(tenantSettings)
-      .where(eq(tenantSettings.tenant_id, tenant.id))
+      .where(eq(tenantSettings.tenantId, tenant.id))
       .limit(1);
 
     const settings = settingsRows[0] ?? null;
