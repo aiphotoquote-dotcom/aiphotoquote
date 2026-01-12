@@ -18,7 +18,6 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ✅ Use db.select() + camelCase schema properties
     const tenantRows = await db
       .select({
         id: tenants.id,
@@ -55,18 +54,16 @@ export async function GET(req: NextRequest) {
         where "tenant_id" = ${tenant.id}::uuid
       `);
 
-      const ct =
-        (settingsCount.rows?.[0] as any)?.ct ??
-        (settingsCount as any)?.[0]?.ct ??
-        null;
+      const fp0 = (fingerprint as any)?.[0] ?? null;
+      const ct0 = (settingsCount as any)?.[0] ?? null;
 
       return NextResponse.json({
         ok: true,
         debug: {
           tenant_id: tenant.id,
-          db: (fingerprint.rows?.[0] as any)?.db ?? null,
-          schema: (fingerprint.rows?.[0] as any)?.schema ?? null,
-          tenant_settings_rows_for_tenant: ct,
+          db: fp0?.db ?? null,
+          schema: fp0?.schema ?? null,
+          tenant_settings_rows_for_tenant: ct0?.ct ?? null,
           postgres_url_tail: (process.env.POSTGRES_URL || "").slice(-12),
           vercel_env: process.env.VERCEL_ENV || null,
         },
