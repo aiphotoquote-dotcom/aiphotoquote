@@ -19,9 +19,8 @@ type MeSettingsResponse =
   | { ok: false; error: any };
 
 export default function TopNav() {
-  const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(
-    null
-  );
+  // null = unknown/loading, false = incomplete, true = complete
+  const [complete, setComplete] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,22 +33,16 @@ export default function TopNav() {
         if (cancelled) return;
 
         if (!("ok" in json) || !json.ok) {
-          // If we can't load it, don't hide onboarding (safe default)
-          setOnboardingComplete(false);
+          setComplete(false);
           return;
         }
 
         const s = json.settings;
         const industry = s?.industry_key ?? "";
-        const redirect = s?.redirect_url ?? "";
-
-        // Define "complete" here. Minimum: industry set.
-        // If you want redirect required too, change to: Boolean(industry && redirect)
-        const complete = Boolean(industry);
-
-        setOnboardingComplete(complete);
+        // If you want redirect required too, use: Boolean(industry && (s?.redirect_url ?? ""))
+        setComplete(Boolean(industry));
       } catch {
-        if (!cancelled) setOnboardingComplete(false);
+        if (!cancelled) setComplete(false);
       }
     }
 
@@ -58,6 +51,8 @@ export default function TopNav() {
       cancelled = true;
     };
   }, []);
+
+  const settingsLabel = complete === true ? "Settings" : "Configure";
 
   return (
     <header className="border-b">
@@ -82,17 +77,15 @@ export default function TopNav() {
                 Dashboard
               </Link>
 
-              {/* Only show onboarding link if not complete (or while unknown, show it) */}
-              {onboardingComplete !== true && (
-                <Link className="underline" href="/onboarding">
-                  Onboarding
-                  {onboardingComplete === false && (
-                    <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
-                      Setup
-                    </span>
-                  )}
-                </Link>
-              )}
+              {/* Always available, label changes based on completion */}
+              <Link className="underline" href="/onboarding">
+                {settingsLabel}
+                {complete === false && (
+                  <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
+                    Setup
+                  </span>
+                )}
+              </Link>
 
               <Link className="underline" href="/admin">
                 Admin
