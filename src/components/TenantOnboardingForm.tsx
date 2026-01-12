@@ -20,11 +20,21 @@ function slugify(s: string) {
     .replace(/(^-|-$)+/g, "");
 }
 
+/** Ensures URLs pass Zod .url() validation */
+function normalizeUrl(u: string) {
+  const s = (u ?? "").trim();
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
+  return s;
+}
+
 export default function TenantOnboardingForm() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [industryKey, setIndustryKey] = useState("upholstery");
+
   const [openaiKey, setOpenaiKey] = useState("");
+
   const [redirectUrl, setRedirectUrl] = useState("");
   const [thankYouUrl, setThankYouUrl] = useState("");
 
@@ -48,8 +58,10 @@ export default function TenantOnboardingForm() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ openaiKey }),
       });
+
       const json = await res.json();
       if (!json.ok) throw new Error(json.error?.message ?? "Key test failed");
+
       setMsg("✅ OpenAI key looks good");
     } catch (e: any) {
       setMsg(`❌ ${e.message}`);
@@ -61,32 +73,46 @@ export default function TenantOnboardingForm() {
   async function save() {
     setMsg(null);
     setSaving(true);
+
     try {
+      const payload = {
+        tenant: {
+          name,
+          slug: slug || suggestedSlug,
+        },
+        industryKey,
+        openaiKey: openaiKey || undefined,
+        redirects: {
+          redirectUrl: normalizeUrl(redirectUrl) || undefined,
+          thankYouUrl: normalizeUrl(thankYouUrl) || undefined,
+        },
+        pricing: {
+          minJob: minJob === "" ? undefined : Number(minJob),
+          typicalLow: typLow === "" ? undefined : Number(typLow),
+          typicalHigh: typHigh === "" ? undefined : Number(typHigh),
+          maxWithoutInspection: maxWOI === "" ? undefined : Number(maxWOI),
+          tone: "value",
+          riskPosture: "conservative",
+          alwaysEstimateLanguage: true,
+        },
+      };
+
       const res = await fetch("/api/tenant/save-settings", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenant: { name, slug: slug || suggestedSlug },
-          industryKey,
-          openaiKey: openaiKey || undefined,
-          redirects: {
-            redirectUrl: redirectUrl || undefined,
-            thankYouUrl: thankYouUrl || undefined,
-          },
-          pricing: {
-            minJob: minJob === "" ? undefined : Number(minJob),
-            typicalLow: typLow === "" ? undefined : Number(typLow),
-            typicalHigh: typHigh === "" ? undefined : Number(typHigh),
-            maxWithoutInspection: maxWOI === "" ? undefined : Number(maxWOI),
-            tone: "value",
-            riskPosture: "conservative",
-            alwaysEstimateLanguage: true,
-          },
-        }),
+        body: JSON.stringify(payload),
       });
+
       const json = await res.json();
-      if (!json.ok) throw new Error(json.error?.message ?? "Save failed");
-      setMsg("✅ Saved");
+      if (!json.ok) {
+        const detail =
+          json.error?.details
+            ? JSON.stringify(json.error.details, null, 2)
+            : json.error?.message ?? "Save failed";
+        throw new Error(detail);
+      }
+
+      setMsg("✅ Settings saved");
     } catch (e: any) {
       setMsg(`❌ ${e.message}`);
     } finally {
@@ -96,44 +122,64 @@ export default function TenantOnboardingForm() {
 
   return (
     <div className="space-y-6">
+      {/* Business */}
       <section className="rounded-xl border p-5">
         <h2 className="font-semibold">Business</h2>
+
         <div className="mt-4 grid gap-3">
           <label className="grid gap-1">
             <span className="text-sm">Business name</span>
-            <input className="border rounded-md p-2" value={name} onChange={(e) => setName(e.target.value)} placeholder="Maggio Upholstery" />
+            <input
+              className="border rounded-md p-2"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Maggio Upholstery"
+            />
           </label>
 
           <label className="grid gap-1">
-            <span className="text-sm">Tenant slug (used in your quote URL)</span>
+            <span className="text-sm">Tenant slug</span>
             <input
               className="border rounded-md p-2"
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
-              placeholder={suggestedSlug || "maggio-upholstery"}
+              placeholder={suggestedSlug || "your-slug"}
             />
             <span className="text-xs text-gray-600">
-              Your public quote page will be: <code>/q/{slug || suggestedSlug || "your-slug"}</code>
+              Public quote page: <code>/q/{slug || suggestedSlug || "your-slug"}</code>
             </span>
           </label>
 
           <label className="grid gap-1">
             <span className="text-sm">Industry</span>
-            <select className="border rounded-md p-2" value={industryKey} onChange={(e) => setIndustryKey(e.target.value)}>
+            <select
+              className="border rounded-md p-2"
+              value={industryKey}
+              onChange={(e) => setIndustryKey(e.target.value)}
+            >
               {INDUSTRIES.map((i) => (
-                <option key={i.key} value={i.key}>{i.name}</option>
+                <option key={i.key} value={i.key}>
+                  {i.name}
+                </option>
               ))}
             </select>
           </label>
         </div>
       </section>
 
+      {/* OpenAI */}
       <section className="rounded-xl border p-5">
         <h2 className="font-semibold">OpenAI Key</h2>
+
         <div className="mt-4 grid gap-3">
           <label className="grid gap-1">
             <span className="text-sm">API Key</span>
-            <input className="border rounded-md p-2" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} placeholder="sk-..." />
+            <input
+              className="border rounded-md p-2"
+              value={openaiKey}
+              onChange={(e) => setOpenaiKey(e.target.value)}
+              placeholder="sk-..."
+            />
           </label>
 
           <div className="flex gap-3">
@@ -154,47 +200,94 @@ export default function TenantOnboardingForm() {
             </button>
           </div>
 
-          {msg && <p className="text-sm">{msg}</p>}
+          {msg && <p className="text-sm whitespace-pre-wrap">{msg}</p>}
         </div>
       </section>
 
+      {/* Pricing */}
       <section className="rounded-xl border p-5">
         <h2 className="font-semibold">Pricing Guardrails</h2>
+
         <div className="mt-4 grid gap-3">
           <div className="grid grid-cols-2 gap-3">
             <label className="grid gap-1">
               <span className="text-sm">Minimum job ($)</span>
-              <input className="border rounded-md p-2" inputMode="numeric" value={minJob} onChange={(e) => setMinJob(e.target.value === "" ? "" : Number(e.target.value))} />
+              <input
+                className="border rounded-md p-2"
+                inputMode="numeric"
+                value={minJob}
+                onChange={(e) =>
+                  setMinJob(e.target.value === "" ? "" : Number(e.target.value))
+                }
+              />
             </label>
+
             <label className="grid gap-1">
               <span className="text-sm">Max w/o inspection ($)</span>
-              <input className="border rounded-md p-2" inputMode="numeric" value={maxWOI} onChange={(e) => setMaxWOI(e.target.value === "" ? "" : Number(e.target.value))} />
+              <input
+                className="border rounded-md p-2"
+                inputMode="numeric"
+                value={maxWOI}
+                onChange={(e) =>
+                  setMaxWOI(e.target.value === "" ? "" : Number(e.target.value))
+                }
+              />
             </label>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <label className="grid gap-1">
               <span className="text-sm">Typical low ($)</span>
-              <input className="border rounded-md p-2" inputMode="numeric" value={typLow} onChange={(e) => setTypLow(e.target.value === "" ? "" : Number(e.target.value))} />
+              <input
+                className="border rounded-md p-2"
+                inputMode="numeric"
+                value={typLow}
+                onChange={(e) =>
+                  setTypLow(e.target.value === "" ? "" : Number(e.target.value))
+                }
+              />
             </label>
+
             <label className="grid gap-1">
               <span className="text-sm">Typical high ($)</span>
-              <input className="border rounded-md p-2" inputMode="numeric" value={typHigh} onChange={(e) => setTypHigh(e.target.value === "" ? "" : Number(e.target.value))} />
+              <input
+                className="border rounded-md p-2"
+                inputMode="numeric"
+                value={typHigh}
+                onChange={(e) =>
+                  setTypHigh(e.target.value === "" ? "" : Number(e.target.value))
+                }
+              />
             </label>
           </div>
         </div>
       </section>
 
+      {/* Redirects */}
       <section className="rounded-xl border p-5">
         <h2 className="font-semibold">Redirects</h2>
+
         <div className="mt-4 grid gap-3">
           <label className="grid gap-1">
-            <span className="text-sm">Redirect after quote (back to your site)</span>
-            <input className="border rounded-md p-2" value={redirectUrl} onChange={(e) => setRedirectUrl(e.target.value)} placeholder="https://your-site.com/thank-you" />
+            <span className="text-sm">Redirect after quote</span>
+            <input
+              className="border rounded-md p-2"
+              value={redirectUrl}
+              onChange={(e) => setRedirectUrl(e.target.value)}
+              onBlur={() => setRedirectUrl(normalizeUrl(redirectUrl))}
+              placeholder="https://maggioupholstery.com"
+            />
           </label>
+
           <label className="grid gap-1">
-            <span className="text-sm">Optional Thank You URL</span>
-            <input className="border rounded-md p-2" value={thankYouUrl} onChange={(e) => setThankYouUrl(e.target.value)} placeholder="https://your-site.com/quote-received" />
+            <span className="text-sm">Thank you page (optional)</span>
+            <input
+              className="border rounded-md p-2"
+              value={thankYouUrl}
+              onChange={(e) => setThankYouUrl(e.target.value)}
+              onBlur={() => setThankYouUrl(normalizeUrl(thankYouUrl))}
+              placeholder="https://your-site.com/quote-received"
+            />
           </label>
         </div>
       </section>
