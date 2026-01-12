@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
 
@@ -25,11 +25,24 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
   const [phone, setPhone] = useState("");
 
   const [working, setWorking] = useState(false);
+  const [phase, setPhase] = useState<
+    "idle" | "uploading" | "analyzing" | "finalizing"
+  >("idle");
+
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [autoRedirect, setAutoRedirect] = useState(true);
   const [countdown, setCountdown] = useState<number | null>(null);
+
+  const [preloadStarted, setPreloadStarted] = useState(false);
+  const [preloadReady, setPreloadReady] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+  const redirectUrl = useMemo(
+    () => normalizeUrl(result?.redirectUrl),
+    [result?.redirectUrl]
+  );
 
   const step = useMemo(() => {
     if (result?.output) return 3;
@@ -38,7 +51,6 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
   }, [files.length, result?.output]);
 
   function setSelectedFiles(next: File[]) {
-    // revoke old previews
     previews.forEach((p) => URL.revokeObjectURL(p));
     const nextPreviews = next.map((f) => URL.createObjectURL(f));
     setFiles(next);
@@ -50,9 +62,43 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     setSelectedFiles(next);
   }
 
+  // Start preloading redirect destination once we have a redirect URL + estimate
+  useEffect(() => {
+    if (!redirectUrl || !result?.output) return;
+    if (!autoRedirect) return;
+
+    setPreloadStarted(true);
+    setPreloadReady(false);
+  }, [redirectUrl, result?.output, autoRedirect]);
+
+  // Countdown + redirect once estimate is ready
+  useEffect(() => {
+    if (!redirectUrl || !result?.output) return;
+    if (!autoRedirect) return;
+
+    setCountdown(8);
+
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      const remaining = 8 - elapsed;
+      setCountdown(remaining);
+
+      if (remaining <= 0) {
+        clearInterval(timer);
+        window.location.href = redirectUrl;
+      }
+    }, 250);
+
+    return () => clearInterval(timer);
+  }, [redirectUrl, result?.output, autoRedirect]);
+
   async function onSubmit() {
     setError(null);
     setResult(null);
+    setCountdown(null);
+    setPreloadStarted(false);
+    setPreloadReady(false);
 
     if (!files.length) {
       setError("Please upload at least 1 photo.");
@@ -66,7 +112,9 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     setWorking(true);
 
     try {
-      // 1) Upload images to Vercel Blob (server route)
+      setPhase("uploading");
+
+      // 1) Upload images to Vercel Blob
       const form = new FormData();
       files.forEach((f) => form.append("files", f));
 
@@ -77,6 +125,8 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       // 2) Submit to quote engine
+      setPhase("analyzing");
+
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -85,7 +135,11 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
           images: urls,
           customer_context: {
             notes,
-            customer: { name: name || undefined, email: email || undefined, phone: phone || undefined },
+            customer: {
+              name: name || undefined,
+              email: email || undefined,
+              phone: phone || undefined,
+            },
           },
         }),
       });
@@ -93,27 +147,14 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
       const json = await res.json();
       if (!json.ok) throw new Error(json.error?.message ?? "Quote failed");
 
+      // 3) Show estimate immediately (THIS is the “Maggio” behavior)
       setResult(json);
 
-      // 3) Auto-redirect if configured
-      const redirect = normalizeUrl(json.redirectUrl);
-      if (redirect && autoRedirect) {
-        setCountdown(8);
-        const start = Date.now();
-
-        const interval = setInterval(() => {
-          const elapsed = Math.floor((Date.now() - start) / 1000);
-          const remaining = 8 - elapsed;
-          setCountdown(remaining);
-
-          if (remaining <= 0) {
-            clearInterval(interval);
-            window.location.href = redirect;
-          }
-        }, 250);
-      }
+      // 4) While countdown runs, we “finalize” the UX and allow preload
+      setPhase("finalizing");
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
+      setPhase("idle");
     } finally {
       setWorking(false);
     }
@@ -130,6 +171,13 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
             {step === 2 && "2 / 3 — Add details"}
             {step === 3 && "3 / 3 — Your estimate"}
           </div>
+          {working && (
+            <div className="text-xs text-gray-600">
+              {phase === "uploading" && "Uploading photos…"}
+              {phase === "analyzing" && "Analyzing photos…"}
+              {phase === "finalizing" && "Finalizing…"}
+            </div>
+          )}
         </div>
 
         <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -138,7 +186,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
             checked={autoRedirect}
             onChange={(e) => setAutoRedirect(e.target.checked)}
           />
-          Auto-redirect after estimate (if enabled)
+          Auto-redirect after estimate
         </label>
       </div>
 
@@ -160,6 +208,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
             accept="image/*"
             multiple
             onChange={(e) => setSelectedFiles(Array.from(e.target.files ?? []))}
+            disabled={working}
           />
           <p className="mt-2 text-xs text-gray-600">
             Your photos are used only to generate this estimate.
@@ -174,8 +223,9 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
                 <img src={src} alt={`preview ${idx + 1}`} className="h-28 w-full object-cover" />
                 <button
                   type="button"
-                  className="absolute top-2 right-2 rounded-md bg-white/90 border px-2 py-1 text-xs"
+                  className="absolute top-2 right-2 rounded-md bg-white/90 border px-2 py-1 text-xs disabled:opacity-50"
                   onClick={() => removeFileAt(idx)}
+                  disabled={working}
                 >
                   Remove
                 </button>
@@ -190,7 +240,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         <div>
           <h2 className="font-semibold">Details</h2>
           <p className="text-xs text-gray-600 mt-1">
-            Helps us estimate faster and avoid follow-up questions.
+            Helps estimate faster and reduces follow-up questions.
           </p>
         </div>
 
@@ -202,6 +252,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Joe"
+              disabled={working}
             />
           </label>
 
@@ -212,6 +263,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@email.com"
+              disabled={working}
             />
           </label>
 
@@ -222,6 +274,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               placeholder="(555) 555-5555"
+              disabled={working}
             />
           </label>
         </div>
@@ -233,15 +286,16 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
             rows={4}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder="What are you looking to do? Any material preference, timeline, or constraints?"
+            placeholder="What are you looking to do? Material preference, timeline, constraints?"
+            disabled={working}
           />
         </label>
 
         <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
           <div className="font-semibold">Estimate disclaimer</div>
           <p className="mt-1">
-            This is a photo-based estimate range. Final pricing can change after inspection, measurements,
-            and material selection.
+            This is a photo-based estimate range. Final pricing can change after inspection,
+            measurements, and material selection.
           </p>
         </div>
 
@@ -260,7 +314,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         )}
       </section>
 
-      {/* Results */}
+      {/* Results appear immediately when ready */}
       {result?.output && (
         <section className="rounded-2xl border p-5 space-y-4">
           <div className="flex items-center justify-between gap-4">
@@ -284,55 +338,60 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
 
           <p className="text-sm">{result.output.summary}</p>
 
-          {!!result.output.visible_scope?.length && (
-            <div className="rounded-xl border p-4">
-              <div className="text-sm font-semibold">What we can see</div>
-              <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
-                {result.output.visible_scope.slice(0, 6).map((x: string, i: number) => (
-                  <li key={i}>{x}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {!!result.output.questions?.length && (
-            <div className="rounded-xl border p-4">
-              <div className="text-sm font-semibold">Quick questions</div>
-              <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
-                {result.output.questions.slice(0, 6).map((x: string, i: number) => (
-                  <li key={i}>{x}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <div className="rounded-xl border p-4">
-            <div className="text-sm font-semibold">What happens next</div>
-            <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
-              <li>We’ll review your photos and notes.</li>
-              <li>If needed, we’ll request 1–2 additional photos or schedule an inspection.</li>
-              <li>We’ll confirm materials, timeline, and finalize pricing.</li>
-            </ul>
-          </div>
-
-          {normalizeUrl(result.redirectUrl) ? (
+          {/* Redirect + background preload like Maggio */}
+          {redirectUrl ? (
             <div className="space-y-2">
+              <div className="rounded-xl border p-4">
+                <div className="text-sm font-semibold">Returning you to the website…</div>
+                <p className="mt-1 text-xs text-gray-600">
+                  We’re preparing the next page so it loads fast.
+                </p>
+
+                <div className="mt-3 flex items-center justify-between text-xs text-gray-700">
+                  <span>
+                    {preloadStarted
+                      ? preloadReady
+                        ? "✅ Page preloaded"
+                        : "⏳ Preloading…"
+                      : "⏳ Preparing…"}
+                  </span>
+                  {autoRedirect && countdown !== null && countdown > 0 && (
+                    <span>
+                      Redirecting in <b>{countdown}</b>…
+                    </span>
+                  )}
+                </div>
+              </div>
+
               <button
                 className="w-full rounded-xl border py-3"
-                onClick={() => (window.location.href = normalizeUrl(result.redirectUrl))}
+                onClick={() => (window.location.href = redirectUrl)}
               >
-                Continue to website
+                Continue now
               </button>
 
-              {autoRedirect && countdown !== null && countdown > 0 && (
-                <p className="text-center text-xs text-gray-600">
-                  Redirecting in <b>{countdown}</b>…
-                </p>
-              )}
-
               <p className="text-center text-xs text-gray-500">
-                You can disable auto-redirect at the top.
+                If you don’t want the auto redirect, uncheck it at the top.
               </p>
+
+              {/* Hidden preload iframe (best-effort; may be blocked by target site headers) */}
+              {autoRedirect && preloadStarted && (
+                <iframe
+                  ref={iframeRef}
+                  src={redirectUrl}
+                  onLoad={() => setPreloadReady(true)}
+                  style={{
+                    position: "absolute",
+                    width: 1,
+                    height: 1,
+                    opacity: 0,
+                    pointerEvents: "none",
+                    left: -9999,
+                    top: -9999,
+                  }}
+                  aria-hidden="true"
+                />
+              )}
             </div>
           ) : (
             <div className="rounded-xl bg-yellow-50 border border-yellow-200 p-3 text-sm text-yellow-800">
