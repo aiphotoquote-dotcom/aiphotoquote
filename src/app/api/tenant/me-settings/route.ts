@@ -1,12 +1,10 @@
-// app/api/tenant/me-settings/route.ts
+// src/app/api/tenant/me-settings/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { eq, sql } from "drizzle-orm";
 
-// ⬇️ Adjust these two imports ONLY if your project uses different paths.
-// (No other hunting. If your build errors, it will tell you the exact path.)
 import { db } from "@/lib/db";
-import { tenants, tenant_settings } from "@/lib/db/schema";
+import { tenants, tenantSettings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 
@@ -24,10 +22,7 @@ export async function GET(req: NextRequest) {
     });
 
     if (!tenant?.id) {
-      return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND" },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
     const url = new URL(req.url);
@@ -43,8 +38,8 @@ export async function GET(req: NextRequest) {
 
       const settingsCount = await db.execute(sql`
         select count(*)::int as ct
-        from tenant_settings
-        where tenant_id = ${tenant.id}::uuid
+        from "tenant_settings"
+        where "tenant_id" = ${tenant.id}::uuid
       `);
 
       const ct =
@@ -66,8 +61,8 @@ export async function GET(req: NextRequest) {
     }
 
     // Normal read
-    const settings = await db.query.tenant_settings.findFirst({
-      where: eq(tenant_settings.tenant_id, tenant.id),
+    const settings = await db.query.tenantSettings.findFirst({
+      where: eq(tenantSettings.tenant_id, tenant.id),
       columns: {
         id: true,
         tenant_id: true,
