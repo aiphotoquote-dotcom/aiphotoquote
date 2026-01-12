@@ -26,6 +26,7 @@ export async function GET(_req: NextRequest) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
+    // tenant_settings (redirects + industry)
     const settingsRows = await db.execute(sql`
       select
         "tenant_id",
@@ -48,7 +49,37 @@ export async function GET(_req: NextRequest) {
         }
       | null;
 
-    // ✅ New: detect whether an OpenAI key exists (without returning it)
+    // tenant_pricing_rules (guardrails)
+    const pricingRows = await db.execute(sql`
+      select
+        "min_job",
+        "typical_low",
+        "typical_high",
+        "max_without_inspection",
+        "tone",
+        "risk_posture",
+        "always_estimate_language",
+        "created_at"
+      from "tenant_pricing_rules"
+      where "tenant_id" = ${tenant.id}::uuid
+      order by "created_at" desc
+      limit 1
+    `);
+
+    const pricing = ((pricingRows as any)?.[0] ?? null) as
+      | {
+          min_job: number | null;
+          typical_low: number | null;
+          typical_high: number | null;
+          max_without_inspection: number | null;
+          tone: string | null;
+          risk_posture: string | null;
+          always_estimate_language: boolean | null;
+          created_at: string | null;
+        }
+      | null;
+
+    // tenant_secrets presence flag (never return actual key)
     const secretsRows = await db.execute(sql`
       select 1 as "has"
       from "tenant_secrets"
@@ -62,6 +93,7 @@ export async function GET(_req: NextRequest) {
       ok: true,
       tenant,
       settings,
+      pricing,
       secrets: { hasOpenaiKey },
     });
   } catch (err: any) {
