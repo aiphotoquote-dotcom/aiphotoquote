@@ -1,16 +1,18 @@
 import {
   pgTable,
-  uuid,
   text,
   timestamp,
-  jsonb,
-  uniqueIndex,
-  numeric,
+  integer,
   boolean,
+  uuid,
+  uniqueIndex,
+  jsonb,
 } from "drizzle-orm/pg-core";
 
 /**
- * Tenants (one per customer/business)
+ * Tenants
+ * NOTE: ownerClerkUserId is nullable temporarily to avoid migration failures
+ * on existing rows. We'll backfill and make it NOT NULL next.
  */
 export const tenants = pgTable(
   "tenants",
@@ -18,87 +20,119 @@ export const tenants = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
+
+    // TEMP nullable to allow smooth migration
+    ownerClerkUserId: text("owner_clerk_user_id"),
+
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
   },
   (t) => ({
-    slugIdx: uniqueIndex("tenants_slug_unique").on(t.slug),
+    slugIdx: uniqueIndex("tenants_slug_idx").on(t.slug),
   })
 );
 
 /**
- * Supported industries (seeded)
- */
-export const industries = pgTable(
-  "industries",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    key: text("key").notNull(),
-    name: text("name").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
-  },
-  (t) => ({
-    keyIdx: uniqueIndex("industries_key_unique").on(t.key),
-  })
-);
-
-/**
- * Tenant-level settings
+ * Tenant settings (non-sensitive)
  */
 export const tenantSettings = pgTable("tenant_settings", {
-  tenantId: uuid("tenant_id").primaryKey(),
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+
   industryKey: text("industry_key").notNull(),
+
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
-});
 
-/**
- * Pricing guardrails per tenant
- */
-export const tenantPricingRules = pgTable("tenant_pricing_rules", {
-  tenantId: uuid("tenant_id").primaryKey(),
-  minJob: numeric("min_job"),
-  typicalLow: numeric("typical_low"),
-  typicalHigh: numeric("typical_high"),
-  maxWithoutInspection: numeric("max_without_inspection"),
-  serviceFee: numeric("service_fee"),
-  tone: text("tone").default("value").notNull(),
-  riskPosture: text("risk_posture").default("conservative").notNull(),
-  alwaysEstimateLanguage: boolean("always_estimate_language")
-    .default(true)
-    .notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
-});
-
-/**
- * Encrypted tenant secrets (OpenAI keys, etc.)
- */
-export const tenantSecrets = pgTable("tenant_secrets", {
-  tenantId: uuid("tenant_id").primaryKey(),
-  openaiKeyEnc: text("openai_key_enc"),
-  openaiKeyLast4: text("openai_key_last4"),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .defaultNow()
-    .notNull(),
-});
-
-/**
- * Quote request + response logs
- */
-export const quoteLogs = pgTable("quote_logs", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  tenantId: uuid("tenant_id").notNull(),
-  input: jsonb("input").notNull(),
-  output: jsonb("output").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
 });
+
+/**
+ * Tenant pricing guardrails
+ */
+export const tenantPricingRules = pgTable("tenant_pricing_rules", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+
+  minJob: integer("min_job"),
+  typicalLow: integer("typical_low"),
+  typicalHigh: integer("typical_high"),
+  maxWithoutInspection: integer("max_without_inspection"),
+
+  tone: text("tone").default("value"),
+  riskPosture: text("risk_posture").default("conservative"),
+  alwaysEstimateLanguage: boolean("always_estimate_language")
+    .default(true)
+    .notNull(),
+
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+/**
+ * Encrypted tenant secrets (never returned raw)
+ */
+export const tenantSecrets = pgTable("tenant_secrets", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+
+  openaiKeyEnc: text("openai_key_enc").notNull(),
+
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+/**
+ * Quote logs (admin + auditing)
+ * Store input/output JSON to match route inserts.
+ */
+export const quoteLogs = pgTable("quote_logs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id")
+    .notNull()
+    .references(() => tenants.id),
+
+  input: jsonb("input").$type<any>(),
+  output: jsonb("output").$type<any>(),
+
+  confidence: text("confidence"),
+  estimateLow: integer("estimate_low"),
+  estimateHigh: integer("estimate_high"),
+  inspectionRequired: boolean("inspection_required"),
+
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
+/**
+ * Industries
+ * Model existing table without trying to change PKs.
+ * Assumes industries.id already exists and is the PK in your DB.
+ */
+export const industries = pgTable(
+  "industries",
+  {
+    id: uuid("id").primaryKey(),
+    key: text("key").notNull(),
+    label: text("label").notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (t) => ({
+    keyIdx: uniqueIndex("industries_key_idx").on(t.key),
+  })
+);

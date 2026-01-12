@@ -15,6 +15,20 @@
       "when": 1768238073666,
       "tag": "0001_damp_edwin_jarvis",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1768251167420,
+      "tag": "0002_perfect_vulcan",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1768251357691,
+      "tag": "0003_small_surge",
+      "breakpoints": true
     }
   ]
 }
