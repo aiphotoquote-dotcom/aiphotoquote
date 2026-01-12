@@ -18,10 +18,19 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const tenant = await db.query.tenants.findFirst({
-      where: eq(tenants.owner_clerk_user_id, userId),
-      columns: { id: true, name: true, slug: true, owner_clerk_user_id: true },
-    });
+    // ✅ Use db.select() so we don't depend on db.query typing
+    const tenantRows = await db
+      .select({
+        id: tenants.id,
+        name: tenants.name,
+        slug: tenants.slug,
+        owner_clerk_user_id: tenants.owner_clerk_user_id,
+      })
+      .from(tenants)
+      .where(eq(tenants.owner_clerk_user_id, userId))
+      .limit(1);
+
+    const tenant = tenantRows[0];
 
     if (!tenant?.id) {
       return NextResponse.json(
@@ -64,22 +73,25 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const settings = await db.query.tenantSettings.findFirst({
-      where: eq(tenantSettings.tenant_id, tenant.id),
-      columns: {
-        id: true,
-        tenant_id: true,
-        industry_key: true,
-        redirect_url: true,
-        thank_you_url: true,
-        created_at: true,
-      },
-    });
+    const settingsRows = await db
+      .select({
+        id: tenantSettings.id,
+        tenant_id: tenantSettings.tenant_id,
+        industry_key: tenantSettings.industry_key,
+        redirect_url: tenantSettings.redirect_url,
+        thank_you_url: tenantSettings.thank_you_url,
+        created_at: tenantSettings.created_at,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenant_id, tenant.id))
+      .limit(1);
+
+    const settings = settingsRows[0] ?? null;
 
     return NextResponse.json({
       ok: true,
       tenant,
-      settings: settings ?? null,
+      settings,
     });
   } catch (err: any) {
     return NextResponse.json(
