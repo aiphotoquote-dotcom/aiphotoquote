@@ -51,7 +51,9 @@ function Chip({
       : "border-gray-200 bg-white text-gray-700";
 
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}>
+    <span
+      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}
+    >
       <span className="inline-block h-2 w-2 rounded-full bg-current opacity-60" />
       {children}
     </span>
@@ -83,14 +85,16 @@ export default function TenantOnboardingForm() {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<"idle" | "dirty" | "saved">("idle");
+
+  // Dirty tracking
+  const baselineRef = useRef<string>("");
+  const baselineReadyRef = useRef<boolean>(false);
+  const [dirty, setDirty] = useState(false);
 
   const suggestedSlug = useMemo(() => slugify(name), [name]);
 
-  // Keep an initial snapshot to know if form is "dirty"
-  const initialRef = useRef<string>("");
-
-  function snapshot() {
+  function currentSnapshot() {
+    // Only track the page-level settings (not openaiKey input itself).
     return JSON.stringify({
       name,
       slug,
@@ -101,8 +105,6 @@ export default function TenantOnboardingForm() {
       typLow,
       typHigh,
       maxWOI,
-      // NOTE: openaiKey not included in dirty tracking; users may leave it blank
-      // and we still want "Save" to work based on other fields.
     });
   }
 
@@ -141,19 +143,7 @@ export default function TenantOnboardingForm() {
       } catch (e: any) {
         if (!cancelled) setMsg(`❌ ${e?.message || "Failed to load settings"}`);
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-          // set baseline snapshot after load
-          const snap = JSON.stringify({
-            name: pick<string>((await (async () => ({}))()) as any, [], ""), // no-op to avoid TS lint on hoist
-          });
-          // We'll set the baseline in a microtask after state settles:
-          queueMicrotask(() => {
-            if (cancelled) return;
-            initialRef.current = snapshot();
-            setSaveState("idle");
-          });
-        }
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -161,17 +151,25 @@ export default function TenantOnboardingForm() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Track dirty state
+  // Establish baseline AFTER load & state populated (runs once)
   useEffect(() => {
     if (loading) return;
-    const isDirty = initialRef.current !== snapshot();
-    setSaveState((prev) => {
-      if (isDirty) return "dirty";
-      return prev === "saved" ? "saved" : "idle";
-    });
+    if (baselineReadyRef.current) return;
+
+    baselineRef.current = currentSnapshot();
+    baselineReadyRef.current = true;
+    setDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  // Update dirty status when fields change (but only after baseline ready)
+  useEffect(() => {
+    if (loading) return;
+    if (!baselineReadyRef.current) return;
+
+    setDirty(baselineRef.current !== currentSnapshot());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, slug, industryKey, redirectUrl, thankYouUrl, minJob, typLow, typHigh, maxWOI, loading]);
 
@@ -240,14 +238,14 @@ export default function TenantOnboardingForm() {
         throw new Error(detail);
       }
 
-      // Update “stored key” indicator if user submitted a key
+      // If user submitted a key, mark as stored
       if (openaiKey) setHasOpenaiKey(true);
 
       // Reset dirty baseline
-      initialRef.current = snapshot();
-      setSaveState("saved");
+      baselineRef.current = currentSnapshot();
+      setDirty(false);
 
-      // Optional: clear the key input so it doesn’t sit there
+      // Clear key input so it doesn't sit there
       setOpenaiKey("");
 
       setMsg("✅ Settings saved");
@@ -260,33 +258,29 @@ export default function TenantOnboardingForm() {
 
   const keyStatusTone = hasOpenaiKey ? "good" : "warn";
   const keyStatusText = hasOpenaiKey ? "Key stored" : "Key not set";
-  const verifyChip =
-    keyVerified ? <Chip tone="good">Verified</Chip> : null;
 
   return (
     <div className="space-y-6 pb-24">
       {loading && (
-        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-600">
+        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-700">
           Loading your current settings…
         </div>
       )}
 
       {/* Business */}
       <section className="rounded-2xl border bg-white p-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">Business</h2>
-            <p className="mt-1 text-sm text-gray-600">
-              Name, slug, and industry drive your public quote page behavior.
-            </p>
-          </div>
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Business</h2>
+          <p className="mt-1 text-sm text-gray-700">
+            Name, slug, and industry drive your public quote page behavior.
+          </p>
         </div>
 
         <div className="mt-5 grid gap-4">
           <label className="grid gap-1">
-            <span className="text-sm font-medium">Business name</span>
+            <span className="text-sm font-medium text-gray-900">Business name</span>
             <input
-              className="border rounded-xl p-3"
+              className="border rounded-xl p-3 text-gray-900"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Maggio Upholstery"
@@ -294,14 +288,14 @@ export default function TenantOnboardingForm() {
           </label>
 
           <label className="grid gap-1">
-            <span className="text-sm font-medium">Tenant slug</span>
+            <span className="text-sm font-medium text-gray-900">Tenant slug</span>
             <input
-              className="border rounded-xl p-3"
+              className="border rounded-xl p-3 text-gray-900"
               value={slug}
               onChange={(e) => setSlug(e.target.value)}
               placeholder={suggestedSlug || "your-slug"}
             />
-            <span className="text-xs text-gray-600">
+            <span className="text-xs text-gray-700">
               Public quote page:{" "}
               <code className="rounded-md bg-gray-50 px-2 py-1">
                 /q/{slug || suggestedSlug || "your-slug"}
@@ -310,9 +304,9 @@ export default function TenantOnboardingForm() {
           </label>
 
           <label className="grid gap-1">
-            <span className="text-sm font-medium">Industry</span>
+            <span className="text-sm font-medium text-gray-900">Industry</span>
             <select
-              className="border rounded-xl p-3"
+              className="border rounded-xl p-3 text-gray-900"
               value={industryKey}
               onChange={(e) => setIndustryKey(e.target.value)}
             >
@@ -330,23 +324,21 @@ export default function TenantOnboardingForm() {
       <section className="rounded-2xl border bg-white p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold">OpenAI</h2>
-            <p className="mt-1 text-sm text-gray-600">
-              Store a key once. We never display it back.
-            </p>
+            <h2 className="text-lg font-semibold text-gray-900">OpenAI</h2>
+            <p className="mt-1 text-sm text-gray-700">Store a key once. We never display it back.</p>
           </div>
 
           <div className="flex items-center gap-2">
             <Chip tone={keyStatusTone as any}>{keyStatusText}</Chip>
-            {verifyChip}
+            {keyVerified && <Chip tone="good">Verified</Chip>}
           </div>
         </div>
 
         <div className="mt-5 grid gap-3">
           <label className="grid gap-1">
-            <span className="text-sm font-medium">API key</span>
+            <span className="text-sm font-medium text-gray-900">API key</span>
             <input
-              className="border rounded-xl p-3"
+              className="border rounded-xl p-3 text-gray-900"
               value={openaiKey}
               onChange={(e) => {
                 setOpenaiKey(e.target.value);
@@ -354,7 +346,7 @@ export default function TenantOnboardingForm() {
               }}
               placeholder={hasOpenaiKey ? "•••••••••••••••• (stored)" : "sk-..."}
             />
-            <span className="text-xs text-gray-600">
+            <span className="text-xs text-gray-700">
               Paste a new key to replace the stored one.
             </span>
           </label>
@@ -368,20 +360,20 @@ export default function TenantOnboardingForm() {
               {testing ? "Testing..." : "Test key"}
             </button>
 
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-gray-600">
               Tip: Test verifies the key you entered. Save stores it for future requests.
             </p>
           </div>
 
-          {msg && <p className="text-sm whitespace-pre-wrap">{msg}</p>}
+          {msg && <p className="text-sm whitespace-pre-wrap text-gray-900">{msg}</p>}
         </div>
       </section>
 
       {/* Pricing */}
       <section className="rounded-2xl border bg-white p-6">
         <div>
-          <h2 className="text-lg font-semibold">Pricing guardrails</h2>
-          <p className="mt-1 text-sm text-gray-600">
+          <h2 className="text-lg font-semibold text-gray-900">Pricing guardrails</h2>
+          <p className="mt-1 text-sm text-gray-700">
             Keep AI output aligned with how your shop actually prices work.
           </p>
         </div>
@@ -389,9 +381,9 @@ export default function TenantOnboardingForm() {
         <div className="mt-5 grid gap-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-1">
-              <span className="text-sm font-medium">Minimum job ($)</span>
+              <span className="text-sm font-medium text-gray-900">Minimum job ($)</span>
               <input
-                className="border rounded-xl p-3"
+                className="border rounded-xl p-3 text-gray-900"
                 inputMode="numeric"
                 value={minJob}
                 onChange={(e) => setMinJob(e.target.value === "" ? "" : Number(e.target.value))}
@@ -399,9 +391,9 @@ export default function TenantOnboardingForm() {
             </label>
 
             <label className="grid gap-1">
-              <span className="text-sm font-medium">Max w/o inspection ($)</span>
+              <span className="text-sm font-medium text-gray-900">Max w/o inspection ($)</span>
               <input
-                className="border rounded-xl p-3"
+                className="border rounded-xl p-3 text-gray-900"
                 inputMode="numeric"
                 value={maxWOI}
                 onChange={(e) => setMaxWOI(e.target.value === "" ? "" : Number(e.target.value))}
@@ -411,9 +403,9 @@ export default function TenantOnboardingForm() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-1">
-              <span className="text-sm font-medium">Typical low ($)</span>
+              <span className="text-sm font-medium text-gray-900">Typical low ($)</span>
               <input
-                className="border rounded-xl p-3"
+                className="border rounded-xl p-3 text-gray-900"
                 inputMode="numeric"
                 value={typLow}
                 onChange={(e) => setTypLow(e.target.value === "" ? "" : Number(e.target.value))}
@@ -421,9 +413,9 @@ export default function TenantOnboardingForm() {
             </label>
 
             <label className="grid gap-1">
-              <span className="text-sm font-medium">Typical high ($)</span>
+              <span className="text-sm font-medium text-gray-900">Typical high ($)</span>
               <input
-                className="border rounded-xl p-3"
+                className="border rounded-xl p-3 text-gray-900"
                 inputMode="numeric"
                 value={typHigh}
                 onChange={(e) => setTypHigh(e.target.value === "" ? "" : Number(e.target.value))}
@@ -436,17 +428,17 @@ export default function TenantOnboardingForm() {
       {/* Redirects */}
       <section className="rounded-2xl border bg-white p-6">
         <div>
-          <h2 className="text-lg font-semibold">Redirects</h2>
-          <p className="mt-1 text-sm text-gray-600">
+          <h2 className="text-lg font-semibold text-gray-900">Redirects</h2>
+          <p className="mt-1 text-sm text-gray-700">
             Send customers where you want after submitting a quote request.
           </p>
         </div>
 
         <div className="mt-5 grid gap-4">
           <label className="grid gap-1">
-            <span className="text-sm font-medium">Redirect after quote</span>
+            <span className="text-sm font-medium text-gray-900">Redirect after quote</span>
             <input
-              className="border rounded-xl p-3"
+              className="border rounded-xl p-3 text-gray-900"
               value={redirectUrl}
               onChange={(e) => setRedirectUrl(e.target.value)}
               onBlur={() => setRedirectUrl(normalizeUrl(redirectUrl))}
@@ -455,9 +447,9 @@ export default function TenantOnboardingForm() {
           </label>
 
           <label className="grid gap-1">
-            <span className="text-sm font-medium">Thank you page (optional)</span>
+            <span className="text-sm font-medium text-gray-900">Thank you page (optional)</span>
             <input
-              className="border rounded-xl p-3"
+              className="border rounded-xl p-3 text-gray-900"
               value={thankYouUrl}
               onChange={(e) => setThankYouUrl(e.target.value)}
               onBlur={() => setThankYouUrl(normalizeUrl(thankYouUrl))}
@@ -467,34 +459,30 @@ export default function TenantOnboardingForm() {
         </div>
       </section>
 
-      {/* Sticky Save Bar */}
-      <div className="fixed inset-x-0 bottom-0 z-50 border-t bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-4">
-          <div className="text-sm">
-            {saveState === "dirty" && (
-              <span className="font-semibold text-gray-800">Unsaved changes</span>
-            )}
-            {saveState === "saved" && (
-              <span className="font-semibold text-green-700">Saved</span>
-            )}
-            {saveState === "idle" && (
-              <span className="text-gray-600">Settings</span>
-            )}
-            <span className="ml-3 text-xs text-gray-500">
-              {hasOpenaiKey ? "OpenAI key stored" : "No OpenAI key stored"}
-              {keyVerified ? " • Key verified" : ""}
-            </span>
-          </div>
+      {/* Sticky Save Bar — ONLY when dirty or saving */}
+      {(dirty || saving) && (
+        <div className="fixed inset-x-0 bottom-0 z-50 border-t bg-white/90 backdrop-blur">
+          <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-4">
+            <div className="text-sm">
+              <span className="font-semibold text-gray-900">
+                {saving ? "Saving…" : "Unsaved changes"}
+              </span>
+              <span className="ml-3 text-xs text-gray-600">
+                {hasOpenaiKey ? "OpenAI key stored" : "No OpenAI key stored"}
+                {keyVerified ? " • Key verified" : ""}
+              </span>
+            </div>
 
-          <button
-            className="rounded-2xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50"
-            onClick={saveAll}
-            disabled={saving || !name}
-          >
-            {saving ? "Saving..." : "Save changes"}
-          </button>
+            <button
+              className="rounded-2xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50"
+              onClick={saveAll}
+              disabled={saving || !name || !dirty}
+            >
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
