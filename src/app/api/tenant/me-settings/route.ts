@@ -26,7 +26,6 @@ export async function GET(_req: NextRequest) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    // ✅ Match the REAL table columns (no "id", no "created_at")
     const settingsRows = await db.execute(sql`
       select
         "tenant_id",
@@ -49,7 +48,22 @@ export async function GET(_req: NextRequest) {
         }
       | null;
 
-    return NextResponse.json({ ok: true, tenant, settings });
+    // ✅ New: detect whether an OpenAI key exists (without returning it)
+    const secretsRows = await db.execute(sql`
+      select 1 as "has"
+      from "tenant_secrets"
+      where "tenant_id" = ${tenant.id}::uuid
+      limit 1
+    `);
+
+    const hasOpenaiKey = Boolean((secretsRows as any)?.[0]?.has);
+
+    return NextResponse.json({
+      ok: true,
+      tenant,
+      settings,
+      secrets: { hasOpenaiKey },
+    });
   } catch (err: any) {
     return NextResponse.json(
       { ok: false, error: { code: "INTERNAL", message: err?.message || String(err) } },
