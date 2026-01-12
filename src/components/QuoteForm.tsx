@@ -12,6 +12,26 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function digitsOnly(s: string) {
+  return (s || "").replace(/\D/g, "");
+}
+
+function formatUSPhone(input: string) {
+  const d = digitsOnly(input).slice(0, 10);
+  const a = d.slice(0, 3);
+  const b = d.slice(3, 6);
+  const c = d.slice(6, 10);
+  if (d.length <= 3) return a ? `(${a}` : "";
+  if (d.length <= 6) return `(${a}) ${b}`;
+  return `(${a}) ${b}-${c}`;
+}
+
+function isValidEmail(email: string) {
+  const s = (email || "").trim();
+  // Simple and safe (we don't need RFC perfection)
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
 /**
  * Compress an image file in-browser using canvas.
  * - Keeps aspect ratio
@@ -74,19 +94,29 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
   const MIN_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
+  // Contact (required)
+  const [customerName, setCustomerName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<
-    "idle" | "compressing" | "uploading" | "analyzing"
-  >("idle");
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  const contactOk = useMemo(() => {
+    const nOk = customerName.trim().length > 0;
+    const eOk = isValidEmail(email);
+    const pOk = digitsOnly(phone).length === 10;
+    return nOk && eOk && pOk;
+  }, [customerName, email, phone]);
 
   const step = useMemo(() => {
     if (result?.output) return 3;
@@ -96,20 +126,17 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
 
   // Progress bar like Maggio: 3 steps with smooth fill + label
   const progress = useMemo(() => {
-    // Base step progress
-    let p = 0.15; // default hint "start"
+    let p = 0.15;
     if (step === 1) p = 0.25;
     if (step === 2) p = 0.55;
     if (step === 3) p = 0.85;
 
-    // When actively running, bump based on phase
     if (working) {
       if (phase === "compressing") p = 0.62;
       if (phase === "uploading") p = 0.72;
       if (phase === "analyzing") p = 0.82;
     }
 
-    // Once estimate is displayed, complete
     if (result?.output) p = 1.0;
 
     return Math.max(0, Math.min(1, p));
@@ -128,10 +155,12 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
   }, [result?.output, working, phase, step]);
 
   const progressText = useMemo(() => {
-    if (files.length >= MIN_PHOTOS)
-      return `✅ ${files.length} photo${files.length === 1 ? "" : "s"} added`;
+    if (files.length >= MIN_PHOTOS) {
+      const c = contactOk ? " • ✅ contact info" : " • add contact info";
+      return `✅ ${files.length} photo${files.length === 1 ? "" : "s"} added${c}`;
+    }
     return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
-  }, [files.length]);
+  }, [files.length, contactOk]);
 
   // Auto-scroll to estimate once it appears
   useEffect(() => {
@@ -161,7 +190,6 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
   }
 
   function retake() {
-    // Clear current state so user can start over quickly
     setError(null);
     setResult(null);
     setNotes("");
@@ -181,6 +209,19 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     }
     if (files.length > MAX_PHOTOS) {
       setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
+      return;
+    }
+
+    if (!customerName.trim()) {
+      setError("Please enter your name.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (digitsOnly(phone).length !== 10) {
+      setError("Please enter a valid 10-digit phone number.");
       return;
     }
 
@@ -207,7 +248,12 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-          customer_context: { notes },
+          customer_context: {
+            name: customerName.trim(),
+            email: email.trim(),
+            phone: digitsOnly(phone),
+            notes,
+          },
         }),
       });
 
@@ -225,7 +271,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
 
   return (
     <div className="space-y-6">
-      {/* Maggio-style progress bar */}
+      {/* Progress bar */}
       <div className="rounded-xl border p-4">
         <div className="flex items-center justify-between gap-4">
           <div>
@@ -243,9 +289,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         </div>
 
         <div className="mt-3 grid grid-cols-3 text-xs text-gray-600">
-          <div className={step >= 1 ? "font-semibold text-gray-900" : ""}>
-            Photos
-          </div>
+          <div className={step >= 1 ? "font-semibold text-gray-900" : ""}>Photos</div>
           <div className={`text-center ${step >= 2 ? "font-semibold text-gray-900" : ""}`}>
             Details
           </div>
@@ -390,10 +434,62 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
       {/* Details */}
       <section className="rounded-2xl border p-5 space-y-4">
         <div>
-          <h2 className="font-semibold">Details (optional)</h2>
+          <h2 className="font-semibold">Your info</h2>
           <p className="mt-1 text-xs text-gray-600">
-            One sentence helps us estimate faster.
+            Required so we can send your estimate and follow up if needed.
           </p>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <div className="text-xs text-gray-700">
+              Name <span className="text-red-600">*</span>
+            </div>
+            <input
+              className="mt-2 w-full rounded-xl border p-3 text-sm"
+              value={customerName}
+              onChange={(e) => setCustomerName(e.target.value)}
+              placeholder="Your name"
+              disabled={working}
+              autoComplete="name"
+            />
+          </label>
+
+          <label className="block">
+            <div className="text-xs text-gray-700">
+              Email <span className="text-red-600">*</span>
+            </div>
+            <input
+              className="mt-2 w-full rounded-xl border p-3 text-sm"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@email.com"
+              disabled={working}
+              inputMode="email"
+              autoComplete="email"
+            />
+          </label>
+        </div>
+
+        <label className="block">
+          <div className="text-xs text-gray-700">
+            Phone <span className="text-red-600">*</span>
+          </div>
+          <input
+            className="mt-2 w-full rounded-xl border p-3 text-sm"
+            value={phone}
+            onChange={(e) => setPhone(formatUSPhone(e.target.value))}
+            placeholder="(555) 555-5555"
+            disabled={working}
+            inputMode="tel"
+            autoComplete="tel"
+          />
+          <p className="mt-1 text-xs text-gray-600">We’ll only use this for your quote request.</p>
+        </label>
+
+        <div className="pt-2">
+          <h3 className="text-sm font-semibold">Details (optional)</h3>
+          <p className="mt-1 text-xs text-gray-600">One sentence helps us estimate faster.</p>
         </div>
 
         <label className="block">
@@ -419,7 +515,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         <button
           className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50"
           onClick={onSubmit}
-          disabled={working || files.length < MIN_PHOTOS}
+          disabled={working || files.length < MIN_PHOTOS || !contactOk}
         >
           {working ? "Working…" : "Get Estimate"}
         </button>
@@ -427,6 +523,12 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
         {files.length < MIN_PHOTOS && (
           <p className="text-center text-xs text-gray-600">
             Add at least <b>{MIN_PHOTOS}</b> photos to unlock estimate.
+          </p>
+        )}
+
+        {files.length >= MIN_PHOTOS && !contactOk && (
+          <p className="text-center text-xs text-gray-600">
+            Please complete <b>Name</b>, <b>Email</b>, and <b>Phone</b> to submit.
           </p>
         )}
 
@@ -472,7 +574,6 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
             </div>
           )}
 
-          {/* Maggio-like post-estimate controls */}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="sr-only">Add another photo</span>
@@ -508,7 +609,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
               type="button"
               className="w-full rounded-xl border py-4 font-semibold"
               onClick={onSubmit}
-              disabled={working}
+              disabled={working || !contactOk}
             >
               Re-run Estimate with Updated Photos
             </button>
