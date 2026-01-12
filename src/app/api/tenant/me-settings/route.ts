@@ -1,21 +1,18 @@
 // src/app/api/tenant/me-settings/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { db } from "../../../../lib/db/client";
 import { tenants, tenantSettings } from "../../../../lib/db/schema";
 
 export const runtime = "nodejs";
 
-export async function GET(req: NextRequest) {
+export async function GET(_req: NextRequest) {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json(
-        { ok: false, error: "UNAUTHORIZED" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
     }
 
     const tenantRows = await db
@@ -23,51 +20,14 @@ export async function GET(req: NextRequest) {
         id: tenants.id,
         name: tenants.name,
         slug: tenants.slug,
-        ownerClerkUserId: tenants.ownerClerkUserId,
       })
       .from(tenants)
       .where(eq(tenants.ownerClerkUserId, userId))
       .limit(1);
 
     const tenant = tenantRows[0];
-
     if (!tenant?.id) {
-      return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND" },
-        { status: 404 }
-      );
-    }
-
-    const url = new URL(req.url);
-    const debug = url.searchParams.get("debug") === "1";
-
-    if (debug) {
-      const fingerprint = await db.execute(sql`
-        select
-          current_database() as db,
-          current_schema() as schema
-      `);
-
-      const settingsCount = await db.execute(sql`
-        select count(*)::int as ct
-        from "tenant_settings"
-        where "tenant_id" = ${tenant.id}::uuid
-      `);
-
-      const fp0 = (fingerprint as any)?.[0] ?? null;
-      const ct0 = (settingsCount as any)?.[0] ?? null;
-
-      return NextResponse.json({
-        ok: true,
-        debug: {
-          tenant_id: tenant.id,
-          db: fp0?.db ?? null,
-          schema: fp0?.schema ?? null,
-          tenant_settings_rows_for_tenant: ct0?.ct ?? null,
-          postgres_url_tail: (process.env.POSTGRES_URL || "").slice(-12),
-          vercel_env: process.env.VERCEL_ENV || null,
-        },
-      });
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
     const settingsRows = await db
@@ -85,20 +45,10 @@ export async function GET(req: NextRequest) {
 
     const settings = settingsRows[0] ?? null;
 
-    return NextResponse.json({
-      ok: true,
-      tenant,
-      settings,
-    });
+    return NextResponse.json({ ok: true, tenant, settings });
   } catch (err: any) {
     return NextResponse.json(
-      {
-        ok: false,
-        error: {
-          code: "INTERNAL",
-          message: err?.message || String(err),
-        },
-      },
+      { ok: false, error: { code: "INTERNAL", message: err?.message || String(err) } },
       { status: 500 }
     );
   }
