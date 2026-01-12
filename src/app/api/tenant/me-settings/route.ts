@@ -49,7 +49,7 @@ export async function GET(_req: NextRequest) {
         }
       | null;
 
-    // tenant_pricing_rules (guardrails)
+    // tenant_pricing_rules (guardrails) — do NOT assume created_at exists
     const pricingRows = await db.execute(sql`
       select
         "min_job",
@@ -58,11 +58,9 @@ export async function GET(_req: NextRequest) {
         "max_without_inspection",
         "tone",
         "risk_posture",
-        "always_estimate_language",
-        "created_at"
+        "always_estimate_language"
       from "tenant_pricing_rules"
       where "tenant_id" = ${tenant.id}::uuid
-      order by "created_at" desc
       limit 1
     `);
 
@@ -75,7 +73,6 @@ export async function GET(_req: NextRequest) {
           tone: string | null;
           risk_posture: string | null;
           always_estimate_language: boolean | null;
-          created_at: string | null;
         }
       | null;
 
