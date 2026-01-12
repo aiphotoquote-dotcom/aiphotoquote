@@ -1,7 +1,9 @@
-import { notFound } from "next/navigation";
 import QuoteForm from "@/components/QuoteForm";
 import { db } from "../../../lib/db/client";
 import { sql } from "drizzle-orm";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export default async function Page({
   params,
@@ -10,42 +12,48 @@ export default async function Page({
 }) {
   const tenantSlug = params.tenantSlug;
 
-  // Server-side tenant lookup (raw SQL to avoid schema-typing friction)
-  const tenantRows = await db.execute(sql`
-    select "id", "name", "slug"
-    from "tenants"
-    where "slug" = ${tenantSlug}
-    limit 1
-  `);
+  // Default/fallback values so this page never hard-crashes.
+  let tenantName = "Get a Photo Quote";
+  let industry = "service";
 
-  const tenant = (tenantRows as any)?.[0] as
-    | { id: string; name: string; slug: string }
-    | undefined;
+  try {
+    // Tenant lookup (safe)
+    const tenantRows = await db.execute(sql`
+      select "id", "name", "slug"
+      from "tenants"
+      where "slug" = ${tenantSlug}
+      limit 1
+    `);
 
-  if (!tenant?.id) notFound();
+    const tenant = (tenantRows as any)?.[0] as
+      | { id: string; name: string; slug: string }
+      | undefined;
 
-  // Optional: pull tenant settings for future use (copy / redirects)
-  const settingsRows = await db.execute(sql`
-    select "industry_key", "redirect_url", "thank_you_url"
-    from "tenant_settings"
-    where "tenant_id" = ${tenant.id}::uuid
-    limit 1
-  `);
+    if (tenant?.name) tenantName = tenant.name;
 
-  const settings = (settingsRows as any)?.[0] as
-    | {
-        industry_key: string | null;
-        redirect_url: string | null;
-        thank_you_url: string | null;
-      }
-    | undefined;
+    // Settings lookup (safe)
+    if (tenant?.id) {
+      const settingsRows = await db.execute(sql`
+        select "industry_key"
+        from "tenant_settings"
+        where "tenant_id" = ${tenant.id}::uuid
+        limit 1
+      `);
 
-  const industry = settings?.industry_key ?? "service";
+      const settings = (settingsRows as any)?.[0] as
+        | { industry_key: string | null }
+        | undefined;
+
+      if (settings?.industry_key) industry = settings.industry_key;
+    }
+  } catch {
+    // Intentionally swallow errors so the page still renders.
+    // QuoteForm can still submit using tenantSlug even if branding fails.
+  }
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900">
       <div className="mx-auto max-w-5xl px-6 py-12">
-        {/* Hero */}
         <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
           <div className="lg:col-span-2">
             <div className="inline-flex items-center gap-2 rounded-full border bg-white px-3 py-1 text-xs text-gray-700">
@@ -54,7 +62,7 @@ export default async function Page({
             </div>
 
             <h1 className="mt-4 text-4xl font-semibold tracking-tight">
-              {tenant.name}
+              {tenantName}
             </h1>
 
             <p className="mt-3 text-base text-gray-700">
@@ -87,7 +95,6 @@ export default async function Page({
             </div>
           </div>
 
-          {/* Form Card */}
           <div className="lg:col-span-3">
             <div className="rounded-2xl border bg-white p-6 shadow-sm md:p-8">
               <div className="flex items-start justify-between gap-4">
@@ -102,7 +109,7 @@ export default async function Page({
                 <div className="hidden md:flex flex-col items-end text-xs text-gray-600">
                   <span className="font-semibold text-gray-900">Tenant</span>
                   <span className="rounded-md bg-gray-50 px-2 py-1">
-                    /q/{tenant.slug}
+                    /q/{tenantSlug}
                   </span>
                 </div>
               </div>
