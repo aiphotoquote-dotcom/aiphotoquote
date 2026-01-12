@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const INDUSTRIES = [
   { key: "upholstery", name: "Upholstery" },
@@ -28,6 +28,14 @@ function normalizeUrl(u: string) {
   return s;
 }
 
+function pick<T = any>(obj: any, keys: string[], fallback: T): T {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== undefined && v !== null) return v as T;
+  }
+  return fallback;
+}
+
 export default function TenantOnboardingForm() {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
@@ -43,11 +51,56 @@ export default function TenantOnboardingForm() {
   const [typHigh, setTypHigh] = useState<number | "">("");
   const [maxWOI, setMaxWOI] = useState<number | "">("");
 
+  const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   const suggestedSlug = useMemo(() => slugify(name), [name]);
+
+  // Load existing tenant/settings once
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setMsg(null);
+      setLoading(true);
+
+      try {
+        const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+        const json = await res.json();
+
+        if (!json.ok) {
+          // If tenant isn't found yet, keep form empty.
+          if (!cancelled) setMsg(json.error?.message ? `❌ ${json.error.message}` : null);
+          return;
+        }
+
+        const t = json.tenant ?? {};
+        const s = json.settings ?? {};
+
+        if (cancelled) return;
+
+        // tenant
+        setName(pick<string>(t, ["name"], ""));
+        setSlug(pick<string>(t, ["slug"], ""));
+
+        // settings (support snake_case from route)
+        setIndustryKey(pick<string>(s, ["industryKey", "industry_key"], "upholstery"));
+        setRedirectUrl(pick<string>(s, ["redirectUrl", "redirect_url"], ""));
+        setThankYouUrl(pick<string>(s, ["thankYouUrl", "thank_you_url"], ""));
+      } catch (e: any) {
+        if (!cancelled) setMsg(`❌ ${e?.message || "Failed to load settings"}`);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function testKey() {
     setMsg(null);
@@ -112,6 +165,17 @@ export default function TenantOnboardingForm() {
         throw new Error(detail);
       }
 
+      // Refresh local state from response (support either shape)
+      const t = json.tenant ?? {};
+      const s = json.settings ?? {};
+
+      setName(pick<string>(t, ["name"], name));
+      setSlug(pick<string>(t, ["slug"], slug || suggestedSlug));
+
+      setIndustryKey(pick<string>(s, ["industryKey", "industry_key"], industryKey));
+      setRedirectUrl(pick<string>(s, ["redirectUrl", "redirect_url"], redirectUrl));
+      setThankYouUrl(pick<string>(s, ["thankYouUrl", "thank_you_url"], thankYouUrl));
+
       setMsg("✅ Settings saved");
     } catch (e: any) {
       setMsg(`❌ ${e.message}`);
@@ -122,6 +186,12 @@ export default function TenantOnboardingForm() {
 
   return (
     <div className="space-y-6">
+      {loading && (
+        <div className="rounded-xl border p-4 text-sm text-gray-600">
+          Loading your current settings…
+        </div>
+      )}
+
       {/* Business */}
       <section className="rounded-xl border p-5">
         <h2 className="font-semibold">Business</h2>
