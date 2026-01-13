@@ -61,23 +61,14 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
-/**
- * IMPORTANT: Use raw SQL so we match your real DB schema:
- * tenant_secrets(tenant_id PK, openai_key_enc, openai_key_last4, updated_at)
- */
+// Uses your real DB schema:
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
   );
-
-  // Drizzle returns different shapes depending on driver; handle both.
-  const row: any =
-    (r as any)?.rows?.[0] ??
-    (Array.isArray(r) ? (r as any)[0] : null);
-
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   const enc = row?.openai_key_enc ?? null;
   if (!enc) return null;
-
   return decryptSecret(enc);
 }
 
@@ -118,7 +109,6 @@ async function preflightImageUrl(url: string) {
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
-  let quoteLogId: string | null = null;
 
   try {
     const raw = await req.json().catch(() => null);
@@ -152,29 +142,19 @@ export async function POST(req: Request) {
         .limit(1);
     } catch {}
 
-    // ✅ Tenant-based key (no global OPENAI_API_KEY)
+    // Tenant-based OpenAI key
     const openAiKey = await getTenantOpenAiKey((tenant as any).id);
     if (!openAiKey) {
       return json(
         {
           ok: false,
           error: "OPENAI_KEY_MISSING",
-          message:
-            "Tenant OpenAI key not configured. Set tenant_secrets.openai_key_enc for this tenant_id.",
+          message: "Tenant OpenAI key not configured in tenant_secrets.openai_key_enc.",
         },
         500,
         debugId
       );
     }
-
-    // Log (best effort)
-    try {
-      const inserted = await db
-        .insert(quoteLogs)
-        .values({ tenantId: (tenant as any).id, requestJson: raw, status: "started" } as any)
-        .returning({ id: (quoteLogs as any).id });
-      quoteLogId = inserted?.[0]?.id ?? null;
-    } catch {}
 
     // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
@@ -188,6 +168,32 @@ export async function POST(req: Request) {
           bad,
         },
         400,
+        debugId
+      );
+    }
+
+    // Create quote log FIRST (and fail loudly if it doesn't work)
+    let quoteLogId: string;
+    try {
+      const inserted = await db
+        .insert(quoteLogs)
+        .values({
+          tenantId: (tenant as any).id,
+          requestJson: raw,
+          status: "started",
+        } as any)
+        .returning({ id: (quoteLogs as any).id });
+
+      quoteLogId = inserted?.[0]?.id;
+      if (!quoteLogId) throw new Error("quoteLogs insert returned no id");
+    } catch (e: any) {
+      return json(
+        {
+          ok: false,
+          error: "QUOTE_LOG_INSERT_FAILED",
+          message: e?.message ?? String(e),
+        },
+        500,
         debugId
       );
     }
@@ -240,19 +246,32 @@ export async function POST(req: Request) {
       structured = validated.success ? validated.data : null;
     } catch {}
 
-    // Update log (best effort)
+    // Update quote log
     try {
-      if (quoteLogId) {
-        await db
-          .update(quoteLogs)
-          .set({
-            status: "completed",
-            responseJson: structured ?? { rawText },
-            durationMs: Date.now() - startedAt,
-          } as any)
-          .where(eq((quoteLogs as any).id, quoteLogId));
-      }
-    } catch {}
+      await db
+        .update(quoteLogs)
+        .set({
+          status: "completed",
+          responseJson: structured ?? { rawText },
+          durationMs: Date.now() - startedAt,
+        } as any)
+        .where(eq((quoteLogs as any).id, quoteLogId));
+    } catch (e: any) {
+      // If update fails, still return success but include a hint
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          tenantId: (tenant as any).id,
+          imagePreflight: checks,
+          assessment:
+            structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." },
+          warning: `quoteLogs update failed: ${e?.message ?? String(e)}`,
+        },
+        200,
+        debugId
+      );
+    }
 
     return json(
       {
@@ -268,17 +287,6 @@ export async function POST(req: Request) {
     );
   } catch (err: any) {
     const e = normalizeErr(err);
-
-    // Update log (best effort)
-    try {
-      if (quoteLogId) {
-        await db
-          .update(quoteLogs)
-          .set({ status: "error", errorJson: e, durationMs: Date.now() - startedAt } as any)
-          .where(eq((quoteLogs as any).id, quoteLogId));
-      }
-    } catch {}
-
     return json({ ok: false, error: "REQUEST_FAILED", ...e }, e.status ?? 500, debugId);
   }
 }
