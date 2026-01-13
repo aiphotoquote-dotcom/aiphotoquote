@@ -3,6 +3,7 @@ import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import crypto from "crypto";
+import { Resend } from "resend";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSettings } from "@/lib/db/schema";
@@ -18,6 +19,10 @@ const Req = z.object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
       category: z.string().optional(),
+      // optional but nice if you add later:
+      name: z.string().optional(),
+      email: z.string().optional(),
+      phone: z.string().optional(),
     })
     .optional(),
 });
@@ -125,14 +130,11 @@ async function preflightImageUrl(url: string) {
 }
 
 /**
- * quote_logs columns that we KNOW exist from your error output:
+ * quote_logs columns we are using:
  * id, tenant_id, input, output, created_at
- *
- * We store everything else (confidence, inspection_required, pricing later) inside output JSON.
  */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
   const quoteLogId = crypto.randomUUID();
-
   const inputStr = JSON.stringify(inputJson ?? {});
   const outputStr = JSON.stringify({ status: "started" });
 
@@ -144,17 +146,219 @@ async function insertQuoteLog(tenantId: string, inputJson: any) {
   return quoteLogId;
 }
 
-async function updateQuoteLogCompleted(quoteLogId: string, assessment: any) {
-  const outputStr = JSON.stringify({
-    status: "completed",
-    assessment,
-  });
-
+async function updateQuoteLogOutput(quoteLogId: string, output: any) {
+  const outputStr = JSON.stringify(output ?? {});
   await db.execute(sql`
     update quote_logs
     set output = ${outputStr}::jsonb
     where id = ${quoteLogId}::uuid
   `);
+}
+
+function esc(s: unknown) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderLeadEmailHTML(args: {
+  tenantSlug: string;
+  quoteLogId: string;
+  customer: { name?: string; email?: string; phone?: string };
+  category?: string;
+  notes?: string;
+  images: string[];
+  assessment: any;
+}) {
+  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment } = args;
+
+  const imgs = images
+    .map(
+      (u) =>
+        `<div style="margin:10px 0;"><a href="${esc(u)}">${esc(u)}</a><br/><img src="${esc(
+          u
+        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
+    )
+    .join("");
+
+  return `
+  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
+    <h2 style="margin:0 0 8px;">New Photo Quote</h2>
+    <div style="margin:0 0 12px;color:#374151;">
+      <div><b>Tenant</b>: ${esc(tenantSlug)}</div>
+      <div><b>Quote Log ID</b>: ${esc(quoteLogId)}</div>
+      <div><b>Category</b>: ${esc(category || "")}</div>
+    </div>
+
+    <h3 style="margin:18px 0 6px;">Customer</h3>
+    <div style="color:#374151;">
+      <div><b>Name</b>: ${esc(customer.name || "")}</div>
+      <div><b>Email</b>: ${esc(customer.email || "")}</div>
+      <div><b>Phone</b>: ${esc(customer.phone || "")}</div>
+    </div>
+
+    ${
+      notes
+        ? `<h3 style="margin:18px 0 6px;">Notes</h3><div style="white-space:pre-wrap;color:#374151;">${esc(
+            notes
+          )}</div>`
+        : ""
+    }
+
+    <h3 style="margin:18px 0 6px;">Photos</h3>
+    ${imgs}
+
+    <h3 style="margin:18px 0 6px;">AI Assessment</h3>
+    <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
+      JSON.stringify(assessment, null, 2)
+    )}</pre>
+  </div>`;
+}
+
+function renderCustomerEmailHTML(args: {
+  businessName: string;
+  quoteLogId: string;
+  notes?: string;
+  images: string[];
+  assessment: any;
+}) {
+  const { businessName, quoteLogId, notes, images, assessment } = args;
+
+  const imgs = images
+    .map(
+      (u) =>
+        `<div style="margin:10px 0;"><img src="${esc(
+          u
+        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
+    )
+    .join("");
+
+  return `
+  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
+    <h2 style="margin:0 0 8px;">We received your request</h2>
+    <div style="margin:0 0 12px;color:#374151;">
+      <div><b>Quote ID</b>: ${esc(quoteLogId)}</div>
+    </div>
+
+    <p style="color:#374151;margin:0 0 10px;">
+      Thanks for sending photos. Here’s what our AI could see at a glance. We’ll follow up if we need any clarifications.
+    </p>
+
+    ${
+      notes
+        ? `<h3 style="margin:18px 0 6px;">Your Notes</h3><div style="white-space:pre-wrap;color:#374151;">${esc(
+            notes
+          )}</div>`
+        : ""
+    }
+
+    <h3 style="margin:18px 0 6px;">Photos Received</h3>
+    ${imgs}
+
+    <h3 style="margin:18px 0 6px;">Preliminary Assessment</h3>
+    <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
+      JSON.stringify(assessment, null, 2)
+    )}</pre>
+
+    <p style="color:#6b7280;margin-top:14px;">
+      — ${esc(businessName)}
+    </p>
+  </div>`;
+}
+
+async function sendEmailsIfConfigured(args: {
+  tenantSlug: string;
+  quoteLogId: string;
+  category?: string;
+  notes?: string;
+  images: string[];
+  assessment: any;
+  customer: { name?: string; email?: string; phone?: string };
+}) {
+  const resendKey = process.env.RESEND_API_KEY || "";
+  const fromEmail = process.env.RESEND_FROM_EMAIL || ""; // e.g. "Maggio Upholstery <quotes@maggioupholstery.com>"
+  const leadToEmail = process.env.LEAD_TO_EMAIL || ""; // your shop inbox
+  const businessName = process.env.BUSINESS_NAME || "Maggio Upholstery";
+
+  const result = {
+    configured: Boolean(resendKey && fromEmail && leadToEmail),
+    lead: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
+    customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
+    missing: {
+      RESEND_API_KEY: !resendKey,
+      RESEND_FROM_EMAIL: !fromEmail,
+      LEAD_TO_EMAIL: !leadToEmail,
+    },
+  };
+
+  if (!result.configured) return result;
+
+  const resend = new Resend(resendKey);
+
+  // Lead email
+  try {
+    result.lead.attempted = true;
+    const leadHtml = renderLeadEmailHTML({
+      tenantSlug: args.tenantSlug,
+      quoteLogId: args.quoteLogId,
+      customer: args.customer,
+      category: args.category,
+      notes: args.notes,
+      images: args.images,
+      assessment: args.assessment,
+    });
+
+    const leadRes = await resend.emails.send({
+      from: fromEmail,
+      to: [leadToEmail],
+      subject: `New Photo Quote (${args.category || "request"}) — ${args.quoteLogId}`,
+      html: leadHtml,
+    });
+
+    // leadRes has { data, error } shape
+    const leadId = (leadRes as any)?.data?.id ?? null;
+    if ((leadRes as any)?.error) throw new Error((leadRes as any).error?.message ?? "Resend error");
+    result.lead.sent = true;
+    result.lead.id = leadId;
+  } catch (e: any) {
+    result.lead.error = e?.message ?? String(e);
+  }
+
+  // Customer receipt (only if we have a customer email)
+  if (args.customer.email) {
+    try {
+      result.customer.attempted = true;
+
+      const custHtml = renderCustomerEmailHTML({
+        businessName,
+        quoteLogId: args.quoteLogId,
+        notes: args.notes,
+        images: args.images,
+        assessment: args.assessment,
+      });
+
+      const custRes = await resend.emails.send({
+        from: fromEmail,
+        to: [args.customer.email],
+        subject: `We received your request — Quote ${args.quoteLogId}`,
+        html: custHtml,
+      });
+
+      const custId = (custRes as any)?.data?.id ?? null;
+      if ((custRes as any)?.error) throw new Error((custRes as any).error?.message ?? "Resend error");
+      result.customer.sent = true;
+      result.customer.id = custId;
+    } catch (e: any) {
+      result.customer.error = e?.message ?? String(e);
+    }
+  } else {
+    result.customer.error = "No customer email provided; skipping customer receipt.";
+  }
+
+  return result;
 }
 
 export async function POST(req: Request) {
@@ -286,10 +490,38 @@ export async function POST(req: Request) {
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
 
-    // Update quote log with completed output (best effort)
+    const customer = {
+      name: customer_context?.name,
+      email: customer_context?.email,
+      phone: customer_context?.phone,
+    };
+
+    // Try sending emails (NON-BLOCKING)
+    const emailResult = await sendEmailsIfConfigured({
+      tenantSlug,
+      quoteLogId,
+      category,
+      notes,
+      images: images.map((i) => i.url),
+      assessment: finalAssessment,
+      customer,
+    });
+
+    // Update quote log output (best effort)
     try {
-      await updateQuoteLogCompleted(quoteLogId!, finalAssessment);
+      await updateQuoteLogOutput(quoteLogId, {
+        status: "completed",
+        assessment: finalAssessment,
+        email: emailResult,
+        meta: {
+          tenantSlug,
+          category,
+          service_type: serviceType,
+          durationMs: Date.now() - startedAt,
+        },
+      });
     } catch (e: any) {
+      // Still return success; include warning
       return json(
         {
           ok: true,
@@ -297,6 +529,7 @@ export async function POST(req: Request) {
           tenantId: (tenant as any).id,
           imagePreflight: checks,
           assessment: finalAssessment,
+          email: emailResult,
           warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
           durationMs: Date.now() - startedAt,
         },
@@ -312,6 +545,7 @@ export async function POST(req: Request) {
         tenantId: (tenant as any).id,
         imagePreflight: checks,
         assessment: finalAssessment,
+        email: emailResult,
         durationMs: Date.now() - startedAt,
       },
       200,
@@ -323,12 +557,7 @@ export async function POST(req: Request) {
     // If we already have a quoteLogId, try to store the error (best effort)
     try {
       if (quoteLogId) {
-        const out = JSON.stringify({ status: "error", error: e });
-        await db.execute(sql`
-          update quote_logs
-          set output = ${out}::jsonb
-          where id = ${quoteLogId}::uuid
-        `);
+        await updateQuoteLogOutput(quoteLogId, { status: "error", error: e });
       }
     } catch {}
 
