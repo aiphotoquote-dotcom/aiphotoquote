@@ -24,11 +24,10 @@ async function getTenantForCurrentUser() {
   const { userId } = await auth();
   if (!userId) return null;
 
-  // assumes tenants.owner_clerk_user_id exists
+  // Use "as any" so we don't depend on Drizzle field name typing here.
   const rows = await db
     .select()
     .from(tenants)
-    // @ts-expect-error: schema typing depends on your drizzle model fields
     .where(eq((tenants as any).ownerClerkUserId, userId))
     .limit(1);
 
