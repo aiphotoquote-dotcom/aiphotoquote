@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import OpenAI from "openai";
+import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
@@ -30,13 +31,17 @@ const QuoteOutputSchema = z.object({
   questions: z.array(z.string()).default([]),
 });
 
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+function json(data: any, status = 200, debugId?: string) {
+  const res = NextResponse.json(
+    debugId ? { debugId, ...data } : data,
+    { status }
+  );
+  if (debugId) res.headers.set("x-debug-id", debugId);
+  return res;
 }
 
 function normalizeErr(err: any) {
   const status = typeof err?.status === "number" ? err.status : undefined;
-
   const message =
     err?.error?.message ??
     err?.response?.data?.error?.message ??
@@ -72,27 +77,18 @@ async function getOpenAiKeyForTenant(tenantId: string) {
 }
 
 async function preflightImageUrl(url: string) {
-  const out: {
-    ok: boolean;
-    url: string;
-    status?: number;
-    contentType?: string | null;
-    finalUrl?: string;
-    hint?: string;
-  } = { ok: false, url };
+  const out: { ok: boolean; url: string; status?: number; hint?: string } = { ok: false, url };
 
   try {
     const headRes = await fetch(url, { method: "HEAD", redirect: "follow" });
     out.status = headRes.status;
-    out.finalUrl = headRes.url;
-    out.contentType = headRes.headers.get("content-type");
     if (headRes.ok) {
       out.ok = true;
       return out;
     }
-    out.hint = `HEAD returned ${headRes.status}.`;
+    out.hint = `HEAD returned ${headRes.status}`;
   } catch (e: any) {
-    out.hint = `HEAD failed (${e?.message ?? "unknown"}).`;
+    out.hint = `HEAD failed: ${e?.message ?? "unknown"}`;
   }
 
   try {
@@ -102,32 +98,35 @@ async function preflightImageUrl(url: string) {
       headers: { Range: "bytes=0-1023" },
     });
     out.status = getRes.status;
-    out.finalUrl = getRes.url;
-    out.contentType = getRes.headers.get("content-type");
     if (getRes.ok || getRes.status === 206) {
       out.ok = true;
       return out;
     }
-    out.hint = `GET returned ${getRes.status}.`;
+    out.hint = `GET returned ${getRes.status}`;
     return out;
   } catch (e: any) {
-    out.hint = `GET failed (${e?.message ?? "unknown"}).`;
+    out.hint = `GET failed: ${e?.message ?? "unknown"}`;
     return out;
   }
 }
 
 export async function POST(req: Request) {
+  const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
   let quoteLogId: string | null = null;
+
+  console.log("QUOTE_SUBMIT_START", { debugId });
 
   try {
     const raw = await req.json().catch(() => null);
 
     const parsed = Req.safeParse(raw);
     if (!parsed.success) {
+      console.warn("QUOTE_SUBMIT_BAD_REQUEST", { debugId, issues: parsed.error.issues });
       return json(
         { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues, received: raw },
-        400
+        400,
+        debugId
       );
     }
 
@@ -135,21 +134,28 @@ export async function POST(req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
-      return json({ ok: false, error: "TENANT_NOT_FOUND", message: `No tenant found: ${tenantSlug}` }, 404);
+      console.warn("QUOTE_SUBMIT_TENANT_NOT_FOUND", { debugId, tenantSlug });
+      return json(
+        { ok: false, error: "TENANT_NOT_FOUND", message: `No tenant found: ${tenantSlug}` },
+        404,
+        debugId
+      );
     }
 
-    const settingsRows = await db
+    // optional
+    await db
       .select()
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, (tenant as any).id))
       .limit(1);
-    const settings = settingsRows[0] ?? null;
 
     const openAiKey = await getOpenAiKeyForTenant((tenant as any).id);
     if (!openAiKey) {
+      console.error("QUOTE_SUBMIT_OPENAI_KEY_MISSING", { debugId, tenantId: (tenant as any).id });
       return json(
-        { ok: false, error: "OPENAI_KEY_MISSING", message: "Tenant OpenAI key missing (and no env fallback)." },
-        500
+        { ok: false, error: "OPENAI_KEY_MISSING", message: "Missing OpenAI key." },
+        500,
+        debugId
       );
     }
 
@@ -162,18 +168,14 @@ export async function POST(req: Request) {
       quoteLogId = inserted?.[0]?.id ?? null;
     } catch {}
 
-    // image preflight
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
     if (bad.length) {
+      console.warn("QUOTE_SUBMIT_IMAGE_PREFLIGHT_FAIL", { debugId, bad });
       return json(
-        {
-          ok: false,
-          error: "IMAGE_URL_NOT_FETCHABLE",
-          message: "One or more image URLs cannot be fetched publicly from the server.",
-          bad,
-        },
-        400
+        { ok: false, error: "IMAGE_URL_NOT_FETCHABLE", bad },
+        400,
+        debugId
       );
     }
 
@@ -201,8 +203,7 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey: openAiKey });
 
-    // --- Attempt #1: image_url as STRING (your current typings want this) ---
-    const contentA = [
+    const content = [
       { type: "input_text" as const, text: promptLines.join("\n") },
       ...images.map((img) => ({
         type: "input_image" as const,
@@ -211,77 +212,48 @@ export async function POST(req: Request) {
       })),
     ];
 
-    // --- Attempt #2 (auto fallback): image_url as OBJECT ---
-    // Some environments/models/tooling expect { url }.
-    const contentB = [
-      { type: "input_text" as const, text: promptLines.join("\n") },
-      ...images.map((img) => ({
-        type: "input_image" as const,
-        image_url: { url: img.url } as any,
-        detail: "auto" as const,
-      })),
-    ];
+    const r = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [{ role: "user", content }],
+      text: { format: { type: "json_object" } },
+    });
 
-    let responseText = "";
-    let usedFormat: "A_string" | "B_object" = "A_string";
-
-    try {
-      const r1 = await openai.responses.create({
-        model: "gpt-4.1-mini",
-        input: [{ role: "user", content: contentA }],
-        text: { format: { type: "json_object" } },
-      });
-      responseText = r1.output_text?.trim() || "";
-    } catch (e1: any) {
-      const n1 = normalizeErr(e1);
-
-      // Retry only for invalid request style failures
-      if ((n1.status && n1.status >= 400 && n1.status < 500) || String(n1.type).includes("invalid")) {
-        usedFormat = "B_object";
-        const r2 = await openai.responses.create({
-          model: "gpt-4.1-mini",
-          input: [{ role: "user", content: contentB as any }],
-          text: { format: { type: "json_object" } },
-        });
-        responseText = r2.output_text?.trim() || "";
-      } else {
-        throw e1;
-      }
-    }
-
-    // Parse output
+    const rawText = r.output_text?.trim() || "";
     let structured: z.infer<typeof QuoteOutputSchema> | null = null;
+
     try {
-      const obj = JSON.parse(responseText);
+      const obj = JSON.parse(rawText);
       const validated = QuoteOutputSchema.safeParse(obj);
       structured = validated.success ? validated.data : null;
     } catch {}
 
-    // log completion (best effort)
     try {
       if (quoteLogId) {
         await db
           .update(quoteLogs)
           .set({
             status: "completed",
-            responseJson: structured ?? { rawText: responseText },
+            responseJson: structured ?? { rawText },
             durationMs: Date.now() - startedAt,
           } as any)
           .where(eq((quoteLogs as any).id, quoteLogId));
       }
     } catch {}
 
-    return json({
-      ok: true,
-      quoteLogId,
-      tenantId: (tenant as any).id,
-      settingsFound: !!settings,
-      imagePreflight: checks,
-      openaiPayloadFormatUsed: usedFormat,
-      assessment: structured ?? { rawText: responseText, parse_warning: "Model did not return valid JSON per schema." },
-    });
+    console.log("QUOTE_SUBMIT_OK", { debugId, ms: Date.now() - startedAt });
+
+    return json(
+      {
+        ok: true,
+        quoteLogId,
+        assessment: structured ?? { rawText, parse_warning: "Invalid JSON returned by model." },
+      },
+      200,
+      debugId
+    );
   } catch (err: any) {
     const e = normalizeErr(err);
+    console.error("QUOTE_SUBMIT_ERROR", { debugId, e });
 
     try {
       if (quoteLogId) {
@@ -292,7 +264,6 @@ export async function POST(req: Request) {
       }
     } catch {}
 
-    const status = e.status ?? 500;
-    return json({ ok: false, error: "REQUEST_FAILED", ...e }, status);
+    return json({ ok: false, error: "REQUEST_FAILED", ...e }, e.status ?? 500, debugId);
   }
 }
