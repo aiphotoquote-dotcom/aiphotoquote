@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSettings, quoteLogs } from "@/lib/db/schema";
+import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 
@@ -58,6 +59,26 @@ function normalizeErr(err: any) {
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
+}
+
+/**
+ * IMPORTANT: Use raw SQL so we match your real DB schema:
+ * tenant_secrets(tenant_id PK, openai_key_enc, openai_key_last4, updated_at)
+ */
+async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
+  const r = await db.execute(
+    sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
+  );
+
+  // Drizzle returns different shapes depending on driver; handle both.
+  const row: any =
+    (r as any)?.rows?.[0] ??
+    (Array.isArray(r) ? (r as any)[0] : null);
+
+  const enc = row?.openai_key_enc ?? null;
+  if (!enc) return null;
+
+  return decryptSecret(enc);
 }
 
 async function preflightImageUrl(url: string) {
@@ -122,7 +143,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Optional settings fetch (keep but don't fail)
+    // Optional settings fetch (best effort)
     try {
       await db
         .select()
@@ -131,11 +152,16 @@ export async function POST(req: Request) {
         .limit(1);
     } catch {}
 
-    // IMPORTANT: bypass tenant_secrets until schema is consistent
-    const openAiKey = process.env.OPENAI_API_KEY;
+    // ✅ Tenant-based key (no global OPENAI_API_KEY)
+    const openAiKey = await getTenantOpenAiKey((tenant as any).id);
     if (!openAiKey) {
       return json(
-        { ok: false, error: "OPENAI_KEY_MISSING", message: "OPENAI_API_KEY env var is not set." },
+        {
+          ok: false,
+          error: "OPENAI_KEY_MISSING",
+          message:
+            "Tenant OpenAI key not configured. Set tenant_secrets.openai_key_enc for this tenant_id.",
+        },
         500,
         debugId
       );
@@ -234,7 +260,8 @@ export async function POST(req: Request) {
         quoteLogId,
         tenantId: (tenant as any).id,
         imagePreflight: checks,
-        assessment: structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." },
+        assessment:
+          structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." },
       },
       200,
       debugId
