@@ -41,14 +41,16 @@ function normalizeDbErr(err: any) {
   return {
     name: err?.name,
     message: err?.message ?? String(err),
-    code: err?.code, // SQLSTATE
+    code: err?.code,
     detail: err?.detail,
     hint: err?.hint,
     constraint: err?.constraint,
     table: err?.table,
     column: err?.column,
-    schema: err?.schema,
     where: err?.where,
+    causeMessage: err?.cause?.message,
+    causeCode: err?.cause?.code,
+    causeDetail: err?.cause?.detail,
   };
 }
 
@@ -124,9 +126,11 @@ async function preflightImageUrl(url: string) {
 
 /**
  * Raw SQL insert into quote_logs with explicit values.
- * IMPORTANT: include created_at to satisfy NOT NULL (common cause of your failure).
+ * KEY CHANGE: we provide id ourselves to avoid broken DB uuid default.
  */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
+  const quoteLogId = crypto.randomUUID();
+
   // Safe initial values; adjust later when pricing is implemented
   const confidence = "low";
   const inspectionRequired = true;
@@ -136,11 +140,12 @@ async function insertQuoteLog(tenantId: string, inputJson: any) {
   const inputStr = JSON.stringify(inputJson ?? {});
   const outputStr = JSON.stringify({ status: "started" });
 
-  const r = await db.execute(sql`
+  await db.execute(sql`
     insert into quote_logs
-      (tenant_id, input, output, confidence, estimate_low, estimate_high, inspection_required, created_at)
+      (id, tenant_id, input, output, confidence, estimate_low, estimate_high, inspection_required, created_at)
     values
       (
+        ${quoteLogId}::uuid,
         ${tenantId},
         ${inputStr}::jsonb,
         ${outputStr}::jsonb,
@@ -150,13 +155,9 @@ async function insertQuoteLog(tenantId: string, inputJson: any) {
         ${inspectionRequired},
         now()
       )
-    returning id
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const id = row?.id ?? null;
-  if (!id) throw new Error("quote_logs insert returned no id");
-  return id as string;
+  return quoteLogId;
 }
 
 async function updateQuoteLogCompleted(
@@ -172,7 +173,7 @@ async function updateQuoteLogCompleted(
       output = ${outputStr}::jsonb,
       confidence = ${confidence},
       inspection_required = ${inspectionRequired}
-    where id = ${quoteLogId}
+    where id = ${quoteLogId}::uuid
   `);
 }
 
@@ -242,7 +243,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Insert quote log (fail loudly with real DB detail)
+    // Insert quote log
     try {
       quoteLogId = await insertQuoteLog((tenant as any).id, raw);
     } catch (e: any) {
@@ -309,7 +310,7 @@ export async function POST(req: Request) {
     try {
       const conf = structured?.confidence ?? "low";
       const insp = structured?.inspection_required ?? true;
-      await updateQuoteLogCompleted(quoteLogId, finalAssessment, conf, insp);
+      await updateQuoteLogCompleted(quoteLogId!, finalAssessment, conf, insp);
     } catch (e: any) {
       return json(
         {
@@ -348,7 +349,7 @@ export async function POST(req: Request) {
         await db.execute(sql`
           update quote_logs
           set output = ${out}::jsonb
-          where id = ${quoteLogId}
+          where id = ${quoteLogId}::uuid
         `);
       }
     } catch {}
