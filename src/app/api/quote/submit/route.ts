@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { Resend } from "resend";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSettings } from "@/lib/db/schema";
+import { tenants } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
@@ -19,7 +19,6 @@ const Req = z.object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
       category: z.string().optional(),
-      // optional but nice if you add later:
       name: z.string().optional(),
       email: z.string().optional(),
       phone: z.string().optional(),
@@ -83,8 +82,7 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
-// tenant_secrets schema you confirmed:
-// tenant_id (pk), openai_key_enc text, openai_key_last4 text, updated_at timestamptz
+// tenant_secrets: tenant_id (pk), openai_key_enc text, ...
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
@@ -93,6 +91,23 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const enc = row?.openai_key_enc ?? null;
   if (!enc) return null;
   return decryptSecret(enc);
+}
+
+// tenant_settings: business_name, lead_to_email, resend_from_email
+async function getTenantEmailSettings(tenantId: string) {
+  const r = await db.execute(sql`
+    select business_name, lead_to_email, resend_from_email
+    from tenant_settings
+    where tenant_id = ${tenantId}
+    limit 1
+  `);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+  return {
+    businessName: row?.business_name ?? null,
+    leadToEmail: row?.lead_to_email ?? null,
+    resendFromEmail: row?.resend_from_email ?? null,
+  };
 }
 
 async function preflightImageUrl(url: string) {
@@ -130,8 +145,7 @@ async function preflightImageUrl(url: string) {
 }
 
 /**
- * quote_logs columns we are using:
- * id, tenant_id, input, output, created_at
+ * quote_logs columns: id, tenant_id, input, output, created_at
  */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
   const quoteLogId = crypto.randomUUID();
@@ -232,7 +246,7 @@ function renderCustomerEmailHTML(args: {
       (u) =>
         `<div style="margin:10px 0;"><img src="${esc(
           u
-        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
+        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb;border-radius:10px"/></div>`
     )
     .join("");
 
@@ -277,20 +291,22 @@ async function sendEmailsIfConfigured(args: {
   images: string[];
   assessment: any;
   customer: { name?: string; email?: string; phone?: string };
+  tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
 }) {
   const resendKey = process.env.RESEND_API_KEY || "";
-  const fromEmail = process.env.RESEND_FROM_EMAIL || ""; // e.g. "Maggio Upholstery <quotes@maggioupholstery.com>"
-  const leadToEmail = process.env.LEAD_TO_EMAIL || ""; // your shop inbox
-  const businessName = process.env.BUSINESS_NAME || "Maggio Upholstery";
+  const { businessName, leadToEmail, resendFromEmail } = args.tenantEmailSettings;
 
   const result = {
-    configured: Boolean(resendKey && fromEmail && leadToEmail),
+    configured: Boolean(resendKey && businessName && leadToEmail && resendFromEmail),
     lead: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
     customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    missing: {
+    missingEnv: {
       RESEND_API_KEY: !resendKey,
-      RESEND_FROM_EMAIL: !fromEmail,
-      LEAD_TO_EMAIL: !leadToEmail,
+    },
+    missingTenant: {
+      business_name: !businessName,
+      lead_to_email: !leadToEmail,
+      resend_from_email: !resendFromEmail,
     },
   };
 
@@ -312,13 +328,12 @@ async function sendEmailsIfConfigured(args: {
     });
 
     const leadRes = await resend.emails.send({
-      from: fromEmail,
-      to: [leadToEmail],
+      from: resendFromEmail!,
+      to: [leadToEmail!],
       subject: `New Photo Quote (${args.category || "request"}) — ${args.quoteLogId}`,
       html: leadHtml,
     });
 
-    // leadRes has { data, error } shape
     const leadId = (leadRes as any)?.data?.id ?? null;
     if ((leadRes as any)?.error) throw new Error((leadRes as any).error?.message ?? "Resend error");
     result.lead.sent = true;
@@ -333,7 +348,7 @@ async function sendEmailsIfConfigured(args: {
       result.customer.attempted = true;
 
       const custHtml = renderCustomerEmailHTML({
-        businessName,
+        businessName: businessName!,
         quoteLogId: args.quoteLogId,
         notes: args.notes,
         images: args.images,
@@ -341,7 +356,7 @@ async function sendEmailsIfConfigured(args: {
       });
 
       const custRes = await resend.emails.send({
-        from: fromEmail,
+        from: resendFromEmail!,
         to: [args.customer.email],
         subject: `We received your request — Quote ${args.quoteLogId}`,
         html: custHtml,
@@ -389,16 +404,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // optional, best-effort
-    try {
-      await db
-        .select()
-        .from(tenantSettings)
-        .where(eq(tenantSettings.tenantId, (tenant as any).id))
-        .limit(1);
-    } catch {}
+    const tenantId = (tenant as any).id as string;
 
-    const openAiKey = await getTenantOpenAiKey((tenant as any).id);
+    const openAiKey = await getTenantOpenAiKey(tenantId);
     if (!openAiKey) {
       return json(
         {
@@ -410,6 +418,9 @@ export async function POST(req: Request) {
         debugId
       );
     }
+
+    // Pull tenant email identity + routing
+    const tenantEmailSettings = await getTenantEmailSettings(tenantId);
 
     // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
@@ -429,7 +440,7 @@ export async function POST(req: Request) {
 
     // Insert quote log
     try {
-      quoteLogId = await insertQuoteLog((tenant as any).id, raw);
+      quoteLogId = await insertQuoteLog(tenantId, raw);
     } catch (e: any) {
       const dbErr = normalizeDbErr(e);
       return json(
@@ -496,7 +507,7 @@ export async function POST(req: Request) {
       phone: customer_context?.phone,
     };
 
-    // Try sending emails (NON-BLOCKING)
+    // Send emails using tenant settings (non-blocking)
     const emailResult = await sendEmailsIfConfigured({
       tenantSlug,
       quoteLogId,
@@ -505,9 +516,10 @@ export async function POST(req: Request) {
       images: images.map((i) => i.url),
       assessment: finalAssessment,
       customer,
+      tenantEmailSettings,
     });
 
-    // Update quote log output (best effort)
+    // Persist output
     try {
       await updateQuoteLogOutput(quoteLogId, {
         status: "completed",
@@ -521,12 +533,11 @@ export async function POST(req: Request) {
         },
       });
     } catch (e: any) {
-      // Still return success; include warning
       return json(
         {
           ok: true,
           quoteLogId,
-          tenantId: (tenant as any).id,
+          tenantId,
           imagePreflight: checks,
           assessment: finalAssessment,
           email: emailResult,
@@ -542,7 +553,7 @@ export async function POST(req: Request) {
       {
         ok: true,
         quoteLogId,
-        tenantId: (tenant as any).id,
+        tenantId,
         imagePreflight: checks,
         assessment: finalAssessment,
         email: emailResult,
@@ -554,7 +565,6 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const e = normalizeErr(err);
 
-    // If we already have a quoteLogId, try to store the error (best effort)
     try {
       if (quoteLogId) {
         await updateQuoteLogOutput(quoteLogId, { status: "error", error: e });
