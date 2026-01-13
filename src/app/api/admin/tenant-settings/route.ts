@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
 import crypto from "crypto";
+import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
@@ -14,20 +15,27 @@ function json(data: any, status = 200) {
 }
 
 const PostBody = z.object({
-  tenantSlug: z.string().min(3),
   business_name: z.string().trim().min(1).max(120),
   lead_to_email: z.string().trim().email().max(200),
-  resend_from_email: z.string().trim().min(5).max(200), // expects "Name <email@domain>"
+  resend_from_email: z.string().trim().min(5).max(200), // "Name <email@domain>"
 });
 
-async function getTenantIdFromSlug(tenantSlug: string) {
-  const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
-  const t: any = rows[0] ?? null;
-  return t?.id ?? null;
+async function getTenantForCurrentUser() {
+  const { userId } = await auth();
+  if (!userId) return null;
+
+  // assumes tenants.owner_clerk_user_id exists
+  const rows = await db
+    .select()
+    .from(tenants)
+    // @ts-expect-error: schema typing depends on your drizzle model fields
+    .where(eq((tenants as any).ownerClerkUserId, userId))
+    .limit(1);
+
+  return (rows as any)?.[0] ?? null;
 }
 
 async function getTenantSettingsRow(tenantId: string) {
-  // Use raw SQL so we don't depend on Drizzle column names beyond tenants table
   const r = await db.execute(sql`
     select tenant_id, business_name, lead_to_email, resend_from_email
     from tenant_settings
@@ -39,7 +47,6 @@ async function getTenantSettingsRow(tenantId: string) {
 }
 
 async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof PostBody>) {
-  // 1) try update existing
   const upd = await db.execute(sql`
     update tenant_settings
     set
@@ -53,16 +60,10 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
   const updatedRow: any =
     (upd as any)?.rows?.[0] ?? (Array.isArray(upd) ? (upd as any)[0] : null);
 
-  if (updatedRow?.tenant_id) {
-    return await getTenantSettingsRow(tenantId);
-  }
+  if (updatedRow?.tenant_id) return await getTenantSettingsRow(tenantId);
 
-  // 2) no row existed -> insert.
-  // NOTE: tenant_settings may have additional NOT NULL fields in your schema.
-  // We set industry_key to 'auto' as a safe default if it exists & is NOT NULL.
-  // If your schema differs, the returned error will tell us exactly what column is missing.
+  // Insert if missing
   const newId = crypto.randomUUID();
-
   await db.execute(sql`
     insert into tenant_settings
       (id, tenant_id, industry_key, business_name, lead_to_email, resend_from_email, created_at)
@@ -73,25 +74,16 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
   return await getTenantSettingsRow(tenantId);
 }
 
-export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const tenantSlug = (url.searchParams.get("tenantSlug") ?? "").trim();
+export async function GET() {
+  const tenant = await getTenantForCurrentUser();
+  if (!tenant) return json({ ok: false, error: "UNAUTHORIZED_OR_NO_TENANT" }, 401);
 
-  if (!tenantSlug) {
-    return json({ ok: false, error: "MISSING_TENANT_SLUG" }, 400);
-  }
-
-  const tenantId = await getTenantIdFromSlug(tenantSlug);
-  if (!tenantId) {
-    return json({ ok: false, error: "TENANT_NOT_FOUND", tenantSlug }, 404);
-  }
-
+  const tenantId = (tenant as any).id as string;
   const settings = await getTenantSettingsRow(tenantId);
 
   return json({
     ok: true,
-    tenantSlug,
-    tenantId,
+    tenant: { id: tenantId, slug: (tenant as any).slug },
     settings: {
       business_name: settings?.business_name ?? "",
       lead_to_email: settings?.lead_to_email ?? "",
@@ -101,24 +93,22 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const tenant = await getTenantForCurrentUser();
+  if (!tenant) return json({ ok: false, error: "UNAUTHORIZED_OR_NO_TENANT" }, 401);
+
   const body = await req.json().catch(() => null);
   const parsed = PostBody.safeParse(body);
-
   if (!parsed.success) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  const tenantId = await getTenantIdFromSlug(parsed.data.tenantSlug);
-  if (!tenantId) {
-    return json({ ok: false, error: "TENANT_NOT_FOUND", tenantSlug: parsed.data.tenantSlug }, 404);
-  }
+  const tenantId = (tenant as any).id as string;
 
   try {
     const saved = await upsertTenantEmailSettings(tenantId, parsed.data);
     return json({
       ok: true,
-      tenantSlug: parsed.data.tenantSlug,
-      tenantId,
+      tenant: { id: tenantId, slug: (tenant as any).slug },
       settings: {
         business_name: saved?.business_name ?? "",
         lead_to_email: saved?.lead_to_email ?? "",
@@ -126,7 +116,6 @@ export async function POST(req: Request) {
       },
     });
   } catch (e: any) {
-    // bubble up real DB error so we can adjust insert fields if your tenant_settings schema differs
     return json(
       {
         ok: false,
