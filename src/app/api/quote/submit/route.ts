@@ -125,54 +125,34 @@ async function preflightImageUrl(url: string) {
 }
 
 /**
- * Raw SQL insert into quote_logs with explicit values.
- * KEY CHANGE: we provide id ourselves to avoid broken DB uuid default.
+ * quote_logs columns that we KNOW exist from your error output:
+ * id, tenant_id, input, output, created_at
+ *
+ * We store everything else (confidence, inspection_required, pricing later) inside output JSON.
  */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
   const quoteLogId = crypto.randomUUID();
-
-  // Safe initial values; adjust later when pricing is implemented
-  const confidence = "low";
-  const inspectionRequired = true;
-  const estimateLow = 0;
-  const estimateHigh = 0;
 
   const inputStr = JSON.stringify(inputJson ?? {});
   const outputStr = JSON.stringify({ status: "started" });
 
   await db.execute(sql`
-    insert into quote_logs
-      (id, tenant_id, input, output, confidence, estimate_low, estimate_high, inspection_required, created_at)
-    values
-      (
-        ${quoteLogId}::uuid,
-        ${tenantId},
-        ${inputStr}::jsonb,
-        ${outputStr}::jsonb,
-        ${confidence},
-        ${estimateLow}::numeric,
-        ${estimateHigh}::numeric,
-        ${inspectionRequired},
-        now()
-      )
+    insert into quote_logs (id, tenant_id, input, output, created_at)
+    values (${quoteLogId}::uuid, ${tenantId}, ${inputStr}::jsonb, ${outputStr}::jsonb, now())
   `);
 
   return quoteLogId;
 }
 
-async function updateQuoteLogCompleted(
-  quoteLogId: string,
-  assessment: any,
-  confidence: string,
-  inspectionRequired: boolean
-) {
-  const outputStr = JSON.stringify(assessment ?? {});
+async function updateQuoteLogCompleted(quoteLogId: string, assessment: any) {
+  const outputStr = JSON.stringify({
+    status: "completed",
+    assessment,
+  });
+
   await db.execute(sql`
     update quote_logs
-    set
-      output = ${outputStr}::jsonb,
-      confidence = ${confidence},
-      inspection_required = ${inspectionRequired}
+    set output = ${outputStr}::jsonb
     where id = ${quoteLogId}::uuid
   `);
 }
@@ -308,9 +288,7 @@ export async function POST(req: Request) {
 
     // Update quote log with completed output (best effort)
     try {
-      const conf = structured?.confidence ?? "low";
-      const insp = structured?.inspection_required ?? true;
-      await updateQuoteLogCompleted(quoteLogId!, finalAssessment, conf, insp);
+      await updateQuoteLogCompleted(quoteLogId!, finalAssessment);
     } catch (e: any) {
       return json(
         {
@@ -345,7 +323,7 @@ export async function POST(req: Request) {
     // If we already have a quoteLogId, try to store the error (best effort)
     try {
       if (quoteLogId) {
-        const out = JSON.stringify({ error: e });
+        const out = JSON.stringify({ status: "error", error: e });
         await db.execute(sql`
           update quote_logs
           set output = ${out}::jsonb
