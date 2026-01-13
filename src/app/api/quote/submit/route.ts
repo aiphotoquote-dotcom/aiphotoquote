@@ -5,7 +5,7 @@ import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSettings, quoteLogs } from "@/lib/db/schema";
+import { tenants, tenantSettings } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
@@ -61,7 +61,8 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
-// Uses your real DB schema:
+// tenant_secrets schema you confirmed:
+// tenant_id (pk), openai_key_enc text, openai_key_last4 text, updated_at timestamptz
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
@@ -106,9 +107,52 @@ async function preflightImageUrl(url: string) {
   }
 }
 
+// Raw SQL insert into quote_logs with explicit values (no DEFAULT reliance)
+async function insertQuoteLog(tenantId: string, inputJson: any) {
+  // Safe initial values; adjust later when you add pricing
+  const confidence = "low";
+  const inspectionRequired = true;
+  const estimateLow = 0;
+  const estimateHigh = 0;
+
+  const inputStr = JSON.stringify(inputJson ?? {});
+  const outputStr = JSON.stringify({ status: "started" });
+
+  const r = await db.execute(sql`
+    insert into quote_logs
+      (tenant_id, input, output, confidence, estimate_low, estimate_high, inspection_required)
+    values
+      (${tenantId}, ${inputStr}::jsonb, ${outputStr}::jsonb, ${confidence}, ${estimateLow}, ${estimateHigh}, ${inspectionRequired})
+    returning id
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const id = row?.id ?? null;
+  if (!id) throw new Error("quote_logs insert returned no id");
+  return id as string;
+}
+
+async function updateQuoteLogCompleted(
+  quoteLogId: string,
+  assessment: any,
+  confidence: string,
+  inspectionRequired: boolean
+) {
+  const outputStr = JSON.stringify(assessment ?? {});
+  await db.execute(sql`
+    update quote_logs
+    set
+      output = ${outputStr}::jsonb,
+      confidence = ${confidence},
+      inspection_required = ${inspectionRequired}
+    where id = ${quoteLogId}
+  `);
+}
+
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
+  let quoteLogId: string | null = null;
 
   try {
     const raw = await req.json().catch(() => null);
@@ -133,7 +177,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Optional settings fetch (best effort)
+    // optional, best-effort
     try {
       await db
         .select()
@@ -142,7 +186,6 @@ export async function POST(req: Request) {
         .limit(1);
     } catch {}
 
-    // Tenant-based OpenAI key
     const openAiKey = await getTenantOpenAiKey((tenant as any).id);
     if (!openAiKey) {
       return json(
@@ -156,7 +199,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Preflight images
+    // Preflight images (catch URL issues before OpenAI)
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
     if (bad.length) {
@@ -172,27 +215,12 @@ export async function POST(req: Request) {
       );
     }
 
-    // Create quote log FIRST (and fail loudly if it doesn't work)
-    let quoteLogId: string;
+    // ✅ Insert quote log with explicit values (no drizzle defaults)
     try {
-      const inserted = await db
-        .insert(quoteLogs)
-        .values({
-          tenantId: (tenant as any).id,
-          requestJson: raw,
-          status: "started",
-        } as any)
-        .returning({ id: (quoteLogs as any).id });
-
-      quoteLogId = inserted?.[0]?.id;
-      if (!quoteLogId) throw new Error("quoteLogs insert returned no id");
+      quoteLogId = await insertQuoteLog((tenant as any).id, raw);
     } catch (e: any) {
       return json(
-        {
-          ok: false,
-          error: "QUOTE_LOG_INSERT_FAILED",
-          message: e?.message ?? String(e),
-        },
+        { ok: false, error: "QUOTE_LOG_INSERT_FAILED", message: e?.message ?? String(e) },
         500,
         debugId
       );
@@ -246,27 +274,24 @@ export async function POST(req: Request) {
       structured = validated.success ? validated.data : null;
     } catch {}
 
-    // Update quote log
+    const finalAssessment =
+      structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
+
+    // Update quote log with completed output (best effort; don’t fail the request if update fails)
     try {
-      await db
-        .update(quoteLogs)
-        .set({
-          status: "completed",
-          responseJson: structured ?? { rawText },
-          durationMs: Date.now() - startedAt,
-        } as any)
-        .where(eq((quoteLogs as any).id, quoteLogId));
+      const conf = structured?.confidence ?? "low";
+      const insp = structured?.inspection_required ?? true;
+      await updateQuoteLogCompleted(quoteLogId, finalAssessment, conf, insp);
     } catch (e: any) {
-      // If update fails, still return success but include a hint
       return json(
         {
           ok: true,
           quoteLogId,
           tenantId: (tenant as any).id,
           imagePreflight: checks,
-          assessment:
-            structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." },
-          warning: `quoteLogs update failed: ${e?.message ?? String(e)}`,
+          assessment: finalAssessment,
+          warning: `quote_logs update failed: ${e?.message ?? String(e)}`,
+          durationMs: Date.now() - startedAt,
         },
         200,
         debugId
@@ -279,14 +304,27 @@ export async function POST(req: Request) {
         quoteLogId,
         tenantId: (tenant as any).id,
         imagePreflight: checks,
-        assessment:
-          structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." },
+        assessment: finalAssessment,
+        durationMs: Date.now() - startedAt,
       },
       200,
       debugId
     );
   } catch (err: any) {
     const e = normalizeErr(err);
+
+    // If we already have a quoteLogId, try to store the error (best effort)
+    try {
+      if (quoteLogId) {
+        const out = JSON.stringify({ error: e });
+        await db.execute(sql`
+          update quote_logs
+          set output = ${out}::jsonb
+          where id = ${quoteLogId}
+        `);
+      }
+    } catch {}
+
     return json({ ok: false, error: "REQUEST_FAILED", ...e }, e.status ?? 500, debugId);
   }
 }
