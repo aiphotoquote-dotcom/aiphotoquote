@@ -35,12 +35,33 @@ function json(data: any, status = 200) {
 }
 
 function normalizeErr(err: any) {
+  // OpenAI SDK errors often carry useful fields here; we surface them all.
+  const status = typeof err?.status === "number" ? err.status : undefined;
+
+  const message =
+    err?.error?.message ??
+    err?.response?.data?.error?.message ??
+    err?.message ??
+    String(err);
+
+  const type =
+    err?.error?.type ??
+    err?.response?.data?.error?.type ??
+    err?.type;
+
+  const code =
+    err?.error?.code ??
+    err?.response?.data?.error?.code ??
+    err?.code;
+
   return {
     name: err?.name,
-    message: err?.message ?? String(err),
-    status: typeof err?.status === "number" ? err.status : undefined,
-    code: err?.code,
-    type: err?.type,
+    status,
+    message,
+    type,
+    code,
+    // keep a tiny bit more context for debugging without dumping massive objects
+    request_id: err?.request_id ?? err?.headers?.["x-request-id"],
   };
 }
 
@@ -53,18 +74,91 @@ async function getTenantBySlug(tenantSlug: string) {
  * Your schema shows tenantSecrets has:
  * - tenantId
  * - openaiKeyEnc
- *
- * So we fetch by tenantId and decrypt openaiKeyEnc.
- * Fallback to process.env.OPENAI_API_KEY if not present.
  */
 async function getOpenAiKeyForTenant(tenantId: string) {
-  const rows = await db.select().from(tenantSecrets).where(eq(tenantSecrets.tenantId, tenantId)).limit(1);
+  const rows = await db
+    .select()
+    .from(tenantSecrets)
+    .where(eq(tenantSecrets.tenantId, tenantId))
+    .limit(1);
+
   const secret = rows[0] ?? null;
 
   const enc = secret ? (secret as any).openaiKeyEnc : null;
   const dec = enc ? decryptSecret(enc) : null;
 
   return dec || process.env.OPENAI_API_KEY || null;
+}
+
+/**
+ * Preflight-check each image URL from the server:
+ * - HEAD (fast) to see status/content-type
+ * - If HEAD blocked, try a tiny GET range
+ * This catches the #1 cause of "Invalid request": URLs not publicly fetchable.
+ */
+async function preflightImageUrl(url: string) {
+  // Some hosts block HEAD. We'll try HEAD then fallback.
+  const out: {
+    ok: boolean;
+    url: string;
+    status?: number;
+    contentType?: string | null;
+    finalUrl?: string;
+    hint?: string;
+  } = { ok: false, url };
+
+  // 1) HEAD
+  try {
+    const headRes = await fetch(url, {
+      method: "HEAD",
+      redirect: "follow",
+      // No credentials; must be publicly accessible
+    });
+
+    out.status = headRes.status;
+    out.finalUrl = headRes.url;
+    out.contentType = headRes.headers.get("content-type");
+
+    if (headRes.ok) {
+      // Content-Type sanity (not required, but helpful)
+      if (out.contentType && !out.contentType.toLowerCase().startsWith("image/")) {
+        out.hint = `HEAD ok but content-type is not image/* (${out.contentType}).`;
+      }
+      out.ok = true;
+      return out;
+    }
+
+    out.hint = `HEAD returned ${headRes.status}. If this is a private/signed URL, OpenAI can't fetch it.`;
+  } catch (e: any) {
+    out.hint = `HEAD failed (${e?.message ?? "unknown"}). Trying GET range...`;
+  }
+
+  // 2) GET range fallback (many CDNs allow this)
+  try {
+    const getRes = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: { Range: "bytes=0-1023" }, // tiny fetch
+    });
+
+    out.status = getRes.status;
+    out.finalUrl = getRes.url;
+    out.contentType = getRes.headers.get("content-type");
+
+    if (getRes.ok || getRes.status === 206) {
+      if (out.contentType && !out.contentType.toLowerCase().startsWith("image/")) {
+        out.hint = `GET ok but content-type is not image/* (${out.contentType}).`;
+      }
+      out.ok = true;
+      return out;
+    }
+
+    out.hint = `GET returned ${getRes.status}. URL is not publicly fetchable.`;
+    return out;
+  } catch (e: any) {
+    out.hint = `GET failed (${e?.message ?? "unknown"}). URL likely not accessible from server/OpenAI.`;
+    return out;
+  }
 }
 
 export async function POST(req: Request) {
@@ -99,7 +193,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 3) Settings fetch (optional, don't fail if missing)
+    // 3) Settings fetch (optional)
     const settingsRows = await db
       .select()
       .from(tenantSettings)
@@ -120,7 +214,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 5) Create quote log (best effort)
+    // 5) Quote log (best effort)
     try {
       const inserted = await db
         .insert(quoteLogs)
@@ -136,7 +230,38 @@ export async function POST(req: Request) {
       // don't block
     }
 
-    // 6) Build OpenAI request (Responses API)
+    // 6) PRE-FLIGHT IMAGE URLs (this is the big win)
+    const checks = await Promise.all(images.map((img) => preflightImageUrl(img.url)));
+    const bad = checks.filter((c) => !c.ok);
+
+    if (bad.length > 0) {
+      // Log error (best effort)
+      try {
+        if (quoteLogId) {
+          await db
+            .update(quoteLogs)
+            .set({
+              status: "error",
+              errorJson: { error: "IMAGE_URL_NOT_FETCHABLE", bad },
+              durationMs: Date.now() - startedAt,
+            } as any)
+            .where(eq((quoteLogs as any).id, quoteLogId));
+        }
+      } catch {}
+
+      return json(
+        {
+          ok: false,
+          error: "IMAGE_URL_NOT_FETCHABLE",
+          message:
+            "At least one image URL is not publicly fetchable from the server. OpenAI will reject these. Fix these URLs first.",
+          bad,
+        },
+        400
+      );
+    }
+
+    // 7) Build OpenAI request (Responses API)
     const openai = new OpenAI({ apiKey: openAiKey });
 
     const notes = customer_context?.notes?.trim();
@@ -145,7 +270,7 @@ export async function POST(req: Request) {
 
     const promptLines = [
       "You are an expert marine + auto upholstery estimator.",
-      "Analyze the photos and return a JSON object with:",
+      "Return ONLY valid JSON with:",
       `confidence: "high"|"medium"|"low"`,
       "inspection_required: boolean",
       "summary: string",
@@ -162,24 +287,24 @@ export async function POST(req: Request) {
     if (serviceType) promptLines.push(`Service type: ${serviceType}`);
     if (notes) promptLines.push(`Customer notes: ${notes}`);
 
-    // IMPORTANT: Your OpenAI SDK types require `detail` on input images.
-    // Also ensure literal types with `as const` to avoid widening to `string`.
+    // NOTE: Docs show input_image with image_url (no detail needed). :contentReference[oaicite:1]{index=1}
+    // Your SDK types required `detail`, but the API doesn't require it, so we omit it to avoid server-side rejects.
     const content = [
       { type: "input_text" as const, text: promptLines.join("\n") },
       ...images.map((img) => ({
         type: "input_image" as const,
         image_url: img.url,
-        detail: "auto" as const, // REQUIRED by your installed SDK typings
       })),
     ];
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [{ role: "user", content }],
+      // JSON mode is valid via text.format. :contentReference[oaicite:2]{index=2}
       text: { format: { type: "json_object" } },
     });
 
-    // 7) Parse + validate output
+    // 8) Parse + validate output
     const rawText = response.output_text?.trim() || "";
     let structured: z.infer<typeof QuoteOutputSchema> | null = null;
 
@@ -191,7 +316,7 @@ export async function POST(req: Request) {
       structured = null;
     }
 
-    // 8) Update quote log (best effort)
+    // 9) Update log (best effort)
     try {
       if (quoteLogId) {
         await db
@@ -203,15 +328,14 @@ export async function POST(req: Request) {
           } as any)
           .where(eq((quoteLogs as any).id, quoteLogId));
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     return json({
       ok: true,
       quoteLogId,
       tenantId: (tenant as any).id,
       settingsFound: !!settings,
+      imagePreflight: checks,
       assessment: structured ?? {
         rawText,
         parse_warning: "Model did not return valid JSON per schema.",
@@ -220,7 +344,7 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const e = normalizeErr(err);
 
-    // Update log row (best effort)
+    // Update log (best effort)
     try {
       if (quoteLogId) {
         await db
@@ -232,9 +356,7 @@ export async function POST(req: Request) {
           } as any)
           .where(eq((quoteLogs as any).id, quoteLogId));
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     const status = e.status ?? 500;
     return json({ ok: false, error: "REQUEST_FAILED", ...e }, status);
