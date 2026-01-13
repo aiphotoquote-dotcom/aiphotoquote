@@ -5,8 +5,7 @@ import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
-import { decryptSecret } from "@/lib/crypto";
+import { tenants, tenantSettings, quoteLogs } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 
@@ -32,10 +31,7 @@ const QuoteOutputSchema = z.object({
 });
 
 function json(data: any, status = 200, debugId?: string) {
-  const res = NextResponse.json(
-    debugId ? { debugId, ...data } : data,
-    { status }
-  );
+  const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
   if (debugId) res.headers.set("x-debug-id", debugId);
   return res;
 }
@@ -47,10 +43,8 @@ function normalizeErr(err: any) {
     err?.response?.data?.error?.message ??
     err?.message ??
     String(err);
-
   const type = err?.error?.type ?? err?.response?.data?.error?.type ?? err?.type;
   const code = err?.error?.code ?? err?.response?.data?.error?.code ?? err?.code;
-
   return {
     name: err?.name,
     status,
@@ -64,16 +58,6 @@ function normalizeErr(err: any) {
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
-}
-
-async function getOpenAiKeyForTenant(tenantId: string) {
-  const rows = await db.select().from(tenantSecrets).where(eq(tenantSecrets.tenantId, tenantId)).limit(1);
-  const secret = rows[0] ?? null;
-
-  const enc = secret ? (secret as any).openaiKeyEnc : null;
-  const dec = enc ? decryptSecret(enc) : null;
-
-  return dec || process.env.OPENAI_API_KEY || null;
 }
 
 async function preflightImageUrl(url: string) {
@@ -115,14 +99,11 @@ export async function POST(req: Request) {
   const startedAt = Date.now();
   let quoteLogId: string | null = null;
 
-  console.log("QUOTE_SUBMIT_START", { debugId });
-
   try {
     const raw = await req.json().catch(() => null);
 
     const parsed = Req.safeParse(raw);
     if (!parsed.success) {
-      console.warn("QUOTE_SUBMIT_BAD_REQUEST", { debugId, issues: parsed.error.issues });
       return json(
         { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues, received: raw },
         400,
@@ -134,7 +115,6 @@ export async function POST(req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
-      console.warn("QUOTE_SUBMIT_TENANT_NOT_FOUND", { debugId, tenantSlug });
       return json(
         { ok: false, error: "TENANT_NOT_FOUND", message: `No tenant found: ${tenantSlug}` },
         404,
@@ -142,24 +122,26 @@ export async function POST(req: Request) {
       );
     }
 
-    // optional
-    await db
-      .select()
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, (tenant as any).id))
-      .limit(1);
+    // Optional settings fetch (keep but don't fail)
+    try {
+      await db
+        .select()
+        .from(tenantSettings)
+        .where(eq(tenantSettings.tenantId, (tenant as any).id))
+        .limit(1);
+    } catch {}
 
-    const openAiKey = await getOpenAiKeyForTenant((tenant as any).id);
+    // IMPORTANT: bypass tenant_secrets until schema is consistent
+    const openAiKey = process.env.OPENAI_API_KEY;
     if (!openAiKey) {
-      console.error("QUOTE_SUBMIT_OPENAI_KEY_MISSING", { debugId, tenantId: (tenant as any).id });
       return json(
-        { ok: false, error: "OPENAI_KEY_MISSING", message: "Missing OpenAI key." },
+        { ok: false, error: "OPENAI_KEY_MISSING", message: "OPENAI_API_KEY env var is not set." },
         500,
         debugId
       );
     }
 
-    // log (best effort)
+    // Log (best effort)
     try {
       const inserted = await db
         .insert(quoteLogs)
@@ -168,12 +150,17 @@ export async function POST(req: Request) {
       quoteLogId = inserted?.[0]?.id ?? null;
     } catch {}
 
+    // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
     if (bad.length) {
-      console.warn("QUOTE_SUBMIT_IMAGE_PREFLIGHT_FAIL", { debugId, bad });
       return json(
-        { ok: false, error: "IMAGE_URL_NOT_FETCHABLE", bad },
+        {
+          ok: false,
+          error: "IMAGE_URL_NOT_FETCHABLE",
+          message: "One or more image URLs cannot be fetched publicly from the server.",
+          bad,
+        },
         400,
         debugId
       );
@@ -219,14 +206,15 @@ export async function POST(req: Request) {
     });
 
     const rawText = r.output_text?.trim() || "";
-    let structured: z.infer<typeof QuoteOutputSchema> | null = null;
 
+    let structured: z.infer<typeof QuoteOutputSchema> | null = null;
     try {
       const obj = JSON.parse(rawText);
       const validated = QuoteOutputSchema.safeParse(obj);
       structured = validated.success ? validated.data : null;
     } catch {}
 
+    // Update log (best effort)
     try {
       if (quoteLogId) {
         await db
@@ -240,21 +228,21 @@ export async function POST(req: Request) {
       }
     } catch {}
 
-    console.log("QUOTE_SUBMIT_OK", { debugId, ms: Date.now() - startedAt });
-
     return json(
       {
         ok: true,
         quoteLogId,
-        assessment: structured ?? { rawText, parse_warning: "Invalid JSON returned by model." },
+        tenantId: (tenant as any).id,
+        imagePreflight: checks,
+        assessment: structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." },
       },
       200,
       debugId
     );
   } catch (err: any) {
     const e = normalizeErr(err);
-    console.error("QUOTE_SUBMIT_ERROR", { debugId, e });
 
+    // Update log (best effort)
     try {
       if (quoteLogId) {
         await db
