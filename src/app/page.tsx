@@ -4,9 +4,6 @@ import React, { useMemo, useState } from "react";
 import { upload } from "@vercel/blob/client";
 import type { PutBlobResult } from "@vercel/blob";
 
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-
 type QuoteCategory = "auto" | "marine" | "motorcycle";
 
 function formatPhone(value: string) {
@@ -17,6 +14,10 @@ function formatPhone(value: string) {
   if (digits.length <= 3) return a;
   if (digits.length <= 6) return `(${a}) ${b}`;
   return `(${a}) ${b}-${c}`;
+}
+
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
 }
 
 export default function QuotePage() {
@@ -31,7 +32,6 @@ export default function QuotePage() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Prefer env, but give a safe default so you don't get "Invalid request" from missing slug.
   const tenantSlug =
     process.env.NEXT_PUBLIC_TENANT_SLUG?.trim() || "maggio-upholstery";
 
@@ -51,24 +51,18 @@ export default function QuotePage() {
     setResult(null);
 
     try {
-      // 1) Upload all selected files to Blob
+      // Upload selected files to Blob
       const uploads: PutBlobResult[] = [];
       for (const f of files) {
-        // NOTE: upload() needs a token endpoint in your app (/api/blob/token).
-        const blob = await upload(
-          `quotes/${Date.now()}-${f.name}`,
-          f,
-          {
-            access: "public",
-            handleUploadUrl: "/api/blob/token",
-          }
-        );
+        const blob = await upload(`quotes/${Date.now()}-${f.name}`, f, {
+          access: "public",
+          handleUploadUrl: "/api/blob/token",
+        });
         uploads.push(blob);
       }
 
       const imageUrls = uploads.map((u) => u.url);
 
-      // 2) Build payload EXACTLY as your Zod schema expects
       const payload = {
         tenantSlug,
         images: imageUrls.map((url) => ({ url })),
@@ -76,19 +70,16 @@ export default function QuotePage() {
           notes: notes.trim() || undefined,
           service_type: "quote",
           category,
-          // (optional) you can also pass name/email/phone here if you want,
-          // but keep it stable with your backend schema for now.
         },
       };
 
-      // 3) Call your quote submit endpoint
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      // 4) ALWAYS read raw text first so we never lose the real error
+      // Read raw response first so we never lose the real error
       const rawText = await res.text();
 
       let data: any;
@@ -139,24 +130,30 @@ export default function QuotePage() {
       <div className="mb-6">
         <h1 className="text-2xl font-semibold">AI Photo Quote</h1>
         <p className="text-sm opacity-80">
-          Upload photos and get an estimate. (Tenant: <span className="font-mono">{tenantSlug}</span>)
+          Upload photos and get an estimate. Tenant:{" "}
+          <span className="font-mono">{tenantSlug}</span>
         </p>
       </div>
 
-      <Card className="mb-6">
-        <CardContent className="p-4 space-y-4">
+      <div className="mb-6 rounded-lg border p-4 shadow-sm">
+        <div className="space-y-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Category</label>
+            <div className="text-sm font-medium">Category</div>
             <div className="flex gap-2">
               {(["auto", "marine", "motorcycle"] as QuoteCategory[]).map((c) => (
-                <Button
+                <button
                   key={c}
                   type="button"
-                  variant={category === c ? "default" : "outline"}
                   onClick={() => setCategory(c)}
+                  className={cx(
+                    "rounded-md border px-3 py-2 text-sm",
+                    category === c
+                      ? "bg-black text-white"
+                      : "bg-white hover:bg-gray-50"
+                  )}
                 >
                   {c}
-                </Button>
+                </button>
               ))}
             </div>
           </div>
@@ -207,9 +204,7 @@ export default function QuotePage() {
                   setFiles(list.slice(0, 12));
                 }}
               />
-              <div className="text-xs opacity-70">
-                Selected: {files.length}
-              </div>
+              <div className="text-xs opacity-70">Selected: {files.length}</div>
             </div>
           </div>
 
@@ -224,9 +219,19 @@ export default function QuotePage() {
             />
           </div>
 
-          <Button type="button" disabled={!canSubmit} onClick={handleSubmit}>
+          <button
+            type="button"
+            disabled={!canSubmit}
+            onClick={handleSubmit}
+            className={cx(
+              "w-full rounded-md px-4 py-2 text-sm font-medium",
+              canSubmit
+                ? "bg-black text-white hover:opacity-90"
+                : "cursor-not-allowed bg-gray-200 text-gray-500"
+            )}
+          >
             {loading ? "Working..." : "Get AI Estimate"}
-          </Button>
+          </button>
 
           {error ? (
             <pre className="whitespace-pre-wrap rounded-md border p-3 text-xs">
@@ -239,8 +244,8 @@ export default function QuotePage() {
               {JSON.stringify(result, null, 2)}
             </pre>
           ) : null}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </main>
   );
 }
