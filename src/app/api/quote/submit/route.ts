@@ -61,7 +61,6 @@ async function getOpenAiKeyForTenant(tenantId: string) {
   const rows = await db.select().from(tenantSecrets).where(eq(tenantSecrets.tenantId, tenantId)).limit(1);
   const secret = rows[0] ?? null;
 
-  // openaiKeyEnc is the column in YOUR schema (per TS error).
   const enc = secret ? (secret as any).openaiKeyEnc : null;
   const dec = enc ? decryptSecret(enc) : null;
 
@@ -163,20 +162,20 @@ export async function POST(req: Request) {
     if (serviceType) promptLines.push(`Service type: ${serviceType}`);
     if (notes) promptLines.push(`Customer notes: ${notes}`);
 
+    // IMPORTANT: Your OpenAI SDK types require `detail` on input images.
+    // Also ensure literal types with `as const` to avoid widening to `string`.
+    const content = [
+      { type: "input_text" as const, text: promptLines.join("\n") },
+      ...images.map((img) => ({
+        type: "input_image" as const,
+        image_url: img.url,
+        detail: "auto" as const, // REQUIRED by your installed SDK typings
+      })),
+    ];
+
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: promptLines.join("\n") },
-            ...images.map((img) => ({
-              type: "input_image",
-              image_url: img.url, // MUST be public https URL
-            })),
-          ],
-        },
-      ],
+      input: [{ role: "user", content }],
       text: { format: { type: "json_object" } },
     });
 
