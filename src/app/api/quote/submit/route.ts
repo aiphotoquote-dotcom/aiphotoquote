@@ -37,6 +37,21 @@ function json(data: any, status = 200, debugId?: string) {
   return res;
 }
 
+function normalizeDbErr(err: any) {
+  return {
+    name: err?.name,
+    message: err?.message ?? String(err),
+    code: err?.code, // SQLSTATE
+    detail: err?.detail,
+    hint: err?.hint,
+    constraint: err?.constraint,
+    table: err?.table,
+    column: err?.column,
+    schema: err?.schema,
+    where: err?.where,
+  };
+}
+
 function normalizeErr(err: any) {
   const status = typeof err?.status === "number" ? err.status : undefined;
   const message =
@@ -107,9 +122,12 @@ async function preflightImageUrl(url: string) {
   }
 }
 
-// Raw SQL insert into quote_logs with explicit values (no DEFAULT reliance)
+/**
+ * Raw SQL insert into quote_logs with explicit values.
+ * IMPORTANT: include created_at to satisfy NOT NULL (common cause of your failure).
+ */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
-  // Safe initial values; adjust later when you add pricing
+  // Safe initial values; adjust later when pricing is implemented
   const confidence = "low";
   const inspectionRequired = true;
   const estimateLow = 0;
@@ -120,9 +138,18 @@ async function insertQuoteLog(tenantId: string, inputJson: any) {
 
   const r = await db.execute(sql`
     insert into quote_logs
-      (tenant_id, input, output, confidence, estimate_low, estimate_high, inspection_required)
+      (tenant_id, input, output, confidence, estimate_low, estimate_high, inspection_required, created_at)
     values
-      (${tenantId}, ${inputStr}::jsonb, ${outputStr}::jsonb, ${confidence}, ${estimateLow}, ${estimateHigh}, ${inspectionRequired})
+      (
+        ${tenantId},
+        ${inputStr}::jsonb,
+        ${outputStr}::jsonb,
+        ${confidence},
+        ${estimateLow}::numeric,
+        ${estimateHigh}::numeric,
+        ${inspectionRequired},
+        now()
+      )
     returning id
   `);
 
@@ -199,7 +226,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Preflight images (catch URL issues before OpenAI)
+    // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
     if (bad.length) {
@@ -215,12 +242,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ Insert quote log with explicit values (no drizzle defaults)
+    // Insert quote log (fail loudly with real DB detail)
     try {
       quoteLogId = await insertQuoteLog((tenant as any).id, raw);
     } catch (e: any) {
+      const dbErr = normalizeDbErr(e);
       return json(
-        { ok: false, error: "QUOTE_LOG_INSERT_FAILED", message: e?.message ?? String(e) },
+        { ok: false, error: "QUOTE_LOG_INSERT_FAILED", message: dbErr.message, dbErr },
         500,
         debugId
       );
@@ -277,7 +305,7 @@ export async function POST(req: Request) {
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
 
-    // Update quote log with completed output (best effort; don’t fail the request if update fails)
+    // Update quote log with completed output (best effort)
     try {
       const conf = structured?.confidence ?? "low";
       const insp = structured?.inspection_required ?? true;
@@ -290,7 +318,7 @@ export async function POST(req: Request) {
           tenantId: (tenant as any).id,
           imagePreflight: checks,
           assessment: finalAssessment,
-          warning: `quote_logs update failed: ${e?.message ?? String(e)}`,
+          warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
           durationMs: Date.now() - startedAt,
         },
         200,
