@@ -1,246 +1,416 @@
-"use client";
+import Link from "next/link";
+import TopNav from "@/components/TopNav";
 
-import React, { useMemo, useState } from "react";
-import { upload } from "@vercel/blob/client";
-import type { PutBlobResult } from "@vercel/blob";
+const TIERS = [
+  {
+    name: "Starter",
+    price: "$29",
+    cadence: "/mo",
+    blurb: "For solo shops testing AI quoting.",
+    highlights: [
+      "AI photo-based estimate",
+      "Customer + admin email notifications",
+      "Redirect/thank-you URLs",
+      "Basic pricing guardrails",
+      "Unlimited quote forms",
+    ],
+    cta: { label: "Get started", href: "/sign-up" },
+  },
+  {
+    name: "Pro",
+    price: "$79",
+    cadence: "/mo",
+    blurb: "For busy shops that want consistency and speed.",
+    highlights: [
+      "Everything in Starter",
+      "Advanced guardrails (min/typical/max)",
+      "Admin workflow for leads",
+      "Higher quality AI analysis",
+      "Priority deliverability tuning",
+    ],
+    cta: { label: "Start Pro", href: "/sign-up" },
+    featured: true,
+  },
+  {
+    name: "Business",
+    price: "Let’s talk",
+    cadence: "",
+    blurb: "For multi-location or high-volume operations.",
+    highlights: [
+      "Everything in Pro",
+      "Custom routing + lead workflows",
+      "Dedicated onboarding + migration",
+      "Custom tuning (where applicable)",
+      "SLA & priority support",
+    ],
+    cta: { label: "Contact sales", href: "/onboarding" },
+  },
+];
 
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+const FAQ = [
+  {
+    q: "Is this an instant quote or an estimate?",
+    a: "It’s an estimate. You control the guardrails so the output stays realistic and protects your margins. For complex jobs, the system can recommend an inspection.",
+  },
+  {
+    q: "What does the customer experience look like?",
+    a: "Customers upload photos and notes, then get a customer-friendly estimate range. You get a clean lead email (with photos) and the record is stored in admin.",
+  },
+  {
+    q: "Can I customize the redirect and thank-you pages?",
+    a: "Yes — set your redirect URL and optional thank-you URL in Settings and route customers wherever you want next.",
+  },
+  {
+    q: "Does it work for automotive and marine upholstery?",
+    a: "Absolutely. Photo-first quoting shines when customers can’t describe the job but can take great pictures.",
+  },
+];
 
-type QuoteCategory = "auto" | "marine" | "motorcycle";
-
-function formatPhone(value: string) {
-  const digits = value.replace(/\D/g, "").slice(0, 10);
-  const a = digits.slice(0, 3);
-  const b = digits.slice(3, 6);
-  const c = digits.slice(6, 10);
-  if (digits.length <= 3) return a;
-  if (digits.length <= 6) return `(${a}) ${b}`;
-  return `(${a}) ${b}-${c}`;
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-export default function QuotePage() {
-  const [category, setCategory] = useState<QuoteCategory>("auto");
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [notes, setNotes] = useState("");
-  const [files, setFiles] = useState<File[]>([]);
-
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Prefer env, but give a safe default so you don't get "Invalid request" from missing slug.
-  const tenantSlug =
-    process.env.NEXT_PUBLIC_TENANT_SLUG?.trim() || "maggio-upholstery";
-
-  const canSubmit = useMemo(() => {
-    return (
-      name.trim().length > 0 &&
-      email.trim().length > 0 &&
-      phone.replace(/\D/g, "").length === 10 &&
-      files.length > 0 &&
-      !loading
-    );
-  }, [name, email, phone, files, loading]);
-
-  async function handleSubmit() {
-    setLoading(true);
-    setError(null);
-    setResult(null);
-
-    try {
-      // 1) Upload all selected files to Blob
-      const uploads: PutBlobResult[] = [];
-      for (const f of files) {
-        // NOTE: upload() needs a token endpoint in your app (/api/blob/token).
-        const blob = await upload(
-          `quotes/${Date.now()}-${f.name}`,
-          f,
-          {
-            access: "public",
-            handleUploadUrl: "/api/blob/token",
-          }
-        );
-        uploads.push(blob);
-      }
-
-      const imageUrls = uploads.map((u) => u.url);
-
-      // 2) Build payload EXACTLY as your Zod schema expects
-      const payload = {
-        tenantSlug,
-        images: imageUrls.map((url) => ({ url })),
-        customer_context: {
-          notes: notes.trim() || undefined,
-          service_type: "quote",
-          category,
-          // (optional) you can also pass name/email/phone here if you want,
-          // but keep it stable with your backend schema for now.
-        },
-      };
-
-      // 3) Call your quote submit endpoint
-      const res = await fetch("/api/quote/submit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      // 4) ALWAYS read raw text first so we never lose the real error
-      const rawText = await res.text();
-
-      let data: any;
-      try {
-        data = JSON.parse(rawText);
-      } catch {
-        data = { ok: false, error: "NON_JSON_RESPONSE", rawText };
-      }
-
-      if (!res.ok || !data?.ok) {
-        console.error("QUOTE_SUBMIT_FAILED", {
-          httpStatus: res.status,
-          data,
-          rawText,
-          payload,
-        });
-
-        const msg = [
-          `HTTP ${res.status}`,
-          data?.debugId ? `debugId: ${data.debugId}` : null,
-          data?.error ? `error: ${data.error}` : null,
-          data?.message ? `message: ${data.message}` : null,
-          data?.type ? `type: ${data.type}` : null,
-          data?.code ? `code: ${data.code}` : null,
-          "",
-          "Raw response:",
-          rawText,
-        ]
-          .filter(Boolean)
-          .join("\n");
-
-        setError(msg);
-        setLoading(false);
-        return;
-      }
-
-      setResult(data);
-      setLoading(false);
-    } catch (e: any) {
-      console.error("QUOTE_CLIENT_EXCEPTION", e);
-      setError(`Client exception: ${e?.message ?? String(e)}`);
-      setLoading(false);
-    }
-  }
-
+function Check() {
   return (
-    <main className="mx-auto max-w-2xl p-6">
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold">AI Photo Quote</h1>
-        <p className="text-sm opacity-80">
-          Upload photos and get an estimate. (Tenant: <span className="font-mono">{tenantSlug}</span>)
-        </p>
-      </div>
+    <span className="mt-1 inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-600/10 text-blue-700">
+      <span className="block h-2 w-2 rounded-full bg-blue-600" />
+    </span>
+  );
+}
 
-      <Card className="mb-6">
-        <CardContent className="p-4 space-y-4">
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Category</label>
-            <div className="flex gap-2">
-              {(["auto", "marine", "motorcycle"] as QuoteCategory[]).map((c) => (
-                <Button
-                  key={c}
-                  type="button"
-                  variant={category === c ? "default" : "outline"}
-                  onClick={() => setCategory(c)}
+export default function HomePage() {
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <TopNav />
+
+      {/* HERO */}
+      <section className="relative overflow-hidden border-b">
+        {/* Accent background */}
+        <div className="absolute inset-0">
+          <div className="absolute -top-48 left-1/2 h-[620px] w-[620px] -translate-x-1/2 rounded-full bg-gradient-to-br from-blue-500/30 via-cyan-400/20 to-white blur-3xl" />
+          <div className="absolute -left-64 top-24 h-[640px] w-[640px] rounded-full bg-gradient-to-br from-indigo-500/20 via-blue-400/20 to-white blur-3xl" />
+          <div className="absolute -right-64 top-40 h-[640px] w-[640px] rounded-full bg-gradient-to-br from-cyan-400/20 via-blue-500/20 to-white blur-3xl" />
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_10%,rgba(37,99,235,0.12),transparent_45%),radial-gradient(circle_at_80%_20%,rgba(34,211,238,0.10),transparent_45%)]" />
+          <div className="absolute inset-0 bg-[linear-gradient(to_bottom,rgba(255,255,255,0.0),rgba(255,255,255,0.92))]" />
+        </div>
+
+        <div className="relative mx-auto max-w-6xl px-6 py-16 sm:py-20">
+          <div className="grid gap-12 lg:grid-cols-2 lg:items-center">
+            {/* Left */}
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-full border bg-white/70 px-3 py-1 text-xs text-gray-700 backdrop-blur">
+                <span className="font-semibold text-blue-700">AIPhotoQuote</span>
+                <span className="text-gray-400">•</span>
+                <span>Photo-based estimates that feel premium</span>
+              </div>
+
+              <h1 className="mt-6 text-4xl font-semibold tracking-tight sm:text-6xl">
+                Turn customer photos into{" "}
+                <span className="relative inline-block">
+                  <span className="absolute inset-x-0 bottom-2 -z-10 h-3 rounded-full bg-blue-200/70" />
+                  consistent estimates
+                </span>{" "}
+                in minutes.
+              </h1>
+
+              <p className="mt-5 text-base leading-7 text-gray-700 sm:text-lg">
+                Stop the back-and-forth. Customers upload photos + notes. You get a clean lead
+                and a realistic estimate range — powered by guardrails you control.
+              </p>
+
+              <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+                <Link
+                  href="/sign-up"
+                  className="inline-flex items-center justify-center rounded-2xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:opacity-95"
                 >
-                  {c}
-                </Button>
-              ))}
-            </div>
-          </div>
+                  Start free setup
+                </Link>
+                <Link
+                  href="/onboarding"
+                  className="inline-flex items-center justify-center rounded-2xl border bg-white/70 px-6 py-3 text-sm font-semibold backdrop-blur hover:bg-white"
+                >
+                  Configure settings
+                </Link>
+              </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Name *</label>
-              <input
-                className="w-full rounded-md border px-3 py-2 text-sm"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                autoComplete="name"
-                placeholder="Your name"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Email *</label>
-              <input
-                className="w-full rounded-md border px-3 py-2 text-sm"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="email"
-                placeholder="you@example.com"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Phone * (required)</label>
-              <input
-                className="w-full rounded-md border px-3 py-2 text-sm"
-                value={phone}
-                onChange={(e) => setPhone(formatPhone(e.target.value))}
-                autoComplete="tel"
-                placeholder="(555) 555-5555"
-              />
+              {/* Trust strip */}
+              <div className="mt-8 grid gap-3 sm:grid-cols-3">
+                {[
+                  { k: "Faster leads", v: "Less email ping-pong" },
+                  { k: "More control", v: "Guardrails protect margins" },
+                  { k: "Premium feel", v: "Modern SaaS experience" },
+                ].map((x) => (
+                  <div
+                    key={x.k}
+                    className="rounded-2xl border bg-white/65 p-4 backdrop-blur"
+                  >
+                    <div className="text-sm font-semibold">{x.k}</div>
+                    <div className="mt-1 text-xs text-gray-600">{x.v}</div>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Photos * (1–12)</label>
-              <input
-                className="w-full text-sm"
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(e) => {
-                  const list = Array.from(e.target.files || []);
-                  setFiles(list.slice(0, 12));
-                }}
-              />
-              <div className="text-xs opacity-70">
-                Selected: {files.length}
+            {/* Right - Hero card */}
+            <div className="relative">
+              <div className="absolute -inset-4 rounded-[32px] bg-gradient-to-br from-blue-500/25 via-cyan-400/15 to-white blur-2xl" />
+              <div className="relative rounded-[28px] border bg-white/80 p-6 shadow-sm backdrop-blur">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-medium text-gray-500">Example output</p>
+                    <h3 className="mt-1 text-lg font-semibold">Photo Estimate Summary</h3>
+                  </div>
+                  <span className="rounded-full border bg-white px-3 py-1 text-xs font-semibold text-blue-700">
+                    Customer-friendly
+                  </span>
+                </div>
+
+                <div className="mt-5 space-y-4">
+                  <div className="rounded-2xl border bg-gradient-to-b from-blue-50 to-white p-5">
+                    <p className="text-sm font-semibold">Estimate range</p>
+                    <p className="mt-1 text-3xl font-semibold tracking-tight">
+                      $650 – $1,250
+                    </p>
+                    <p className="mt-2 text-sm text-gray-600">
+                      Based on visible wear, materials, and stitching complexity. Final quote
+                      after inspection.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border bg-white p-4">
+                      <p className="text-sm font-semibold">Materials</p>
+                      <p className="mt-1 text-sm text-gray-600">
+                        Marine vinyl / UV thread
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border bg-white p-4">
+                      <p className="text-sm font-semibold">Turnaround</p>
+                      <p className="mt-1 text-sm text-gray-600">3–7 business days</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border bg-white p-4">
+                    <p className="text-sm font-semibold">Next steps</p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-600">
+                      <li>Confirm measurements & pattern details</li>
+                      <li>Choose material + color</li>
+                      <li>Schedule drop-off or mobile visit</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex items-center justify-between border-t pt-4 text-xs text-gray-500">
+                  <span>Lead emailed + stored in admin</span>
+                  <span className="text-blue-700">Guardrails applied</span>
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Notes</label>
-            <textarea
-              className="w-full rounded-md border px-3 py-2 text-sm"
-              rows={4}
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Tell us what you want done..."
-            />
+          {/* Under-hero highlight */}
+          <div className="mt-10 rounded-[28px] border bg-white/70 p-6 backdrop-blur">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-sm font-semibold">
+                  Built for upholstery, auto, marine — and any photo-first service business.
+                </div>
+                <div className="mt-1 text-sm text-gray-600">
+                  Your customers don’t know the words. They know how to take pictures.
+                </div>
+              </div>
+              <Link href="/sign-up" className="text-sm font-semibold text-blue-700 underline">
+                Create your tenant →
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* HOW IT WORKS */}
+      <section className="border-b">
+        <div className="mx-auto max-w-6xl px-6 py-16">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-3xl font-semibold tracking-tight">
+                Simple flow. Big upgrade.
+              </h2>
+              <p className="mt-2 text-sm text-gray-600">
+                A quoting experience that feels modern — without losing control.
+              </p>
+            </div>
+            <Link href="/onboarding" className="text-sm font-semibold text-blue-700 underline">
+              Configure →
+            </Link>
           </div>
 
-          <Button type="button" disabled={!canSubmit} onClick={handleSubmit}>
-            {loading ? "Working..." : "Get AI Estimate"}
-          </Button>
+          <div className="mt-10 grid gap-6 lg:grid-cols-3">
+            {[
+              { step: "01", title: "Customer uploads photos", desc: "Category + notes + multiple images from any device." },
+              { step: "02", title: "AI generates estimate range", desc: "Guardrails keep output realistic and margin-safe." },
+              { step: "03", title: "You get a clean lead", desc: "Photos, notes, estimate, and inspection flags in admin + email." },
+            ].map((x) => (
+              <div key={x.step} className="rounded-[28px] border bg-white p-6">
+                <div className="text-xs font-semibold text-blue-700/80">Step {x.step}</div>
+                <div className="mt-2 text-xl font-semibold">{x.title}</div>
+                <div className="mt-2 text-sm text-gray-600">{x.desc}</div>
+              </div>
+            ))}
+          </div>
 
-          {error ? (
-            <pre className="whitespace-pre-wrap rounded-md border p-3 text-xs">
-              {error}
-            </pre>
-          ) : null}
+          <div className="mt-10 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {[
+              { title: "Pricing guardrails", desc: "Minimums and typical ranges keep AI aligned with your shop." },
+              { title: "Redirect + thank-you pages", desc: "Route customers back to your site, scheduler, or confirmation." },
+              { title: "Admin workflow", desc: "Central place to review leads and follow up fast." },
+              { title: "Customer-friendly language", desc: "Estimate wording avoids overpromising and reduces disputes." },
+              { title: "Made for photo-first jobs", desc: "Perfect when customers can’t describe the work reliably." },
+              { title: "Brand-ready experience", desc: "Clean layout, premium feel, and conversion-focused CTAs." },
+            ].map((f) => (
+              <div key={f.title} className="rounded-[28px] border bg-white p-6">
+                <div className="text-lg font-semibold">{f.title}</div>
+                <div className="mt-2 text-sm text-gray-600">{f.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
 
-          {result ? (
-            <pre className="whitespace-pre-wrap rounded-md border p-3 text-xs">
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          ) : null}
-        </CardContent>
-      </Card>
+      {/* PRICING */}
+      <section id="pricing" className="border-b">
+        <div className="mx-auto max-w-6xl px-6 py-16">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-3xl font-semibold tracking-tight">Pricing</h2>
+              <p className="mt-2 text-sm text-gray-600">
+                Simple tiers — built around the quoting workflow.
+              </p>
+            </div>
+            <Link href="/sign-up" className="text-sm font-semibold text-blue-700 underline">
+              Start now →
+            </Link>
+          </div>
+
+          <div className="mt-10 grid gap-6 lg:grid-cols-3">
+            {TIERS.map((t) => (
+              <div
+                key={t.name}
+                className={cn(
+                  "relative rounded-[28px] border bg-white p-6",
+                  t.featured && "border-blue-600 shadow-sm"
+                )}
+              >
+                {t.featured && (
+                  <div className="absolute -top-3 left-6 rounded-full bg-gradient-to-r from-blue-600 to-cyan-500 px-3 py-1 text-xs font-semibold text-white">
+                    Most popular
+                  </div>
+                )}
+
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-lg font-semibold">{t.name}</div>
+                    <div className="mt-1 text-sm text-gray-600">{t.blurb}</div>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex items-end gap-2">
+                  <div className={cn("text-4xl font-semibold tracking-tight", t.featured && "text-blue-700")}>
+                    {t.price}
+                  </div>
+                  <div className="pb-1 text-sm text-gray-600">{t.cadence}</div>
+                </div>
+
+                <ul className="mt-6 space-y-3 text-sm text-gray-700">
+                  {t.highlights.map((h) => (
+                    <li key={h} className="flex gap-3">
+                      <Check />
+                      <span>{h}</span>
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="mt-8">
+                  <Link
+                    href={t.cta.href}
+                    className={cn(
+                      "inline-flex w-full items-center justify-center rounded-2xl px-4 py-3 text-sm font-semibold",
+                      t.featured
+                        ? "bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-sm hover:opacity-95"
+                        : "border bg-white hover:bg-gray-50"
+                    )}
+                  >
+                    {t.cta.label}
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 text-xs text-gray-500">
+            If you want “redirect URL required” to mark onboarding complete, we can enforce that.
+          </div>
+        </div>
+      </section>
+
+      {/* FAQ + CTA */}
+      <section>
+        <div className="mx-auto max-w-6xl px-6 py-16">
+          <h2 className="text-3xl font-semibold tracking-tight">FAQ</h2>
+
+          <div className="mt-10 grid gap-6 lg:grid-cols-2">
+            {FAQ.map((f) => (
+              <div key={f.q} className="rounded-[28px] border bg-white p-6">
+                <div className="text-lg font-semibold">{f.q}</div>
+                <div className="mt-2 text-sm leading-6 text-gray-600">{f.a}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-14 relative overflow-hidden rounded-[28px] border bg-gradient-to-r from-blue-700 to-cyan-600 p-10 text-white">
+            <div className="absolute -left-24 -top-24 h-72 w-72 rounded-full bg-white/15 blur-2xl" />
+            <div className="absolute -right-24 -bottom-24 h-72 w-72 rounded-full bg-white/15 blur-2xl" />
+
+            <div className="relative">
+              <div className="text-2xl font-semibold tracking-tight">
+                Ready to stop the quoting chaos?
+              </div>
+              <div className="mt-2 text-sm text-white/90">
+                Set guardrails once. Let customers do the photo work. You focus on closing jobs.
+              </div>
+
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+                <Link
+                  href="/sign-up"
+                  className="inline-flex items-center justify-center rounded-2xl bg-white px-6 py-3 text-sm font-semibold text-blue-700"
+                >
+                  Start free setup
+                </Link>
+                <Link
+                  href="/onboarding"
+                  className="inline-flex items-center justify-center rounded-2xl border border-white/40 bg-white/10 px-6 py-3 text-sm font-semibold text-white hover:bg-white/15"
+                >
+                  Go to Settings
+                </Link>
+              </div>
+            </div>
+          </div>
+
+          <footer className="mt-12 border-t pt-6 text-sm text-gray-500 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span>© {new Date().getFullYear()} AIPhotoQuote</span>
+            <div className="flex gap-4">
+              <Link href="/dashboard" className="underline">
+                Dashboard
+              </Link>
+              <Link href="/admin" className="underline">
+                Admin
+              </Link>
+              <Link href="/onboarding" className="underline">
+                Settings
+              </Link>
+            </div>
+          </footer>
+        </div>
+      </section>
     </main>
   );
 }
