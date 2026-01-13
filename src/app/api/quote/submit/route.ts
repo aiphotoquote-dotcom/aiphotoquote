@@ -35,7 +35,6 @@ function json(data: any, status = 200) {
 }
 
 function normalizeErr(err: any) {
-  // OpenAI SDK errors often carry useful fields here; we surface them all.
   const status = typeof err?.status === "number" ? err.status : undefined;
 
   const message =
@@ -44,15 +43,8 @@ function normalizeErr(err: any) {
     err?.message ??
     String(err);
 
-  const type =
-    err?.error?.type ??
-    err?.response?.data?.error?.type ??
-    err?.type;
-
-  const code =
-    err?.error?.code ??
-    err?.response?.data?.error?.code ??
-    err?.code;
+  const type = err?.error?.type ?? err?.response?.data?.error?.type ?? err?.type;
+  const code = err?.error?.code ?? err?.response?.data?.error?.code ?? err?.code;
 
   return {
     name: err?.name,
@@ -60,7 +52,6 @@ function normalizeErr(err: any) {
     message,
     type,
     code,
-    // keep a tiny bit more context for debugging without dumping massive objects
     request_id: err?.request_id ?? err?.headers?.["x-request-id"],
   };
 }
@@ -83,7 +74,6 @@ async function getOpenAiKeyForTenant(tenantId: string) {
     .limit(1);
 
   const secret = rows[0] ?? null;
-
   const enc = secret ? (secret as any).openaiKeyEnc : null;
   const dec = enc ? decryptSecret(enc) : null;
 
@@ -91,13 +81,11 @@ async function getOpenAiKeyForTenant(tenantId: string) {
 }
 
 /**
- * Preflight-check each image URL from the server:
- * - HEAD (fast) to see status/content-type
- * - If HEAD blocked, try a tiny GET range
- * This catches the #1 cause of "Invalid request": URLs not publicly fetchable.
+ * Preflight each image URL from the server (catches the #1 cause of "Invalid request"):
+ * - HEAD (fast)
+ * - fallback tiny GET range
  */
 async function preflightImageUrl(url: string) {
-  // Some hosts block HEAD. We'll try HEAD then fallback.
   const out: {
     ok: boolean;
     url: string;
@@ -109,18 +97,13 @@ async function preflightImageUrl(url: string) {
 
   // 1) HEAD
   try {
-    const headRes = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      // No credentials; must be publicly accessible
-    });
+    const headRes = await fetch(url, { method: "HEAD", redirect: "follow" });
 
     out.status = headRes.status;
     out.finalUrl = headRes.url;
     out.contentType = headRes.headers.get("content-type");
 
     if (headRes.ok) {
-      // Content-Type sanity (not required, but helpful)
       if (out.contentType && !out.contentType.toLowerCase().startsWith("image/")) {
         out.hint = `HEAD ok but content-type is not image/* (${out.contentType}).`;
       }
@@ -128,17 +111,17 @@ async function preflightImageUrl(url: string) {
       return out;
     }
 
-    out.hint = `HEAD returned ${headRes.status}. If this is a private/signed URL, OpenAI can't fetch it.`;
+    out.hint = `HEAD returned ${headRes.status}. If this URL is private/signed/expired, OpenAI can't fetch it.`;
   } catch (e: any) {
     out.hint = `HEAD failed (${e?.message ?? "unknown"}). Trying GET range...`;
   }
 
-  // 2) GET range fallback (many CDNs allow this)
+  // 2) GET range fallback
   try {
     const getRes = await fetch(url, {
       method: "GET",
       redirect: "follow",
-      headers: { Range: "bytes=0-1023" }, // tiny fetch
+      headers: { Range: "bytes=0-1023" },
     });
 
     out.status = getRes.status;
@@ -227,15 +210,14 @@ export async function POST(req: Request) {
 
       quoteLogId = inserted?.[0]?.id ?? null;
     } catch {
-      // don't block
+      // ignore
     }
 
-    // 6) PRE-FLIGHT IMAGE URLs (this is the big win)
+    // 6) Preflight images
     const checks = await Promise.all(images.map((img) => preflightImageUrl(img.url)));
     const bad = checks.filter((c) => !c.ok);
 
     if (bad.length > 0) {
-      // Log error (best effort)
       try {
         if (quoteLogId) {
           await db
@@ -261,7 +243,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 7) Build OpenAI request (Responses API)
+    // 7) OpenAI request (Responses API)
     const openai = new OpenAI({ apiKey: openAiKey });
 
     const notes = customer_context?.notes?.trim();
@@ -287,20 +269,20 @@ export async function POST(req: Request) {
     if (serviceType) promptLines.push(`Service type: ${serviceType}`);
     if (notes) promptLines.push(`Customer notes: ${notes}`);
 
-    // NOTE: Docs show input_image with image_url (no detail needed). :contentReference[oaicite:1]{index=1}
-    // Your SDK types required `detail`, but the API doesn't require it, so we omit it to avoid server-side rejects.
+    // IMPORTANT: Your SDK types REQUIRE `detail` on input images.
+    // Also lock literal types with `as const` so TS doesn't widen them.
     const content = [
       { type: "input_text" as const, text: promptLines.join("\n") },
       ...images.map((img) => ({
         type: "input_image" as const,
         image_url: img.url,
+        detail: "auto" as const,
       })),
     ];
 
     const response = await openai.responses.create({
       model: "gpt-4.1-mini",
       input: [{ role: "user", content }],
-      // JSON mode is valid via text.format. :contentReference[oaicite:2]{index=2}
       text: { format: { type: "json_object" } },
     });
 
@@ -344,7 +326,6 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const e = normalizeErr(err);
 
-    // Update log (best effort)
     try {
       if (quoteLogId) {
         await db
