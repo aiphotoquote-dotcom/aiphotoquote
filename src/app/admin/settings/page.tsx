@@ -2,7 +2,12 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 
-type TenantRow = { tenantId: string; slug: string; name: string | null; role: "owner" | "admin" | "member" };
+type TenantRow = {
+  tenantId: string;
+  slug: string;
+  name: string | null;
+  role: "owner" | "admin" | "member";
+};
 
 type ContextResp =
   | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
@@ -16,6 +21,20 @@ type SettingsResp =
       settings: { business_name: string; lead_to_email: string; resend_from_email: string };
     }
   | { ok: false; error: string; message?: string; issues?: any };
+
+async function safeJson<T>(res: Response): Promise<T> {
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) {
+    const text = await res.text().catch(() => "");
+    // Most common causes: 404 HTML page or auth redirect HTML
+    throw new Error(
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ` +
+        `This usually means the route is missing or you were redirected to sign-in.\n` +
+        `First 80 chars: ${text.slice(0, 80)}`
+    );
+  }
+  return (await res.json()) as T;
+}
 
 export default function AdminTenantSettingsPage() {
   const [context, setContext] = useState<{ activeTenantId: string | null; tenants: TenantRow[] }>({
@@ -36,18 +55,23 @@ export default function AdminTenantSettingsPage() {
 
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
+  // IMPORTANT: your build output shows /api/tenant/context exists (NOT /api/admin/tenant/context)
+  const CONTEXT_URL = "/api/tenant/context";
+  const SETTINGS_URL = "/api/admin/tenant-settings";
+
   async function loadContext() {
-    const res = await fetch("/api/admin/tenant/context", { cache: "no-store" });
-    const data: ContextResp = await res.json();
+    const res = await fetch(CONTEXT_URL, { cache: "no-store" });
+    const data = await safeJson<ContextResp>(res);
     if (!data.ok) throw new Error(data.message || data.error || "Failed to load tenant context");
     setContext({ activeTenantId: data.activeTenantId, tenants: data.tenants });
     return data.activeTenantId;
   }
 
   async function loadSettings() {
-    const res = await fetch("/api/admin/tenant-settings", { cache: "no-store" });
-    const data: SettingsResp = await res.json();
+    const res = await fetch(SETTINGS_URL, { cache: "no-store" });
+    const data = await safeJson<SettingsResp>(res);
     if (!data.ok) throw new Error(data.message || data.error || "Failed to load settings");
+
     setRole(data.role);
     setBusinessName(data.settings.business_name || "");
     setLeadToEmail(data.settings.lead_to_email || "");
@@ -80,12 +104,12 @@ export default function AdminTenantSettingsPage() {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/admin/tenant/context", {
+      const res = await fetch(CONTEXT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tenantId }),
       });
-      const data = await res.json();
+      const data = await safeJson<any>(res);
       if (!data?.ok) throw new Error(data?.message || data?.error || "Failed to switch tenant");
 
       await bootstrap();
@@ -102,7 +126,7 @@ export default function AdminTenantSettingsPage() {
     setSaving(true);
 
     try {
-      const res = await fetch("/api/admin/tenant-settings", {
+      const res = await fetch(SETTINGS_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -112,7 +136,7 @@ export default function AdminTenantSettingsPage() {
         }),
       });
 
-      const data: SettingsResp = await res.json();
+      const data = await safeJson<SettingsResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to save settings");
 
       setRole(data.role);
@@ -172,12 +196,9 @@ export default function AdminTenantSettingsPage() {
         </div>
       </div>
 
-      {/* Tenant switcher */}
       <div className="mb-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
         <div className="text-sm font-semibold text-gray-900">Active Tenant</div>
-        <p className="mt-1 text-sm text-gray-600">
-          If you belong to multiple tenants, switch here.
-        </p>
+        <p className="mt-1 text-sm text-gray-600">If you belong to multiple tenants, switch here.</p>
 
         <div className="mt-3 flex flex-col gap-2">
           {context.tenants.length === 0 ? (
@@ -205,7 +226,6 @@ export default function AdminTenantSettingsPage() {
         </div>
       </div>
 
-      {/* Settings card */}
       <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
         {loading ? (
           <div className="text-sm text-gray-700">Loading…</div>
@@ -224,7 +244,7 @@ export default function AdminTenantSettingsPage() {
                 value={businessName}
                 onChange={(e) => setBusinessName(e.target.value)}
                 disabled={!canEdit}
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
               />
             </div>
 
@@ -234,7 +254,7 @@ export default function AdminTenantSettingsPage() {
                 value={leadToEmail}
                 onChange={(e) => setLeadToEmail(e.target.value)}
                 disabled={!canEdit}
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
               />
             </div>
 
@@ -244,10 +264,11 @@ export default function AdminTenantSettingsPage() {
                 value={fromEmail}
                 onChange={(e) => setFromEmail(e.target.value)}
                 disabled={!canEdit}
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
               />
               <p className="mt-1 text-xs text-gray-500">
-                Must be a verified sending domain in Resend. Format: <span className="font-mono">Name &lt;email@domain.com&gt;</span>
+                Must be a verified sending domain in Resend. Format:{" "}
+                <span className="font-mono">Name &lt;email@domain.com&gt;</span>
               </p>
             </div>
 
@@ -261,7 +282,7 @@ export default function AdminTenantSettingsPage() {
               </button>
 
               {msg && <span className="text-sm text-green-700">{msg}</span>}
-              {err && <span className="text-sm text-red-700">{err}</span>}
+              {err && <span className="text-sm text-red-700 whitespace-pre-wrap">{err}</span>}
             </div>
 
             <div className="rounded-lg border border-gray-200 bg-gray-100 p-4 text-sm text-gray-700">
