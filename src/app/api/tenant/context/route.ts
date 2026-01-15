@@ -18,31 +18,45 @@ const PostBody = z.object({
   tenantId: z.string().uuid(),
 });
 
-export async function GET() {
-  // bootstrap any legacy owner-only tenants into tenant_members
+export async function GET(req: Request) {
+  // Bootstrap legacy tenants (owner_clerk_user_id) into tenant_members if needed
   await ensureOwnerMembershipForLegacyTenants();
 
   const tenants = await listUserTenants();
 
-  // pick active tenant:
-  // - if cookie points to a tenant the user still has, keep it
-  // - otherwise pick first tenant
-  // - if none, return empty
-  const cookieTenantId = (await import("next/headers")).cookies().then((c) => c.get(ACTIVE_TENANT_COOKIE)?.value || "");
-  const current = (await cookieTenantId).trim();
+  // Read cookie (if any)
+  const cookieHeader = req.headers.get("cookie") || "";
+  const cookieMatch = cookieHeader
+    .split(";")
+    .map((s) => s.trim())
+    .find((s) => s.startsWith(`${ACTIVE_TENANT_COOKIE}=`));
+  const current = cookieMatch ? decodeURIComponent(cookieMatch.split("=").slice(1).join("=")) : "";
 
+  // Determine active tenant
   const stillValid = tenants.find((t) => t.tenantId === current);
   const activeTenantId = stillValid?.tenantId ?? tenants[0]?.tenantId ?? null;
 
-  return json({
+  const res = json({
     ok: true,
     activeTenantId,
     tenants,
   });
+
+  // If cookie missing/invalid and we have a tenant, set it
+  if (activeTenantId && activeTenantId !== current) {
+    res.cookies.set(ACTIVE_TENANT_COOKIE, activeTenantId, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: true,
+      path: "/",
+      maxAge: 60 * 60 * 24 * 30, // 30 days
+    });
+  }
+
+  return res;
 }
 
 export async function POST(req: Request) {
-  // bootstrap any legacy owner-only tenants into tenant_members
   await ensureOwnerMembershipForLegacyTenants();
 
   const body = await req.json().catch(() => null);
@@ -51,7 +65,7 @@ export async function POST(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  // Ensure the requested tenant is one user belongs to
+  // Ensure user belongs to that tenant
   const tenants = await listUserTenants();
   const found = tenants.find((t) => t.tenantId === parsed.data.tenantId);
   if (!found) {
@@ -60,7 +74,6 @@ export async function POST(req: Request) {
 
   const res = json({ ok: true, activeTenantId: found.tenantId });
 
-  // Set cookie for 30 days
   res.cookies.set(ACTIVE_TENANT_COOKIE, found.tenantId, {
     httpOnly: true,
     sameSite: "lax",
