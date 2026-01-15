@@ -126,9 +126,131 @@ async function getTenantAutoEstimateEnabled(tenantId: string): Promise<boolean> 
     const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
     return row?.auto_estimate_enabled === false ? false : true;
   } catch {
-    // Column likely doesn't exist yet → default ON
     return true;
   }
+}
+
+/**
+ * Latest tenant pricing rules (if configured)
+ */
+async function getTenantPricingRules(tenantId: string) {
+  try {
+    const r = await db.execute(sql`
+      select
+        id,
+        min_job,
+        typical_low,
+        typical_high,
+        max_without_inspection,
+        tone,
+        risk_posture,
+        always_estimate_language,
+        created_at
+      from tenant_pricing_rules
+      where tenant_id = ${tenantId}
+      order by created_at desc
+      limit 1
+    `);
+
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    if (!row) return null;
+
+    return {
+      id: String(row.id),
+      minJob: row.min_job == null ? null : Number(row.min_job),
+      typicalLow: row.typical_low == null ? null : Number(row.typical_low),
+      typicalHigh: row.typical_high == null ? null : Number(row.typical_high),
+      maxWithoutInspection: row.max_without_inspection == null ? null : Number(row.max_without_inspection),
+      tone: row.tone ?? null,
+      riskPosture: row.risk_posture ?? null,
+      alwaysEstimateLanguage: row.always_estimate_language === false ? false : true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function roundTo10(n: number) {
+  return Math.round(n / 10) * 10;
+}
+
+/**
+ * Pricing logic:
+ * - Base range uses tenant typical_low/high (or min_job fallback)
+ * - Confidence adjusts width
+ * - inspection_required widens and caps against max_without_inspection if present
+ * - Always enforces min_job floor
+ */
+function estimateFromRules(args: {
+  rules: {
+    id: string;
+    minJob: number | null;
+    typicalLow: number | null;
+    typicalHigh: number | null;
+    maxWithoutInspection: number | null;
+    alwaysEstimateLanguage: boolean;
+  } | null;
+  confidence: "high" | "medium" | "low";
+  inspectionRequired: boolean;
+}) {
+  const { rules, confidence, inspectionRequired } = args;
+
+  // Conservative defaults if tenant hasn't configured rules yet
+  const minJob = rules?.minJob ?? 250;
+  const typicalLow = rules?.typicalLow ?? Math.max(minJob, 500);
+  const typicalHigh = rules?.typicalHigh ?? Math.max(typicalLow + 300, typicalLow * 1.6);
+  const maxNoInspect = rules?.maxWithoutInspection ?? null;
+
+  // Start from typical range
+  let low = typicalLow;
+  let high = typicalHigh;
+
+  // Confidence tuning (narrower for high, wider for low)
+  if (confidence === "high") {
+    low *= 0.95;
+    high *= 1.05;
+  } else if (confidence === "medium") {
+    low *= 0.9;
+    high *= 1.15;
+  } else {
+    low *= 0.85;
+    high *= 1.3;
+  }
+
+  // Inspection required => widen slightly, and if max_without_inspection exists, cap high there
+  if (inspectionRequired) {
+    low *= 0.95;
+    high *= 1.1;
+    if (maxNoInspect != null) {
+      high = Math.min(high, maxNoInspect);
+    }
+  } else {
+    // If inspection NOT required, still respect max_without_inspection if provided (acts as a guardrail)
+    if (maxNoInspect != null) {
+      high = Math.min(high, maxNoInspect);
+    }
+  }
+
+  // Enforce min job floor
+  low = Math.max(low, minJob);
+  high = Math.max(high, low + 50);
+
+  low = roundTo10(low);
+  high = roundTo10(high);
+
+  return {
+    currency: "USD" as const,
+    low,
+    high,
+    method: rules ? "tenant_pricing_rules" : "default_rules",
+    pricing_rule_id: rules?.id ?? null,
+    inspection_required: inspectionRequired,
+    confidence,
+    note: inspectionRequired
+      ? "Estimate is preliminary; inspection recommended to confirm scope."
+      : "Estimate is preliminary; final price may change after inspection/material selection.",
+    always_estimate_language: rules?.alwaysEstimateLanguage ?? true,
+  };
 }
 
 async function preflightImageUrl(url: string) {
@@ -188,6 +310,33 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
     set output = ${outputStr}::jsonb
     where id = ${quoteLogId}::uuid
   `);
+}
+
+/**
+ * Try to persist scalar columns if present (fallback-safe).
+ */
+async function tryUpdateQuoteLogScalars(args: {
+  quoteLogId: string;
+  confidence: "high" | "medium" | "low" | null;
+  inspectionRequired: boolean | null;
+  estimateLow: number | null;
+  estimateHigh: number | null;
+}) {
+  const { quoteLogId, confidence, inspectionRequired, estimateLow, estimateHigh } = args;
+
+  try {
+    await db.execute(sql`
+      update quote_logs
+      set
+        confidence = ${confidence},
+        inspection_required = ${inspectionRequired},
+        estimate_low = ${estimateLow},
+        estimate_high = ${estimateHigh}
+      where id = ${quoteLogId}::uuid
+    `);
+  } catch {
+    // Columns may not exist in some environments; ignore.
+  }
 }
 
 function esc(s: unknown) {
@@ -548,17 +697,27 @@ export async function POST(req: Request) {
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
 
-    // TEMP estimate output shape:
-    // - if auto estimate enabled: return a placeholder range so UI has structure
-    // - next task: wire real pricing rules and persist to quote_logs columns
-    const estimate = autoEstimateEnabled
-      ? {
-          mode: "placeholder",
-          low: null,
-          high: null,
-          note: "Estimate enabled for tenant, but pricing rules are not wired yet.",
-        }
-      : null;
+    // Pricing (real)
+    let estimate: any = null;
+    if (autoEstimateEnabled && structured) {
+      const rules = await getTenantPricingRules(tenantId);
+      estimate = estimateFromRules({
+        rules,
+        confidence: structured.confidence,
+        inspectionRequired: structured.inspection_required,
+      });
+    }
+
+    // Persist scalar columns if available (optional)
+    if (structured) {
+      await tryUpdateQuoteLogScalars({
+        quoteLogId,
+        confidence: structured.confidence,
+        inspectionRequired: structured.inspection_required,
+        estimateLow: typeof estimate?.low === "number" ? estimate.low : null,
+        estimateHigh: typeof estimate?.high === "number" ? estimate.high : null,
+      });
+    }
 
     const customer = {
       name: customer_context?.name,
@@ -579,7 +738,7 @@ export async function POST(req: Request) {
       tenantEmailSettings,
     });
 
-    // Persist output
+    // Persist output json
     try {
       await updateQuoteLogOutput(quoteLogId, {
         status: "completed",
