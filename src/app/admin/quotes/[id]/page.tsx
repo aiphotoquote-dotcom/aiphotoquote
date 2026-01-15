@@ -61,13 +61,34 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
+function pickAssessment(output: any) {
+  if (!output || typeof output !== "object") return null;
+
+  // 1) Current shape: { assessment: {...} }
+  if (output.assessment && typeof output.assessment === "object") return output.assessment;
+
+  // 2) Alternate shape: { output: {...assessment...} }
+  if (output.output && typeof output.output === "object") return output.output;
+
+  // 3) Old/flat shape: output IS the assessment
+  const looksLikeAssessment =
+    typeof output.confidence === "string" ||
+    typeof output.summary === "string" ||
+    typeof output.inspection_required === "boolean" ||
+    Array.isArray(output.questions);
+
+  if (looksLikeAssessment) return output;
+
+  return null;
+}
+
 export default async function AdminQuoteDetailPage(props: PageProps) {
   const { id } = await props.params;
 
   let row: any = null;
   let renderingColumnsAvailable = true;
 
-  // Try the "new columns" query first; fallback if columns aren't migrated yet.
+  // Try new columns, fallback if not migrated yet
   try {
     const rNew = await db.execute(sql`
       select
@@ -90,7 +111,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
     row =
       (rNew as any)?.rows?.[0] ??
       (Array.isArray(rNew) ? (rNew as any)[0] : null);
-  } catch (e: any) {
+  } catch {
     renderingColumnsAvailable = false;
 
     const rOld = await db.execute(sql`
@@ -110,16 +131,14 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const input = safeJsonParse(row.input) ?? {};
   const output = safeJsonParse(row.output) ?? {};
 
-  const assessment = output?.assessment ?? null;
+  const assessment = pickAssessment(output);
   const email = output?.email ?? null;
 
   const lead = email?.lead ?? null;
   const customer = email?.customer ?? null;
 
   const tenantSlug = input?.tenantSlug ?? "";
-  const images: string[] = (input?.images ?? [])
-    .map((x: any) => x?.url)
-    .filter(Boolean);
+  const images: string[] = (input?.images ?? []).map((x: any) => x?.url).filter(Boolean);
 
   const customerCtx = input?.customer_context ?? {};
   const createdAt = row.created_at ? new Date(row.created_at).toLocaleString() : "";
@@ -129,12 +148,11 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const customerAttempted = Boolean(customer?.attempted);
   const customerSent = Boolean(customer?.sent);
 
-  // Rendering: prefer DB columns (if present), fallback to output.rendering
+  // Rendering (DB columns preferred; fallback to output.rendering)
   const outputRendering = output?.rendering ?? null;
 
   const renderOptIn =
-    (renderingColumnsAvailable && row.render_opt_in === true) ||
-    outputRendering?.requested === true
+    (renderingColumnsAvailable && row.render_opt_in === true) || outputRendering?.requested === true
       ? true
       : false;
 
@@ -148,8 +166,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
     (outputRendering?.imageUrl as string | null) ??
     null;
 
-  const renderPrompt =
-    (renderingColumnsAvailable ? (row.render_prompt as string | null) : null) ?? null;
+  const renderPrompt = (renderingColumnsAvailable ? (row.render_prompt as string | null) : null) ?? null;
 
   const renderError =
     (renderingColumnsAvailable ? (row.render_error as string | null) : null) ??
@@ -157,9 +174,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
     null;
 
   const renderedAt =
-    renderingColumnsAvailable && row.rendered_at
-      ? new Date(row.rendered_at).toLocaleString()
-      : "";
+    renderingColumnsAvailable && row.rendered_at ? new Date(row.rendered_at).toLocaleString() : "";
 
   return (
     <div className="mx-auto max-w-5xl p-6">
@@ -216,9 +231,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                   Error: <span className="font-mono">{String(lead.error)}</span>
                 </div>
               ) : null}
-              {!lead?.attempted && leadConfigured ? (
-                <div className="mt-2 text-gray-600">Not attempted.</div>
-              ) : null}
+              {!lead?.attempted && leadConfigured ? <div className="mt-2 text-gray-600">Not attempted.</div> : null}
               {!leadConfigured ? (
                 <div className="mt-2 text-gray-600">
                   Set <span className="font-mono">RESEND_API_KEY</span>,{" "}
@@ -232,16 +245,12 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
           <div className="rounded-xl border border-gray-200 p-4">
             <div className="flex items-center justify-between">
               <div className="font-medium">Customer Receipt</div>
-              <Badge
-                ok={customerSent}
-                text={customerSent ? "SENT" : customerAttempted ? "FAILED" : "SKIPPED"}
-              />
+              <Badge ok={customerSent} text={customerSent ? "SENT" : customerAttempted ? "FAILED" : "SKIPPED"} />
             </div>
 
             <div className="mt-2 text-sm text-gray-700">
               <div>
-                Customer email:{" "}
-                <span className="font-mono">{customerCtx?.email || "(not provided)"}</span>
+                Customer email: <span className="font-mono">{customerCtx?.email || "(not provided)"}</span>
               </div>
 
               {customer?.id ? (
@@ -254,10 +263,6 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800">
                   Error: <span className="font-mono">{String(customer.error)}</span>
                 </div>
-              ) : null}
-
-              {!customerAttempted && (customerCtx?.email ? true : false) && leadConfigured ? (
-                <div className="mt-2 text-gray-600">Not attempted.</div>
               ) : null}
             </div>
           </div>
@@ -279,8 +284,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
 
         {!renderingColumnsAvailable ? (
           <div className="mb-4 rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">
-            Rendering columns are not available in the database yet. Run the migration to add the
-            <span className="font-mono"> render_*</span> columns to <span className="font-mono">quote_logs</span>.
+            Rendering columns are not available in the database yet.
           </div>
         ) : null}
 
@@ -292,8 +296,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 Status: <span className="font-mono">{String(renderStatus)}</span>
               </div>
               <div>
-                Requested (customer opt-in):{" "}
-                <span className="font-mono">{renderOptIn ? "true" : "false"}</span>
+                Requested (customer opt-in): <span className="font-mono">{renderOptIn ? "true" : "false"}</span>
               </div>
 
               {renderImageUrl ? (
@@ -398,7 +401,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
       </div>
 
       {/* Assessment */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+      <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold">Assessment</h2>
         {assessment ? (
           <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm">
@@ -407,6 +410,14 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
         ) : (
           <div className="mt-3 text-sm text-gray-600">(no assessment stored)</div>
         )}
+      </div>
+
+      {/* Raw output (debug) */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+        <h2 className="text-lg font-semibold">Raw quote_logs.output</h2>
+        <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs">
+          {JSON.stringify(output, null, 2)}
+        </pre>
       </div>
     </div>
   );
