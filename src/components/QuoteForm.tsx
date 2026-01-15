@@ -28,16 +28,9 @@ function formatUSPhone(input: string) {
 
 function isValidEmail(email: string) {
   const s = (email || "").trim();
-  // Simple and safe (we don't need RFC perfection)
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-/**
- * Compress an image file in-browser using canvas.
- * - Keeps aspect ratio
- * - Converts to JPEG
- * - Limits max dimension
- */
 async function compressImage(
   file: File,
   opts?: { maxDim?: number; quality?: number }
@@ -90,79 +83,79 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-function asArray(v: any): string[] {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
-  return [];
-}
-
-function titleCase(s: string) {
-  const v = String(s || "").trim();
-  if (!v) return "";
-  return v.charAt(0).toUpperCase() + v.slice(1);
-}
-
-function Pill({
-  label,
-  tone = "neutral",
-}: {
-  label: string;
-  tone?: "neutral" | "green" | "yellow" | "red" | "blue";
-}) {
-  const cls =
-    tone === "green"
-      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
-      : tone === "yellow"
-      ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
-      : tone === "blue"
-      ? "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200"
-      : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-100";
-
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {label}
-    </span>
-  );
-}
-
 /**
- * Normalize quote response shapes:
- * - newer API returns { assessment, estimate }
- * - older UI expected result.output.*
+ * Read a fetch Response safely:
+ * - If JSON, return parsed JSON
+ * - If not JSON, return text
  */
-function pickAssessmentFromResult(result: any) {
-  if (!result || typeof result !== "object") return null;
+async function readResponse(res: Response): Promise<{
+  ok: boolean;
+  status: number;
+  contentType: string;
+  json: any | null;
+  text: string | null;
+}> {
+  const status = res.status;
+  const contentType = res.headers.get("content-type") || "";
+  const isJson = contentType.includes("application/json");
 
-  // Preferred new: result.assessment
-  if (result.assessment && typeof result.assessment === "object") return result.assessment;
+  if (isJson) {
+    const j = await res.json().catch(() => null);
+    return { ok: res.ok, status, contentType, json: j, text: null };
+  }
 
-  // Alternate: result.output is the assessment
-  if (result.output && typeof result.output === "object") return result.output;
-
-  // Nested: result.output.assessment
-  if (result.output?.assessment && typeof result.output.assessment === "object")
-    return result.output.assessment;
-
-  return null;
+  const t = await res.text().catch(() => "");
+  return { ok: res.ok, status, contentType, json: null, text: t || "" };
 }
 
-function pickEstimateFromResult(result: any) {
-  if (!result || typeof result !== "object") return null;
+function buildUserError(args: {
+  stage: "upload" | "quote";
+  r: { ok: boolean; status: number; contentType: string; json: any | null; text: string | null };
+}) {
+  const { stage, r } = args;
 
-  // Preferred new: result.estimate
-  if (result.estimate !== undefined) return result.estimate;
+  // JSON errors from our API
+  if (r.json) {
+    const debugId = r.json?.debugId || r.json?.xDebugId || null;
+    const code = r.json?.error || "UNKNOWN_ERROR";
+    const msg =
+      r.json?.message ||
+      r.json?.error?.message ||
+      r.json?.error_message ||
+      null;
 
-  // Old: result.output.estimate
-  if (result.output?.estimate !== undefined) return result.output.estimate;
+    const details =
+      r.json?.dbErr?.message ||
+      r.json?.error?.detail ||
+      null;
 
-  return null;
+    return [
+      stage === "upload" ? "Upload failed" : "Quote failed",
+      `HTTP ${r.status}`,
+      debugId ? `debugId: ${debugId}` : null,
+      msg ? `message: ${msg}` : null,
+      details ? `details: ${details}` : null,
+      `code: ${code}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  // Non-JSON (HTML / plain text) -> show snippet
+  const snippet = (r.text || "").slice(0, 240).trim();
+  return [
+    stage === "upload" ? "Upload failed" : "Quote failed",
+    `HTTP ${r.status}`,
+    `content-type: ${r.contentType || "(none)"}`,
+    snippet ? `body: ${snippet}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export default function QuoteForm({
   tenantSlug,
-  aiRenderingEnabled = false,
+  aiRenderingEnabled,
 }: {
   tenantSlug: string;
   aiRenderingEnabled?: boolean;
@@ -179,11 +172,13 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // Rendering opt-in (customer-controlled, only if tenant-enabled)
+  // Customer opt-in for rendering (only shown if tenant enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">(
+    "idle"
+  );
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -198,10 +193,10 @@ export default function QuoteForm({
   }, [customerName, email, phone]);
 
   const step = useMemo(() => {
-    if (result) return 3;
+    if (result?.output) return 3;
     if (files.length > 0) return 2;
     return 1;
-  }, [files.length, result]);
+  }, [files.length, result?.output]);
 
   const progress = useMemo(() => {
     let p = 0.15;
@@ -215,13 +210,13 @@ export default function QuoteForm({
       if (phase === "analyzing") p = 0.82;
     }
 
-    if (result) p = 1.0;
+    if (result?.output) p = 1.0;
 
     return Math.max(0, Math.min(1, p));
-  }, [step, working, phase, result]);
+  }, [step, working, phase, result?.output]);
 
   const progressLabel = useMemo(() => {
-    if (result) return "Estimate ready";
+    if (result?.output) return "Estimate ready";
     if (working) {
       if (phase === "compressing") return "Optimizing photos…";
       if (phase === "uploading") return "Uploading…";
@@ -230,7 +225,7 @@ export default function QuoteForm({
     if (step === 1) return "Add photos";
     if (step === 2) return "Add details";
     return "Review estimate";
-  }, [result, working, phase, step]);
+  }, [result?.output, working, phase, step]);
 
   const progressText = useMemo(() => {
     if (files.length >= MIN_PHOTOS) {
@@ -241,18 +236,12 @@ export default function QuoteForm({
   }, [files.length, contactOk]);
 
   useEffect(() => {
-    if (!result) return;
+    if (!result?.output) return;
     (async () => {
       await sleep(50);
       resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     })();
-  }, [result]);
-
-  // If tenant disables rendering, ensure opt-in is off
-  useEffect(() => {
-    if (!aiRenderingEnabled && renderOptIn) setRenderOptIn(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiRenderingEnabled]);
+  }, [result?.output]);
 
   function rebuildPreviews(nextFiles: File[]) {
     previews.forEach((p) => URL.revokeObjectURL(p));
@@ -276,11 +265,11 @@ export default function QuoteForm({
     setError(null);
     setResult(null);
     setNotes("");
+    setRenderOptIn(false);
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
-    setRenderOptIn(false);
   }
 
   async function onSubmit() {
@@ -319,14 +308,17 @@ export default function QuoteForm({
       const form = new FormData();
       compressed.forEach((f) => form.append("files", f));
 
-      const up = await fetch("/api/blob/upload", { method: "POST", body: form });
-      const upJson = await up.json();
-      if (!upJson.ok) throw new Error(upJson.error?.message ?? "Upload failed");
+      const upRes = await fetch("/api/blob/upload", { method: "POST", body: form });
+      const up = await readResponse(upRes);
 
-      const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
+      if (!up.ok || !up.json?.ok) {
+        throw new Error(buildUserError({ stage: "upload", r: up }));
+      }
+
+      const urls: UploadedFile[] = up.json.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
-      const res = await fetch("/api/quote/submit", {
+      const qRes = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -342,126 +334,98 @@ export default function QuoteForm({
         }),
       });
 
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error?.message ?? "Quote failed");
+      const q = await readResponse(qRes);
 
-      setResult(json);
+      if (!q.ok || !q.json?.ok) {
+        throw new Error(buildUserError({ stage: "quote", r: q }));
+      }
+
+      setResult(q.json);
     } catch (e: any) {
-      setError(e.message ?? "Something went wrong.");
+      setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
     } finally {
       setWorking(false);
     }
   }
 
-  const assessment = useMemo(() => pickAssessmentFromResult(result), [result]);
-  const estimate = useMemo(() => pickEstimateFromResult(result), [result]);
-
-  const summary = assessment?.summary ? String(assessment.summary) : "";
-  const confidence = assessment?.confidence ? String(assessment.confidence) : "";
-  const inspectionRequired = assessment?.inspection_required === true;
-
-  const questions = asArray(assessment?.questions);
-  const visibleScope = asArray(assessment?.visible_scope);
-  const assumptions = asArray(assessment?.assumptions);
-
-  const confidenceTone =
-    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "neutral";
-
-  const estLow =
-    typeof estimate?.low === "number"
-      ? estimate.low
-      : typeof estimate?.estimate?.low === "number"
-        ? estimate.estimate.low
-        : null;
-
-  const estHigh =
-    typeof estimate?.high === "number"
-      ? estimate.high
-      : typeof estimate?.estimate?.high === "number"
-        ? estimate.estimate.high
-        : null;
-
-  const hasEstimateRange = typeof estLow === "number" && typeof estHigh === "number";
-
   return (
     <div className="space-y-6">
       {/* Progress bar */}
-      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+      <div className="rounded-xl border p-4">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
+            <div className="text-xs text-gray-600">Progress</div>
             <div className="text-sm font-semibold">{progressLabel}</div>
           </div>
-          <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
+          <div className="text-xs text-gray-700">{progressText}</div>
         </div>
 
-        <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
+        <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden">
           <div
-            className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
+            className="h-full rounded-full bg-black transition-all duration-500"
             style={{ width: `${Math.round(progress * 100)}%` }}
           />
         </div>
 
-        <div className="mt-3 grid grid-cols-3 text-xs text-gray-600 dark:text-gray-300">
-          <div className={step >= 1 ? "font-semibold text-gray-900 dark:text-gray-100" : ""}>Photos</div>
-          <div className={`text-center ${step >= 2 ? "font-semibold text-gray-900 dark:text-gray-100" : ""}`}>
+        <div className="mt-3 grid grid-cols-3 text-xs text-gray-600">
+          <div className={step >= 1 ? "font-semibold text-gray-900" : ""}>Photos</div>
+          <div className={`text-center ${step >= 2 ? "font-semibold text-gray-900" : ""}`}>
             Details
           </div>
-          <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900 dark:text-gray-100" : ""}`}>
-            Result
+          <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900" : ""}`}>
+            Estimate
           </div>
         </div>
       </div>
 
       {/* Pre-photos hint */}
       {files.length === 0 && (
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
+        <div className="rounded-2xl border p-5">
           <div className="text-sm font-semibold">Fastest way (phone)</div>
-          <p className="mt-1 text-sm text-gray-700 dark:text-gray-200">
+          <p className="mt-1 text-sm text-gray-700">
             Tap <b>Take Photo</b> twice:
           </p>
-          <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 dark:text-gray-200 space-y-1">
+          <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
             <li>One wide shot (full seat/cushion/panel)</li>
             <li>One close-up (damage/stitching/material texture)</li>
           </ul>
-          <p className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+          <p className="mt-3 text-xs text-gray-600">
             Add a third photo from an angle if you can — it improves accuracy.
           </p>
         </div>
       )}
 
       {/* Guidance + capture */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+      <section className="rounded-2xl border p-5 space-y-4">
         <div>
           <h2 className="font-semibold">Take 2 quick photos</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+          <p className="mt-1 text-xs text-gray-600">
             These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
           </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+          <div className="rounded-xl border p-4">
             <div className="text-sm font-semibold">1) Wide shot</div>
-            <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+            <p className="mt-1 text-xs text-gray-600">
               Step back. Capture the full seat/cushion/panel.
             </p>
           </div>
-          <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+          <div className="rounded-xl border p-4">
             <div className="text-sm font-semibold">2) Close-up</div>
-            <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+            <p className="mt-1 text-xs text-gray-600">
               Get the damage/stitching/material texture clearly.
             </p>
           </div>
-          <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+          <div className="rounded-xl border p-4">
             <div className="text-sm font-semibold">Optional: Angle</div>
-            <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+            <p className="mt-1 text-xs text-gray-600">
               Helps estimate seam complexity + foam condition.
             </p>
           </div>
         </div>
 
-        {/* Big mobile capture buttons */}
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="sr-only">Take photo</span>
@@ -477,7 +441,7 @@ export default function QuoteForm({
               }}
               disabled={working}
             />
-            <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
+            <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none">
               Take Photo (Camera)
             </div>
           </label>
@@ -496,38 +460,33 @@ export default function QuoteForm({
               }}
               disabled={working}
             />
-            <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
+            <div className="w-full rounded-xl border py-4 text-center font-semibold cursor-pointer select-none">
               Upload Photos
             </div>
           </label>
         </div>
 
-        {/* Checklist */}
-        <div className="rounded-xl bg-gray-50 p-4 text-sm dark:bg-gray-950">
+        <div className="rounded-xl bg-gray-50 p-4 text-sm">
           <div className="font-semibold">Checklist</div>
-          <ul className="mt-2 space-y-1 text-gray-700 dark:text-gray-200">
+          <ul className="mt-2 space-y-1 text-gray-700">
             <li>{files.length >= 1 ? "✅" : "⬜️"} Wide shot added</li>
             <li>{files.length >= 2 ? "✅" : "⬜️"} Close-up added</li>
-            <li className="text-xs text-gray-600 dark:text-gray-300 pt-1">
+            <li className="text-xs text-gray-600 pt-1">
               Tip: If you’re unsure, take one extra angle photo.
             </li>
           </ul>
         </div>
 
-        {/* Previews */}
         {previews.length > 0 && (
           <div className="space-y-3">
             <div className="grid grid-cols-3 gap-3">
               {previews.map((src, idx) => (
-                <div
-                  key={`${src}-${idx}`}
-                  className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
-                >
+                <div key={`${src}-${idx}`} className="relative rounded-xl border overflow-hidden">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
                   <button
                     type="button"
-                    className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-700"
+                    className="absolute top-2 right-2 rounded-md bg-white/90 border px-2 py-1 text-xs disabled:opacity-50"
                     onClick={() => removeFileAt(idx)}
                     disabled={working}
                   >
@@ -541,7 +500,7 @@ export default function QuoteForm({
             </div>
 
             {files.length < MAX_PHOTOS && (
-              <div className="text-center text-xs text-gray-600 dark:text-gray-300">
+              <div className="text-center text-xs text-gray-600">
                 Want better accuracy? Add one more photo from a different angle.
               </div>
             )}
@@ -550,21 +509,21 @@ export default function QuoteForm({
       </section>
 
       {/* Details */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+      <section className="rounded-2xl border p-5 space-y-4">
         <div>
           <h2 className="font-semibold">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+          <p className="mt-1 text-xs text-gray-600">
             Required so we can send your estimate and follow up if needed.
           </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
-            <div className="text-xs text-gray-700 dark:text-gray-300">
+            <div className="text-xs text-gray-700">
               Name <span className="text-red-600">*</span>
             </div>
             <input
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-gray-950"
+              className="mt-2 w-full rounded-xl border p-3 text-sm"
               value={customerName}
               onChange={(e) => setCustomerName(e.target.value)}
               placeholder="Your name"
@@ -574,11 +533,11 @@ export default function QuoteForm({
           </label>
 
           <label className="block">
-            <div className="text-xs text-gray-700 dark:text-gray-300">
+            <div className="text-xs text-gray-700">
               Email <span className="text-red-600">*</span>
             </div>
             <input
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-gray-950"
+              className="mt-2 w-full rounded-xl border p-3 text-sm"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@email.com"
@@ -590,11 +549,11 @@ export default function QuoteForm({
         </div>
 
         <label className="block">
-          <div className="text-xs text-gray-700 dark:text-gray-300">
+          <div className="text-xs text-gray-700">
             Phone <span className="text-red-600">*</span>
           </div>
           <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-gray-950"
+            className="mt-2 w-full rounded-xl border p-3 text-sm"
             value={phone}
             onChange={(e) => setPhone(formatUSPhone(e.target.value))}
             placeholder="(555) 555-5555"
@@ -602,22 +561,18 @@ export default function QuoteForm({
             inputMode="tel"
             autoComplete="tel"
           />
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            We’ll only use this for your quote request.
-          </p>
+          <p className="mt-1 text-xs text-gray-600">We’ll only use this for your quote request.</p>
         </label>
 
         <div className="pt-2">
           <h3 className="text-sm font-semibold">Details (optional)</h3>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            One sentence helps us estimate faster.
-          </p>
+          <p className="mt-1 text-xs text-gray-600">One sentence helps us estimate faster.</p>
         </div>
 
         <label className="block">
-          <div className="text-xs text-gray-700 dark:text-gray-300">Notes</div>
+          <div className="text-xs text-gray-700">Notes</div>
           <textarea
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-gray-950"
+            className="mt-2 w-full rounded-xl border p-3 text-sm"
             rows={4}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -626,30 +581,25 @@ export default function QuoteForm({
           />
         </label>
 
-        {/* Customer opt-in, only when tenant-enabled */}
         {aiRenderingEnabled ? (
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-start gap-3">
-              <input
-                id="renderOptIn"
-                type="checkbox"
-                className="mt-1 h-4 w-4 rounded border-gray-300"
-                checked={renderOptIn}
-                onChange={(e) => setRenderOptIn(e.target.checked)}
-                disabled={working}
-              />
-              <label htmlFor="renderOptIn" className="cursor-pointer">
-                <div className="text-sm font-semibold">Optional: AI concept rendering</div>
-                <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If available, we can generate a concept image of what the finished result could look like.
-                  This is optional and may take additional time after review.
-                </p>
-              </label>
+          <label className="flex items-start gap-3 rounded-xl border p-4">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={renderOptIn}
+              onChange={(e) => setRenderOptIn(e.target.checked)}
+              disabled={working}
+            />
+            <div>
+              <div className="text-sm font-semibold">Optional: AI concept rendering</div>
+              <div className="text-xs text-gray-600">
+                If available, we can generate a concept image of the finished result after review.
+              </div>
             </div>
-          </div>
+          </label>
         ) : null}
 
-        <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700 dark:bg-gray-950 dark:text-gray-200">
+        <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
           <div className="font-semibold">Estimate disclaimer</div>
           <p className="mt-1">
             This is a photo-based estimate range. Final pricing can change after inspection,
@@ -658,7 +608,7 @@ export default function QuoteForm({
         </div>
 
         <button
-          className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
+          className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50"
           onClick={onSubmit}
           disabled={working || files.length < MIN_PHOTOS || !contactOk}
         >
@@ -666,116 +616,58 @@ export default function QuoteForm({
         </button>
 
         {files.length < MIN_PHOTOS && (
-          <p className="text-center text-xs text-gray-600 dark:text-gray-300">
+          <p className="text-center text-xs text-gray-600">
             Add at least <b>{MIN_PHOTOS}</b> photos to unlock estimate.
           </p>
         )}
 
         {files.length >= MIN_PHOTOS && !contactOk && (
-          <p className="text-center text-xs text-gray-600 dark:text-gray-300">
+          <p className="text-center text-xs text-gray-600">
             Please complete <b>Name</b>, <b>Email</b>, and <b>Phone</b> to submit.
           </p>
         )}
 
         {error && (
-          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-200">
+          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
             {error}
           </div>
         )}
       </section>
 
-      {/* Results (pretty) */}
-      {result && (
-        <section
-          ref={resultsRef}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold">Your Result</h2>
-              <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                This is a photo-based preliminary assessment. We may follow up with questions.
+      {/* Results */}
+      {result?.output && (
+        <section ref={resultsRef} className="rounded-2xl border p-5 space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-lg font-semibold">Your Estimate</h2>
+            <div className="text-xs text-gray-600">
+              Confidence: <b>{result.output.confidence}</b>
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-gray-50 p-4">
+            <div className="text-sm font-medium">Estimated Price Range</div>
+            <div className="mt-1 text-2xl font-semibold">
+              {formatMoney(result.output.estimate.low)} – {formatMoney(result.output.estimate.high)}
+            </div>
+            {result.output.inspection_required && (
+              <p className="mt-2 text-xs text-gray-600">
+                Inspection recommended to confirm scope and pricing.
               </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Pill
-                label={confidence ? `Confidence: ${titleCase(confidence)}` : "Confidence: —"}
-                tone={confidenceTone}
-              />
-              <Pill
-                label={inspectionRequired ? "Inspection recommended" : "Inspection not required"}
-                tone={inspectionRequired ? "yellow" : "green"}
-              />
-            </div>
+            )}
           </div>
 
-          {hasEstimateRange ? (
-            <div className="rounded-xl bg-gray-50 p-4 dark:bg-gray-950">
-              <div className="text-sm font-medium">Estimated Price Range</div>
-              <div className="mt-1 text-2xl font-semibold">
-                {formatMoney(estLow!)} – {formatMoney(estHigh!)}
-              </div>
-              {inspectionRequired ? (
-                <p className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-                  Inspection recommended to confirm scope and pricing.
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-semibold">Next step</div>
-              <p className="mt-1 text-sm text-gray-700 dark:text-gray-200">
-                We’ve received your photos and generated a preliminary assessment. Pricing will follow after review.
-              </p>
-            </div>
-          )}
+          <p className="text-sm">{result.output.summary}</p>
 
-          <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Summary</div>
-            <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
-              {summary || <span className="text-gray-500 dark:text-gray-400">(no summary)</span>}
-            </div>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">What we can see</div>
-              {visibleScope.length ? (
-                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                  {visibleScope.slice(0, 10).map((x, i) => (
-                    <li key={i}>{x}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">(none listed)</div>
-              )}
-            </div>
-
-            <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Assumptions</div>
-              {assumptions.length ? (
-                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                  {assumptions.slice(0, 10).map((x, i) => (
-                    <li key={i}>{x}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">(none listed)</div>
-              )}
-            </div>
-          </div>
-
-          {questions.length ? (
-            <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quick questions</div>
-              <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                {questions.slice(0, 8).map((x, i) => (
+          {!!result.output.questions?.length && (
+            <div className="rounded-xl border p-4">
+              <div className="text-sm font-semibold">Quick questions</div>
+              <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
+                {result.output.questions.slice(0, 6).map((x: string, i: number) => (
                   <li key={i}>{x}</li>
                 ))}
               </ul>
             </div>
-          ) : null}
+          )}
 
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
@@ -792,14 +684,14 @@ export default function QuoteForm({
                 }}
                 disabled={working || files.length >= MAX_PHOTOS}
               />
-              <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
+              <div className="w-full rounded-xl border py-4 text-center font-semibold cursor-pointer select-none">
                 Add Another Photo
               </div>
             </label>
 
             <button
               type="button"
-              className="w-full rounded-xl bg-black text-white py-4 font-semibold dark:bg-white dark:text-black"
+              className="w-full rounded-xl bg-black text-white py-4 font-semibold"
               onClick={retake}
               disabled={working}
             >
@@ -810,31 +702,15 @@ export default function QuoteForm({
           {files.length >= MIN_PHOTOS && files.length <= MAX_PHOTOS && (
             <button
               type="button"
-              className="w-full rounded-xl border border-gray-200 py-4 font-semibold dark:border-gray-800"
+              className="w-full rounded-xl border py-4 font-semibold"
               onClick={onSubmit}
               disabled={working || !contactOk}
             >
-              Re-run with Updated Photos
+              Re-run Estimate with Updated Photos
             </button>
           )}
 
-          {/* Show whether customer opted in */}
-          {aiRenderingEnabled ? (
-            <div className="text-center text-xs text-gray-600 dark:text-gray-300">
-              AI rendering opt-in: <b>{renderOptIn ? "yes" : "no"}</b>
-            </div>
-          ) : null}
-
-          <details className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Debug details (raw JSON)
-            </summary>
-            <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs dark:border-gray-800 dark:bg-gray-900">
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          </details>
-
-          <p className="text-center text-xs text-gray-600 dark:text-gray-300">
+          <p className="text-center text-xs text-gray-600">
             Tip: Add a new angle photo, then click <b>Re-run</b> for better accuracy.
           </p>
         </section>
