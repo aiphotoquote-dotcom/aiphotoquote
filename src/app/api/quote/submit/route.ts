@@ -24,6 +24,9 @@ const Req = z.object({
       phone: z.string().optional(),
     })
     .optional(),
+
+  // ✅ customer opt-in (only honored if tenant enabled)
+  render_opt_in: z.boolean().optional().default(false),
 });
 
 const QuoteOutputSchema = z.object({
@@ -110,6 +113,21 @@ async function getTenantEmailSettings(tenantId: string) {
   };
 }
 
+// ✅ tenant_settings: ai_rendering_enabled (boolean)
+async function getTenantRenderingPolicy(tenantId: string) {
+  const r = await db.execute(sql`
+    select ai_rendering_enabled
+    from tenant_settings
+    where tenant_id = ${tenantId}
+    limit 1
+  `);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+  return {
+    aiRenderingEnabled: row?.ai_rendering_enabled === true,
+  };
+}
+
 async function preflightImageUrl(url: string) {
   const out: { ok: boolean; url: string; status?: number; hint?: string } = { ok: false, url };
 
@@ -145,16 +163,33 @@ async function preflightImageUrl(url: string) {
 }
 
 /**
- * quote_logs columns: id, tenant_id, input, output, created_at
+ * quote_logs columns (expanded):
+ * id, tenant_id, input, output,
+ * render_opt_in, render_status, render_image_url, render_prompt, render_error, rendered_at,
+ * created_at
  */
-async function insertQuoteLog(tenantId: string, inputJson: any) {
+async function insertQuoteLog(args: {
+  tenantId: string;
+  inputJson: any;
+  renderOptIn: boolean;
+  renderStatus: "not_requested" | "queued" | "rendered" | "failed";
+}) {
   const quoteLogId = crypto.randomUUID();
-  const inputStr = JSON.stringify(inputJson ?? {});
+  const inputStr = JSON.stringify(args.inputJson ?? {});
   const outputStr = JSON.stringify({ status: "started" });
 
   await db.execute(sql`
-    insert into quote_logs (id, tenant_id, input, output, created_at)
-    values (${quoteLogId}::uuid, ${tenantId}, ${inputStr}::jsonb, ${outputStr}::jsonb, now())
+    insert into quote_logs (
+      id, tenant_id, input, output,
+      render_opt_in, render_status,
+      created_at
+    )
+    values (
+      ${quoteLogId}::uuid, ${args.tenantId},
+      ${inputStr}::jsonb, ${outputStr}::jsonb,
+      ${args.renderOptIn}, ${args.renderStatus},
+      now()
+    )
   `);
 
   return quoteLogId;
@@ -165,6 +200,29 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   await db.execute(sql`
     update quote_logs
     set output = ${outputStr}::jsonb
+    where id = ${quoteLogId}::uuid
+  `);
+}
+
+async function updateQuoteLogRendering(quoteLogId: string, patch: any) {
+  const {
+    render_status,
+    render_opt_in,
+    render_prompt,
+    render_image_url,
+    render_error,
+    rendered_at,
+  } = patch ?? {};
+
+  await db.execute(sql`
+    update quote_logs
+    set
+      render_status = coalesce(${render_status}, render_status),
+      render_opt_in = coalesce(${render_opt_in}, render_opt_in),
+      render_prompt = coalesce(${render_prompt}, render_prompt),
+      render_image_url = coalesce(${render_image_url}, render_image_url),
+      render_error = coalesce(${render_error}, render_error),
+      rendered_at = coalesce(${rendered_at}, rendered_at)
     where id = ${quoteLogId}::uuid
   `);
 }
@@ -186,8 +244,9 @@ function renderLeadEmailHTML(args: {
   notes?: string;
   images: string[];
   assessment: any;
+  rendering?: { requested: boolean; allowed: boolean; status: string; imageUrl?: string | null };
 }) {
-  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment } = args;
+  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment, rendering } = args;
 
   const imgs = images
     .map(
@@ -197,6 +256,27 @@ function renderLeadEmailHTML(args: {
         )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
     )
     .join("");
+
+  const renderBlock =
+    rendering?.requested
+      ? `
+    <h3 style="margin:18px 0 6px;">AI Rendering (optional)</h3>
+    <div style="color:#374151;">
+      <div><b>Requested</b>: ${rendering.requested ? "yes" : "no"}</div>
+      <div><b>Allowed</b>: ${rendering.allowed ? "yes" : "no"}</div>
+      <div><b>Status</b>: ${esc(rendering.status)}</div>
+      ${
+        rendering.imageUrl
+          ? `<div style="margin-top:10px;"><a href="${esc(rendering.imageUrl)}">${esc(
+              rendering.imageUrl
+            )}</a><br/><img src="${esc(
+              rendering.imageUrl
+            )}" alt="AI concept rendering" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
+          : ""
+      }
+    </div>
+    `
+      : "";
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
@@ -229,6 +309,8 @@ function renderLeadEmailHTML(args: {
     <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
       JSON.stringify(assessment, null, 2)
     )}</pre>
+
+    ${renderBlock}
   </div>`;
 }
 
@@ -238,8 +320,9 @@ function renderCustomerEmailHTML(args: {
   notes?: string;
   images: string[];
   assessment: any;
+  rendering?: { requested: boolean; allowed: boolean; status: string; imageUrl?: string | null };
 }) {
-  const { businessName, quoteLogId, notes, images, assessment } = args;
+  const { businessName, quoteLogId, notes, images, assessment, rendering } = args;
 
   const imgs = images
     .map(
@@ -249,6 +332,23 @@ function renderCustomerEmailHTML(args: {
         )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb;border-radius:10px"/></div>`
     )
     .join("");
+
+  const renderBlock =
+    rendering?.requested
+      ? `
+    <h3 style="margin:18px 0 6px;">AI Concept Rendering (optional)</h3>
+    <div style="color:#374151;">
+      <div><b>Status</b>: ${esc(rendering.status)}</div>
+      ${
+        rendering.imageUrl
+          ? `<div style="margin-top:10px;"><img src="${esc(
+              rendering.imageUrl
+            )}" alt="AI concept rendering" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
+          : `<div style="margin-top:8px;color:#6b7280;">If selected, we may send a concept image in a follow-up message.</div>`
+      }
+    </div>
+    `
+      : "";
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
@@ -277,6 +377,8 @@ function renderCustomerEmailHTML(args: {
       JSON.stringify(assessment, null, 2)
     )}</pre>
 
+    ${renderBlock}
+
     <p style="color:#6b7280;margin-top:14px;">
       — ${esc(businessName)}
     </p>
@@ -290,6 +392,7 @@ async function sendEmailsIfConfigured(args: {
   notes?: string;
   images: string[];
   assessment: any;
+  rendering?: { requested: boolean; allowed: boolean; status: string; imageUrl?: string | null };
   customer: { name?: string; email?: string; phone?: string };
   tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
 }) {
@@ -325,6 +428,7 @@ async function sendEmailsIfConfigured(args: {
       notes: args.notes,
       images: args.images,
       assessment: args.assessment,
+      rendering: args.rendering,
     });
 
     const leadRes = await resend.emails.send({
@@ -353,6 +457,7 @@ async function sendEmailsIfConfigured(args: {
         notes: args.notes,
         images: args.images,
         assessment: args.assessment,
+        rendering: args.rendering,
       });
 
       const custRes = await resend.emails.send({
@@ -376,6 +481,74 @@ async function sendEmailsIfConfigured(args: {
   return result;
 }
 
+function buildRenderPrompt(args: {
+  category?: string;
+  serviceType?: string;
+  notes?: string;
+  assessment: any;
+}) {
+  const category = args.category ?? "unknown";
+  const serviceType = args.serviceType ?? "";
+  const notes = args.notes ?? "";
+  const summary = typeof args.assessment?.summary === "string" ? args.assessment.summary : "";
+  const visibleScope = Array.isArray(args.assessment?.visible_scope)
+    ? args.assessment.visible_scope
+    : [];
+
+  const lines = [
+    "Create a photorealistic concept rendering of the finished, restored item described below.",
+    "This is a conceptual 'after' image, not an exact preview or guarantee.",
+    "",
+    `Category: ${category}`,
+    serviceType ? `Service type: ${serviceType}` : "",
+    notes ? `Customer notes: ${notes}` : "",
+    "",
+    summary ? `Assessment summary: ${summary}` : "",
+    visibleScope.length ? `Visible scope: ${visibleScope.join(", ")}` : "",
+    "",
+    "Style guidance:",
+    "- Clean professional product photo look",
+    "- Neutral background",
+    "- Natural lighting",
+    "- Realistic materials and stitching",
+    "- No text overlays or watermarks",
+  ];
+
+  return lines.filter(Boolean).join("\n");
+}
+
+async function generateConceptRendering(args: {
+  openAiKey: string;
+  prompt: string;
+}) {
+  const openai = new OpenAI({ apiKey: args.openAiKey });
+
+  // Note: images.generate response format can vary by model/sdk version.
+  // We try url first; if only base64 is returned, we throw a clear error
+  // so you can decide where to store it (blob) later without re-architecture.
+  const img: any = await openai.images.generate({
+    model: "gpt-image-1",
+    prompt: args.prompt,
+    size: "1024x1024",
+  });
+
+  const first = img?.data?.[0];
+  const url = first?.url ?? null;
+
+  if (!url) {
+    // Some responses may return base64 in b64_json; we intentionally don't persist it here.
+    // That would require a storage decision (blob), which you said not to re-architect.
+    const hasB64 = Boolean(first?.b64_json);
+    throw new Error(
+      hasB64
+        ? "Image API returned base64 (b64_json) but no URL. Storage is required to persist it."
+        : "Image API returned no image URL."
+    );
+  }
+
+  return { url };
+}
+
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -393,7 +566,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantSlug, images, customer_context } = parsed.data;
+    const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
@@ -422,6 +595,12 @@ export async function POST(req: Request) {
     // Pull tenant email identity + routing
     const tenantEmailSettings = await getTenantEmailSettings(tenantId);
 
+    // Pull tenant rendering policy (tenant-controlled)
+    const renderingPolicy = await getTenantRenderingPolicy(tenantId);
+
+    const renderRequested = render_opt_in === true;
+    const renderingAllowed = renderingPolicy.aiRenderingEnabled === true && renderRequested === true;
+
     // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
@@ -438,9 +617,14 @@ export async function POST(req: Request) {
       );
     }
 
-    // Insert quote log
+    // Insert quote log (now includes rendering fields)
     try {
-      quoteLogId = await insertQuoteLog(tenantId, raw);
+      quoteLogId = await insertQuoteLog({
+        tenantId,
+        inputJson: raw,
+        renderOptIn: renderRequested,
+        renderStatus: renderingAllowed ? "queued" : "not_requested",
+      });
     } catch (e: any) {
       const dbErr = normalizeDbErr(e);
       return json(
@@ -501,6 +685,66 @@ export async function POST(req: Request) {
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
 
+    // --- Rendering (2nd step; optional; tenant enabled + customer opted in) ---
+    const renderingResult: {
+      requested: boolean;
+      allowed: boolean;
+      status: "not_requested" | "queued" | "rendered" | "failed";
+      imageUrl: string | null;
+      error: string | null;
+    } = {
+      requested: renderRequested,
+      allowed: renderingAllowed,
+      status: renderingAllowed ? "queued" : "not_requested",
+      imageUrl: null,
+      error: null,
+    };
+
+    if (renderingAllowed && quoteLogId) {
+      try {
+        const renderPrompt = buildRenderPrompt({
+          category,
+          serviceType,
+          notes,
+          assessment: finalAssessment,
+        });
+
+        // Persist prompt + queued
+        await updateQuoteLogRendering(quoteLogId, {
+          render_status: "queued",
+          render_opt_in: true,
+          render_prompt: renderPrompt,
+          render_error: null,
+        });
+
+        const img = await generateConceptRendering({
+          openAiKey,
+          prompt: renderPrompt,
+        });
+
+        renderingResult.status = "rendered";
+        renderingResult.imageUrl = img.url;
+
+        await updateQuoteLogRendering(quoteLogId, {
+          render_status: "rendered",
+          render_image_url: img.url,
+          render_error: null,
+          rendered_at: new Date(),
+        });
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        renderingResult.status = "failed";
+        renderingResult.error = msg;
+
+        try {
+          await updateQuoteLogRendering(quoteLogId, {
+            render_status: "failed",
+            render_error: msg,
+          });
+        } catch {}
+      }
+    }
+
     const customer = {
       name: customer_context?.name,
       email: customer_context?.email,
@@ -510,20 +754,27 @@ export async function POST(req: Request) {
     // Send emails using tenant settings (non-blocking)
     const emailResult = await sendEmailsIfConfigured({
       tenantSlug,
-      quoteLogId,
+      quoteLogId: quoteLogId!,
       category,
       notes,
       images: images.map((i) => i.url),
       assessment: finalAssessment,
+      rendering: {
+        requested: renderingResult.requested,
+        allowed: renderingResult.allowed,
+        status: renderingResult.status,
+        imageUrl: renderingResult.imageUrl,
+      },
       customer,
       tenantEmailSettings,
     });
 
     // Persist output
     try {
-      await updateQuoteLogOutput(quoteLogId, {
+      await updateQuoteLogOutput(quoteLogId!, {
         status: "completed",
         assessment: finalAssessment,
+        rendering: renderingResult,
         email: emailResult,
         meta: {
           tenantSlug,
@@ -540,6 +791,7 @@ export async function POST(req: Request) {
           tenantId,
           imagePreflight: checks,
           assessment: finalAssessment,
+          rendering: renderingResult,
           email: emailResult,
           warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
           durationMs: Date.now() - startedAt,
@@ -556,6 +808,7 @@ export async function POST(req: Request) {
         tenantId,
         imagePreflight: checks,
         assessment: finalAssessment,
+        rendering: renderingResult,
         email: emailResult,
         durationMs: Date.now() - startedAt,
       },
