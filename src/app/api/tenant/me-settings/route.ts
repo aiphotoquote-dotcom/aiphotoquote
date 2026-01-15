@@ -13,8 +13,8 @@ function json(data: any, status = 200) {
  * We don't want to "hunt" for the exact cookie name.
  * This supports the common variants used in the app so far.
  */
-function getActiveTenantIdFromCookies(): string | null {
-  const c = cookies();
+async function getActiveTenantIdFromCookies(): Promise<string | null> {
+  const c = await cookies();
 
   const candidates = [
     "active_tenant_id",
@@ -34,7 +34,7 @@ function getActiveTenantIdFromCookies(): string | null {
 
 export async function GET() {
   try {
-    const tenantId = getActiveTenantIdFromCookies();
+    const tenantId = await getActiveTenantIdFromCookies();
 
     if (!tenantId) {
       return json(
@@ -72,7 +72,7 @@ export async function GET() {
         settings: row ?? null,
         meta: { schema: "new" },
       });
-    } catch (e: any) {
+    } catch {
       // Fallback for prod DBs missing new columns
       const r = await db.execute(sql`
         select
