@@ -13,21 +13,67 @@ function json(data: any, status = 200) {
 }
 
 const AiMode = z.enum(["assessment_only", "range", "fixed"]);
+const RenderingStyle = z.enum(["photoreal", "clean_oem", "custom"]);
 
 const PostBody = z.object({
   ai_mode: AiMode,
   pricing_enabled: z.boolean(),
+
+  // Rendering policy (tenant-level)
+  rendering_enabled: z.boolean(),
+  rendering_style: RenderingStyle,
+  rendering_notes: z.string().max(2000),
+  rendering_max_per_day: z.number().int().min(0).max(1000),
+  rendering_customer_opt_in_required: z.boolean(),
 });
 
 async function getRow(tenantId: string) {
   const r = await db.execute(sql`
-    select ai_mode, pricing_enabled
+    select
+      ai_mode,
+      pricing_enabled,
+      rendering_enabled,
+      rendering_style,
+      rendering_notes,
+      rendering_max_per_day,
+      rendering_customer_opt_in_required
     from tenant_settings
     where tenant_id = ${tenantId}::uuid
     limit 1
   `);
+
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   return row ?? null;
+}
+
+function normalizeRow(row: any) {
+  const ai_mode = (row?.ai_mode ?? "assessment_only").toString();
+  const pricing_enabled = !!(row?.pricing_enabled ?? false);
+
+  const rendering_enabled = !!(row?.rendering_enabled ?? false);
+
+  const rendering_style_raw = (row?.rendering_style ?? "photoreal").toString();
+  const rendering_style =
+    rendering_style_raw === "photoreal" || rendering_style_raw === "clean_oem" || rendering_style_raw === "custom"
+      ? rendering_style_raw
+      : "photoreal";
+
+  const rendering_notes = (row?.rendering_notes ?? "").toString();
+  const rendering_max_per_day = Number.isFinite(Number(row?.rendering_max_per_day))
+    ? Math.max(0, Number(row?.rendering_max_per_day))
+    : 20;
+
+  const rendering_customer_opt_in_required = !!(row?.rendering_customer_opt_in_required ?? true);
+
+  return {
+    ai_mode,
+    pricing_enabled,
+    rendering_enabled,
+    rendering_style,
+    rendering_notes,
+    rendering_max_per_day,
+    rendering_customer_opt_in_required,
+  };
 }
 
 export async function GET() {
@@ -35,18 +81,13 @@ export async function GET() {
   if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
 
   const row = await getRow(gate.tenantId);
-
-  const ai_mode = (row?.ai_mode ?? "assessment_only").toString();
-  const pricing_enabled = row?.pricing_enabled ?? false;
+  const normalized = normalizeRow(row);
 
   return json({
     ok: true,
     tenantId: gate.tenantId,
     role: gate.role,
-    ai_policy: {
-      ai_mode,
-      pricing_enabled: !!pricing_enabled,
-    },
+    ai_policy: normalized,
   });
 }
 
@@ -61,39 +102,50 @@ export async function POST(req: Request) {
   }
 
   try {
+    const data = parsed.data;
+
     const upd = await db.execute(sql`
       update tenant_settings
-      set ai_mode = ${parsed.data.ai_mode},
-          pricing_enabled = ${parsed.data.pricing_enabled},
-          updated_at = now()
+      set
+        ai_mode = ${data.ai_mode},
+        pricing_enabled = ${data.pricing_enabled},
+
+        rendering_enabled = ${data.rendering_enabled},
+        rendering_style = ${data.rendering_style},
+        rendering_notes = ${data.rendering_notes},
+        rendering_max_per_day = ${data.rendering_max_per_day},
+        rendering_customer_opt_in_required = ${data.rendering_customer_opt_in_required},
+
+        updated_at = now()
       where tenant_id = ${gate.tenantId}::uuid
       returning tenant_id
     `);
 
-    const updatedRow: any =
-      (upd as any)?.rows?.[0] ?? (Array.isArray(upd) ? (upd as any)[0] : null);
+    const updatedRow: any = (upd as any)?.rows?.[0] ?? (Array.isArray(upd) ? (upd as any)[0] : null);
 
     if (!updatedRow?.tenant_id) {
-      // If tenant_settings row doesn't exist yet for some tenant, create a minimal one.
-      // industry_key default is arbitrary here; your onboarding flow can later set it.
+      // If tenant_settings row doesn't exist yet, create one.
+      // (industry_key can be refined later during onboarding)
       await db.execute(sql`
         insert into tenant_settings
-          (id, tenant_id, industry_key, ai_mode, pricing_enabled, created_at)
+          (id, tenant_id, industry_key, ai_mode, pricing_enabled,
+           rendering_enabled, rendering_style, rendering_notes, rendering_max_per_day, rendering_customer_opt_in_required,
+           created_at)
         values
-          (gen_random_uuid(), ${gate.tenantId}::uuid, 'auto', ${parsed.data.ai_mode}, ${parsed.data.pricing_enabled}, now())
+          (gen_random_uuid(), ${gate.tenantId}::uuid, 'auto', ${data.ai_mode}, ${data.pricing_enabled},
+           ${data.rendering_enabled}, ${data.rendering_style}, ${data.rendering_notes}, ${data.rendering_max_per_day}, ${data.rendering_customer_opt_in_required},
+           now())
       `);
     }
 
     const row = await getRow(gate.tenantId);
+    const normalized = normalizeRow(row ?? parsed.data);
 
     return json({
       ok: true,
       tenantId: gate.tenantId,
       role: gate.role,
-      ai_policy: {
-        ai_mode: (row?.ai_mode ?? parsed.data.ai_mode).toString(),
-        pricing_enabled: !!(row?.pricing_enabled ?? parsed.data.pricing_enabled),
-      },
+      ai_policy: normalized,
     });
   } catch (e: any) {
     return json(
