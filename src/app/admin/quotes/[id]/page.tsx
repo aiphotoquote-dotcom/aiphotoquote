@@ -20,13 +20,7 @@ function safeJsonParse(v: any) {
   }
 }
 
-function Badge({
-  ok,
-  text,
-}: {
-  ok: boolean;
-  text: string;
-}) {
+function Badge({ ok, text }: { ok: boolean; text: string }) {
   return (
     <span
       className={[
@@ -70,26 +64,47 @@ function StatusPill({ status }: { status: string }) {
 export default async function AdminQuoteDetailPage(props: PageProps) {
   const { id } = await props.params;
 
-  // Fetch using raw SQL so we don't depend on Drizzle table field names
-  const r = await db.execute(sql`
-    select
-      id,
-      tenant_id,
-      input,
-      output,
-      created_at,
-      render_opt_in,
-      render_status,
-      render_image_url,
-      render_prompt,
-      render_error,
-      rendered_at
-    from quote_logs
-    where id = ${id}::uuid
-    limit 1
-  `);
+  let row: any = null;
+  let renderingColumnsAvailable = true;
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  // Try the "new columns" query first; fallback if columns aren't migrated yet.
+  try {
+    const rNew = await db.execute(sql`
+      select
+        id,
+        tenant_id,
+        input,
+        output,
+        created_at,
+        render_opt_in,
+        render_status,
+        render_image_url,
+        render_prompt,
+        render_error,
+        rendered_at
+      from quote_logs
+      where id = ${id}::uuid
+      limit 1
+    `);
+
+    row =
+      (rNew as any)?.rows?.[0] ??
+      (Array.isArray(rNew) ? (rNew as any)[0] : null);
+  } catch (e: any) {
+    renderingColumnsAvailable = false;
+
+    const rOld = await db.execute(sql`
+      select id, tenant_id, input, output, created_at
+      from quote_logs
+      where id = ${id}::uuid
+      limit 1
+    `);
+
+    row =
+      (rOld as any)?.rows?.[0] ??
+      (Array.isArray(rOld) ? (rOld as any)[0] : null);
+  }
+
   if (!row) notFound();
 
   const input = safeJsonParse(row.input) ?? {};
@@ -114,31 +129,37 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const customerAttempted = Boolean(customer?.attempted);
   const customerSent = Boolean(customer?.sent);
 
-  // Rendering: prefer DB columns, but fall back to output.rendering (older rows)
+  // Rendering: prefer DB columns (if present), fallback to output.rendering
   const outputRendering = output?.rendering ?? null;
 
   const renderOptIn =
-    row.render_opt_in === true || outputRendering?.requested === true ? true : false;
+    (renderingColumnsAvailable && row.render_opt_in === true) ||
+    outputRendering?.requested === true
+      ? true
+      : false;
 
   const renderStatus =
-    (row.render_status as string | null) ??
+    (renderingColumnsAvailable ? (row.render_status as string | null) : null) ??
     (outputRendering?.status as string | null) ??
     "not_requested";
 
   const renderImageUrl =
-    (row.render_image_url as string | null) ??
+    (renderingColumnsAvailable ? (row.render_image_url as string | null) : null) ??
     (outputRendering?.imageUrl as string | null) ??
     null;
 
   const renderPrompt =
-    (row.render_prompt as string | null) ?? null;
+    (renderingColumnsAvailable ? (row.render_prompt as string | null) : null) ?? null;
 
   const renderError =
-    (row.render_error as string | null) ??
+    (renderingColumnsAvailable ? (row.render_error as string | null) : null) ??
     (outputRendering?.error as string | null) ??
     null;
 
-  const renderedAt = row.rendered_at ? new Date(row.rendered_at).toLocaleString() : "";
+  const renderedAt =
+    renderingColumnsAvailable && row.rendered_at
+      ? new Date(row.rendered_at).toLocaleString()
+      : "";
 
   return (
     <div className="mx-auto max-w-5xl p-6">
@@ -256,6 +277,13 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
           </div>
         </div>
 
+        {!renderingColumnsAvailable ? (
+          <div className="mb-4 rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">
+            Rendering columns are not available in the database yet. Run the migration to add the
+            <span className="font-mono"> render_*</span> columns to <span className="font-mono">quote_logs</span>.
+          </div>
+        ) : null}
+
         <div className="grid gap-4 md:grid-cols-2">
           <div className="rounded-xl border border-gray-200 p-4">
             <div className="text-sm font-medium text-gray-900">Details</div>
@@ -267,6 +295,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 Requested (customer opt-in):{" "}
                 <span className="font-mono">{renderOptIn ? "true" : "false"}</span>
               </div>
+
               {renderImageUrl ? (
                 <div>
                   Image URL:{" "}
@@ -331,9 +360,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
               </div>
               <div>
                 Notes:{" "}
-                <span className="whitespace-pre-wrap font-mono">
-                  {customerCtx?.notes ?? ""}
-                </span>
+                <span className="whitespace-pre-wrap font-mono">{customerCtx?.notes ?? ""}</span>
               </div>
             </div>
           </div>
