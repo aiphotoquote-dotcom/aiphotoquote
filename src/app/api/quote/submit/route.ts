@@ -14,7 +14,10 @@ export const runtime = "nodejs";
 const Req = z.object({
   tenantSlug: z.string().min(3),
   images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
+
+  // ✅ NEW: optional customer opt-in for rendering
   render_opt_in: z.boolean().optional(),
+
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -27,7 +30,7 @@ const Req = z.object({
     .optional(),
 });
 
-const QuoteAssessmentSchema = z.object({
+const QuoteOutputSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
   inspection_required: z.boolean(),
   summary: z.string(),
@@ -83,7 +86,6 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
-// tenant_secrets: tenant_id (pk), openai_key_enc text, ...
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
@@ -94,7 +96,6 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   return decryptSecret(enc);
 }
 
-// tenant_settings: business_name, lead_to_email, resend_from_email
 async function getTenantEmailSettings(tenantId: string) {
   const r = await db.execute(sql`
     select business_name, lead_to_email, resend_from_email
@@ -108,156 +109,6 @@ async function getTenantEmailSettings(tenantId: string) {
     businessName: row?.business_name ?? null,
     leadToEmail: row?.lead_to_email ?? null,
     resendFromEmail: row?.resend_from_email ?? null,
-  };
-}
-
-/**
- * Tenant toggle: auto_estimate_enabled
- * - If column exists: use it
- * - If not yet migrated: default true
- */
-async function getTenantAutoEstimateEnabled(tenantId: string): Promise<boolean> {
-  try {
-    const r = await db.execute(sql`
-      select auto_estimate_enabled
-      from tenant_settings
-      where tenant_id = ${tenantId}
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    return row?.auto_estimate_enabled === false ? false : true;
-  } catch {
-    return true;
-  }
-}
-
-/**
- * Tenant toggle: ai_rendering_enabled
- * - If column exists: use it
- * - If not yet migrated: default false (safer)
- */
-async function getTenantAiRenderingEnabled(tenantId: string): Promise<boolean> {
-  try {
-    const r = await db.execute(sql`
-      select ai_rendering_enabled
-      from tenant_settings
-      where tenant_id = ${tenantId}
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    return row?.ai_rendering_enabled === true ? true : false;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Latest tenant pricing rules (if configured)
- */
-async function getTenantPricingRules(tenantId: string) {
-  try {
-    const r = await db.execute(sql`
-      select
-        id,
-        min_job,
-        typical_low,
-        typical_high,
-        max_without_inspection,
-        tone,
-        risk_posture,
-        always_estimate_language,
-        created_at
-      from tenant_pricing_rules
-      where tenant_id = ${tenantId}
-      order by created_at desc
-      limit 1
-    `);
-
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    if (!row) return null;
-
-    return {
-      id: String(row.id),
-      minJob: row.min_job == null ? null : Number(row.min_job),
-      typicalLow: row.typical_low == null ? null : Number(row.typical_low),
-      typicalHigh: row.typical_high == null ? null : Number(row.typical_high),
-      maxWithoutInspection: row.max_without_inspection == null ? null : Number(row.max_without_inspection),
-      tone: row.tone ?? null,
-      riskPosture: row.risk_posture ?? null,
-      alwaysEstimateLanguage: row.always_estimate_language === false ? false : true,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function roundTo10(n: number) {
-  return Math.round(n / 10) * 10;
-}
-
-function estimateFromRules(args: {
-  rules: {
-    id: string;
-    minJob: number | null;
-    typicalLow: number | null;
-    typicalHigh: number | null;
-    maxWithoutInspection: number | null;
-    alwaysEstimateLanguage: boolean;
-  } | null;
-  confidence: "high" | "medium" | "low";
-  inspectionRequired: boolean;
-}) {
-  const { rules, confidence, inspectionRequired } = args;
-
-  const minJob = rules?.minJob ?? 250;
-  const typicalLow = rules?.typicalLow ?? Math.max(minJob, 500);
-  const typicalHigh = rules?.typicalHigh ?? Math.max(typicalLow + 300, typicalLow * 1.6);
-  const maxNoInspect = rules?.maxWithoutInspection ?? null;
-
-  let low = typicalLow;
-  let high = typicalHigh;
-
-  if (confidence === "high") {
-    low *= 0.95;
-    high *= 1.05;
-  } else if (confidence === "medium") {
-    low *= 0.9;
-    high *= 1.15;
-  } else {
-    low *= 0.85;
-    high *= 1.3;
-  }
-
-  if (inspectionRequired) {
-    low *= 0.95;
-    high *= 1.1;
-    if (maxNoInspect != null) {
-      high = Math.min(high, maxNoInspect);
-    }
-  } else {
-    if (maxNoInspect != null) {
-      high = Math.min(high, maxNoInspect);
-    }
-  }
-
-  low = Math.max(low, minJob);
-  high = Math.max(high, low + 50);
-
-  low = roundTo10(low);
-  high = roundTo10(high);
-
-  return {
-    currency: "USD" as const,
-    low,
-    high,
-    method: rules ? "tenant_pricing_rules" : "default_rules",
-    pricing_rule_id: rules?.id ?? null,
-    inspection_required: inspectionRequired,
-    confidence,
-    note: inspectionRequired
-      ? "Estimate is preliminary; inspection recommended to confirm scope."
-      : "Estimate is preliminary; final price may change after inspection/material selection.",
-    always_estimate_language: rules?.alwaysEstimateLanguage ?? true,
   };
 }
 
@@ -317,30 +168,6 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
-async function tryUpdateQuoteLogScalars(args: {
-  quoteLogId: string;
-  confidence: "high" | "medium" | "low" | null;
-  inspectionRequired: boolean | null;
-  estimateLow: number | null;
-  estimateHigh: number | null;
-}) {
-  const { quoteLogId, confidence, inspectionRequired, estimateLow, estimateHigh } = args;
-
-  try {
-    await db.execute(sql`
-      update quote_logs
-      set
-        confidence = ${confidence},
-        inspection_required = ${inspectionRequired},
-        estimate_low = ${estimateLow},
-        estimate_high = ${estimateHigh}
-      where id = ${quoteLogId}::uuid
-    `);
-  } catch {
-    // ignore if columns don't exist
-  }
-}
-
 function esc(s: unknown) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -358,10 +185,8 @@ function renderLeadEmailHTML(args: {
   notes?: string;
   images: string[];
   assessment: any;
-  estimate: any;
-  rendering: any;
 }) {
-  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment, estimate, rendering } = args;
+  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment } = args;
 
   const imgs = images
     .map(
@@ -371,20 +196,6 @@ function renderLeadEmailHTML(args: {
         )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
     )
     .join("");
-
-  const estBlock = estimate
-    ? `<h3 style="margin:18px 0 6px;">Estimate</h3>
-       <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
-         JSON.stringify(estimate, null, 2)
-       )}</pre>`
-    : "";
-
-  const renderBlock = rendering
-    ? `<h3 style="margin:18px 0 6px;">Rendering (opt-in)</h3>
-       <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
-         JSON.stringify(rendering, null, 2)
-       )}</pre>`
-    : "";
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
@@ -417,9 +228,6 @@ function renderLeadEmailHTML(args: {
     <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
       JSON.stringify(assessment, null, 2)
     )}</pre>
-
-    ${estBlock}
-    ${renderBlock}
   </div>`;
 }
 
@@ -429,10 +237,8 @@ function renderCustomerEmailHTML(args: {
   notes?: string;
   images: string[];
   assessment: any;
-  estimate: any;
-  rendering: any;
 }) {
-  const { businessName, quoteLogId, notes, images, assessment, estimate, rendering } = args;
+  const { businessName, quoteLogId, notes, images, assessment } = args;
 
   const imgs = images
     .map(
@@ -442,18 +248,6 @@ function renderCustomerEmailHTML(args: {
         )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb;border-radius:10px"/></div>`
     )
     .join("");
-
-  const estBlock = estimate
-    ? `<h3 style="margin:18px 0 6px;">Estimate</h3>
-       <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
-         JSON.stringify(estimate, null, 2)
-       )}</pre>`
-    : `<p style="color:#6b7280;margin-top:14px;">We’ll follow up with pricing after review.</p>`;
-
-  const renderLine =
-    rendering?.requested === true
-      ? `<p style="color:#374151;margin-top:10px;"><b>Optional:</b> You opted in to an AI concept rendering (if available). This may be delivered after review.</p>`
-      : "";
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
@@ -482,9 +276,6 @@ function renderCustomerEmailHTML(args: {
       JSON.stringify(assessment, null, 2)
     )}</pre>
 
-    ${estBlock}
-    ${renderLine}
-
     <p style="color:#6b7280;margin-top:14px;">
       — ${esc(businessName)}
     </p>
@@ -498,8 +289,6 @@ async function sendEmailsIfConfigured(args: {
   notes?: string;
   images: string[];
   assessment: any;
-  estimate: any;
-  rendering: any;
   customer: { name?: string; email?: string; phone?: string };
   tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
 }) {
@@ -524,7 +313,6 @@ async function sendEmailsIfConfigured(args: {
 
   const resend = new Resend(resendKey);
 
-  // Lead email
   try {
     result.lead.attempted = true;
     const leadHtml = renderLeadEmailHTML({
@@ -535,8 +323,6 @@ async function sendEmailsIfConfigured(args: {
       notes: args.notes,
       images: args.images,
       assessment: args.assessment,
-      estimate: args.estimate,
-      rendering: args.rendering,
     });
 
     const leadRes = await resend.emails.send({
@@ -554,7 +340,6 @@ async function sendEmailsIfConfigured(args: {
     result.lead.error = e?.message ?? String(e);
   }
 
-  // Customer receipt
   if (args.customer.email) {
     try {
       result.customer.attempted = true;
@@ -565,8 +350,6 @@ async function sendEmailsIfConfigured(args: {
         notes: args.notes,
         images: args.images,
         assessment: args.assessment,
-        estimate: args.estimate,
-        rendering: args.rendering,
       });
 
       const custRes = await resend.emails.send({
@@ -607,8 +390,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantSlug, images, customer_context } = parsed.data;
-    const requestedRenderOptIn = parsed.data.render_opt_in === true;
+    const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
@@ -634,16 +416,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const autoEstimateEnabled = await getTenantAutoEstimateEnabled(tenantId);
-    const tenantRenderingEnabled = await getTenantAiRenderingEnabled(tenantId);
-
-    // Effective opt-in must be tenant enabled AND customer opted in
-    const renderOptIn = tenantRenderingEnabled && requestedRenderOptIn;
-
-    // Pull tenant email identity + routing
     const tenantEmailSettings = await getTenantEmailSettings(tenantId);
 
-    // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
     if (bad.length) {
@@ -659,7 +433,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Insert quote log
+    // Insert quote log (store raw input including render_opt_in)
     try {
       quoteLogId = await insertQuoteLog(tenantId, raw);
     } catch (e: any) {
@@ -712,45 +486,15 @@ export async function POST(req: Request) {
 
     const rawText = r.output_text?.trim() || "";
 
-    let structured: z.infer<typeof QuoteAssessmentSchema> | null = null;
+    let structured: z.infer<typeof QuoteOutputSchema> | null = null;
     try {
       const obj = JSON.parse(rawText);
-      const validated = QuoteAssessmentSchema.safeParse(obj);
+      const validated = QuoteOutputSchema.safeParse(obj);
       structured = validated.success ? validated.data : null;
     } catch {}
 
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
-
-    // Pricing
-    let estimate: any = null;
-    if (autoEstimateEnabled && structured) {
-      const rules = await getTenantPricingRules(tenantId);
-      estimate = estimateFromRules({
-        rules,
-        confidence: structured.confidence,
-        inspectionRequired: structured.inspection_required,
-      });
-    }
-
-    // Persist scalar columns if available
-    if (structured) {
-      await tryUpdateQuoteLogScalars({
-        quoteLogId,
-        confidence: structured.confidence,
-        inspectionRequired: structured.inspection_required,
-        estimateLow: typeof estimate?.low === "number" ? estimate.low : null,
-        estimateHigh: typeof estimate?.high === "number" ? estimate.high : null,
-      });
-    }
-
-    const rendering = {
-      tenant_enabled: tenantRenderingEnabled,
-      requested: renderOptIn,
-      status: renderOptIn ? "queued" : "not_requested",
-      // second-step: no image yet
-      imageUrl: null as string | null,
-    };
 
     const customer = {
       name: customer_context?.name,
@@ -758,7 +502,6 @@ export async function POST(req: Request) {
       phone: customer_context?.phone,
     };
 
-    // Send emails (include rendering metadata)
     const emailResult = await sendEmailsIfConfigured({
       tenantSlug,
       quoteLogId,
@@ -766,26 +509,26 @@ export async function POST(req: Request) {
       notes,
       images: images.map((i) => i.url),
       assessment: finalAssessment,
-      estimate,
-      rendering,
       customer,
       tenantEmailSettings,
     });
 
-    // Persist output json (includes rendering)
+    // Persist output; include render opt-in flag for later step
     try {
       await updateQuoteLogOutput(quoteLogId, {
         status: "completed",
         assessment: finalAssessment,
-        estimate,
-        rendering,
         email: emailResult,
+        rendering: {
+          requested: Boolean(render_opt_in),
+          status: Boolean(render_opt_in) ? "queued" : "not_requested",
+        },
         meta: {
           tenantSlug,
           category,
           service_type: serviceType,
+          render_opt_in: Boolean(render_opt_in),
           durationMs: Date.now() - startedAt,
-          auto_estimate_enabled: autoEstimateEnabled,
         },
       });
     } catch (e: any) {
@@ -796,8 +539,6 @@ export async function POST(req: Request) {
           tenantId,
           imagePreflight: checks,
           assessment: finalAssessment,
-          estimate,
-          rendering,
           email: emailResult,
           warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
           durationMs: Date.now() - startedAt,
@@ -814,8 +555,6 @@ export async function POST(req: Request) {
         tenantId,
         imagePreflight: checks,
         assessment: finalAssessment,
-        estimate,
-        rendering,
         email: emailResult,
         durationMs: Date.now() - startedAt,
       },
