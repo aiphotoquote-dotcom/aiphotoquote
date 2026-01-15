@@ -22,14 +22,26 @@ type SettingsResp =
     }
   | { ok: false; error: string; message?: string; issues?: any };
 
+type EmailStatusResp =
+  | {
+      ok: true;
+      enabled: boolean;
+      platform: { resend_key_present: boolean };
+      tenant: {
+        business_name_present: boolean;
+        lead_to_email_present: boolean;
+        resend_from_email_present: boolean;
+      };
+      notes: string[];
+    }
+  | { ok: false; error: string; message?: string };
+
 async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    // Most common causes: 404 HTML page or auth redirect HTML
     throw new Error(
       `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ` +
-        `This usually means the route is missing or you were redirected to sign-in.\n` +
         `First 80 chars: ${text.slice(0, 80)}`
     );
   }
@@ -48,6 +60,8 @@ export default function AdminTenantSettingsPage() {
   const [leadToEmail, setLeadToEmail] = useState("");
   const [fromEmail, setFromEmail] = useState("");
 
+  const [emailStatus, setEmailStatus] = useState<EmailStatusResp | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -55,9 +69,9 @@ export default function AdminTenantSettingsPage() {
 
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
-  // IMPORTANT: your build output shows /api/tenant/context exists (NOT /api/admin/tenant/context)
   const CONTEXT_URL = "/api/tenant/context";
   const SETTINGS_URL = "/api/admin/tenant-settings";
+  const EMAIL_STATUS_URL = "/api/admin/email/status";
 
   async function loadContext() {
     const res = await fetch(CONTEXT_URL, { cache: "no-store" });
@@ -78,6 +92,12 @@ export default function AdminTenantSettingsPage() {
     setFromEmail(data.settings.resend_from_email || "");
   }
 
+  async function loadEmailStatus() {
+    const res = await fetch(EMAIL_STATUS_URL, { cache: "no-store" });
+    const data = await safeJson<EmailStatusResp>(res);
+    setEmailStatus(data);
+  }
+
   async function bootstrap() {
     setErr(null);
     setMsg(null);
@@ -87,12 +107,17 @@ export default function AdminTenantSettingsPage() {
       const activeTenantId = await loadContext();
       if (!activeTenantId) {
         setErr("No tenants found for this user yet.");
+        setEmailStatus(null);
         return;
       }
+
       await loadSettings();
+      await loadEmailStatus();
+
       setMsg("Loaded.");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
+      setEmailStatus(null);
     } finally {
       setLoading(false);
     }
@@ -140,6 +165,10 @@ export default function AdminTenantSettingsPage() {
       if (!data.ok) throw new Error(data.message || data.error || "Failed to save settings");
 
       setRole(data.role);
+
+      // Refresh email readiness immediately after save
+      await loadEmailStatus();
+
       setMsg("Saved.");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -196,6 +225,7 @@ export default function AdminTenantSettingsPage() {
         </div>
       </div>
 
+      {/* Tenant switcher */}
       <div className="mb-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
         <div className="text-sm font-semibold text-gray-900">Active Tenant</div>
         <p className="mt-1 text-sm text-gray-600">If you belong to multiple tenants, switch here.</p>
@@ -210,7 +240,9 @@ export default function AdminTenantSettingsPage() {
                 onClick={() => switchTenant(t.tenantId)}
                 className={[
                   "w-full text-left rounded-md border px-3 py-2 text-sm hover:bg-gray-50",
-                  t.tenantId === context.activeTenantId ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white",
+                  t.tenantId === context.activeTenantId
+                    ? "border-blue-400 bg-blue-50"
+                    : "border-gray-200 bg-white",
                 ].join(" ")}
               >
                 <div className="flex items-center justify-between">
@@ -226,6 +258,64 @@ export default function AdminTenantSettingsPage() {
         </div>
       </div>
 
+      {/* Live email readiness */}
+      <div className="mb-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="text-sm font-semibold text-gray-900">Email Status</div>
+        <p className="mt-1 text-sm text-gray-600">
+          This shows whether email is configured (domain verification may still be required).
+        </p>
+
+        {emailStatus?.ok ? (
+          <div className="mt-3 grid gap-2 text-sm">
+            <div
+              className={[
+                "rounded-lg border p-3",
+                emailStatus.enabled ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50",
+              ].join(" ")}
+            >
+              <div className="font-medium text-gray-900">
+                {emailStatus.enabled ? "Configured" : "Needs setup"}
+              </div>
+              <ul className="mt-1 list-disc pl-5 text-gray-700 space-y-1">
+                {emailStatus.notes.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="grid gap-1 text-xs text-gray-700">
+              <div>
+                Platform: RESEND_API_KEY{" "}
+                <span className={emailStatus.platform.resend_key_present ? "text-green-700" : "text-red-700"}>
+                  {emailStatus.platform.resend_key_present ? "present" : "missing"}
+                </span>
+              </div>
+              <div>
+                Tenant: business_name{" "}
+                <span className={emailStatus.tenant.business_name_present ? "text-green-700" : "text-red-700"}>
+                  {emailStatus.tenant.business_name_present ? "set" : "missing"}
+                </span>
+                {" · "}lead_to_email{" "}
+                <span className={emailStatus.tenant.lead_to_email_present ? "text-green-700" : "text-red-700"}>
+                  {emailStatus.tenant.lead_to_email_present ? "set" : "missing"}
+                </span>
+                {" · "}resend_from_email{" "}
+                <span className={emailStatus.tenant.resend_from_email_present ? "text-green-700" : "text-red-700"}>
+                  {emailStatus.tenant.resend_from_email_present ? "set" : "missing"}
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : emailStatus ? (
+          <div className="mt-3 text-sm text-red-700">
+            {emailStatus.message || emailStatus.error || "Failed to load email status."}
+          </div>
+        ) : (
+          <div className="mt-3 text-sm text-gray-700">Loading status…</div>
+        )}
+      </div>
+
+      {/* Settings */}
       <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
         {loading ? (
           <div className="text-sm text-gray-700">Loading…</div>
@@ -283,10 +373,6 @@ export default function AdminTenantSettingsPage() {
 
               {msg && <span className="text-sm text-green-700">{msg}</span>}
               {err && <span className="text-sm text-red-700 whitespace-pre-wrap">{err}</span>}
-            </div>
-
-            <div className="rounded-lg border border-gray-200 bg-gray-100 p-4 text-sm text-gray-700">
-              Platform env var still required: <span className="font-mono">RESEND_API_KEY</span>
             </div>
           </div>
         )}
