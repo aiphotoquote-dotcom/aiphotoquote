@@ -116,6 +116,17 @@ export const quoteLogs = pgTable("quote_logs", {
   estimateHigh: integer("estimate_high"),
   inspectionRequired: boolean("inspection_required"),
 
+  // --- AI Rendering (optional 2nd step) ---
+  renderOptIn: boolean("render_opt_in").notNull().default(false),
+
+  // "not_requested" | "queued" | "rendered" | "failed"
+  renderStatus: text("render_status").notNull().default("not_requested"),
+
+  renderImageUrl: text("render_image_url"),
+  renderPrompt: text("render_prompt"),
+  renderError: text("render_error"),
+  renderedAt: timestamp("rendered_at", { withTimezone: true }),
+
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
