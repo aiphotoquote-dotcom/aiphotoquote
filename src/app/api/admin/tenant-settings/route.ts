@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import crypto from "crypto";
-import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
-import { tenants } from "@/lib/db/schema";
+import { requireTenantRole } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,25 +19,11 @@ const PostBody = z.object({
   resend_from_email: z.string().trim().min(5).max(200), // "Name <email@domain>"
 });
 
-async function getTenantForCurrentUser() {
-  const { userId } = await auth();
-  if (!userId) return null;
-
-  // Use "as any" so we don't depend on Drizzle field name typing here.
-  const rows = await db
-    .select()
-    .from(tenants)
-    .where(eq((tenants as any).ownerClerkUserId, userId))
-    .limit(1);
-
-  return (rows as any)?.[0] ?? null;
-}
-
 async function getTenantSettingsRow(tenantId: string) {
   const r = await db.execute(sql`
     select tenant_id, business_name, lead_to_email, resend_from_email
     from tenant_settings
-    where tenant_id = ${tenantId}
+    where tenant_id = ${tenantId}::uuid
     limit 1
   `);
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
@@ -52,7 +37,7 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
       business_name = ${data.business_name},
       lead_to_email = ${data.lead_to_email},
       resend_from_email = ${data.resend_from_email}
-    where tenant_id = ${tenantId}
+    where tenant_id = ${tenantId}::uuid
     returning tenant_id
   `);
 
@@ -67,22 +52,22 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
     insert into tenant_settings
       (id, tenant_id, industry_key, business_name, lead_to_email, resend_from_email, created_at)
     values
-      (${newId}::uuid, ${tenantId}, 'auto', ${data.business_name}, ${data.lead_to_email}, ${data.resend_from_email}, now())
+      (${newId}::uuid, ${tenantId}::uuid, 'auto', ${data.business_name}, ${data.lead_to_email}, ${data.resend_from_email}, now())
   `);
 
   return await getTenantSettingsRow(tenantId);
 }
 
 export async function GET() {
-  const tenant = await getTenantForCurrentUser();
-  if (!tenant) return json({ ok: false, error: "UNAUTHORIZED_OR_NO_TENANT" }, 401);
+  const gate = await requireTenantRole(["owner", "admin"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
 
-  const tenantId = (tenant as any).id as string;
-  const settings = await getTenantSettingsRow(tenantId);
+  const settings = await getTenantSettingsRow(gate.tenantId);
 
   return json({
     ok: true,
-    tenant: { id: tenantId, slug: (tenant as any).slug },
+    tenantId: gate.tenantId,
+    role: gate.role,
     settings: {
       business_name: settings?.business_name ?? "",
       lead_to_email: settings?.lead_to_email ?? "",
@@ -92,8 +77,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const tenant = await getTenantForCurrentUser();
-  if (!tenant) return json({ ok: false, error: "UNAUTHORIZED_OR_NO_TENANT" }, 401);
+  const gate = await requireTenantRole(["owner", "admin"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
 
   const body = await req.json().catch(() => null);
   const parsed = PostBody.safeParse(body);
@@ -101,13 +86,12 @@ export async function POST(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  const tenantId = (tenant as any).id as string;
-
   try {
-    const saved = await upsertTenantEmailSettings(tenantId, parsed.data);
+    const saved = await upsertTenantEmailSettings(gate.tenantId, parsed.data);
     return json({
       ok: true,
-      tenant: { id: tenantId, slug: (tenant as any).slug },
+      tenantId: gate.tenantId,
+      role: gate.role,
       settings: {
         business_name: saved?.business_name ?? "",
         lead_to_email: saved?.lead_to_email ?? "",
