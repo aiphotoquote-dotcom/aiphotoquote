@@ -28,7 +28,6 @@ function formatUSPhone(input: string) {
 
 function isValidEmail(email: string) {
   const s = (email || "").trim();
-  // Simple and safe (we don't need RFC perfection)
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
@@ -90,6 +89,78 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
+function asArray(v: any): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
+  return [];
+}
+
+function titleCase(s: string) {
+  const v = String(s || "").trim();
+  if (!v) return "";
+  return v.charAt(0).toUpperCase() + v.slice(1);
+}
+
+function Pill({
+  label,
+  tone = "neutral",
+}: {
+  label: string;
+  tone?: "neutral" | "green" | "yellow" | "red" | "blue";
+}) {
+  const cls =
+    tone === "green"
+      ? "bg-green-100 text-green-800"
+      : tone === "yellow"
+      ? "bg-yellow-100 text-yellow-800"
+      : tone === "red"
+      ? "bg-red-100 text-red-800"
+      : tone === "blue"
+      ? "bg-blue-100 text-blue-800"
+      : "bg-gray-100 text-gray-800";
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+/**
+ * Normalize quote response shapes:
+ * - newer API returns { assessment, estimate }
+ * - older UI expected result.output.*
+ */
+function pickAssessmentFromResult(result: any) {
+  if (!result || typeof result !== "object") return null;
+
+  // Preferred new: result.assessment
+  if (result.assessment && typeof result.assessment === "object") return result.assessment;
+
+  // Alternate: result.output is the assessment
+  if (result.output && typeof result.output === "object") return result.output;
+
+  // Nested: result.output.assessment
+  if (result.output?.assessment && typeof result.output.assessment === "object")
+    return result.output.assessment;
+
+  return null;
+}
+
+function pickEstimateFromResult(result: any) {
+  if (!result || typeof result !== "object") return null;
+
+  // Preferred new: result.estimate
+  if (result.estimate !== undefined) return result.estimate;
+
+  // Old: result.output.estimate
+  if (result.output?.estimate !== undefined) return result.output.estimate;
+
+  return null;
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false,
@@ -109,9 +180,6 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // ✅ Customer opt-in (only shown/used if tenant enabled)
-  const [renderOptIn, setRenderOptIn] = useState(false);
-
   const [working, setWorking] = useState(false);
   const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
@@ -128,10 +196,10 @@ export default function QuoteForm({
   }, [customerName, email, phone]);
 
   const step = useMemo(() => {
-    if (result?.output) return 3;
+    if (result) return 3;
     if (files.length > 0) return 2;
     return 1;
-  }, [files.length, result?.output]);
+  }, [files.length, result]);
 
   // Progress bar like Maggio: 3 steps with smooth fill + label
   const progress = useMemo(() => {
@@ -146,13 +214,13 @@ export default function QuoteForm({
       if (phase === "analyzing") p = 0.82;
     }
 
-    if (result?.output) p = 1.0;
+    if (result) p = 1.0;
 
     return Math.max(0, Math.min(1, p));
-  }, [step, working, phase, result?.output]);
+  }, [step, working, phase, result]);
 
   const progressLabel = useMemo(() => {
-    if (result?.output) return "Estimate ready";
+    if (result) return "Estimate ready";
     if (working) {
       if (phase === "compressing") return "Optimizing photos…";
       if (phase === "uploading") return "Uploading…";
@@ -161,7 +229,7 @@ export default function QuoteForm({
     if (step === 1) return "Add photos";
     if (step === 2) return "Add details";
     return "Review estimate";
-  }, [result?.output, working, phase, step]);
+  }, [result, working, phase, step]);
 
   const progressText = useMemo(() => {
     if (files.length >= MIN_PHOTOS) {
@@ -171,19 +239,14 @@ export default function QuoteForm({
     return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
   }, [files.length, contactOk]);
 
-  // Auto-scroll to estimate once it appears
+  // Auto-scroll to results once it appears
   useEffect(() => {
-    if (!result?.output) return;
+    if (!result) return;
     (async () => {
       await sleep(50);
       resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     })();
-  }, [result?.output]);
-
-  // If tenant disables rendering, force opt-in off (avoids stale UI state)
-  useEffect(() => {
-    if (!aiRenderingEnabled) setRenderOptIn(false);
-  }, [aiRenderingEnabled]);
+  }, [result]);
 
   function rebuildPreviews(nextFiles: File[]) {
     previews.forEach((p) => URL.revokeObjectURL(p));
@@ -207,7 +270,6 @@ export default function QuoteForm({
     setError(null);
     setResult(null);
     setNotes("");
-    setRenderOptIn(false);
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
@@ -269,8 +331,6 @@ export default function QuoteForm({
             phone: digitsOnly(phone),
             notes,
           },
-          // ✅ only send true when tenant allows + user opted in
-          render_opt_in: aiRenderingEnabled ? renderOptIn : false,
         }),
       });
 
@@ -286,7 +346,37 @@ export default function QuoteForm({
     }
   }
 
-  const rendering = result?.rendering ?? null;
+  const assessment = useMemo(() => pickAssessmentFromResult(result), [result]);
+  const estimate = useMemo(() => pickEstimateFromResult(result), [result]);
+
+  // Pretty fields
+  const summary = assessment?.summary ? String(assessment.summary) : "";
+  const confidence = assessment?.confidence ? String(assessment.confidence) : "";
+  const inspectionRequired = assessment?.inspection_required === true;
+
+  const questions = asArray(assessment?.questions);
+  const visibleScope = asArray(assessment?.visible_scope);
+  const assumptions = asArray(assessment?.assumptions);
+
+  const confidenceTone =
+    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "neutral";
+
+  // Estimate support (if you later wire real pricing)
+  const estLow =
+    typeof estimate?.low === "number"
+      ? estimate.low
+      : typeof estimate?.estimate?.low === "number"
+        ? estimate.estimate.low
+        : null;
+
+  const estHigh =
+    typeof estimate?.high === "number"
+      ? estimate.high
+      : typeof estimate?.estimate?.high === "number"
+        ? estimate.estimate.high
+        : null;
+
+  const hasEstimateRange = typeof estLow === "number" && typeof estHigh === "number";
 
   return (
     <div className="space-y-6">
@@ -313,7 +403,7 @@ export default function QuoteForm({
             Details
           </div>
           <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900" : ""}`}>
-            Estimate
+            Result
           </div>
         </div>
       </div>
@@ -412,9 +502,7 @@ export default function QuoteForm({
           <ul className="mt-2 space-y-1 text-gray-700">
             <li>{files.length >= 1 ? "✅" : "⬜️"} Wide shot added</li>
             <li>{files.length >= 2 ? "✅" : "⬜️"} Close-up added</li>
-            <li className="text-xs text-gray-600 pt-1">
-              Tip: If you’re unsure, take one extra angle photo.
-            </li>
+            <li className="text-xs text-gray-600 pt-1">Tip: If you’re unsure, take one extra angle photo.</li>
           </ul>
         </div>
 
@@ -523,24 +611,13 @@ export default function QuoteForm({
           />
         </label>
 
-        {/* ✅ Rendering opt-in (only when tenant enabled) */}
         {aiRenderingEnabled ? (
-          <label className="flex items-start gap-3 rounded-xl border p-4">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={renderOptIn}
-              onChange={(e) => setRenderOptIn(e.target.checked)}
-              disabled={working}
-            />
-            <div className="text-sm">
-              <div className="font-semibold">Add an AI concept rendering (optional)</div>
-              <div className="mt-1 text-xs text-gray-600">
-                If selected, we’ll try to generate a concept “after” image of what the finished
-                result could look like. This is conceptual, not a guarantee.
-              </div>
-            </div>
-          </label>
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
+            <div className="font-semibold">Optional: AI concept rendering</div>
+            <p className="mt-1 text-xs text-gray-600">
+              Some shops offer an optional AI concept rendering after review. You’ll be able to opt in if available.
+            </p>
+          </div>
         ) : null}
 
         <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
@@ -578,83 +655,102 @@ export default function QuoteForm({
         )}
       </section>
 
-      {/* Results */}
-      {result?.output && (
+      {/* Results (pretty) */}
+      {result && (
         <section ref={resultsRef} className="rounded-2xl border p-5 space-y-4">
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold">Your Estimate</h2>
-            <div className="text-xs text-gray-600">
-              Confidence: <b>{result.output.confidence}</b>
-            </div>
-          </div>
-
-          <div className="rounded-xl bg-gray-50 p-4">
-            <div className="text-sm font-medium">Estimated Price Range</div>
-            <div className="mt-1 text-2xl font-semibold">
-              {formatMoney(result.output.estimate.low)} – {formatMoney(result.output.estimate.high)}
-            </div>
-            {result.output.inspection_required && (
-              <p className="mt-2 text-xs text-gray-600">
-                Inspection recommended to confirm scope and pricing.
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">Your Result</h2>
+              <p className="mt-1 text-xs text-gray-600">
+                This is a photo-based preliminary assessment. We may follow up with questions.
               </p>
-            )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Pill
+                label={confidence ? `Confidence: ${titleCase(confidence)}` : "Confidence: —"}
+                tone={confidenceTone}
+              />
+              <Pill
+                label={inspectionRequired ? "Inspection recommended" : "Inspection not required"}
+                tone={inspectionRequired ? "yellow" : "green"}
+              />
+            </div>
           </div>
 
-          <p className="text-sm">{result.output.summary}</p>
+          {/* Estimate block (only if we have numbers) */}
+          {hasEstimateRange ? (
+            <div className="rounded-xl bg-gray-50 p-4">
+              <div className="text-sm font-medium">Estimated Price Range</div>
+              <div className="mt-1 text-2xl font-semibold">
+                {formatMoney(estLow!)} – {formatMoney(estHigh!)}
+              </div>
+              {inspectionRequired ? (
+                <p className="mt-2 text-xs text-gray-600">
+                  Inspection recommended to confirm scope and pricing.
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+              <div className="text-sm font-semibold">Next step</div>
+              <p className="mt-1 text-sm text-gray-700">
+                We’ve received your photos and generated a preliminary assessment. Pricing will follow after review.
+              </p>
+            </div>
+          )}
 
-          {!!result.output.questions?.length && (
-            <div className="rounded-xl border p-4">
-              <div className="text-sm font-semibold">Quick questions</div>
-              <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
-                {result.output.questions.slice(0, 6).map((x: string, i: number) => (
+          {/* Summary */}
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="text-sm font-semibold text-gray-900">Summary</div>
+            <div className="mt-2 text-sm text-gray-800 whitespace-pre-wrap">
+              {summary || <span className="text-gray-500">(no summary)</span>}
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            {/* Visible scope */}
+            <div className="rounded-xl border border-gray-200 p-4">
+              <div className="text-sm font-semibold text-gray-900">What we can see</div>
+              {visibleScope.length ? (
+                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 space-y-1">
+                  {visibleScope.slice(0, 10).map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-2 text-sm text-gray-500">(none listed)</div>
+              )}
+            </div>
+
+            {/* Assumptions */}
+            <div className="rounded-xl border border-gray-200 p-4">
+              <div className="text-sm font-semibold text-gray-900">Assumptions</div>
+              {assumptions.length ? (
+                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 space-y-1">
+                  {assumptions.slice(0, 10).map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-2 text-sm text-gray-500">(none listed)</div>
+              )}
+            </div>
+          </div>
+
+          {/* Questions */}
+          {questions.length ? (
+            <div className="rounded-xl border border-gray-200 p-4">
+              <div className="text-sm font-semibold text-gray-900">Quick questions</div>
+              <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 space-y-1">
+                {questions.slice(0, 8).map((x, i) => (
                   <li key={i}>{x}</li>
                 ))}
               </ul>
             </div>
-          )}
-
-          {/* ✅ Rendering result (if requested / available) */}
-          {rendering ? (
-            <div className="rounded-xl border p-4 space-y-2">
-              <div className="flex items-center justify-between gap-4">
-                <div className="text-sm font-semibold">AI Concept Rendering</div>
-                <div className="text-xs text-gray-600">
-                  Status: <b>{String(rendering.status || "unknown")}</b>
-                </div>
-              </div>
-
-              {rendering.imageUrl ? (
-                <div className="space-y-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={rendering.imageUrl}
-                    alt="AI concept rendering"
-                    className="w-full rounded-xl border object-contain"
-                  />
-                  <div className="text-xs text-gray-600">
-                    Concept image for inspiration only — final result depends on materials and scope.
-                  </div>
-                </div>
-              ) : rendering.requested ? (
-                <div className="text-xs text-gray-700">
-                  {rendering.allowed === false ? (
-                    <span>
-                      Rendering was requested, but this shop has it disabled right now.
-                    </span>
-                  ) : rendering.status === "failed" ? (
-                    <span>
-                      We couldn’t generate a rendering this time. Your estimate is still valid.
-                    </span>
-                  ) : (
-                    <span>
-                      Rendering requested. If available, it will appear here after processing.
-                    </span>
-                  )}
-                </div>
-              ) : null}
-            </div>
           ) : null}
 
+          {/* Actions */}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="sr-only">Add another photo</span>
@@ -692,9 +788,19 @@ export default function QuoteForm({
               onClick={onSubmit}
               disabled={working || !contactOk}
             >
-              Re-run Estimate with Updated Photos
+              Re-run with Updated Photos
             </button>
           )}
+
+          {/* Debug (collapsed) */}
+          <details className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+            <summary className="cursor-pointer text-sm font-semibold text-gray-900">
+              Debug details (raw JSON)
+            </summary>
+            <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs">
+              {JSON.stringify(result, null, 2)}
+            </pre>
+          </details>
 
           <p className="text-center text-xs text-gray-600">
             Tip: Add a new angle photo, then click <b>Re-run</b> for better accuracy.
