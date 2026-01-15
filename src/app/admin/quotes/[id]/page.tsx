@@ -33,26 +33,23 @@ function Badge({ ok, text }: { ok: boolean; text: string }) {
   );
 }
 
-function StatusPill({ status }: { status: string }) {
-  const s = String(status || "").toLowerCase();
-
+function Pill({
+  label,
+  tone = "neutral",
+}: {
+  label: string;
+  tone?: "neutral" | "green" | "yellow" | "red" | "blue";
+}) {
   const cls =
-    s === "rendered"
+    tone === "green"
       ? "bg-green-100 text-green-800"
-      : s === "queued"
+      : tone === "yellow"
         ? "bg-yellow-100 text-yellow-800"
-        : s === "failed"
+        : tone === "red"
           ? "bg-red-100 text-red-800"
-          : "bg-gray-100 text-gray-800";
-
-  const label =
-    s === "rendered"
-      ? "RENDERED"
-      : s === "queued"
-        ? "QUEUED"
-        : s === "failed"
-          ? "FAILED"
-          : "NOT REQUESTED";
+          : tone === "blue"
+            ? "bg-blue-100 text-blue-800"
+            : "bg-gray-100 text-gray-800";
 
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
@@ -80,6 +77,18 @@ function pickAssessment(output: any) {
   if (looksLikeAssessment) return output;
 
   return null;
+}
+
+function titleCase(s: string) {
+  const v = String(s || "").trim();
+  if (!v) return "";
+  return v.charAt(0).toUpperCase() + v.slice(1);
+}
+
+function asArray(v: any): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
+  return [];
 }
 
 export default async function AdminQuoteDetailPage(props: PageProps) {
@@ -166,7 +175,8 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
     (outputRendering?.imageUrl as string | null) ??
     null;
 
-  const renderPrompt = (renderingColumnsAvailable ? (row.render_prompt as string | null) : null) ?? null;
+  const renderPrompt =
+    (renderingColumnsAvailable ? (row.render_prompt as string | null) : null) ?? null;
 
   const renderError =
     (renderingColumnsAvailable ? (row.render_error as string | null) : null) ??
@@ -175,6 +185,28 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
 
   const renderedAt =
     renderingColumnsAvailable && row.rendered_at ? new Date(row.rendered_at).toLocaleString() : "";
+
+  // Assessment fields (normalized)
+  const a = assessment ?? null;
+  const summary = a?.summary ? String(a.summary) : "";
+  const confidence = a?.confidence ? String(a.confidence) : "";
+  const inspectionRequired = a?.inspection_required === true;
+
+  const questions = asArray(a?.questions);
+  const visibleScope = asArray(a?.visible_scope);
+  const assumptions = asArray(a?.assumptions);
+
+  const confidenceTone =
+    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "neutral";
+
+  const statusTone =
+    renderStatus === "rendered"
+      ? "green"
+      : renderStatus === "queued"
+        ? "yellow"
+        : renderStatus === "failed"
+          ? "red"
+          : "neutral";
 
   return (
     <div className="mx-auto max-w-5xl p-6">
@@ -274,10 +306,15 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
         <div className="mb-3 flex items-center justify-between gap-4">
           <h2 className="text-lg font-semibold">AI Rendering</h2>
           <div className="flex items-center gap-2">
-            <StatusPill status={renderStatus} />
+            <Pill label={renderStatus === "not_requested" ? "NOT REQUESTED" : titleCase(renderStatus)} tone={statusTone} />
             <span className="text-xs text-gray-500">
               Opt-in: <span className="font-medium">{renderOptIn ? "yes" : "no"}</span>
-              {renderedAt ? <> · Rendered: <span className="font-medium">{renderedAt}</span></> : null}
+              {renderedAt ? (
+                <>
+                  {" "}
+                  · Rendered: <span className="font-medium">{renderedAt}</span>
+                </>
+              ) : null}
             </span>
           </div>
         </div>
@@ -400,24 +437,106 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
         ) : null}
       </div>
 
-      {/* Assessment */}
+      {/* Assessment (pretty) */}
       <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-        <h2 className="text-lg font-semibold">Assessment</h2>
-        {assessment ? (
-          <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm">
-            {JSON.stringify(assessment, null, 2)}
-          </pre>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">Assessment</h2>
+            <p className="mt-1 text-xs text-gray-500">
+              Human-friendly view. Raw JSON is available below for debugging.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill label={confidence ? `Confidence: ${titleCase(confidence)}` : "Confidence: —"} tone={confidenceTone} />
+            <Pill label={inspectionRequired ? "Inspection required" : "Inspection not required"} tone={inspectionRequired ? "yellow" : "green"} />
+          </div>
+        </div>
+
+        {!a ? (
+          <div className="mt-4 text-sm text-gray-600">(no assessment stored)</div>
         ) : (
-          <div className="mt-3 text-sm text-gray-600">(no assessment stored)</div>
+          <div className="mt-4 space-y-5">
+            {/* Summary */}
+            <div className="rounded-xl border border-gray-200 p-4">
+              <div className="text-sm font-semibold text-gray-900">Summary</div>
+              <div className="mt-2 text-sm text-gray-800 whitespace-pre-wrap">
+                {summary || <span className="text-gray-500">(no summary)</span>}
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              {/* Visible scope */}
+              <div className="rounded-xl border border-gray-200 p-4">
+                <div className="text-sm font-semibold text-gray-900">Visible scope</div>
+                {visibleScope.length ? (
+                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 space-y-1">
+                    {visibleScope.slice(0, 12).map((x, i) => (
+                      <li key={i}>{x}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="mt-2 text-sm text-gray-500">(none listed)</div>
+                )}
+              </div>
+
+              {/* Assumptions */}
+              <div className="rounded-xl border border-gray-200 p-4">
+                <div className="text-sm font-semibold text-gray-900">Assumptions</div>
+                {assumptions.length ? (
+                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 space-y-1">
+                    {assumptions.slice(0, 12).map((x, i) => (
+                      <li key={i}>{x}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="mt-2 text-sm text-gray-500">(none listed)</div>
+                )}
+              </div>
+            </div>
+
+            {/* Questions */}
+            <div className="rounded-xl border border-gray-200 p-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm font-semibold text-gray-900">Questions to confirm</div>
+                <div className="text-xs text-gray-500">{questions.length ? `${questions.length} item(s)` : "0"}</div>
+              </div>
+
+              {questions.length ? (
+                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 space-y-1">
+                  {questions.slice(0, 12).map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="mt-2 text-sm text-gray-500">(none)</div>
+              )}
+            </div>
+          </div>
         )}
+
+        {/* Raw JSON (collapsed) */}
+        <details className="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-gray-900">
+            Raw assessment JSON (debug)
+          </summary>
+          <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs">
+            {JSON.stringify(a ?? null, null, 2)}
+          </pre>
+        </details>
       </div>
 
       {/* Raw output (debug) */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
         <h2 className="text-lg font-semibold">Raw quote_logs.output</h2>
-        <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs">
-          {JSON.stringify(output, null, 2)}
-        </pre>
+        <details className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-gray-900">
+            Expand raw output JSON (debug)
+          </summary>
+          <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs">
+            {JSON.stringify(output, null, 2)}
+          </pre>
+        </details>
       </div>
     </div>
   );
