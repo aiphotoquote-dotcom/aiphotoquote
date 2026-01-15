@@ -14,6 +14,7 @@ export const runtime = "nodejs";
 const Req = z.object({
   tenantSlug: z.string().min(3),
   images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
+  render_opt_in: z.boolean().optional(),
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -131,6 +132,26 @@ async function getTenantAutoEstimateEnabled(tenantId: string): Promise<boolean> 
 }
 
 /**
+ * Tenant toggle: ai_rendering_enabled
+ * - If column exists: use it
+ * - If not yet migrated: default false (safer)
+ */
+async function getTenantAiRenderingEnabled(tenantId: string): Promise<boolean> {
+  try {
+    const r = await db.execute(sql`
+      select ai_rendering_enabled
+      from tenant_settings
+      where tenant_id = ${tenantId}
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    return row?.ai_rendering_enabled === true ? true : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Latest tenant pricing rules (if configured)
  */
 async function getTenantPricingRules(tenantId: string) {
@@ -174,13 +195,6 @@ function roundTo10(n: number) {
   return Math.round(n / 10) * 10;
 }
 
-/**
- * Pricing logic:
- * - Base range uses tenant typical_low/high (or min_job fallback)
- * - Confidence adjusts width
- * - inspection_required widens and caps against max_without_inspection if present
- * - Always enforces min_job floor
- */
 function estimateFromRules(args: {
   rules: {
     id: string;
@@ -195,17 +209,14 @@ function estimateFromRules(args: {
 }) {
   const { rules, confidence, inspectionRequired } = args;
 
-  // Conservative defaults if tenant hasn't configured rules yet
   const minJob = rules?.minJob ?? 250;
   const typicalLow = rules?.typicalLow ?? Math.max(minJob, 500);
   const typicalHigh = rules?.typicalHigh ?? Math.max(typicalLow + 300, typicalLow * 1.6);
   const maxNoInspect = rules?.maxWithoutInspection ?? null;
 
-  // Start from typical range
   let low = typicalLow;
   let high = typicalHigh;
 
-  // Confidence tuning (narrower for high, wider for low)
   if (confidence === "high") {
     low *= 0.95;
     high *= 1.05;
@@ -217,7 +228,6 @@ function estimateFromRules(args: {
     high *= 1.3;
   }
 
-  // Inspection required => widen slightly, and if max_without_inspection exists, cap high there
   if (inspectionRequired) {
     low *= 0.95;
     high *= 1.1;
@@ -225,13 +235,11 @@ function estimateFromRules(args: {
       high = Math.min(high, maxNoInspect);
     }
   } else {
-    // If inspection NOT required, still respect max_without_inspection if provided (acts as a guardrail)
     if (maxNoInspect != null) {
       high = Math.min(high, maxNoInspect);
     }
   }
 
-  // Enforce min job floor
   low = Math.max(low, minJob);
   high = Math.max(high, low + 50);
 
@@ -287,9 +295,6 @@ async function preflightImageUrl(url: string) {
   }
 }
 
-/**
- * quote_logs columns: id, tenant_id, input, output, created_at
- */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
   const quoteLogId = crypto.randomUUID();
   const inputStr = JSON.stringify(inputJson ?? {});
@@ -312,9 +317,6 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
-/**
- * Try to persist scalar columns if present (fallback-safe).
- */
 async function tryUpdateQuoteLogScalars(args: {
   quoteLogId: string;
   confidence: "high" | "medium" | "low" | null;
@@ -335,7 +337,7 @@ async function tryUpdateQuoteLogScalars(args: {
       where id = ${quoteLogId}::uuid
     `);
   } catch {
-    // Columns may not exist in some environments; ignore.
+    // ignore if columns don't exist
   }
 }
 
@@ -357,8 +359,9 @@ function renderLeadEmailHTML(args: {
   images: string[];
   assessment: any;
   estimate: any;
+  rendering: any;
 }) {
-  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment, estimate } = args;
+  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment, estimate, rendering } = args;
 
   const imgs = images
     .map(
@@ -373,6 +376,13 @@ function renderLeadEmailHTML(args: {
     ? `<h3 style="margin:18px 0 6px;">Estimate</h3>
        <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
          JSON.stringify(estimate, null, 2)
+       )}</pre>`
+    : "";
+
+  const renderBlock = rendering
+    ? `<h3 style="margin:18px 0 6px;">Rendering (opt-in)</h3>
+       <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
+         JSON.stringify(rendering, null, 2)
        )}</pre>`
     : "";
 
@@ -409,6 +419,7 @@ function renderLeadEmailHTML(args: {
     )}</pre>
 
     ${estBlock}
+    ${renderBlock}
   </div>`;
 }
 
@@ -419,8 +430,9 @@ function renderCustomerEmailHTML(args: {
   images: string[];
   assessment: any;
   estimate: any;
+  rendering: any;
 }) {
-  const { businessName, quoteLogId, notes, images, assessment, estimate } = args;
+  const { businessName, quoteLogId, notes, images, assessment, estimate, rendering } = args;
 
   const imgs = images
     .map(
@@ -437,6 +449,11 @@ function renderCustomerEmailHTML(args: {
          JSON.stringify(estimate, null, 2)
        )}</pre>`
     : `<p style="color:#6b7280;margin-top:14px;">We’ll follow up with pricing after review.</p>`;
+
+  const renderLine =
+    rendering?.requested === true
+      ? `<p style="color:#374151;margin-top:10px;"><b>Optional:</b> You opted in to an AI concept rendering (if available). This may be delivered after review.</p>`
+      : "";
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
@@ -466,6 +483,7 @@ function renderCustomerEmailHTML(args: {
     )}</pre>
 
     ${estBlock}
+    ${renderLine}
 
     <p style="color:#6b7280;margin-top:14px;">
       — ${esc(businessName)}
@@ -481,6 +499,7 @@ async function sendEmailsIfConfigured(args: {
   images: string[];
   assessment: any;
   estimate: any;
+  rendering: any;
   customer: { name?: string; email?: string; phone?: string };
   tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
 }) {
@@ -517,6 +536,7 @@ async function sendEmailsIfConfigured(args: {
       images: args.images,
       assessment: args.assessment,
       estimate: args.estimate,
+      rendering: args.rendering,
     });
 
     const leadRes = await resend.emails.send({
@@ -534,7 +554,7 @@ async function sendEmailsIfConfigured(args: {
     result.lead.error = e?.message ?? String(e);
   }
 
-  // Customer receipt (only if we have a customer email)
+  // Customer receipt
   if (args.customer.email) {
     try {
       result.customer.attempted = true;
@@ -546,6 +566,7 @@ async function sendEmailsIfConfigured(args: {
         images: args.images,
         assessment: args.assessment,
         estimate: args.estimate,
+        rendering: args.rendering,
       });
 
       const custRes = await resend.emails.send({
@@ -587,6 +608,7 @@ export async function POST(req: Request) {
     }
 
     const { tenantSlug, images, customer_context } = parsed.data;
+    const requestedRenderOptIn = parsed.data.render_opt_in === true;
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
@@ -612,8 +634,11 @@ export async function POST(req: Request) {
       );
     }
 
-    // Tenant choice: auto estimate enabled?
     const autoEstimateEnabled = await getTenantAutoEstimateEnabled(tenantId);
+    const tenantRenderingEnabled = await getTenantAiRenderingEnabled(tenantId);
+
+    // Effective opt-in must be tenant enabled AND customer opted in
+    const renderOptIn = tenantRenderingEnabled && requestedRenderOptIn;
 
     // Pull tenant email identity + routing
     const tenantEmailSettings = await getTenantEmailSettings(tenantId);
@@ -697,7 +722,7 @@ export async function POST(req: Request) {
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
 
-    // Pricing (real)
+    // Pricing
     let estimate: any = null;
     if (autoEstimateEnabled && structured) {
       const rules = await getTenantPricingRules(tenantId);
@@ -708,7 +733,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // Persist scalar columns if available (optional)
+    // Persist scalar columns if available
     if (structured) {
       await tryUpdateQuoteLogScalars({
         quoteLogId,
@@ -719,13 +744,21 @@ export async function POST(req: Request) {
       });
     }
 
+    const rendering = {
+      tenant_enabled: tenantRenderingEnabled,
+      requested: renderOptIn,
+      status: renderOptIn ? "queued" : "not_requested",
+      // second-step: no image yet
+      imageUrl: null as string | null,
+    };
+
     const customer = {
       name: customer_context?.name,
       email: customer_context?.email,
       phone: customer_context?.phone,
     };
 
-    // Send emails
+    // Send emails (include rendering metadata)
     const emailResult = await sendEmailsIfConfigured({
       tenantSlug,
       quoteLogId,
@@ -734,16 +767,18 @@ export async function POST(req: Request) {
       images: images.map((i) => i.url),
       assessment: finalAssessment,
       estimate,
+      rendering,
       customer,
       tenantEmailSettings,
     });
 
-    // Persist output json
+    // Persist output json (includes rendering)
     try {
       await updateQuoteLogOutput(quoteLogId, {
         status: "completed",
         assessment: finalAssessment,
         estimate,
+        rendering,
         email: emailResult,
         meta: {
           tenantSlug,
@@ -762,6 +797,7 @@ export async function POST(req: Request) {
           imagePreflight: checks,
           assessment: finalAssessment,
           estimate,
+          rendering,
           email: emailResult,
           warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
           durationMs: Date.now() - startedAt,
@@ -779,6 +815,7 @@ export async function POST(req: Request) {
         imagePreflight: checks,
         assessment: finalAssessment,
         estimate,
+        rendering,
         email: emailResult,
         durationMs: Date.now() - startedAt,
       },
