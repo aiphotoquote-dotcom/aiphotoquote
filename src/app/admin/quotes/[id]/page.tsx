@@ -39,12 +39,51 @@ function Badge({
   );
 }
 
+function StatusPill({ status }: { status: string }) {
+  const s = String(status || "").toLowerCase();
+
+  const cls =
+    s === "rendered"
+      ? "bg-green-100 text-green-800"
+      : s === "queued"
+        ? "bg-yellow-100 text-yellow-800"
+        : s === "failed"
+          ? "bg-red-100 text-red-800"
+          : "bg-gray-100 text-gray-800";
+
+  const label =
+    s === "rendered"
+      ? "RENDERED"
+      : s === "queued"
+        ? "QUEUED"
+        : s === "failed"
+          ? "FAILED"
+          : "NOT REQUESTED";
+
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
 export default async function AdminQuoteDetailPage(props: PageProps) {
   const { id } = await props.params;
 
   // Fetch using raw SQL so we don't depend on Drizzle table field names
   const r = await db.execute(sql`
-    select id, tenant_id, input, output, created_at
+    select
+      id,
+      tenant_id,
+      input,
+      output,
+      created_at,
+      render_opt_in,
+      render_status,
+      render_image_url,
+      render_prompt,
+      render_error,
+      rendered_at
     from quote_logs
     where id = ${id}::uuid
     limit 1
@@ -75,6 +114,32 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const customerAttempted = Boolean(customer?.attempted);
   const customerSent = Boolean(customer?.sent);
 
+  // Rendering: prefer DB columns, but fall back to output.rendering (older rows)
+  const outputRendering = output?.rendering ?? null;
+
+  const renderOptIn =
+    row.render_opt_in === true || outputRendering?.requested === true ? true : false;
+
+  const renderStatus =
+    (row.render_status as string | null) ??
+    (outputRendering?.status as string | null) ??
+    "not_requested";
+
+  const renderImageUrl =
+    (row.render_image_url as string | null) ??
+    (outputRendering?.imageUrl as string | null) ??
+    null;
+
+  const renderPrompt =
+    (row.render_prompt as string | null) ?? null;
+
+  const renderError =
+    (row.render_error as string | null) ??
+    (outputRendering?.error as string | null) ??
+    null;
+
+  const renderedAt = row.rendered_at ? new Date(row.rendered_at).toLocaleString() : "";
+
   return (
     <div className="mx-auto max-w-5xl p-6">
       <div className="mb-6 flex items-start justify-between gap-4">
@@ -85,7 +150,12 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
           </p>
           <p className="mt-1 text-sm text-gray-600">
             Tenant: <span className="font-medium">{tenantSlug || row.tenant_id}</span>
-            {createdAt ? <> · Created: <span className="font-medium">{createdAt}</span></> : null}
+            {createdAt ? (
+              <>
+                {" "}
+                · Created: <span className="font-medium">{createdAt}</span>
+              </>
+            ) : null}
           </p>
         </div>
 
@@ -143,22 +213,14 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
               <div className="font-medium">Customer Receipt</div>
               <Badge
                 ok={customerSent}
-                text={
-                  customerSent
-                    ? "SENT"
-                    : customerAttempted
-                      ? "FAILED"
-                      : "SKIPPED"
-                }
+                text={customerSent ? "SENT" : customerAttempted ? "FAILED" : "SKIPPED"}
               />
             </div>
 
             <div className="mt-2 text-sm text-gray-700">
               <div>
                 Customer email:{" "}
-                <span className="font-mono">
-                  {customerCtx?.email || "(not provided)"}
-                </span>
+                <span className="font-mono">{customerCtx?.email || "(not provided)"}</span>
               </div>
 
               {customer?.id ? (
@@ -179,6 +241,78 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* AI Rendering */}
+      <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="mb-3 flex items-center justify-between gap-4">
+          <h2 className="text-lg font-semibold">AI Rendering</h2>
+          <div className="flex items-center gap-2">
+            <StatusPill status={renderStatus} />
+            <span className="text-xs text-gray-500">
+              Opt-in: <span className="font-medium">{renderOptIn ? "yes" : "no"}</span>
+              {renderedAt ? <> · Rendered: <span className="font-medium">{renderedAt}</span></> : null}
+            </span>
+          </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="text-sm font-medium text-gray-900">Details</div>
+            <div className="mt-2 text-sm text-gray-700 space-y-2">
+              <div>
+                Status: <span className="font-mono">{String(renderStatus)}</span>
+              </div>
+              <div>
+                Requested (customer opt-in):{" "}
+                <span className="font-mono">{renderOptIn ? "true" : "false"}</span>
+              </div>
+              {renderImageUrl ? (
+                <div>
+                  Image URL:{" "}
+                  <a className="break-all text-blue-700 hover:underline" href={renderImageUrl} target="_blank">
+                    {renderImageUrl}
+                  </a>
+                </div>
+              ) : (
+                <div className="text-gray-600">(no image stored)</div>
+              )}
+
+              {renderError ? (
+                <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800">
+                  Error: <span className="font-mono">{String(renderError)}</span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 p-4">
+            <div className="text-sm font-medium text-gray-900">Preview</div>
+            <div className="mt-2 text-sm text-gray-700">
+              {renderImageUrl ? (
+                <a href={renderImageUrl} target="_blank" className="block overflow-hidden rounded-xl border">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={renderImageUrl}
+                    alt="AI concept rendering"
+                    className="h-64 w-full object-contain bg-gray-50"
+                  />
+                </a>
+              ) : (
+                <div className="text-gray-600">(no preview)</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {renderPrompt ? (
+          <div className="mt-4">
+            <div className="text-sm font-medium text-gray-900">Prompt</div>
+            <pre className="mt-2 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs">
+              {String(renderPrompt)}
+            </pre>
+          </div>
+        ) : null}
       </div>
 
       {/* Request */}
