@@ -16,7 +16,7 @@ export default async function Page({
   let tenantName = "Get a Photo Quote";
   let industry = "service";
 
-  // ✅ Tenant-controlled AI rendering flag (default false)
+  // Tenant-controlled AI rendering flag (default false)
   let aiRenderingEnabled = false;
 
   try {
@@ -28,33 +28,50 @@ export default async function Page({
       limit 1
     `);
 
-    const tenant = (tenantRows as any)?.[0] as
+    const tenant = ((tenantRows as any)?.rows?.[0] ??
+      (Array.isArray(tenantRows) ? (tenantRows as any)[0] : null)) as
       | { id: string; name: string; slug: string }
-      | undefined;
+      | null;
 
     if (tenant?.name) tenantName = tenant.name;
 
-    // Settings lookup (safe)
     if (tenant?.id) {
-      const settingsRows = await db.execute(sql`
-        select "industry_key", "ai_rendering_enabled"
-        from "tenant_settings"
-        where "tenant_id" = ${tenant.id}::uuid
-        limit 1
-      `);
+      // Try new schema first
+      try {
+        const settingsRows = await db.execute(sql`
+          select "industry_key", "ai_rendering_enabled"
+          from "tenant_settings"
+          where "tenant_id" = ${tenant.id}::uuid
+          limit 1
+        `);
 
-      const settings = (settingsRows as any)?.[0] as
-        | { industry_key: string | null; ai_rendering_enabled: boolean | null }
-        | undefined;
+        const settings = ((settingsRows as any)?.rows?.[0] ??
+          (Array.isArray(settingsRows) ? (settingsRows as any)[0] : null)) as
+          | { industry_key: string | null; ai_rendering_enabled: boolean | null }
+          | null;
 
-      if (settings?.industry_key) industry = settings.industry_key;
+        if (settings?.industry_key) industry = settings.industry_key;
+        aiRenderingEnabled = settings?.ai_rendering_enabled === true;
+      } catch {
+        // Fallback for DBs missing ai_rendering_enabled
+        const settingsRows = await db.execute(sql`
+          select "industry_key"
+          from "tenant_settings"
+          where "tenant_id" = ${tenant.id}::uuid
+          limit 1
+        `);
 
-      // ✅ tenant policy gate
-      aiRenderingEnabled = settings?.ai_rendering_enabled === true;
+        const settings = ((settingsRows as any)?.rows?.[0] ??
+          (Array.isArray(settingsRows) ? (settingsRows as any)[0] : null)) as
+          | { industry_key: string | null }
+          | null;
+
+        if (settings?.industry_key) industry = settings.industry_key;
+        aiRenderingEnabled = false;
+      }
     }
   } catch {
     // Intentionally swallow errors so the page still renders.
-    // QuoteForm can still submit using tenantSlug even if branding fails.
   }
 
   return (
@@ -99,7 +116,6 @@ export default async function Page({
                 </p>
               </div>
 
-              {/* ✅ Optional feature hint (tenant-controlled, customer opt-in happens inside form) */}
               {aiRenderingEnabled ? (
                 <div className="flex gap-3">
                   <div className="mt-1 h-2 w-2 rounded-full bg-black" />
