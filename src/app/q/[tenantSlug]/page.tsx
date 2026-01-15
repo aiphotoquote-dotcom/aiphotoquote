@@ -15,63 +15,58 @@ export default async function Page({
   // Default/fallback values so this page never hard-crashes.
   let tenantName = "Get a Photo Quote";
   let industry = "service";
-
-  // Tenant-controlled AI rendering flag (default false)
   let aiRenderingEnabled = false;
 
   try {
     // Tenant lookup (safe)
-    const tenantRows = await db.execute(sql`
+    const tenantRes = await db.execute(sql`
       select "id", "name", "slug"
       from "tenants"
       where "slug" = ${tenantSlug}
       limit 1
     `);
 
-    const tenant = ((tenantRows as any)?.rows?.[0] ??
-      (Array.isArray(tenantRows) ? (tenantRows as any)[0] : null)) as
-      | { id: string; name: string; slug: string }
-      | null;
+    const tenant: any =
+      (tenantRes as any)?.rows?.[0] ??
+      (Array.isArray(tenantRes) ? (tenantRes as any)[0] : null);
 
     if (tenant?.name) tenantName = tenant.name;
 
     if (tenant?.id) {
-      // Try new schema first
+      // Try the new settings schema first
       try {
-        const settingsRows = await db.execute(sql`
+        const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
           from "tenant_settings"
           where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = ((settingsRows as any)?.rows?.[0] ??
-          (Array.isArray(settingsRows) ? (settingsRows as any)[0] : null)) as
-          | { industry_key: string | null; ai_rendering_enabled: boolean | null }
-          | null;
+        const settings: any =
+          (settingsRes as any)?.rows?.[0] ??
+          (Array.isArray(settingsRes) ? (settingsRes as any)[0] : null);
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
       } catch {
-        // Fallback for DBs missing ai_rendering_enabled
-        const settingsRows = await db.execute(sql`
+        // Fallback for DBs that do not have ai_rendering_enabled yet
+        const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
           where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = ((settingsRows as any)?.rows?.[0] ??
-          (Array.isArray(settingsRows) ? (settingsRows as any)[0] : null)) as
-          | { industry_key: string | null }
-          | null;
+        const settings: any =
+          (settingsRes as any)?.rows?.[0] ??
+          (Array.isArray(settingsRes) ? (settingsRes as any)[0] : null);
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = false;
       }
     }
   } catch {
-    // Intentionally swallow errors so the page still renders.
+    // swallow — page must render even if DB lookup fails
   }
 
   return (
@@ -148,10 +143,7 @@ export default async function Page({
               </div>
 
               <div className="mt-6">
-                <QuoteForm
-                  tenantSlug={tenantSlug}
-                  aiRenderingEnabled={aiRenderingEnabled}
-                />
+                <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
               </div>
 
               <p className="mt-6 text-xs text-gray-600">
