@@ -90,7 +90,13 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
+export default function QuoteForm({
+  tenantSlug,
+  aiRenderingEnabled = false,
+}: {
+  tenantSlug: string;
+  aiRenderingEnabled?: boolean;
+}) {
   const MIN_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
@@ -102,6 +108,9 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
+
+  // ✅ Customer opt-in (only shown/used if tenant enabled)
+  const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
   const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
@@ -171,6 +180,11 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     })();
   }, [result?.output]);
 
+  // If tenant disables rendering, force opt-in off (avoids stale UI state)
+  useEffect(() => {
+    if (!aiRenderingEnabled) setRenderOptIn(false);
+  }, [aiRenderingEnabled]);
+
   function rebuildPreviews(nextFiles: File[]) {
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews(nextFiles.map((f) => URL.createObjectURL(f)));
@@ -193,6 +207,7 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
     setError(null);
     setResult(null);
     setNotes("");
+    setRenderOptIn(false);
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
@@ -254,6 +269,8 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
             phone: digitsOnly(phone),
             notes,
           },
+          // ✅ only send true when tenant allows + user opted in
+          render_opt_in: aiRenderingEnabled ? renderOptIn : false,
         }),
       });
 
@@ -268,6 +285,8 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
       setWorking(false);
     }
   }
+
+  const rendering = result?.rendering ?? null;
 
   return (
     <div className="space-y-6">
@@ -504,6 +523,26 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
           />
         </label>
 
+        {/* ✅ Rendering opt-in (only when tenant enabled) */}
+        {aiRenderingEnabled ? (
+          <label className="flex items-start gap-3 rounded-xl border p-4">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={renderOptIn}
+              onChange={(e) => setRenderOptIn(e.target.checked)}
+              disabled={working}
+            />
+            <div className="text-sm">
+              <div className="font-semibold">Add an AI concept rendering (optional)</div>
+              <div className="mt-1 text-xs text-gray-600">
+                If selected, we’ll try to generate a concept “after” image of what the finished
+                result could look like. This is conceptual, not a guarantee.
+              </div>
+            </div>
+          </label>
+        ) : null}
+
         <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
           <div className="font-semibold">Estimate disclaimer</div>
           <p className="mt-1">
@@ -573,6 +612,48 @@ export default function QuoteForm({ tenantSlug }: { tenantSlug: string }) {
               </ul>
             </div>
           )}
+
+          {/* ✅ Rendering result (if requested / available) */}
+          {rendering ? (
+            <div className="rounded-xl border p-4 space-y-2">
+              <div className="flex items-center justify-between gap-4">
+                <div className="text-sm font-semibold">AI Concept Rendering</div>
+                <div className="text-xs text-gray-600">
+                  Status: <b>{String(rendering.status || "unknown")}</b>
+                </div>
+              </div>
+
+              {rendering.imageUrl ? (
+                <div className="space-y-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={rendering.imageUrl}
+                    alt="AI concept rendering"
+                    className="w-full rounded-xl border object-contain"
+                  />
+                  <div className="text-xs text-gray-600">
+                    Concept image for inspiration only — final result depends on materials and scope.
+                  </div>
+                </div>
+              ) : rendering.requested ? (
+                <div className="text-xs text-gray-700">
+                  {rendering.allowed === false ? (
+                    <span>
+                      Rendering was requested, but this shop has it disabled right now.
+                    </span>
+                  ) : rendering.status === "failed" ? (
+                    <span>
+                      We couldn’t generate a rendering this time. Your estimate is still valid.
+                    </span>
+                  ) : (
+                    <span>
+                      Rendering requested. If available, it will appear here after processing.
+                    </span>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
