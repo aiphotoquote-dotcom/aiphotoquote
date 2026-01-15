@@ -16,6 +16,9 @@ export default async function Page({
   let tenantName = "Get a Photo Quote";
   let industry = "service";
 
+  // ✅ Tenant-controlled AI rendering flag (default false)
+  let aiRenderingEnabled = false;
+
   try {
     // Tenant lookup (safe)
     const tenantRows = await db.execute(sql`
@@ -34,17 +37,20 @@ export default async function Page({
     // Settings lookup (safe)
     if (tenant?.id) {
       const settingsRows = await db.execute(sql`
-        select "industry_key"
+        select "industry_key", "ai_rendering_enabled"
         from "tenant_settings"
         where "tenant_id" = ${tenant.id}::uuid
         limit 1
       `);
 
       const settings = (settingsRows as any)?.[0] as
-        | { industry_key: string | null }
+        | { industry_key: string | null; ai_rendering_enabled: boolean | null }
         | undefined;
 
       if (settings?.industry_key) industry = settings.industry_key;
+
+      // ✅ tenant policy gate
+      aiRenderingEnabled = settings?.ai_rendering_enabled === true;
     }
   } catch {
     // Intentionally swallow errors so the page still renders.
@@ -92,6 +98,17 @@ export default async function Page({
                   quotes. We’ll follow up if anything needs clarification.
                 </p>
               </div>
+
+              {/* ✅ Optional feature hint (tenant-controlled, customer opt-in happens inside form) */}
+              {aiRenderingEnabled ? (
+                <div className="flex gap-3">
+                  <div className="mt-1 h-2 w-2 rounded-full bg-black" />
+                  <p>
+                    <span className="font-semibold">Optional:</span> You may be able
+                    to request an AI concept rendering of the finished result.
+                  </p>
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -115,7 +132,10 @@ export default async function Page({
               </div>
 
               <div className="mt-6">
-                <QuoteForm tenantSlug={tenantSlug} />
+                <QuoteForm
+                  tenantSlug={tenantSlug}
+                  aiRenderingEnabled={aiRenderingEnabled}
+                />
               </div>
 
               <p className="mt-6 text-xs text-gray-600">
