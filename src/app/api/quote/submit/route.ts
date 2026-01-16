@@ -440,8 +440,8 @@ function renderCustomerEmailHTML(args: {
     ${
       notes
         ? `<h3 style="margin:18px 0 6px;">Your Notes</h3><div style="white-space:pre-wrap;color:#374151;">${esc(
-            notes
-          )}</div>`
+          notes
+        )}</div>`
         : ""
     }
 
@@ -799,12 +799,30 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const e = normalizeErr(err);
 
+    // ✅ BEST-EFFORT: still try to mark the quote log if we have one (unchanged behavior)
     try {
       if (quoteLogId) {
         await updateQuoteLogOutput(quoteLogId, { status: "error", error: e });
       }
     } catch {}
 
-    return json({ ok: false, error: "REQUEST_FAILED", ...e }, e.status ?? 500, debugId);
+    // 🔴 TEMP DEBUG: return extra details to the client so you don't have to find Vercel logs
+    return json(
+      {
+        ok: false,
+        error: "REQUEST_FAILED",
+        ...e,
+        debug: {
+          message: err?.message ?? String(err),
+          name: err?.name,
+          code: err?.code ?? err?.cause?.code,
+          detail: err?.detail ?? err?.cause?.detail,
+          hint: err?.hint ?? err?.cause?.hint,
+          stack: err?.stack,
+        },
+      },
+      e.status ?? 500,
+      debugId
+    );
   }
 }
