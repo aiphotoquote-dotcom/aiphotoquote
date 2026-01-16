@@ -89,6 +89,37 @@ function asArray(v: any): string[] {
   return [];
 }
 
+function pickRenderOptIn(args: {
+  renderingColumnsAvailable: boolean;
+  row: any;
+  input: any;
+  output: any;
+}) {
+  const { renderingColumnsAvailable, row, input, output } = args;
+
+  // Prefer first-class DB column if present
+  if (renderingColumnsAvailable && typeof row?.render_opt_in === "boolean") {
+    return row.render_opt_in;
+  }
+
+  // Then fall back to stored request input JSON (submit route sends render_opt_in)
+  if (typeof input?.render_opt_in === "boolean") return input.render_opt_in;
+
+  // Then fall back to structured output/meta (submit route carries render_opt_in)
+  if (typeof output?.meta?.render_opt_in === "boolean") return output.meta.render_opt_in;
+
+  // Some payloads store normalized "output" object under output.output
+  if (typeof output?.output?.render_opt_in === "boolean") return output.output.render_opt_in;
+
+  // Some payloads may store it at the top-level
+  if (typeof output?.render_opt_in === "boolean") return output.render_opt_in;
+
+  // Legacy fallback: output.rendering.requested
+  if (output?.rendering?.requested === true) return true;
+
+  return false;
+}
+
 export default async function AdminQuoteDetailPage(props: PageProps) {
   const { id } = await props.params;
 
@@ -154,18 +185,42 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const customerAttempted = Boolean(customer?.attempted);
   const customerSent = Boolean(customer?.sent);
 
+  // Best-effort tenant setting (schema drift safe)
+  let tenantRenderingEnabled: boolean | null = null;
+  try {
+    const t = await db.execute(sql`
+      select ai_rendering_enabled
+      from tenant_settings
+      where tenant_id = ${row.tenant_id}::uuid
+      limit 1
+    `);
+
+    const tRow: any =
+      (t as any)?.rows?.[0] ?? (Array.isArray(t) ? (t as any)[0] : null);
+
+    if (typeof tRow?.ai_rendering_enabled === "boolean") {
+      tenantRenderingEnabled = tRow.ai_rendering_enabled;
+    } else {
+      tenantRenderingEnabled = null;
+    }
+  } catch {
+    tenantRenderingEnabled = null;
+  }
+
   // Rendering (DB columns preferred; fallback to output.rendering)
   const outputRendering = output?.rendering ?? null;
 
-  const renderOptIn =
-    (renderingColumnsAvailable && row.render_opt_in === true) || outputRendering?.requested === true
-      ? true
-      : false;
+  const renderOptIn = pickRenderOptIn({
+    renderingColumnsAvailable,
+    row,
+    input,
+    output,
+  });
 
   const renderStatus =
     (renderingColumnsAvailable ? (row.render_status as string | null) : null) ??
     (outputRendering?.status as string | null) ??
-    "not_requested";
+    (renderOptIn ? "requested" : "not_requested");
 
   const renderImageUrl =
     (renderingColumnsAvailable ? (row.render_image_url as string | null) : null) ??
@@ -199,11 +254,13 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const statusTone =
     renderStatus === "rendered"
       ? "green"
-      : renderStatus === "queued"
+      : renderStatus === "queued" || renderStatus === "requested"
         ? "yellow"
         : renderStatus === "failed"
           ? "red"
-          : "neutral";
+          : renderStatus === "not_requested"
+            ? "neutral"
+            : "neutral";
 
   const pageBg = "bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100";
   const card = "rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900";
@@ -212,6 +269,9 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
   const mono = "font-mono text-gray-900 dark:text-gray-100";
   const link = "text-blue-700 hover:underline dark:text-blue-300";
   const pre = "overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950";
+
+  const tenantEnabledLabel =
+    tenantRenderingEnabled === true ? "yes" : tenantRenderingEnabled === false ? "no" : "unknown";
 
   return (
     <div className={`${pageBg} min-h-screen`}>
@@ -319,7 +379,8 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 tone={statusTone}
               />
               <span className="text-xs text-gray-500 dark:text-gray-400">
-                Opt-in: <span className="font-medium">{renderOptIn ? "yes" : "no"}</span>
+                Tenant enabled: <span className="font-medium">{tenantEnabledLabel}</span> · Opt-in:{" "}
+                <span className="font-medium">{renderOptIn ? "yes" : "no"}</span>
                 {renderedAt ? (
                   <>
                     {" "}
@@ -339,7 +400,10 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
           <div className="grid gap-4 md:grid-cols-2">
             <div className={innerCard}>
               <div className="text-sm font-medium">Details</div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200 space-y-2">
+              <div className="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+                <div>
+                  Tenant enabled: <span className={mono}>{tenantEnabledLabel}</span>
+                </div>
                 <div>
                   Status: <span className={mono}>{String(renderStatus)}</span>
                 </div>
@@ -486,7 +550,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
             <div className="mt-4 space-y-5">
               <div className={innerCard}>
                 <div className="text-sm font-semibold">Summary</div>
-                <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+                <div className="mt-2 whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-200">
                   {summary || <span className="text-gray-500 dark:text-gray-400">(no summary)</span>}
                 </div>
               </div>
@@ -495,7 +559,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 <div className={innerCard}>
                   <div className="text-sm font-semibold">Visible scope</div>
                   {visibleScope.length ? (
-                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-800 dark:text-gray-200">
                       {visibleScope.slice(0, 12).map((x, i) => (
                         <li key={i}>{x}</li>
                       ))}
@@ -508,7 +572,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 <div className={innerCard}>
                   <div className="text-sm font-semibold">Assumptions</div>
                   {assumptions.length ? (
-                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-800 dark:text-gray-200">
                       {assumptions.slice(0, 12).map((x, i) => (
                         <li key={i}>{x}</li>
                       ))}
@@ -528,7 +592,7 @@ export default async function AdminQuoteDetailPage(props: PageProps) {
                 </div>
 
                 {questions.length ? (
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-gray-800 dark:text-gray-200">
                     {questions.slice(0, 12).map((x, i) => (
                       <li key={i}>{x}</li>
                     ))}
