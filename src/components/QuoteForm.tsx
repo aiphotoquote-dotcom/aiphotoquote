@@ -1,583 +1,506 @@
-import { NextResponse } from "next/server";
-import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
-import OpenAI from "openai";
-import crypto from "crypto";
-import { Resend } from "resend";
+"use client";
 
-import { db } from "@/lib/db/client";
-import { tenants } from "@/lib/db/schema";
-import { decryptSecret } from "@/lib/crypto";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-export const runtime = "nodejs";
+type UploadedFile = { url: string };
 
-const Req = z.object({
-  tenantSlug: z.string().min(3),
-  images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
-  customer_context: z
-    .object({
-      notes: z.string().optional(),
-      service_type: z.string().optional(),
-      category: z.string().optional(),
-      name: z.string().optional(),
-      email: z.string().optional(),
-      phone: z.string().optional(),
-
-      // ✅ customer opt-in for rendering (tenant-enabled feature)
-      render_opt_in: z.boolean().optional(),
-    })
-    .optional(),
-});
-
-const QuoteOutputSchema = z.object({
-  confidence: z.enum(["high", "medium", "low"]),
-  inspection_required: z.boolean(),
-  summary: z.string(),
-  visible_scope: z.array(z.string()).default([]),
-  assumptions: z.array(z.string()).default([]),
-  questions: z.array(z.string()).default([]),
-});
-
-function json(data: any, status = 200, debugId?: string) {
-  const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
-  if (debugId) res.headers.set("x-debug-id", debugId);
-  return res;
+function formatMoney(n: number) {
+  return `$${Math.round(n).toLocaleString()}`;
 }
 
-function normalizeDbErr(err: any) {
-  return {
-    name: err?.name,
-    message: err?.message ?? String(err),
-    code: err?.code,
-    detail: err?.detail,
-    hint: err?.hint,
-    constraint: err?.constraint,
-    table: err?.table,
-    column: err?.column,
-    where: err?.where,
-    causeMessage: err?.cause?.message,
-    causeCode: err?.cause?.code,
-    causeDetail: err?.cause?.detail,
-  };
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-function normalizeErr(err: any) {
-  const status = typeof err?.status === "number" ? err.status : undefined;
-  const message =
-    err?.error?.message ??
-    err?.response?.data?.error?.message ??
-    err?.message ??
-    String(err);
-  const type = err?.error?.type ?? err?.response?.data?.error?.type ?? err?.type;
-  const code = err?.error?.code ?? err?.response?.data?.error?.code ?? err?.code;
-  return {
-    name: err?.name,
-    status,
-    message,
-    type,
-    code,
-    request_id: err?.request_id ?? err?.headers?.["x-request-id"],
-  };
+function digitsOnly(s: string) {
+  return (s || "").replace(/\D/g, "");
 }
 
-async function getTenantBySlug(tenantSlug: string) {
-  const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
-  return rows[0] ?? null;
+function formatUSPhone(input: string) {
+  const d = digitsOnly(input).slice(0, 10);
+  const a = d.slice(0, 3);
+  const b = d.slice(3, 6);
+  const c = d.slice(6, 10);
+  if (d.length <= 3) return a ? `(${a}` : "";
+  if (d.length <= 6) return `(${a}) ${b}`;
+  return `(${a}) ${b}-${c}`;
 }
 
-// tenant_secrets: tenant_id (pk), openai_key_enc text, ...
-async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
-  const r = await db.execute(
-    sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
-  );
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const enc = row?.openai_key_enc ?? null;
-  if (!enc) return null;
-  return decryptSecret(enc);
+function isValidEmail(email: string) {
+  const s = (email || "").trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-// tenant_settings: business_name, lead_to_email, resend_from_email
-async function getTenantEmailSettings(tenantId: string) {
-  const r = await db.execute(sql`
-    select business_name, lead_to_email, resend_from_email
-    from tenant_settings
-    where tenant_id = ${tenantId}
-    limit 1
-  `);
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+async function compressImage(
+  file: File,
+  opts?: { maxDim?: number; quality?: number }
+): Promise<File> {
+  const maxDim = opts?.maxDim ?? 1600;
+  const quality = opts?.quality ?? 0.78;
 
-  return {
-    businessName: row?.business_name ?? null,
-    leadToEmail: row?.lead_to_email ?? null,
-    resendFromEmail: row?.resend_from_email ?? null,
-  };
-}
+  if (!file.type.startsWith("image/")) return file;
 
-async function preflightImageUrl(url: string) {
-  const out: { ok: boolean; url: string; status?: number; hint?: string } = { ok: false, url };
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Failed to read image"));
+    reader.readAsDataURL(file);
+  });
 
-  try {
-    const headRes = await fetch(url, { method: "HEAD", redirect: "follow" });
-    out.status = headRes.status;
-    if (headRes.ok) {
-      out.ok = true;
-      return out;
-    }
-    out.hint = `HEAD returned ${headRes.status}`;
-  } catch (e: any) {
-    out.hint = `HEAD failed: ${e?.message ?? "unknown"}`;
-  }
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error("Failed to load image"));
+    i.src = dataUrl;
+  });
 
-  try {
-    const getRes = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      headers: { Range: "bytes=0-1023" },
-    });
-    out.status = getRes.status;
-    if (getRes.ok || getRes.status === 206) {
-      out.ok = true;
-      return out;
-    }
-    out.hint = `GET returned ${getRes.status}`;
-    return out;
-  } catch (e: any) {
-    out.hint = `GET failed: ${e?.message ?? "unknown"}`;
-    return out;
-  }
-}
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
 
-/**
- * quote_logs columns: id, tenant_id, input, output, created_at
- */
-async function insertQuoteLog(tenantId: string, inputJson: any) {
-  const quoteLogId = crypto.randomUUID();
-  const inputStr = JSON.stringify(inputJson ?? {});
-  const outputStr = JSON.stringify({ status: "started" });
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const outW = Math.max(1, Math.round(w * scale));
+  const outH = Math.max(1, Math.round(h * scale));
 
-  await db.execute(sql`
-    insert into quote_logs (id, tenant_id, input, output, created_at)
-    values (${quoteLogId}::uuid, ${tenantId}, ${inputStr}::jsonb, ${outputStr}::jsonb, now())
-  `);
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
 
-  return quoteLogId;
-}
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return file;
 
-async function updateQuoteLogOutput(quoteLogId: string, output: any) {
-  const outputStr = JSON.stringify(output ?? {});
-  await db.execute(sql`
-    update quote_logs
-    set output = ${outputStr}::jsonb
-    where id = ${quoteLogId}::uuid
-  `);
-}
+  ctx.drawImage(img, 0, 0, outW, outH);
 
-function esc(s: unknown) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function renderLeadEmailHTML(args: {
-  tenantSlug: string;
-  quoteLogId: string;
-  customer: { name?: string; email?: string; phone?: string };
-  category?: string;
-  notes?: string;
-  images: string[];
-  assessment: any;
-  renderOptIn: boolean;
-}) {
-  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment, renderOptIn } = args;
-
-  const imgs = images
-    .map(
-      (u) =>
-        `<div style="margin:10px 0;"><a href="${esc(u)}">${esc(u)}</a><br/><img src="${esc(
-          u
-        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
-    )
-    .join("");
-
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
-    <h2 style="margin:0 0 8px;">New Photo Quote</h2>
-    <div style="margin:0 0 12px;color:#374151;">
-      <div><b>Tenant</b>: ${esc(tenantSlug)}</div>
-      <div><b>Quote Log ID</b>: ${esc(quoteLogId)}</div>
-      <div><b>Category</b>: ${esc(category || "")}</div>
-      <div><b>AI Render Opt-In</b>: ${renderOptIn ? "YES" : "NO"}</div>
-    </div>
-
-    <h3 style="margin:18px 0 6px;">Customer</h3>
-    <div style="color:#374151;">
-      <div><b>Name</b>: ${esc(customer.name || "")}</div>
-      <div><b>Email</b>: ${esc(customer.email || "")}</div>
-      <div><b>Phone</b>: ${esc(customer.phone || "")}</div>
-    </div>
-
-    ${
-      notes
-        ? `<h3 style="margin:18px 0 6px;">Notes</h3><div style="white-space:pre-wrap;color:#374151;">${esc(
-            notes
-          )}</div>`
-        : ""
-    }
-
-    <h3 style="margin:18px 0 6px;">Photos</h3>
-    ${imgs}
-
-    <h3 style="margin:18px 0 6px;">AI Assessment</h3>
-    <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
-      JSON.stringify(assessment, null, 2)
-    )}</pre>
-  </div>`;
-}
-
-function renderCustomerEmailHTML(args: {
-  businessName: string;
-  quoteLogId: string;
-  notes?: string;
-  images: string[];
-  assessment: any;
-}) {
-  const { businessName, quoteLogId, notes, images, assessment } = args;
-
-  const imgs = images
-    .map(
-      (u) =>
-        `<div style="margin:10px 0;"><img src="${esc(
-          u
-        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb;border-radius:10px"/></div>`
-    )
-    .join("");
-
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
-    <h2 style="margin:0 0 8px;">We received your request</h2>
-    <div style="margin:0 0 12px;color:#374151;">
-      <div><b>Quote ID</b>: ${esc(quoteLogId)}</div>
-    </div>
-
-    <p style="color:#374151;margin:0 0 10px;">
-      Thanks for sending photos. Here’s what our AI could see at a glance. We’ll follow up if we need any clarifications.
-    </p>
-
-    ${
-      notes
-        ? `<h3 style="margin:18px 0 6px;">Your Notes</h3><div style="white-space:pre-wrap;color:#374151;">${esc(
-            notes
-          )}</div>`
-        : ""
-    }
-
-    <h3 style="margin:18px 0 6px;">Photos Received</h3>
-    ${imgs}
-
-    <h3 style="margin:18px 0 6px;">Preliminary Assessment</h3>
-    <pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px;white-space:pre-wrap;">${esc(
-      JSON.stringify(assessment, null, 2)
-    )}</pre>
-
-    <p style="color:#6b7280;margin-top:14px;">
-      — ${esc(businessName)}
-    </p>
-  </div>`;
-}
-
-async function sendEmailsIfConfigured(args: {
-  tenantSlug: string;
-  quoteLogId: string;
-  category?: string;
-  notes?: string;
-  images: string[];
-  assessment: any;
-  renderOptIn: boolean;
-  customer: { name?: string; email?: string; phone?: string };
-  tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
-}) {
-  const resendKey = process.env.RESEND_API_KEY || "";
-  const { businessName, leadToEmail, resendFromEmail } = args.tenantEmailSettings;
-
-  const result = {
-    configured: Boolean(resendKey && businessName && leadToEmail && resendFromEmail),
-    lead: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    missingEnv: {
-      RESEND_API_KEY: !resendKey,
-    },
-    missingTenant: {
-      business_name: !businessName,
-      lead_to_email: !leadToEmail,
-      resend_from_email: !resendFromEmail,
-    },
-  };
-
-  if (!result.configured) return result;
-
-  const resend = new Resend(resendKey);
-
-  // Lead email
-  try {
-    result.lead.attempted = true;
-    const leadHtml = renderLeadEmailHTML({
-      tenantSlug: args.tenantSlug,
-      quoteLogId: args.quoteLogId,
-      customer: args.customer,
-      category: args.category,
-      notes: args.notes,
-      images: args.images,
-      assessment: args.assessment,
-      renderOptIn: args.renderOptIn,
-    });
-
-    const leadRes = await resend.emails.send({
-      from: resendFromEmail!,
-      to: [leadToEmail!],
-      subject: `New Photo Quote (${args.category || "request"}) — ${args.quoteLogId}`,
-      html: leadHtml,
-    });
-
-    const leadId = (leadRes as any)?.data?.id ?? null;
-    if ((leadRes as any)?.error) throw new Error((leadRes as any).error?.message ?? "Resend error");
-    result.lead.sent = true;
-    result.lead.id = leadId;
-  } catch (e: any) {
-    result.lead.error = e?.message ?? String(e);
-  }
-
-  // Customer receipt (only if we have a customer email)
-  if (args.customer.email) {
-    try {
-      result.customer.attempted = true;
-
-      const custHtml = renderCustomerEmailHTML({
-        businessName: businessName!,
-        quoteLogId: args.quoteLogId,
-        notes: args.notes,
-        images: args.images,
-        assessment: args.assessment,
-      });
-
-      const custRes = await resend.emails.send({
-        from: resendFromEmail!,
-        to: [args.customer.email],
-        subject: `We received your request — Quote ${args.quoteLogId}`,
-        html: custHtml,
-      });
-
-      const custId = (custRes as any)?.data?.id ?? null;
-      if ((custRes as any)?.error) throw new Error((custRes as any).error?.message ?? "Resend error");
-      result.customer.sent = true;
-      result.customer.id = custId;
-    } catch (e: any) {
-      result.customer.error = e?.message ?? String(e);
-    }
-  } else {
-    result.customer.error = "No customer email provided; skipping customer receipt.";
-  }
-
-  return result;
-}
-
-export async function POST(req: Request) {
-  const debugId = crypto.randomBytes(6).toString("hex");
-  const startedAt = Date.now();
-  let quoteLogId: string | null = null;
-
-  try {
-    const raw = await req.json().catch(() => null);
-
-    const parsed = Req.safeParse(raw);
-    if (!parsed.success) {
-      return json(
-        { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues, received: raw },
-        400,
-        debugId
-      );
-    }
-
-    const { tenantSlug, images, customer_context } = parsed.data;
-
-    const tenant = await getTenantBySlug(tenantSlug);
-    if (!tenant) {
-      return json(
-        { ok: false, error: "TENANT_NOT_FOUND", message: `No tenant found: ${tenantSlug}` },
-        404,
-        debugId
-      );
-    }
-
-    const tenantId = (tenant as any).id as string;
-
-    const openAiKey = await getTenantOpenAiKey(tenantId);
-    if (!openAiKey) {
-      return json(
-        {
-          ok: false,
-          error: "OPENAI_KEY_MISSING",
-          message: "Tenant OpenAI key not configured in tenant_secrets.openai_key_enc.",
-        },
-        500,
-        debugId
-      );
-    }
-
-    // Pull tenant email identity + routing
-    const tenantEmailSettings = await getTenantEmailSettings(tenantId);
-
-    // Preflight images
-    const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
-    const bad = checks.filter((c) => !c.ok);
-    if (bad.length) {
-      return json(
-        {
-          ok: false,
-          error: "IMAGE_URL_NOT_FETCHABLE",
-          message: "One or more image URLs cannot be fetched publicly from the server.",
-          bad,
-        },
-        400,
-        debugId
-      );
-    }
-
-    // Insert quote log
-    try {
-      quoteLogId = await insertQuoteLog(tenantId, raw);
-    } catch (e: any) {
-      const dbErr = normalizeDbErr(e);
-      return json({ ok: false, error: "QUOTE_LOG_INSERT_FAILED", message: dbErr.message, dbErr }, 500, debugId);
-    }
-
-    const notes = customer_context?.notes?.trim();
-    const serviceType = customer_context?.service_type?.trim();
-    const category = customer_context?.category?.trim();
-
-    // ✅ customer opt-in is stored, but should NOT affect base assessment prompt
-    const renderOptIn = customer_context?.render_opt_in === true;
-
-    const promptLines = [
-      "You are an expert marine + auto upholstery estimator.",
-      "Return ONLY valid JSON with:",
-      `confidence: "high"|"medium"|"low"`,
-      "inspection_required: boolean",
-      "summary: string",
-      "visible_scope: string[]",
-      "assumptions: string[]",
-      "questions: string[]",
-      "",
-      "Rules:",
-      "- If anything is unclear from photos, set inspection_required=true and add questions.",
-      "- Be practical and shop-accurate; avoid wild guesses.",
-    ];
-    if (category) promptLines.push(`Category: ${category}`);
-    if (serviceType) promptLines.push(`Service type: ${serviceType}`);
-    if (notes) promptLines.push(`Customer notes: ${notes}`);
-
-    const openai = new OpenAI({ apiKey: openAiKey });
-
-    const content = [
-      { type: "input_text" as const, text: promptLines.join("\n") },
-      ...images.map((img) => ({
-        type: "input_image" as const,
-        image_url: img.url,
-        detail: "auto" as const,
-      })),
-    ];
-
-    const r = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [{ role: "user", content }],
-      text: { format: { type: "json_object" } },
-    });
-
-    const rawText = r.output_text?.trim() || "";
-
-    let structured: z.infer<typeof QuoteOutputSchema> | null = null;
-    try {
-      const obj = JSON.parse(rawText);
-      const validated = QuoteOutputSchema.safeParse(obj);
-      structured = validated.success ? validated.data : null;
-    } catch {}
-
-    const finalAssessment =
-      structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
-
-    const customer = {
-      name: customer_context?.name,
-      email: customer_context?.email,
-      phone: customer_context?.phone,
-    };
-
-    const emailResult = await sendEmailsIfConfigured({
-      tenantSlug,
-      quoteLogId,
-      category,
-      notes,
-      images: images.map((i) => i.url),
-      assessment: finalAssessment,
-      renderOptIn,
-      customer,
-      tenantEmailSettings,
-    });
-
-    // Persist output
-    try {
-      await updateQuoteLogOutput(quoteLogId, {
-        status: "completed",
-        assessment: finalAssessment,
-        email: emailResult,
-        meta: {
-          tenantSlug,
-          category,
-          service_type: serviceType,
-          render_opt_in: renderOptIn,
-          durationMs: Date.now() - startedAt,
-        },
-      });
-    } catch (e: any) {
-      return json(
-        {
-          ok: true,
-          quoteLogId,
-          tenantId,
-          imagePreflight: checks,
-          assessment: finalAssessment,
-          email: emailResult,
-          warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
-          durationMs: Date.now() - startedAt,
-        },
-        200,
-        debugId
-      );
-    }
-
-    return json(
-      {
-        ok: true,
-        quoteLogId,
-        tenantId,
-        imagePreflight: checks,
-        assessment: finalAssessment,
-        email: emailResult,
-        durationMs: Date.now() - startedAt,
-      },
-      200,
-      debugId
+  const blob: Blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("Compression failed"))),
+      "image/jpeg",
+      quality
     );
-  } catch (err: any) {
-    const e = normalizeErr(err);
+  });
+
+  const baseName = file.name.replace(/\.[^/.]+$/, "");
+  const outName = `${baseName}.jpg`;
+  return new File([blob], outName, { type: "image/jpeg" });
+}
+
+export default function QuoteForm({
+  tenantSlug,
+  aiRenderingEnabled,
+}: {
+  tenantSlug: string;
+  aiRenderingEnabled?: boolean;
+}) {
+  const MIN_PHOTOS = 2;
+  const MAX_PHOTOS = 12;
+
+  const [customerName, setCustomerName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+
+  const [notes, setNotes] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [previews, setPreviews] = useState<string[]>([]);
+
+  // ✅ customer opt-in (tenant-enabled)
+  const [renderOptIn, setRenderOptIn] = useState(false);
+
+  const [working, setWorking] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  const contactOk = useMemo(() => {
+    const nOk = customerName.trim().length > 0;
+    const eOk = isValidEmail(email);
+    const pOk = digitsOnly(phone).length === 10;
+    return nOk && eOk && pOk;
+  }, [customerName, email, phone]);
+
+  const step = useMemo(() => {
+    if (result?.output) return 3;
+    if (files.length > 0) return 2;
+    return 1;
+  }, [files.length, result?.output]);
+
+  const progress = useMemo(() => {
+    let p = 0.15;
+    if (step === 1) p = 0.25;
+    if (step === 2) p = 0.55;
+    if (step === 3) p = 0.85;
+
+    if (working) {
+      if (phase === "compressing") p = 0.62;
+      if (phase === "uploading") p = 0.72;
+      if (phase === "analyzing") p = 0.82;
+    }
+
+    if (result?.output) p = 1.0;
+
+    return Math.max(0, Math.min(1, p));
+  }, [step, working, phase, result?.output]);
+
+  const progressLabel = useMemo(() => {
+    if (result?.output) return "Estimate ready";
+    if (working) {
+      if (phase === "compressing") return "Optimizing photos…";
+      if (phase === "uploading") return "Uploading…";
+      if (phase === "analyzing") return "Analyzing…";
+    }
+    if (step === 1) return "Add photos";
+    if (step === 2) return "Add details";
+    return "Review estimate";
+  }, [result?.output, working, phase, step]);
+
+  const progressText = useMemo(() => {
+    if (files.length >= MIN_PHOTOS) {
+      const c = contactOk ? " • ✅ contact info" : " • add contact info";
+      return `✅ ${files.length} photo${files.length === 1 ? "" : "s"} added${c}`;
+    }
+    return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
+  }, [files.length, contactOk]);
+
+  useEffect(() => {
+    if (!result?.output) return;
+    (async () => {
+      await sleep(50);
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    })();
+  }, [result?.output]);
+
+  function rebuildPreviews(nextFiles: File[]) {
+    previews.forEach((p) => URL.revokeObjectURL(p));
+    setPreviews(nextFiles.map((f) => URL.createObjectURL(f)));
+  }
+
+  function addFiles(newOnes: File[]) {
+    if (!newOnes.length) return;
+    const combined = [...files, ...newOnes].slice(0, MAX_PHOTOS);
+    setFiles(combined);
+    rebuildPreviews(combined);
+  }
+
+  function removeFileAt(idx: number) {
+    const next = files.filter((_, i) => i !== idx);
+    setFiles(next);
+    rebuildPreviews(next);
+  }
+
+  function retake() {
+    setError(null);
+    setResult(null);
+    setNotes("");
+    setRenderOptIn(false);
+    previews.forEach((p) => URL.revokeObjectURL(p));
+    setPreviews([]);
+    setFiles([]);
+    setPhase("idle");
+  }
+
+  async function onSubmit() {
+    setError(null);
+    setResult(null);
+
+    if (!tenantSlug || typeof tenantSlug !== "string") {
+      setError("Missing tenant slug. Please reload the page (invalid tenant link).");
+      return;
+    }
+
+    if (files.length < MIN_PHOTOS) {
+      setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
+      return;
+    }
+    if (files.length > MAX_PHOTOS) {
+      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
+      return;
+    }
+
+    if (!customerName.trim()) {
+      setError("Please enter your name.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (digitsOnly(phone).length !== 10) {
+      setError("Please enter a valid 10-digit phone number.");
+      return;
+    }
+
+    setWorking(true);
 
     try {
-      if (quoteLogId) {
-        await updateQuoteLogOutput(quoteLogId, { status: "error", error: e });
-      }
-    } catch {}
+      setPhase("compressing");
+      const compressed = await Promise.all(files.map((f) => compressImage(f)));
 
-    return json({ ok: false, error: "REQUEST_FAILED", ...e }, e.status ?? 500, debugId);
+      setPhase("uploading");
+      const form = new FormData();
+      compressed.forEach((f) => form.append("files", f));
+
+      const up = await fetch("/api/blob/upload", { method: "POST", body: form });
+      const upJson = await up.json();
+      if (!upJson.ok) throw new Error(upJson.error?.message ?? "Upload failed");
+
+      const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
+
+      setPhase("analyzing");
+      const res = await fetch("/api/quote/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenantSlug,
+          images: urls,
+          customer_context: {
+            name: customerName.trim(),
+            email: email.trim(),
+            phone: digitsOnly(phone),
+            notes,
+            render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+          },
+        }),
+      });
+
+      const json = await res.json();
+
+      if (!json.ok) {
+        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
+        const code = json?.error ? `\ncode: ${json.error}` : "";
+        const issues = json?.issues
+          ? `\nissues:\n${json.issues
+              .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
+              .join("\n")}`
+          : "";
+        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${issues}`.trim());
+      }
+
+      setResult(json);
+    } catch (e: any) {
+      setError(e.message ?? "Something went wrong.");
+      setPhase("idle");
+    } finally {
+      setWorking(false);
+    }
   }
+
+  const out = result?.output ?? null;
+
+  return (
+    <div className="space-y-6">
+      {/* Progress bar */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
+          </div>
+          <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
+        </div>
+
+        <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
+          <div
+            className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
+            style={{ width: `${Math.round(progress * 100)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Photos */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+        <div>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
+          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+            These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
+          </p>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <input
+              className="hidden"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={(e) => {
+                const next = Array.from(e.target.files ?? []);
+                addFiles(next);
+                e.currentTarget.value = "";
+              }}
+              disabled={working}
+            />
+            <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
+              Take Photo (Camera)
+            </div>
+          </label>
+
+          <label className="block">
+            <input
+              className="hidden"
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(e) => {
+                const next = Array.from(e.target.files ?? []);
+                addFiles(next);
+                e.currentTarget.value = "";
+              }}
+              disabled={working}
+            />
+            <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
+              Upload Photos
+            </div>
+          </label>
+        </div>
+
+        {previews.length > 0 && (
+          <div className="grid grid-cols-3 gap-3">
+            {previews.map((src, idx) => (
+              <div key={`${src}-${idx}`} className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
+                <button
+                  type="button"
+                  className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
+                  onClick={() => removeFileAt(idx)}
+                  disabled={working}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Details */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+        <div>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
+          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+            Required so we can send your estimate and follow up if needed.
+          </p>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block">
+            <div className="text-xs text-gray-700 dark:text-gray-200">
+              Name <span className="text-red-600">*</span>
+            </div>
+            <input
+              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              value={customerName}
+              onChange={(e) => setCustomerName(e.target.value)}
+              placeholder="Your name"
+              disabled={working}
+              autoComplete="name"
+            />
+          </label>
+
+          <label className="block">
+            <div className="text-xs text-gray-700 dark:text-gray-200">
+              Email <span className="text-red-600">*</span>
+            </div>
+            <input
+              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@email.com"
+              disabled={working}
+              inputMode="email"
+              autoComplete="email"
+            />
+          </label>
+        </div>
+
+        <label className="block">
+          <div className="text-xs text-gray-700 dark:text-gray-200">
+            Phone <span className="text-red-600">*</span>
+          </div>
+          <input
+            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            value={phone}
+            onChange={(e) => setPhone(formatUSPhone(e.target.value))}
+            placeholder="(555) 555-5555"
+            disabled={working}
+            inputMode="tel"
+            autoComplete="tel"
+          />
+        </label>
+
+        <label className="block">
+          <div className="text-xs text-gray-700 dark:text-gray-200">Notes</div>
+          <textarea
+            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            rows={4}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="What are you looking to do? Material preference, timeline, constraints?"
+            disabled={working}
+          />
+        </label>
+
+        {aiRenderingEnabled ? (
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+            <div className="flex items-start gap-3">
+              <input
+                id="renderOptIn"
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={renderOptIn}
+                onChange={(e) => setRenderOptIn(e.target.checked)}
+                disabled={working}
+              />
+              <label htmlFor="renderOptIn" className="cursor-pointer">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  Optional: AI rendering preview
+                </div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
+                </div>
+              </label>
+            </div>
+          </div>
+        ) : null}
+
+        <button
+          className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
+          onClick={onSubmit}
+          disabled={working || files.length < MIN_PHOTOS || !contactOk}
+        >
+          {working ? "Working…" : "Get Estimate"}
+        </button>
+
+        {error && (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+            {error}
+          </div>
+        )}
+      </section>
+
+      {out ? (
+        <section
+          ref={resultsRef}
+          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
+            <button
+              type="button"
+              className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
+              onClick={retake}
+              disabled={working}
+            >
+              Start Over
+            </button>
+          </div>
+
+          <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+            {JSON.stringify(out, null, 2)}
+          </pre>
+        </section>
+      ) : null}
+    </div>
+  );
 }
