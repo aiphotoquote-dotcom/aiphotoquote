@@ -296,6 +296,14 @@ export default function QuoteForm({
     setError(null);
     setResult(null);
 
+    // ✅ Guardrail: never call API with undefined tenantSlug
+    if (!tenantSlug || typeof tenantSlug !== "string") {
+      setError(
+        "This quote link is missing tenant information. Please refresh the page or contact the shop."
+      );
+      return;
+    }
+
     if (files.length < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
       return;
