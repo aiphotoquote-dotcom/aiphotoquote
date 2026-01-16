@@ -4,10 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
 
-function formatMoney(n: number) {
-  return `$${Math.round(n).toLocaleString()}`;
-}
-
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -94,6 +90,36 @@ type QuoteFormProps = {
   aiRenderingEnabled?: boolean;
 };
 
+type NormalizedOutput = {
+  confidence?: "high" | "medium" | "low" | string;
+  inspection_required?: boolean;
+  summary?: string;
+  visible_scope?: string[];
+  assumptions?: string[];
+  questions?: string[];
+  // until pricing is wired on the server, we won't assume estimate exists
+};
+
+function normalizeAssessmentToOutput(payload: any): NormalizedOutput | null {
+  if (!payload) return null;
+
+  // If server already returns output in the old shape:
+  if (payload?.output && typeof payload.output === "object") return payload.output as any;
+
+  // Current server route returns: { assessment: {...} }
+  const a = payload?.assessment;
+
+  if (!a) return null;
+
+  // Sometimes assessment is nested or wrapped
+  if (a?.assessment && typeof a.assessment === "object") return a.assessment as any;
+
+  // If assessment is the object itself (expected today)
+  if (typeof a === "object") return a as any;
+
+  return null;
+}
+
 export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormProps) {
   const MIN_PHOTOS = 2;
   const MAX_PHOTOS = 12;
@@ -110,7 +136,9 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
   const [working, setWorking] = useState(false);
   const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
+  // We store both the raw payload and a normalized output used for UI
   const [result, setResult] = useState<any>(null);
+
   const [error, setError] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
@@ -125,7 +153,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
     if (typeof window === "undefined") return "";
 
     const path = window.location.pathname || "";
-    // expected: /q/<slug>
     const parts = path.split("/").filter(Boolean);
     const qIdx = parts.indexOf("q");
     if (qIdx >= 0 && parts[qIdx + 1]) return parts[qIdx + 1];
@@ -140,13 +167,16 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
     return nOk && eOk && pOk;
   }, [customerName, email, phone]);
 
+  const normalizedOutput: NormalizedOutput | null = useMemo(() => {
+    return normalizeAssessmentToOutput(result);
+  }, [result]);
+
   const step = useMemo(() => {
-    if (result?.output) return 3;
+    if (normalizedOutput) return 3;
     if (files.length > 0) return 2;
     return 1;
-  }, [files.length, result?.output]);
+  }, [files.length, normalizedOutput]);
 
-  // Progress bar like Maggio: 3 steps with smooth fill + label
   const progress = useMemo(() => {
     let p = 0.15;
     if (step === 1) p = 0.25;
@@ -159,13 +189,13 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
       if (phase === "analyzing") p = 0.82;
     }
 
-    if (result?.output) p = 1.0;
+    if (normalizedOutput) p = 1.0;
 
     return Math.max(0, Math.min(1, p));
-  }, [step, working, phase, result?.output]);
+  }, [step, working, phase, normalizedOutput]);
 
   const progressLabel = useMemo(() => {
-    if (result?.output) return "Estimate ready";
+    if (normalizedOutput) return "Assessment ready";
     if (working) {
       if (phase === "compressing") return "Optimizing photos…";
       if (phase === "uploading") return "Uploading…";
@@ -173,8 +203,8 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
     }
     if (step === 1) return "Add photos";
     if (step === 2) return "Add details";
-    return "Review estimate";
-  }, [result?.output, working, phase, step]);
+    return "Review";
+  }, [normalizedOutput, working, phase, step]);
 
   const progressText = useMemo(() => {
     if (files.length >= MIN_PHOTOS) {
@@ -184,14 +214,14 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
     return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
   }, [files.length, contactOk]);
 
-  // Auto-scroll to estimate once it appears
+  // Auto-scroll to results once it appears
   useEffect(() => {
-    if (!result?.output) return;
+    if (!normalizedOutput) return;
     (async () => {
       await sleep(50);
       resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     })();
-  }, [result?.output]);
+  }, [normalizedOutput]);
 
   function rebuildPreviews(nextFiles: File[]) {
     previews.forEach((p) => URL.revokeObjectURL(p));
@@ -287,15 +317,12 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
             phone: digitsOnly(phone),
             notes,
           },
-          // we are NOT wiring rendering yet in this file — just making slug bulletproof
-          // aiRenderingEnabled is passed down for next step
         }),
       });
 
       const json = await res.json();
 
       if (!json.ok) {
-        // Preserve your nice debug payload so mobile shows exact issues
         const parts = [
           "Quote failed",
           `HTTP ${res.status}`,
@@ -308,7 +335,15 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
         throw new Error(parts.join("\n"));
       }
 
-      setResult(json);
+      // ✅ normalize so UI always has result.output-like data
+      const out = normalizeAssessmentToOutput(json);
+      if (!out) {
+        // still show raw payload for debugging
+        setResult(json);
+        throw new Error("Server returned ok=true but no assessment/output was found in the response.");
+      }
+
+      setResult({ ...json, output: out });
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -339,59 +374,19 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
         <div className="mt-3 grid grid-cols-3 text-xs text-gray-600">
           <div className={step >= 1 ? "font-semibold text-gray-900" : ""}>Photos</div>
           <div className={`text-center ${step >= 2 ? "font-semibold text-gray-900" : ""}`}>Details</div>
-          <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900" : ""}`}>Estimate</div>
+          <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900" : ""}`}>Result</div>
         </div>
-
-        {/* Tiny debug helper (only when missing slug) */}
-        {!resolvedTenantSlug ? (
-          <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
-            Missing tenant slug. Current URL must be <span className="font-mono">/q/&lt;tenantSlug&gt;</span>.
-          </div>
-        ) : null}
       </div>
-
-      {/* Pre-photos hint */}
-      {files.length === 0 && (
-        <div className="rounded-2xl border p-5">
-          <div className="text-sm font-semibold">Fastest way (phone)</div>
-          <p className="mt-1 text-sm text-gray-700">
-            Tap <b>Take Photo</b> twice:
-          </p>
-          <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
-            <li>One wide shot (full seat/cushion/panel)</li>
-            <li>One close-up (damage/stitching/material texture)</li>
-          </ul>
-          <p className="mt-3 text-xs text-gray-600">
-            Add a third photo from an angle if you can — it improves accuracy.
-          </p>
-        </div>
-      )}
 
       {/* Guidance + capture */}
       <section className="rounded-2xl border p-5 space-y-4">
         <div>
           <h2 className="font-semibold">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600">
-            These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
+            These two shots give the best accuracy. Add more if you want (max 12).
           </p>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-3">
-          <div className="rounded-xl border p-4">
-            <div className="text-sm font-semibold">1) Wide shot</div>
-            <p className="mt-1 text-xs text-gray-600">Step back. Capture the full seat/cushion/panel.</p>
-          </div>
-          <div className="rounded-xl border p-4">
-            <div className="text-sm font-semibold">2) Close-up</div>
-            <p className="mt-1 text-xs text-gray-600">Get the damage/stitching/material texture clearly.</p>
-          </div>
-          <div className="rounded-xl border p-4">
-            <div className="text-sm font-semibold">Optional: Angle</div>
-            <p className="mt-1 text-xs text-gray-600">Helps estimate seam complexity + foam condition.</p>
-          </div>
-        </div>
-
-        {/* Big mobile capture buttons */}
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="sr-only">Take photo</span>
@@ -432,16 +427,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
           </label>
         </div>
 
-        {/* Checklist */}
-        <div className="rounded-xl bg-gray-50 p-4 text-sm">
-          <div className="font-semibold">Checklist</div>
-          <ul className="mt-2 space-y-1 text-gray-700">
-            <li>{files.length >= 1 ? "✅" : "⬜️"} Wide shot added</li>
-            <li>{files.length >= 2 ? "✅" : "⬜️"} Close-up added</li>
-            <li className="text-xs text-gray-600 pt-1">Tip: If you’re unsure, take one extra angle photo.</li>
-          </ul>
-        </div>
-
         {/* Previews */}
         {previews.length > 0 && (
           <div className="space-y-3">
@@ -458,18 +443,9 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
                   >
                     Remove
                   </button>
-                  <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[11px] px-2 py-1">
-                    Photo {idx + 1}
-                  </div>
                 </div>
               ))}
             </div>
-
-            {files.length < MAX_PHOTOS && (
-              <div className="text-center text-xs text-gray-600">
-                Want better accuracy? Add one more photo from a different angle.
-              </div>
-            )}
           </div>
         )}
       </section>
@@ -478,7 +454,9 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
       <section className="rounded-2xl border p-5 space-y-4">
         <div>
           <h2 className="font-semibold">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600">Required so we can send your estimate and follow up if needed.</p>
+          <p className="mt-1 text-xs text-gray-600">
+            Required so we can send your estimate and follow up if needed.
+          </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -528,11 +506,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
           <p className="mt-1 text-xs text-gray-600">We’ll only use this for your quote request.</p>
         </label>
 
-        <div className="pt-2">
-          <h3 className="text-sm font-semibold">Details (optional)</h3>
-          <p className="mt-1 text-xs text-gray-600">One sentence helps us estimate faster.</p>
-        </div>
-
         <label className="block">
           <div className="text-xs text-gray-700">Notes</div>
           <textarea
@@ -545,14 +518,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
           />
         </label>
 
-        <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
-          <div className="font-semibold">Estimate disclaimer</div>
-          <p className="mt-1">
-            This is a photo-based estimate range. Final pricing can change after inspection, measurements, and material
-            selection.
-          </p>
-        </div>
-
         <button
           className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50"
           onClick={onSubmit}
@@ -561,25 +526,12 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
           {working ? "Working…" : "Get Estimate"}
         </button>
 
-        {files.length < MIN_PHOTOS && (
-          <p className="text-center text-xs text-gray-600">
-            Add at least <b>{MIN_PHOTOS}</b> photos to unlock estimate.
-          </p>
-        )}
-
-        {files.length >= MIN_PHOTOS && !contactOk && (
-          <p className="text-center text-xs text-gray-600">
-            Please complete <b>Name</b>, <b>Email</b>, and <b>Phone</b> to submit.
-          </p>
-        )}
-
         {error && (
           <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
             {error}
           </div>
         )}
 
-        {/* tiny note for next step */}
         {aiRenderingEnabled ? (
           <div className="text-xs text-gray-600">
             (Tenant has AI rendering enabled — customer opt-in will appear in the next step.)
@@ -588,82 +540,53 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
       </section>
 
       {/* Results */}
-      {result?.output && (
+      {normalizedOutput && (
         <section ref={resultsRef} className="rounded-2xl border p-5 space-y-4">
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold">Your Estimate</h2>
+            <h2 className="text-lg font-semibold">Preliminary Assessment</h2>
             <div className="text-xs text-gray-600">
-              Confidence: <b>{result.output.confidence}</b>
+              Confidence: <b>{String(normalizedOutput.confidence || "—")}</b>
             </div>
           </div>
 
-          <div className="rounded-xl bg-gray-50 p-4">
-            <div className="text-sm font-medium">Estimated Price Range</div>
-            <div className="mt-1 text-2xl font-semibold">
-              {formatMoney(result.output.estimate.low)} – {formatMoney(result.output.estimate.high)}
-            </div>
-            {result.output.inspection_required && (
-              <p className="mt-2 text-xs text-gray-600">Inspection recommended to confirm scope and pricing.</p>
-            )}
-          </div>
+          {normalizedOutput.summary ? <p className="text-sm">{normalizedOutput.summary}</p> : null}
 
-          <p className="text-sm">{result.output.summary}</p>
-
-          {!!result.output.questions?.length && (
+          {!!normalizedOutput.questions?.length && (
             <div className="rounded-xl border p-4">
               <div className="text-sm font-semibold">Quick questions</div>
               <ul className="mt-2 list-disc pl-5 text-sm text-gray-700 space-y-1">
-                {result.output.questions.slice(0, 6).map((x: string, i: number) => (
+                {normalizedOutput.questions.slice(0, 8).map((x: string, i: number) => (
                   <li key={i}>{x}</li>
                 ))}
               </ul>
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="sr-only">Add another photo</span>
-              <input
-                className="hidden"
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={(e) => {
-                  const next = Array.from(e.target.files ?? []);
-                  addFiles(next);
-                  e.currentTarget.value = "";
-                }}
-                disabled={working || files.length >= MAX_PHOTOS}
-              />
-              <div className="w-full rounded-xl border py-4 text-center font-semibold cursor-pointer select-none">
-                Add Another Photo
-              </div>
-            </label>
+          {normalizedOutput.inspection_required ? (
+            <div className="rounded-xl bg-gray-50 p-4 text-sm text-gray-700">
+              Inspection recommended to confirm scope and pricing.
+            </div>
+          ) : null}
 
+          <div className="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
-              className="w-full rounded-xl bg-black text-white py-4 font-semibold"
+              className="w-full rounded-xl border py-4 font-semibold"
               onClick={retake}
               disabled={working}
             >
               Retake / Start Over
             </button>
-          </div>
 
-          {files.length >= MIN_PHOTOS && files.length <= MAX_PHOTOS && (
             <button
               type="button"
-              className="w-full rounded-xl border py-4 font-semibold"
+              className="w-full rounded-xl bg-black text-white py-4 font-semibold"
               onClick={onSubmit}
-              disabled={working || !contactOk}
+              disabled={working || !contactOk || files.length < MIN_PHOTOS}
             >
-              Re-run Estimate with Updated Photos
+              Re-run with Updated Photos
             </button>
-          )}
-
-          <p className="text-center text-xs text-gray-600">
-            Tip: Add a new angle photo, then click <b>Re-run</b> for better accuracy.
-          </p>
+          </div>
         </section>
       )}
     </div>
