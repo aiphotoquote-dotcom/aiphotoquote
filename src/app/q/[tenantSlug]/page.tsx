@@ -5,6 +5,10 @@ import { sql } from "drizzle-orm";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type PageProps = {
+  params: Promise<{ tenantSlug: string }>;
+};
+
 function firstRow(r: any) {
   // drizzle execute can return { rows } OR an array depending on driver/version
   if (!r) return null;
@@ -13,12 +17,8 @@ function firstRow(r: any) {
   return null;
 }
 
-export default async function Page({
-  params,
-}: {
-  params: { tenantSlug: string };
-}) {
-  const tenantSlug = params.tenantSlug;
+export default async function Page(props: PageProps) {
+  const { tenantSlug } = await props.params;
 
   // Default/fallback values so this page never hard-crashes.
   let tenantName = "Get a Photo Quote";
