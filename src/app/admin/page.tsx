@@ -19,8 +19,20 @@ type SetupResp =
       tenantId: string;
       role: "owner" | "admin" | "member";
       progress: { completedCount: number; totalCount: number; pct: number };
-      steps: Array<{ key: string; title: string; complete: boolean; description: string; href: string }>;
-      nextStep: { key: string; title: string; complete: boolean; description: string; href: string } | null;
+      steps: Array<{
+        key: string;
+        title: string;
+        complete: boolean;
+        description: string;
+        href: string;
+      }>;
+      nextStep: {
+        key: string;
+        title: string;
+        complete: boolean;
+        description: string;
+        href: string;
+      } | null;
       latestQuoteLogId: string | null;
     }
   | { ok: false; error: string; message?: string };
@@ -37,7 +49,10 @@ async function safeJson<T>(res: Response): Promise<T> {
 }
 
 export default function AdminHome() {
-  const [context, setContext] = useState<{ activeTenantId: string | null; tenants: TenantRow[] }>({
+  const [context, setContext] = useState<{
+    activeTenantId: string | null;
+    tenants: TenantRow[];
+  }>({
     activeTenantId: null,
     tenants: [],
   });
@@ -118,6 +133,23 @@ export default function AdminHome() {
   const progress = setupOk ? (setup as any).progress : null;
   const steps = setupOk ? (setup as any).steps : [];
   const nextStep = setupOk ? (setup as any).nextStep : null;
+
+  const publicQuoteHref = activeTenant?.slug ? `/q/${activeTenant.slug}` : "";
+  const publicQuoteFullUrl =
+    typeof window !== "undefined" && publicQuoteHref ? `${window.location.origin}${publicQuoteHref}` : "";
+
+  async function copyPublicLink() {
+    if (!publicQuoteFullUrl) return;
+    try {
+      await navigator.clipboard.writeText(publicQuoteFullUrl);
+      // Tiny, non-invasive UX: reuse err banner area as a brief status message
+      setErr("Copied public quote link to clipboard.");
+      setTimeout(() => setErr(null), 1500);
+    } catch (e: any) {
+      setErr(e?.message ?? "Failed to copy to clipboard.");
+      setTimeout(() => setErr(null), 2000);
+    }
+  }
 
   return (
     <div className="mx-auto max-w-4xl p-6 bg-gray-50 min-h-screen">
@@ -266,16 +298,43 @@ export default function AdminHome() {
             {/* Quick links */}
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
               <div className="text-sm font-semibold text-gray-900">Quick links</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <a className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm hover:bg-gray-100" href="/q/maggio-upholstery">
-                  Public quote page (example)
-                </a>
-                <a className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm hover:bg-gray-100" href="/quote">
+
+              <div className="mt-2 flex flex-wrap gap-2 items-center">
+                {publicQuoteHref ? (
+                  <>
+                    <a
+                      className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm hover:bg-gray-100"
+                      href={publicQuoteHref}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Public quote page
+                    </a>
+                    <button
+                      type="button"
+                      onClick={copyPublicLink}
+                      className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm hover:bg-gray-100"
+                    >
+                      Copy link
+                    </button>
+                    <span className="text-xs text-gray-600 font-mono">{publicQuoteHref}</span>
+                  </>
+                ) : (
+                  <span className="text-sm text-gray-700">
+                    Public quote page unavailable (no active tenant slug).
+                  </span>
+                )}
+
+                <a
+                  className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm hover:bg-gray-100"
+                  href="/quote"
+                >
                   Internal test quote form
                 </a>
               </div>
+
               <div className="mt-2 text-xs text-gray-600">
-                Tip: once the widget page exists, we’ll replace the example link with the tenant’s real embed + live URLs.
+                Tip: This link is tenant-specific. Use it on your website or share it with customers.
               </div>
             </div>
           </div>
