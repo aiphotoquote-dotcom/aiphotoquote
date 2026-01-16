@@ -89,8 +89,18 @@ function normalizeErr(err: any) {
   };
 }
 
+function isUndefinedColumnError(e: any) {
+  const code = e?.code ?? e?.cause?.code;
+  const msg = e?.message ?? e?.cause?.message ?? "";
+  return code === "42703" || /column .* does not exist/i.test(msg);
+}
+
 async function getTenantBySlug(tenantSlug: string) {
-  const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
+  const rows = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.slug, tenantSlug))
+    .limit(1);
   return rows[0] ?? null;
 }
 
@@ -124,16 +134,57 @@ async function getTenantEmailSettings(tenantId: string) {
 
 // tenant_pricing_rules: min_job, typical_low, typical_high, max_without_inspection
 async function getTenantPricingRules(tenantId: string): Promise<PricingRules> {
-  // Choose the most recent rules row if multiple exist.
-  const r = await db.execute(sql`
-    select min_job, typical_low, typical_high, max_without_inspection
-    from tenant_pricing_rules
-    where tenant_id = ${tenantId}::uuid
-    order by created_at desc nulls last
-    limit 1
-  `);
+  // Schema drift safe:
+  // - Prefer created_at if it exists
+  // - Else try updated_at (many schemas have this instead)
+  // - Else no order
+  let row: any = null;
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  // 1) created_at
+  try {
+    const r = await db.execute(sql`
+      select min_job, typical_low, typical_high, max_without_inspection
+      from tenant_pricing_rules
+      where tenant_id = ${tenantId}::uuid
+      order by created_at desc nulls last
+      limit 1
+    `);
+    row = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  } catch (e: any) {
+    if (!isUndefinedColumnError(e)) {
+      // Non-drift failure: still don't blow up quote submission.
+      row = null;
+    } else {
+      // 2) updated_at
+      try {
+        const r2 = await db.execute(sql`
+          select min_job, typical_low, typical_high, max_without_inspection
+          from tenant_pricing_rules
+          where tenant_id = ${tenantId}::uuid
+          order by updated_at desc nulls last
+          limit 1
+        `);
+        row = (r2 as any)?.rows?.[0] ?? (Array.isArray(r2) ? (r2 as any)[0] : null);
+      } catch (e2: any) {
+        if (!isUndefinedColumnError(e2)) {
+          row = null;
+        } else {
+          // 3) no order (last resort)
+          try {
+            const r3 = await db.execute(sql`
+              select min_job, typical_low, typical_high, max_without_inspection
+              from tenant_pricing_rules
+              where tenant_id = ${tenantId}::uuid
+              limit 1
+            `);
+            row = (r3 as any)?.rows?.[0] ?? (Array.isArray(r3) ? (r3 as any)[0] : null);
+          } catch {
+            row = null;
+          }
+        }
+      }
+    }
+  }
 
   return {
     min_job: typeof row?.min_job === "number" ? row.min_job : row?.min_job ? Number(row.min_job) : null,
@@ -199,7 +250,11 @@ function priceFromRules(args: {
   }
 
   // cap high if tenant wants "no inspection max"
-  if (!inspection_required && typeof rules.max_without_inspection === "number" && rules.max_without_inspection > 0) {
+  if (
+    !inspection_required &&
+    typeof rules.max_without_inspection === "number" &&
+    rules.max_without_inspection > 0
+  ) {
     high = Math.min(high, rules.max_without_inspection);
     if (high < low) low = high;
   }
@@ -440,8 +495,8 @@ function renderCustomerEmailHTML(args: {
     ${
       notes
         ? `<h3 style="margin:18px 0 6px;">Your Notes</h3><div style="white-space:pre-wrap;color:#374151;">${esc(
-          notes
-        )}</div>`
+            notes
+          )}</div>`
         : ""
     }
 
@@ -799,30 +854,12 @@ export async function POST(req: Request) {
   } catch (err: any) {
     const e = normalizeErr(err);
 
-    // ✅ BEST-EFFORT: still try to mark the quote log if we have one (unchanged behavior)
     try {
       if (quoteLogId) {
         await updateQuoteLogOutput(quoteLogId, { status: "error", error: e });
       }
     } catch {}
 
-    // 🔴 TEMP DEBUG: return extra details to the client so you don't have to find Vercel logs
-    return json(
-      {
-        ok: false,
-        error: "REQUEST_FAILED",
-        ...e,
-        debug: {
-          message: err?.message ?? String(err),
-          name: err?.name,
-          code: err?.code ?? err?.cause?.code,
-          detail: err?.detail ?? err?.cause?.detail,
-          hint: err?.hint ?? err?.cause?.hint,
-          stack: err?.stack,
-        },
-      },
-      e.status ?? 500,
-      debugId
-    );
+    return json({ ok: false, error: "REQUEST_FAILED", ...e }, e.status ?? 500, debugId);
   }
 }
