@@ -32,8 +32,15 @@ async function getActiveTenantIdFromCookie(): Promise<string | null> {
 }
 
 export async function GET() {
-  const a = auth();
-  const userId = a.userId;
+  let userId: string | null = null;
+
+  try {
+    // Clerk auth() is async in some versions; await it to avoid TS/build errors.
+    const a = await auth();
+    userId = a.userId ?? null;
+  } catch {
+    userId = null;
+  }
 
   if (!userId) {
     return json({ ok: false, error: "UNAUTHORIZED" }, 401);
