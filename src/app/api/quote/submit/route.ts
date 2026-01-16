@@ -14,6 +14,11 @@ export const runtime = "nodejs";
 const Req = z.object({
   tenantSlug: z.string().min(3),
   images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
+
+  // Customer opt-in for optional SECOND-STEP rendering
+  // Tenant gating is enforced in the public page/QuoteForm; server stores the opt-in signal.
+  render_opt_in: z.boolean().optional().default(false),
+
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -242,6 +247,7 @@ async function preflightImageUrl(url: string) {
 
 /**
  * quote_logs columns: id, tenant_id, input, output, created_at, confidence, estimate_low, estimate_high, inspection_required
+ * (optional drift): render_opt_in boolean
  */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
   const quoteLogId = crypto.randomUUID();
@@ -283,6 +289,38 @@ async function updateQuoteLogSummaryFields(args: {
       estimate_high = ${estimateHigh}
     where id = ${quoteLogId}::uuid
   `);
+}
+
+// Best-effort persistence of render opt-in signal (schema drift safe)
+async function updateQuoteLogRenderOptIn(args: { quoteLogId: string; renderOptIn: boolean }) {
+  const { quoteLogId, renderOptIn } = args;
+
+  try {
+    await db.execute(sql`
+      update quote_logs
+      set render_opt_in = ${renderOptIn}
+      where id = ${quoteLogId}::uuid
+    `);
+    return { ok: true as const };
+  } catch (e: any) {
+    // If the column doesn't exist locally, do NOT break quote submissions.
+    const code = e?.code ?? e?.cause?.code;
+    const msg = e?.message ?? e?.cause?.message ?? "";
+    const isUndefinedColumn =
+      code === "42703" || /column .*render_opt_in.* does not exist/i.test(msg);
+
+    if (isUndefinedColumn) {
+      return { ok: false as const, skipped: true as const, reason: "render_opt_in column missing" };
+    }
+
+    // For other DB errors, still don't fail the request; just report in debug output.
+    return {
+      ok: false as const,
+      skipped: true as const,
+      reason: "render_opt_in update failed",
+      dbErr: normalizeDbErr(e),
+    };
+  }
 }
 
 function esc(s: unknown) {
@@ -534,7 +572,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantSlug, images, customer_context } = parsed.data;
+    const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
+    const renderOptIn = Boolean(render_opt_in);
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
@@ -590,6 +629,11 @@ export async function POST(req: Request) {
         debugId
       );
     }
+
+    // Persist render opt-in (schema drift safe)
+    const renderOptInPersist = quoteLogId
+      ? await updateQuoteLogRenderOptIn({ quoteLogId, renderOptIn })
+      : { ok: false as const, skipped: true as const, reason: "no quoteLogId" };
 
     const notes = customer_context?.notes?.trim();
     const serviceType = customer_context?.service_type?.trim();
@@ -661,6 +705,8 @@ export async function POST(req: Request) {
             summary: structured.summary,
             questions: structured.questions ?? [],
             estimate: estimate ?? null,
+            // carry through customer intent (NOT a render result; render is step 2)
+            render_opt_in: renderOptIn,
           }
         : null;
 
@@ -695,7 +741,11 @@ export async function POST(req: Request) {
           tenantSlug,
           category,
           service_type: serviceType,
+          render_opt_in: renderOptIn,
           durationMs: Date.now() - startedAt,
+        },
+        drift: {
+          renderOptInPersist,
         },
       });
 
@@ -714,6 +764,8 @@ export async function POST(req: Request) {
           ok: true,
           quoteLogId,
           tenantId,
+          render_opt_in: renderOptIn,
+          renderOptInPersist,
           imagePreflight: checks,
           assessment: finalAssessment,
           output,
@@ -732,9 +784,11 @@ export async function POST(req: Request) {
         ok: true,
         quoteLogId,
         tenantId,
+        render_opt_in: renderOptIn,
+        renderOptInPersist,
         imagePreflight: checks,
         assessment: finalAssessment,
-        output,   // ✅ what QuoteForm wants
+        output, // ✅ what QuoteForm wants
         estimate, // ✅ explicit too
         email: emailResult,
         durationMs: Date.now() - startedAt,
