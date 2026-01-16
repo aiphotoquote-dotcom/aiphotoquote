@@ -83,8 +83,6 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-type RenderState = "idle" | "queued" | "rendering" | "rendered" | "failed";
-
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled,
@@ -113,11 +111,6 @@ export default function QuoteForm({
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
-
-  // ✅ second-step render status in UI
-  const [renderState, setRenderState] = useState<RenderState>("idle");
-  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
-  const [renderErr, setRenderErr] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -175,7 +168,10 @@ export default function QuoteForm({
     if (!result?.output) return;
     (async () => {
       await sleep(50);
-      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      resultsRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     })();
   }, [result?.output]);
 
@@ -202,65 +198,20 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
-    setRenderState("idle");
-    setRenderImageUrl(null);
-    setRenderErr(null);
-
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
-  async function triggerSecondStepRender(args: { quoteLogId: string }) {
-    // Only run if tenant allows AND customer opted-in
-    if (!aiRenderingEnabled) return;
-    if (!renderOptIn) return;
-
-    setRenderState("queued");
-    setRenderErr(null);
-    setRenderImageUrl(null);
-
-    try {
-      setRenderState("rendering");
-
-      const r = await fetch("/api/render/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenantSlug,
-          quoteLogId: args.quoteLogId,
-        }),
-      });
-
-      const j = await r.json().catch(() => null);
-
-      if (!r.ok || !j?.ok) {
-        const msg =
-          j?.message ||
-          j?.error ||
-          `Render failed (HTTP ${r.status})`;
-        throw new Error(String(msg));
-      }
-
-      const url = j?.imageUrl ? String(j.imageUrl) : null;
-      if (url) setRenderImageUrl(url);
-      setRenderState("rendered");
-    } catch (e: any) {
-      setRenderState("failed");
-      setRenderErr(e?.message ?? "Render failed.");
-    }
-  }
-
   async function onSubmit() {
     setError(null);
     setResult(null);
-    setRenderState("idle");
-    setRenderImageUrl(null);
-    setRenderErr(null);
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
-      setError("Missing tenant slug. Please reload the page (invalid tenant link).");
+      setError(
+        "Missing tenant slug. Please reload the page (invalid tenant link)."
+      );
       return;
     }
 
@@ -304,8 +255,8 @@ export default function QuoteForm({
 
       setPhase("analyzing");
 
-      // ✅ IMPORTANT: send render_opt_in TOP-LEVEL (server expects this)
-      const requestedRender = aiRenderingEnabled ? Boolean(renderOptIn) : false;
+      // ✅ IMPORTANT: render_opt_in belongs at the TOP LEVEL for /api/quote/submit
+      const renderOptInTopLevel = aiRenderingEnabled ? Boolean(renderOptIn) : false;
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
@@ -313,14 +264,12 @@ export default function QuoteForm({
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-          render_opt_in: requestedRender,
+          render_opt_in: renderOptInTopLevel,
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
             notes,
-            // optional to keep around for debugging/legacy; server ignores this
-            render_opt_in: requestedRender as any,
           },
         }),
       });
@@ -340,13 +289,6 @@ export default function QuoteForm({
       }
 
       setResult(json);
-
-      // ✅ fire second-step render after estimate completes
-      const quoteLogId = json?.quoteLogId ? String(json.quoteLogId) : "";
-      if (requestedRender && quoteLogId) {
-        // don't block UI; run immediately after we set result
-        await triggerSecondStepRender({ quoteLogId });
-      }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -427,10 +369,7 @@ export default function QuoteForm({
         {previews.length > 0 && (
           <div className="grid grid-cols-3 gap-3">
             {previews.map((src, idx) => (
-              <div
-                key={`${src}-${idx}`}
-                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
-              >
+              <div key={`${src}-${idx}`} className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
                 <button
@@ -568,48 +507,6 @@ export default function QuoteForm({
               Start Over
             </button>
           </div>
-
-          {/* ✅ Render status / preview */}
-          {aiRenderingEnabled && renderOptIn ? (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex items-center justify-between gap-3">
-                <div className="font-semibold">AI Rendering</div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">
-                  {renderState === "idle"
-                    ? "Not started"
-                    : renderState === "queued"
-                      ? "Queued…"
-                      : renderState === "rendering"
-                        ? "Generating…"
-                        : renderState === "rendered"
-                          ? "Completed"
-                          : "Failed"}
-                </div>
-              </div>
-
-              {renderErr ? (
-                <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800 dark:bg-red-900/30 dark:text-red-200">
-                  {renderErr}
-                </div>
-              ) : null}
-
-              {renderImageUrl ? (
-                <a
-                  href={renderImageUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-3 block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={renderImageUrl}
-                    alt="AI rendering preview"
-                    className="h-64 w-full object-contain bg-white dark:bg-black"
-                  />
-                </a>
-              ) : null}
-            </div>
-          ) : null}
 
           <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
             {JSON.stringify(out, null, 2)}
