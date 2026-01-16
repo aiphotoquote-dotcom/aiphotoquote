@@ -1,9 +1,17 @@
 import QuoteForm from "@/components/QuoteForm";
-import { db } from "../../../lib/db/client";
+import { db } from "@/lib/db/client";
 import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function firstRow(r: any) {
+  // drizzle execute can return { rows } OR an array depending on driver/version
+  if (!r) return null;
+  if (Array.isArray(r)) return r[0] ?? null;
+  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
+  return null;
+}
 
 export default async function Page({
   params,
@@ -19,49 +27,48 @@ export default async function Page({
 
   try {
     // Tenant lookup (safe)
-    const tenantRows = await db.execute(sql`
+    const tenantRes = await db.execute(sql`
       select "id", "name", "slug"
       from "tenants"
       where "slug" = ${tenantSlug}
       limit 1
     `);
 
-    const tenant = (tenantRows as any)?.[0] as
-      | { id: string; name: string; slug: string }
-      | undefined;
+    const tenant = firstRow(tenantRes) as
+      | { id: string; name: string | null; slug: string }
+      | null;
 
     if (tenant?.name) tenantName = tenant.name;
 
     // Settings lookup (safe)
     if (tenant?.id) {
-      // NOTE: we keep this as a single SQL statement to avoid partial failures.
-      // Some environments may not yet have ai_rendering_enabled, so we try/catch around it.
+      // NOTE: keep as single SQL statement; handle schema drift for ai_rendering_enabled
       try {
-        const settingsRows = await db.execute(sql`
+        const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
           from "tenant_settings"
           where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = (settingsRows as any)?.[0] as
+        const settings = firstRow(settingsRes) as
           | { industry_key: string | null; ai_rendering_enabled: boolean | null }
-          | undefined;
+          | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
       } catch {
         // Fallback if ai_rendering_enabled column isn't present yet
-        const settingsRows = await db.execute(sql`
+        const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
           where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = (settingsRows as any)?.[0] as
+        const settings = firstRow(settingsRes) as
           | { industry_key: string | null }
-          | undefined;
+          | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
       }
