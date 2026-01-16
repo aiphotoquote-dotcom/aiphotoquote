@@ -89,18 +89,8 @@ function normalizeErr(err: any) {
   };
 }
 
-function isUndefinedColumnError(e: any) {
-  const code = e?.code ?? e?.cause?.code;
-  const msg = e?.message ?? e?.cause?.message ?? "";
-  return code === "42703" || /column .* does not exist/i.test(msg);
-}
-
 async function getTenantBySlug(tenantSlug: string) {
-  const rows = await db
-    .select()
-    .from(tenants)
-    .where(eq(tenants.slug, tenantSlug))
-    .limit(1);
+  const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
 }
 
@@ -134,14 +124,48 @@ async function getTenantEmailSettings(tenantId: string) {
 
 // tenant_pricing_rules: min_job, typical_low, typical_high, max_without_inspection
 async function getTenantPricingRules(tenantId: string): Promise<PricingRules> {
-  // Schema drift safe:
-  // - Prefer created_at if it exists
-  // - Else try updated_at (many schemas have this instead)
-  // - Else no order
-  let row: any = null;
+  // Drift-safe:
+  // - Prefer created_at if present
+  // - Fall back to updated_at if created_at doesn't exist
+  // - If table/columns aren't present, return null rules (no pricing) without failing quote submission
+  const empty: PricingRules = {
+    min_job: null,
+    typical_low: null,
+    typical_high: null,
+    max_without_inspection: null,
+  };
 
-  // 1) created_at
+  function coerce(row: any): PricingRules {
+    return {
+      min_job:
+        typeof row?.min_job === "number"
+          ? row.min_job
+          : row?.min_job != null
+            ? Number(row.min_job)
+            : null,
+      typical_low:
+        typeof row?.typical_low === "number"
+          ? row.typical_low
+          : row?.typical_low != null
+            ? Number(row.typical_low)
+            : null,
+      typical_high:
+        typeof row?.typical_high === "number"
+          ? row.typical_high
+          : row?.typical_high != null
+            ? Number(row.typical_high)
+            : null,
+      max_without_inspection:
+        typeof row?.max_without_inspection === "number"
+          ? row.max_without_inspection
+          : row?.max_without_inspection != null
+            ? Number(row.max_without_inspection)
+            : null,
+    };
+  }
+
   try {
+    // Prefer created_at
     const r = await db.execute(sql`
       select min_job, typical_low, typical_high, max_without_inspection
       from tenant_pricing_rules
@@ -149,56 +173,40 @@ async function getTenantPricingRules(tenantId: string): Promise<PricingRules> {
       order by created_at desc nulls last
       limit 1
     `);
-    row = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  } catch (e: any) {
-    if (!isUndefinedColumnError(e)) {
-      // Non-drift failure: still don't blow up quote submission.
-      row = null;
-    } else {
-      // 2) updated_at
-      try {
-        const r2 = await db.execute(sql`
-          select min_job, typical_low, typical_high, max_without_inspection
-          from tenant_pricing_rules
-          where tenant_id = ${tenantId}::uuid
-          order by updated_at desc nulls last
-          limit 1
-        `);
-        row = (r2 as any)?.rows?.[0] ?? (Array.isArray(r2) ? (r2 as any)[0] : null);
-      } catch (e2: any) {
-        if (!isUndefinedColumnError(e2)) {
-          row = null;
-        } else {
-          // 3) no order (last resort)
-          try {
-            const r3 = await db.execute(sql`
-              select min_job, typical_low, typical_high, max_without_inspection
-              from tenant_pricing_rules
-              where tenant_id = ${tenantId}::uuid
-              limit 1
-            `);
-            row = (r3 as any)?.rows?.[0] ?? (Array.isArray(r3) ? (r3 as any)[0] : null);
-          } catch {
-            row = null;
-          }
-        }
-      }
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    return row ? coerce(row) : empty;
+  } catch (e1: any) {
+    const code1 = e1?.code ?? e1?.cause?.code;
+    const msg1 = e1?.message ?? e1?.cause?.message ?? "";
+
+    const isUndefinedColumn =
+      code1 === "42703" || /column .*created_at.* does not exist/i.test(msg1);
+
+    const isUndefinedTable =
+      code1 === "42P01" || /relation .*tenant_pricing_rules.* does not exist/i.test(msg1);
+
+    if (isUndefinedTable) return empty;
+
+    if (!isUndefinedColumn) {
+      // Unknown DB error — still do not fail quote submission.
+      return empty;
+    }
+
+    // Fall back to updated_at
+    try {
+      const r2 = await db.execute(sql`
+        select min_job, typical_low, typical_high, max_without_inspection
+        from tenant_pricing_rules
+        where tenant_id = ${tenantId}::uuid
+        order by updated_at desc nulls last
+        limit 1
+      `);
+      const row2: any = (r2 as any)?.rows?.[0] ?? (Array.isArray(r2) ? (r2 as any)[0] : null);
+      return row2 ? coerce(row2) : empty;
+    } catch {
+      return empty;
     }
   }
-
-  return {
-    min_job: typeof row?.min_job === "number" ? row.min_job : row?.min_job ? Number(row.min_job) : null,
-    typical_low:
-      typeof row?.typical_low === "number" ? row.typical_low : row?.typical_low ? Number(row.typical_low) : null,
-    typical_high:
-      typeof row?.typical_high === "number" ? row.typical_high : row?.typical_high ? Number(row.typical_high) : null,
-    max_without_inspection:
-      typeof row?.max_without_inspection === "number"
-        ? row.max_without_inspection
-        : row?.max_without_inspection
-          ? Number(row.max_without_inspection)
-          : null,
-  };
 }
 
 /**
@@ -250,11 +258,7 @@ function priceFromRules(args: {
   }
 
   // cap high if tenant wants "no inspection max"
-  if (
-    !inspection_required &&
-    typeof rules.max_without_inspection === "number" &&
-    rules.max_without_inspection > 0
-  ) {
+  if (!inspection_required && typeof rules.max_without_inspection === "number" && rules.max_without_inspection > 0) {
     high = Math.min(high, rules.max_without_inspection);
     if (high < low) low = high;
   }
@@ -655,6 +659,8 @@ export async function POST(req: Request) {
     }
 
     const tenantEmailSettings = await getTenantEmailSettings(tenantId);
+
+    // ✅ drift-safe pricing rules (never fail the whole request)
     const pricingRules = await getTenantPricingRules(tenantId);
 
     // Preflight images
@@ -801,6 +807,12 @@ export async function POST(req: Request) {
         },
         drift: {
           renderOptInPersist,
+          pricingRules: {
+            // helpful debug without leaking tenant pricing values in UI
+            hasTypical: pricingRules.typical_low != null && pricingRules.typical_high != null,
+            hasMinJob: pricingRules.min_job != null,
+            hasMaxNoInspect: pricingRules.max_without_inspection != null,
+          },
         },
       });
 
@@ -843,8 +855,8 @@ export async function POST(req: Request) {
         renderOptInPersist,
         imagePreflight: checks,
         assessment: finalAssessment,
-        output, // ✅ what QuoteForm wants
-        estimate, // ✅ explicit too
+        output,
+        estimate,
         email: emailResult,
         durationMs: Date.now() - startedAt,
       },
