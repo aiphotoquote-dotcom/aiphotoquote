@@ -14,10 +14,6 @@ export const runtime = "nodejs";
 const Req = z.object({
   tenantSlug: z.string().min(3),
   images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
-
-  // ✅ NEW: optional customer opt-in for rendering
-  render_opt_in: z.boolean().optional(),
-
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -30,7 +26,7 @@ const Req = z.object({
     .optional(),
 });
 
-const QuoteOutputSchema = z.object({
+const QuoteAssessmentSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
   inspection_required: z.boolean(),
   summary: z.string(),
@@ -38,6 +34,13 @@ const QuoteOutputSchema = z.object({
   assumptions: z.array(z.string()).default([]),
   questions: z.array(z.string()).default([]),
 });
+
+type PricingRules = {
+  min_job: number | null;
+  typical_low: number | null;
+  typical_high: number | null;
+  max_without_inspection: number | null;
+};
 
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
@@ -86,6 +89,7 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
+// tenant_secrets: tenant_id, openai_key_enc
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
@@ -96,6 +100,7 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   return decryptSecret(enc);
 }
 
+// tenant_settings: business_name, lead_to_email, resend_from_email
 async function getTenantEmailSettings(tenantId: string) {
   const r = await db.execute(sql`
     select business_name, lead_to_email, resend_from_email
@@ -110,6 +115,95 @@ async function getTenantEmailSettings(tenantId: string) {
     leadToEmail: row?.lead_to_email ?? null,
     resendFromEmail: row?.resend_from_email ?? null,
   };
+}
+
+// tenant_pricing_rules: min_job, typical_low, typical_high, max_without_inspection
+async function getTenantPricingRules(tenantId: string): Promise<PricingRules> {
+  // Choose the most recent rules row if multiple exist.
+  const r = await db.execute(sql`
+    select min_job, typical_low, typical_high, max_without_inspection
+    from tenant_pricing_rules
+    where tenant_id = ${tenantId}::uuid
+    order by created_at desc nulls last
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+  return {
+    min_job: typeof row?.min_job === "number" ? row.min_job : row?.min_job ? Number(row.min_job) : null,
+    typical_low:
+      typeof row?.typical_low === "number" ? row.typical_low : row?.typical_low ? Number(row.typical_low) : null,
+    typical_high:
+      typeof row?.typical_high === "number" ? row.typical_high : row?.typical_high ? Number(row.typical_high) : null,
+    max_without_inspection:
+      typeof row?.max_without_inspection === "number"
+        ? row.max_without_inspection
+        : row?.max_without_inspection
+          ? Number(row.max_without_inspection)
+          : null,
+  };
+}
+
+/**
+ * Pricing logic (simple + tenant-controlled):
+ * - If typical_low/high exist, use them as a base range.
+ * - Apply min_job floor.
+ * - If inspection_required=false and max_without_inspection exists, cap the HIGH.
+ * - If confidence=low, widen the range slightly.
+ * - If confidence=high and inspection_required=false, tighten slightly.
+ */
+function priceFromRules(args: {
+  rules: PricingRules;
+  confidence: "high" | "medium" | "low";
+  inspection_required: boolean;
+}): { low: number; high: number } | null {
+  const { rules, confidence, inspection_required } = args;
+
+  let low = rules.typical_low ?? null;
+  let high = rules.typical_high ?? null;
+
+  // If tenant hasn't configured pricing guardrails yet, do not fabricate pricing.
+  if (low == null || high == null) return null;
+
+  // normalize ordering
+  if (high < low) {
+    const tmp = high;
+    high = low;
+    low = tmp;
+  }
+
+  // min job floor
+  if (typeof rules.min_job === "number" && rules.min_job > 0) {
+    low = Math.max(low, rules.min_job);
+    high = Math.max(high, rules.min_job);
+  }
+
+  // confidence adjustments
+  if (confidence === "low") {
+    // widen by 25%
+    const span = Math.max(50, high - low);
+    low = Math.max(0, Math.round(low - span * 0.15));
+    high = Math.round(high + span * 0.15);
+  } else if (confidence === "high" && !inspection_required) {
+    // tighten by 10%
+    const span = Math.max(50, high - low);
+    low = Math.round(low + span * 0.05);
+    high = Math.round(high - span * 0.05);
+    if (high < low) high = low;
+  }
+
+  // cap high if tenant wants "no inspection max"
+  if (!inspection_required && typeof rules.max_without_inspection === "number" && rules.max_without_inspection > 0) {
+    high = Math.min(high, rules.max_without_inspection);
+    if (high < low) low = high;
+  }
+
+  // final rounding
+  low = Math.round(low);
+  high = Math.round(high);
+
+  return { low, high };
 }
 
 async function preflightImageUrl(url: string) {
@@ -146,6 +240,9 @@ async function preflightImageUrl(url: string) {
   }
 }
 
+/**
+ * quote_logs columns: id, tenant_id, input, output, created_at, confidence, estimate_low, estimate_high, inspection_required
+ */
 async function insertQuoteLog(tenantId: string, inputJson: any) {
   const quoteLogId = crypto.randomUUID();
   const inputStr = JSON.stringify(inputJson ?? {});
@@ -168,6 +265,26 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
+async function updateQuoteLogSummaryFields(args: {
+  quoteLogId: string;
+  confidence: string | null;
+  inspectionRequired: boolean | null;
+  estimateLow: number | null;
+  estimateHigh: number | null;
+}) {
+  const { quoteLogId, confidence, inspectionRequired, estimateLow, estimateHigh } = args;
+
+  await db.execute(sql`
+    update quote_logs
+    set
+      confidence = ${confidence},
+      inspection_required = ${inspectionRequired},
+      estimate_low = ${estimateLow},
+      estimate_high = ${estimateHigh}
+    where id = ${quoteLogId}::uuid
+  `);
+}
+
 function esc(s: unknown) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -185,8 +302,9 @@ function renderLeadEmailHTML(args: {
   notes?: string;
   images: string[];
   assessment: any;
+  estimate?: { low: number; high: number } | null;
 }) {
-  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment } = args;
+  const { tenantSlug, quoteLogId, customer, category, notes, images, assessment, estimate } = args;
 
   const imgs = images
     .map(
@@ -197,6 +315,13 @@ function renderLeadEmailHTML(args: {
     )
     .join("");
 
+  const estHtml =
+    estimate && typeof estimate.low === "number" && typeof estimate.high === "number"
+      ? `<div style="margin:8px 0 0;color:#111;"><b>Estimate</b>: $${Math.round(estimate.low).toLocaleString()} – $${Math.round(
+          estimate.high
+        ).toLocaleString()}</div>`
+      : "";
+
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
     <h2 style="margin:0 0 8px;">New Photo Quote</h2>
@@ -204,6 +329,7 @@ function renderLeadEmailHTML(args: {
       <div><b>Tenant</b>: ${esc(tenantSlug)}</div>
       <div><b>Quote Log ID</b>: ${esc(quoteLogId)}</div>
       <div><b>Category</b>: ${esc(category || "")}</div>
+      ${estHtml}
     </div>
 
     <h3 style="margin:18px 0 6px;">Customer</h3>
@@ -237,8 +363,9 @@ function renderCustomerEmailHTML(args: {
   notes?: string;
   images: string[];
   assessment: any;
+  estimate?: { low: number; high: number } | null;
 }) {
-  const { businessName, quoteLogId, notes, images, assessment } = args;
+  const { businessName, quoteLogId, notes, images, assessment, estimate } = args;
 
   const imgs = images
     .map(
@@ -248,6 +375,16 @@ function renderCustomerEmailHTML(args: {
         )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb;border-radius:10px"/></div>`
     )
     .join("");
+
+  const estHtml =
+    estimate && typeof estimate.low === "number" && typeof estimate.high === "number"
+      ? `<div style="margin:10px 0;padding:12px;border:1px solid #e5e7eb;border-radius:10px;background:#f9fafb;">
+          <div style="font-weight:700;color:#111;">Estimated Range</div>
+          <div style="font-size:18px;font-weight:700;color:#111;margin-top:4px;">
+            $${Math.round(estimate.low).toLocaleString()} – $${Math.round(estimate.high).toLocaleString()}
+          </div>
+        </div>`
+      : "";
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
@@ -259,6 +396,8 @@ function renderCustomerEmailHTML(args: {
     <p style="color:#374151;margin:0 0 10px;">
       Thanks for sending photos. Here’s what our AI could see at a glance. We’ll follow up if we need any clarifications.
     </p>
+
+    ${estHtml}
 
     ${
       notes
@@ -289,6 +428,7 @@ async function sendEmailsIfConfigured(args: {
   notes?: string;
   images: string[];
   assessment: any;
+  estimate: { low: number; high: number } | null;
   customer: { name?: string; email?: string; phone?: string };
   tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
 }) {
@@ -313,6 +453,7 @@ async function sendEmailsIfConfigured(args: {
 
   const resend = new Resend(resendKey);
 
+  // Lead email
   try {
     result.lead.attempted = true;
     const leadHtml = renderLeadEmailHTML({
@@ -323,6 +464,7 @@ async function sendEmailsIfConfigured(args: {
       notes: args.notes,
       images: args.images,
       assessment: args.assessment,
+      estimate: args.estimate,
     });
 
     const leadRes = await resend.emails.send({
@@ -340,6 +482,7 @@ async function sendEmailsIfConfigured(args: {
     result.lead.error = e?.message ?? String(e);
   }
 
+  // Customer receipt (only if we have a customer email)
   if (args.customer.email) {
     try {
       result.customer.attempted = true;
@@ -350,6 +493,7 @@ async function sendEmailsIfConfigured(args: {
         notes: args.notes,
         images: args.images,
         assessment: args.assessment,
+        estimate: args.estimate,
       });
 
       const custRes = await resend.emails.send({
@@ -390,7 +534,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
+    const { tenantSlug, images, customer_context } = parsed.data;
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) {
@@ -417,7 +561,9 @@ export async function POST(req: Request) {
     }
 
     const tenantEmailSettings = await getTenantEmailSettings(tenantId);
+    const pricingRules = await getTenantPricingRules(tenantId);
 
+    // Preflight images
     const checks = await Promise.all(images.map((i) => preflightImageUrl(i.url)));
     const bad = checks.filter((c) => !c.ok);
     if (bad.length) {
@@ -433,7 +579,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Insert quote log (store raw input including render_opt_in)
+    // Insert quote log
     try {
       quoteLogId = await insertQuoteLog(tenantId, raw);
     } catch (e: any) {
@@ -486,15 +632,37 @@ export async function POST(req: Request) {
 
     const rawText = r.output_text?.trim() || "";
 
-    let structured: z.infer<typeof QuoteOutputSchema> | null = null;
+    let structured: z.infer<typeof QuoteAssessmentSchema> | null = null;
     try {
       const obj = JSON.parse(rawText);
-      const validated = QuoteOutputSchema.safeParse(obj);
+      const validated = QuoteAssessmentSchema.safeParse(obj);
       structured = validated.success ? validated.data : null;
     } catch {}
 
     const finalAssessment =
       structured ?? { rawText, parse_warning: "Model did not return valid JSON per schema." };
+
+    // ✅ compute pricing (only if assessment validated + rules exist)
+    const estimate =
+      structured
+        ? priceFromRules({
+            rules: pricingRules,
+            confidence: structured.confidence,
+            inspection_required: structured.inspection_required,
+          })
+        : null;
+
+    // normalized output for the public flow (stable shape)
+    const output =
+      structured
+        ? {
+            confidence: structured.confidence,
+            inspection_required: structured.inspection_required,
+            summary: structured.summary,
+            questions: structured.questions ?? [],
+            estimate: estimate ?? null,
+          }
+        : null;
 
     const customer = {
       name: customer_context?.name,
@@ -502,6 +670,7 @@ export async function POST(req: Request) {
       phone: customer_context?.phone,
     };
 
+    // Send emails
     const emailResult = await sendEmailsIfConfigured({
       tenantSlug,
       quoteLogId,
@@ -509,28 +678,36 @@ export async function POST(req: Request) {
       notes,
       images: images.map((i) => i.url),
       assessment: finalAssessment,
+      estimate,
       customer,
       tenantEmailSettings,
     });
 
-    // Persist output; include render opt-in flag for later step
+    // Persist output JSON + summary fields (best-effort)
     try {
       await updateQuoteLogOutput(quoteLogId, {
         status: "completed",
+        output,
         assessment: finalAssessment,
+        estimate,
         email: emailResult,
-        rendering: {
-          requested: Boolean(render_opt_in),
-          status: Boolean(render_opt_in) ? "queued" : "not_requested",
-        },
         meta: {
           tenantSlug,
           category,
           service_type: serviceType,
-          render_opt_in: Boolean(render_opt_in),
           durationMs: Date.now() - startedAt,
         },
       });
+
+      if (structured) {
+        await updateQuoteLogSummaryFields({
+          quoteLogId,
+          confidence: structured.confidence ?? null,
+          inspectionRequired: structured.inspection_required ?? null,
+          estimateLow: estimate?.low ?? null,
+          estimateHigh: estimate?.high ?? null,
+        });
+      }
     } catch (e: any) {
       return json(
         {
@@ -539,6 +716,8 @@ export async function POST(req: Request) {
           tenantId,
           imagePreflight: checks,
           assessment: finalAssessment,
+          output,
+          estimate,
           email: emailResult,
           warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
           durationMs: Date.now() - startedAt,
@@ -555,6 +734,8 @@ export async function POST(req: Request) {
         tenantId,
         imagePreflight: checks,
         assessment: finalAssessment,
+        output,   // ✅ what QuoteForm wants
+        estimate, // ✅ explicit too
         email: emailResult,
         durationMs: Date.now() - startedAt,
       },
