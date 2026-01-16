@@ -31,6 +31,18 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
+function titleCase(s: string) {
+  const v = String(s || "").trim();
+  if (!v) return "";
+  return v.charAt(0).toUpperCase() + v.slice(1);
+}
+
+function asArray(v: any): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
+  return [];
+}
+
 async function compressImage(
   file: File,
   opts?: { maxDim?: number; quality?: number }
@@ -83,6 +95,31 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
+function Pill({
+  label,
+  tone = "neutral",
+}: {
+  label: string;
+  tone?: "neutral" | "green" | "yellow" | "red" | "blue";
+}) {
+  const cls =
+    tone === "green"
+      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
+      : tone === "yellow"
+        ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200"
+        : tone === "red"
+          ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
+          : tone === "blue"
+            ? "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200"
+            : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-100";
+
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled,
@@ -105,9 +142,7 @@ export default function QuoteForm({
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">(
-    "idle"
-  );
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -201,34 +236,6 @@ export default function QuoteForm({
     setPhase("idle");
   }
 
-  function buildServerErrorText(resStatus: number, j: any) {
-    const dbg = j?.debugId ? `\ndebugId: ${j.debugId}` : "";
-    const code = j?.error ? `\ncode: ${j.error}` : "";
-    const msg = j?.message ? `\nmessage: ${j.message}` : "";
-
-    const issues = j?.issues
-      ? `\nissues:\n${j.issues
-          .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
-          .join("\n")}`
-      : "";
-
-    const debug =
-      j?.debug && typeof j.debug === "object"
-        ? `\nserver_debug:\n${[
-            j.debug?.message ? `- message: ${j.debug.message}` : null,
-            j.debug?.name ? `- name: ${j.debug.name}` : null,
-            j.debug?.code ? `- code: ${j.debug.code}` : null,
-            j.debug?.detail ? `- detail: ${j.debug.detail}` : null,
-            j.debug?.hint ? `- hint: ${j.debug.hint}` : null,
-            j.debug?.stack ? `\nstack:\n${String(j.debug.stack)}` : null,
-          ]
-            .filter(Boolean)
-            .join("\n")}`
-        : "";
-
-    return `Quote failed\nHTTP ${resStatus}${dbg}${code}${msg}${issues}${debug}`.trim();
-  }
-
   async function onSubmit() {
     setError(null);
     setResult(null);
@@ -283,7 +290,6 @@ export default function QuoteForm({
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-          // IMPORTANT: render_opt_in is a TOP-LEVEL field for the API schema
           render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
           customer_context: {
             name: customerName.trim(),
@@ -294,13 +300,21 @@ export default function QuoteForm({
         }),
       });
 
-      const j = await res.json().catch(() => null);
+      const json = await res.json();
 
-      if (!j?.ok) {
-        throw new Error(buildServerErrorText(res.status, j));
+      if (!json.ok) {
+        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
+        const code = json?.error ? `\ncode: ${json.error}` : "";
+        const issues = json?.issues
+          ? `\nissues:\n${json.issues
+              .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
+              .join("\n")}`
+          : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
+        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
-      setResult(j);
+      setResult(json);
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -311,6 +325,21 @@ export default function QuoteForm({
 
   const out = result?.output ?? null;
 
+  const confidence = out?.confidence ? String(out.confidence) : "";
+  const inspectionRequired = out?.inspection_required === true;
+  const summary = out?.summary ? String(out.summary) : "";
+  const questions = asArray(out?.questions);
+  const estimate = out?.estimate ?? null;
+  const renderRequested = out?.render_opt_in === true;
+
+  const confidenceTone =
+    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "neutral";
+
+  const card = "rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900";
+  const inner = "rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950";
+  const muted = "text-xs text-gray-600 dark:text-gray-300";
+  const mono = "font-mono text-gray-900 dark:text-gray-100";
+
   return (
     <div className="space-y-6">
       {/* Progress bar */}
@@ -318,9 +347,7 @@ export default function QuoteForm({
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              {progressLabel}
-            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
           </div>
           <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
         </div>
@@ -334,7 +361,7 @@ export default function QuoteForm({
       </div>
 
       {/* Photos */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+      <section className={card}>
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -404,7 +431,7 @@ export default function QuoteForm({
       </section>
 
       {/* Details */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+      <section className={card}>
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -486,8 +513,8 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This
-                  happens as a second step after your estimate.
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second
+                  step after your estimate.
                 </div>
               </label>
             </div>
@@ -510,12 +537,12 @@ export default function QuoteForm({
       </section>
 
       {out ? (
-        <section
-          ref={resultsRef}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-        >
+        <section ref={resultsRef} className={card}>
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Your estimate</h2>
+              <p className={muted}>This is a preliminary range based on photos. Final scope may require inspection.</p>
+            </div>
             <button
               type="button"
               className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
@@ -526,9 +553,74 @@ export default function QuoteForm({
             </button>
           </div>
 
-          <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(out, null, 2)}
-          </pre>
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill
+              label={confidence ? `Confidence: ${titleCase(confidence)}` : "Confidence: —"}
+              tone={confidenceTone}
+            />
+            <Pill
+              label={inspectionRequired ? "Inspection required" : "Inspection not required"}
+              tone={inspectionRequired ? "yellow" : "green"}
+            />
+            {renderRequested ? <Pill label="Rendering requested" tone="blue" /> : null}
+          </div>
+
+          <div className={inner}>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Estimated range</div>
+            {estimate && typeof estimate.low === "number" && typeof estimate.high === "number" ? (
+              <div className="mt-2 flex items-baseline gap-2">
+                <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+                  {formatMoney(estimate.low)} – {formatMoney(estimate.high)}
+                </div>
+                <div className="text-xs text-gray-600 dark:text-gray-300">(preliminary)</div>
+              </div>
+            ) : (
+              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+                Pricing range not configured for this shop yet.
+              </div>
+            )}
+
+            {renderRequested ? (
+              <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+                Optional rendering will run as a second step after the estimate (if enabled by the shop).
+              </div>
+            ) : null}
+          </div>
+
+          <div className={inner}>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Summary</div>
+            <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+              {summary || <span className="text-gray-500 dark:text-gray-400">(no summary)</span>}
+            </div>
+          </div>
+
+          <div className={inner}>
+            <div className="flex items-center justify-between gap-4">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Questions to confirm</div>
+              <div className="text-xs text-gray-600 dark:text-gray-300">{questions.length ? `${questions.length}` : "0"}</div>
+            </div>
+            {questions.length ? (
+              <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                {questions.slice(0, 12).map((q, i) => (
+                  <li key={i}>{q}</li>
+                ))}
+              </ul>
+            ) : (
+              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">No questions — looks straightforward.</div>
+            )}
+          </div>
+
+          <details className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+            <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Debug JSON (for you)
+            </summary>
+            <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
+              {JSON.stringify(out, null, 2)}
+            </pre>
+            <div className={`mt-2 ${muted}`}>
+              quoteLogId: <span className={mono}>{String(result?.quoteLogId ?? "")}</span>
+            </div>
+          </details>
         </section>
       ) : null}
     </div>
