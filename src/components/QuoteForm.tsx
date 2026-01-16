@@ -31,18 +31,6 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-function titleCase(s: string) {
-  const v = String(s || "").trim();
-  if (!v) return "";
-  return v.charAt(0).toUpperCase() + v.slice(1);
-}
-
-function asArray(v: any): string[] {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
-  return [];
-}
-
 async function compressImage(
   file: File,
   opts?: { maxDim?: number; quality?: number }
@@ -95,30 +83,7 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-function Pill({
-  label,
-  tone = "neutral",
-}: {
-  label: string;
-  tone?: "neutral" | "green" | "yellow" | "red" | "blue";
-}) {
-  const cls =
-    tone === "green"
-      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
-      : tone === "yellow"
-        ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200"
-        : tone === "red"
-          ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
-          : tone === "blue"
-            ? "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200"
-            : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-100";
-
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {label}
-    </span>
-  );
-}
+type RenderState = "idle" | "queued" | "rendering" | "rendered" | "failed";
 
 export default function QuoteForm({
   tenantSlug,
@@ -142,10 +107,17 @@ export default function QuoteForm({
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+  const [phase, setPhase] = useState<
+    "idle" | "compressing" | "uploading" | "analyzing"
+  >("idle");
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // ✅ second-step render status in UI
+  const [renderState, setRenderState] = useState<RenderState>("idle");
+  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
+  const [renderErr, setRenderErr] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -230,15 +202,62 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
+    setRenderState("idle");
+    setRenderImageUrl(null);
+    setRenderErr(null);
+
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
+  async function triggerSecondStepRender(args: { quoteLogId: string }) {
+    // Only run if tenant allows AND customer opted-in
+    if (!aiRenderingEnabled) return;
+    if (!renderOptIn) return;
+
+    setRenderState("queued");
+    setRenderErr(null);
+    setRenderImageUrl(null);
+
+    try {
+      setRenderState("rendering");
+
+      const r = await fetch("/api/render/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenantSlug,
+          quoteLogId: args.quoteLogId,
+        }),
+      });
+
+      const j = await r.json().catch(() => null);
+
+      if (!r.ok || !j?.ok) {
+        const msg =
+          j?.message ||
+          j?.error ||
+          `Render failed (HTTP ${r.status})`;
+        throw new Error(String(msg));
+      }
+
+      const url = j?.imageUrl ? String(j.imageUrl) : null;
+      if (url) setRenderImageUrl(url);
+      setRenderState("rendered");
+    } catch (e: any) {
+      setRenderState("failed");
+      setRenderErr(e?.message ?? "Render failed.");
+    }
+  }
+
   async function onSubmit() {
     setError(null);
     setResult(null);
+    setRenderState("idle");
+    setRenderImageUrl(null);
+    setRenderErr(null);
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
@@ -284,18 +303,24 @@ export default function QuoteForm({
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
+
+      // ✅ IMPORTANT: send render_opt_in TOP-LEVEL (server expects this)
+      const requestedRender = aiRenderingEnabled ? Boolean(renderOptIn) : false;
+
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+          render_opt_in: requestedRender,
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
             notes,
+            // optional to keep around for debugging/legacy; server ignores this
+            render_opt_in: requestedRender as any,
           },
         }),
       });
@@ -305,16 +330,23 @@ export default function QuoteForm({
       if (!json.ok) {
         const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
         const code = json?.error ? `\ncode: ${json.error}` : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         const issues = json?.issues
           ? `\nissues:\n${json.issues
               .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
               .join("\n")}`
           : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
       setResult(json);
+
+      // ✅ fire second-step render after estimate completes
+      const quoteLogId = json?.quoteLogId ? String(json.quoteLogId) : "";
+      if (requestedRender && quoteLogId) {
+        // don't block UI; run immediately after we set result
+        await triggerSecondStepRender({ quoteLogId });
+      }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -324,21 +356,6 @@ export default function QuoteForm({
   }
 
   const out = result?.output ?? null;
-
-  const confidence = out?.confidence ? String(out.confidence) : "";
-  const inspectionRequired = out?.inspection_required === true;
-  const summary = out?.summary ? String(out.summary) : "";
-  const questions = asArray(out?.questions);
-  const estimate = out?.estimate ?? null;
-  const renderRequested = out?.render_opt_in === true;
-
-  const confidenceTone =
-    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "neutral";
-
-  const card = "rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900";
-  const inner = "rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950";
-  const muted = "text-xs text-gray-600 dark:text-gray-300";
-  const mono = "font-mono text-gray-900 dark:text-gray-100";
 
   return (
     <div className="space-y-6">
@@ -361,7 +378,7 @@ export default function QuoteForm({
       </div>
 
       {/* Photos */}
-      <section className={card}>
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -431,7 +448,7 @@ export default function QuoteForm({
       </section>
 
       {/* Details */}
-      <section className={card}>
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -513,8 +530,7 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second
-                  step after your estimate.
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
                 </div>
               </label>
             </div>
@@ -537,12 +553,12 @@ export default function QuoteForm({
       </section>
 
       {out ? (
-        <section ref={resultsRef} className={card}>
+        <section
+          ref={resultsRef}
+          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+        >
           <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Your estimate</h2>
-              <p className={muted}>This is a preliminary range based on photos. Final scope may require inspection.</p>
-            </div>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
             <button
               type="button"
               className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
@@ -553,74 +569,51 @@ export default function QuoteForm({
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <Pill
-              label={confidence ? `Confidence: ${titleCase(confidence)}` : "Confidence: —"}
-              tone={confidenceTone}
-            />
-            <Pill
-              label={inspectionRequired ? "Inspection required" : "Inspection not required"}
-              tone={inspectionRequired ? "yellow" : "green"}
-            />
-            {renderRequested ? <Pill label="Rendering requested" tone="blue" /> : null}
-          </div>
-
-          <div className={inner}>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Estimated range</div>
-            {estimate && typeof estimate.low === "number" && typeof estimate.high === "number" ? (
-              <div className="mt-2 flex items-baseline gap-2">
-                <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {formatMoney(estimate.low)} – {formatMoney(estimate.high)}
+          {/* ✅ Render status / preview */}
+          {aiRenderingEnabled && renderOptIn ? (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-semibold">AI Rendering</div>
+                <div className="text-xs text-gray-600 dark:text-gray-300">
+                  {renderState === "idle"
+                    ? "Not started"
+                    : renderState === "queued"
+                      ? "Queued…"
+                      : renderState === "rendering"
+                        ? "Generating…"
+                        : renderState === "rendered"
+                          ? "Completed"
+                          : "Failed"}
                 </div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">(preliminary)</div>
               </div>
-            ) : (
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                Pricing range not configured for this shop yet.
-              </div>
-            )}
 
-            {renderRequested ? (
-              <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-                Optional rendering will run as a second step after the estimate (if enabled by the shop).
-              </div>
-            ) : null}
-          </div>
+              {renderErr ? (
+                <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800 dark:bg-red-900/30 dark:text-red-200">
+                  {renderErr}
+                </div>
+              ) : null}
 
-          <div className={inner}>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Summary</div>
-            <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
-              {summary || <span className="text-gray-500 dark:text-gray-400">(no summary)</span>}
+              {renderImageUrl ? (
+                <a
+                  href={renderImageUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-3 block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={renderImageUrl}
+                    alt="AI rendering preview"
+                    className="h-64 w-full object-contain bg-white dark:bg-black"
+                  />
+                </a>
+              ) : null}
             </div>
-          </div>
+          ) : null}
 
-          <div className={inner}>
-            <div className="flex items-center justify-between gap-4">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Questions to confirm</div>
-              <div className="text-xs text-gray-600 dark:text-gray-300">{questions.length ? `${questions.length}` : "0"}</div>
-            </div>
-            {questions.length ? (
-              <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                {questions.slice(0, 12).map((q, i) => (
-                  <li key={i}>{q}</li>
-                ))}
-              </ul>
-            ) : (
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">No questions — looks straightforward.</div>
-            )}
-          </div>
-
-          <details className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Debug JSON (for you)
-            </summary>
-            <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
-              {JSON.stringify(out, null, 2)}
-            </pre>
-            <div className={`mt-2 ${muted}`}>
-              quoteLogId: <span className={mono}>{String(result?.quoteLogId ?? "")}</span>
-            </div>
-          </details>
+          <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+            {JSON.stringify(out, null, 2)}
+          </pre>
         </section>
       ) : null}
     </div>
