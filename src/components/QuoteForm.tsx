@@ -4,10 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
 
-function formatMoney(n: number) {
-  return `$${Math.round(n).toLocaleString()}`;
-}
-
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -83,12 +79,12 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-type RenderKickoffState =
-  | { state: "idle" }
-  | { state: "starting" }
-  | { state: "queued"; message?: string }
-  | { state: "skipped"; reason: string }
-  | { state: "failed"; error: string };
+type RenderState =
+  | { phase: "idle" }
+  | { phase: "queued" }
+  | { phase: "rendering" }
+  | { phase: "rendered"; imageUrl: string }
+  | { phase: "failed"; message: string };
 
 export default function QuoteForm({
   tenantSlug,
@@ -112,13 +108,15 @@ export default function QuoteForm({
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+  const [phase, setPhase] = useState<
+    "idle" | "compressing" | "uploading" | "analyzing"
+  >("idle");
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // second-step rendering kickoff status (non-blocking)
-  const [renderKickoff, setRenderKickoff] = useState<RenderKickoffState>({ state: "idle" });
+  // ✅ second-step render status/result (separate from base assessment)
+  const [renderState, setRenderState] = useState<RenderState>({ phase: "idle" });
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -203,79 +201,61 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
-    setRenderKickoff({ state: "idle" });
+    setRenderState({ phase: "idle" });
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
-  async function kickOffRenderIfNeeded(args: {
+  async function triggerRenderSecondStep(args: {
     tenantSlug: string;
     quoteLogId: string;
-    renderOptIn: boolean;
   }) {
-    const enabled = Boolean(aiRenderingEnabled);
-    const optedIn = Boolean(args.renderOptIn);
+    const { tenantSlug, quoteLogId } = args;
 
-    if (!enabled) {
-      setRenderKickoff({ state: "skipped", reason: "Tenant has AI rendering disabled." });
-      return;
-    }
-    if (!optedIn) {
-      setRenderKickoff({ state: "skipped", reason: "Customer did not opt in." });
-      return;
-    }
-    if (!args.quoteLogId) {
-      setRenderKickoff({ state: "failed", error: "Missing quoteLogId for render kickoff." });
-      return;
-    }
-
-    setRenderKickoff({ state: "starting" });
+    // Don’t do anything unless tenant enabled + customer opted in
+    if (!aiRenderingEnabled || !renderOptIn) return;
 
     try {
-      // This endpoint is the second step (NOT part of base assessment).
-      // It may not exist yet; this call is non-blocking and fails safely.
+      setRenderState({ phase: "queued" });
+
+      setRenderState({ phase: "rendering" });
       const res = await fetch("/api/quote/render", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenantSlug: args.tenantSlug,
-          quoteLogId: args.quoteLogId,
-        }),
+        body: JSON.stringify({ tenantSlug, quoteLogId }),
       });
-
-      // If endpoint isn't built yet, don't scare the customer—just mark as queued/skipped.
-      if (res.status === 404) {
-        setRenderKickoff({
-          state: "skipped",
-          reason: "Render endpoint not available yet (server not deployed).",
-        });
-        return;
-      }
 
       const j = await res.json().catch(() => null);
 
-      if (!res.ok || !j?.ok) {
+      if (!j?.ok) {
+        const dbg = j?.debugId ? ` (debugId: ${j.debugId})` : "";
         const msg =
-          j?.error?.message ||
           j?.message ||
           j?.error ||
-          `Render kickoff failed (HTTP ${res.status})`;
-        setRenderKickoff({ state: "failed", error: String(msg) });
-        return;
+          `Render failed (HTTP ${res.status})`;
+        throw new Error(`${msg}${dbg}`.trim());
       }
 
-      setRenderKickoff({ state: "queued", message: j?.message ?? "Render request queued." });
+      const imageUrl = j?.imageUrl ? String(j.imageUrl) : "";
+      if (!imageUrl) {
+        throw new Error("Render completed but no imageUrl was returned.");
+      }
+
+      setRenderState({ phase: "rendered", imageUrl });
     } catch (e: any) {
-      setRenderKickoff({ state: "failed", error: e?.message ?? "Render kickoff failed." });
+      setRenderState({
+        phase: "failed",
+        message: e?.message ?? "Render failed.",
+      });
     }
   }
 
   async function onSubmit() {
     setError(null);
     setResult(null);
-    setRenderKickoff({ state: "idle" });
+    setRenderState({ phase: "idle" });
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
@@ -322,23 +302,23 @@ export default function QuoteForm({
 
       setPhase("analyzing");
 
-      // IMPORTANT: render_opt_in must be TOP-LEVEL to persist correctly in /api/quote/submit
-      const payload = {
-        tenantSlug,
-        images: urls,
-        render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
-        customer_context: {
-          name: customerName.trim(),
-          email: email.trim(),
-          phone: digitsOnly(phone),
-          notes,
-        },
-      };
+      // ✅ IMPORTANT: send render_opt_in at TOP LEVEL so /api/quote/submit can persist it
+      const renderOptInFinal = aiRenderingEnabled ? Boolean(renderOptIn) : false;
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          tenantSlug,
+          images: urls,
+          render_opt_in: renderOptInFinal,
+          customer_context: {
+            name: customerName.trim(),
+            email: email.trim(),
+            phone: digitsOnly(phone),
+            notes,
+          },
+        }),
       });
 
       const json = await res.json();
@@ -356,13 +336,13 @@ export default function QuoteForm({
 
       setResult(json);
 
-      // Fire second-step render kickoff (non-blocking)
-      const qid = String(json?.quoteLogId ?? "");
-      void kickOffRenderIfNeeded({
-        tenantSlug,
-        quoteLogId: qid,
-        renderOptIn: aiRenderingEnabled ? Boolean(renderOptIn) : false,
-      });
+      // ✅ Kick off render SECOND STEP (never blocks estimate)
+      if (renderOptInFinal && json?.quoteLogId) {
+        void triggerRenderSecondStep({
+          tenantSlug,
+          quoteLogId: String(json.quoteLogId),
+        });
+      }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -380,7 +360,9 @@ export default function QuoteForm({
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              {progressLabel}
+            </div>
           </div>
           <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
         </div>
@@ -443,7 +425,10 @@ export default function QuoteForm({
         {previews.length > 0 && (
           <div className="grid grid-cols-3 gap-3">
             {previews.map((src, idx) => (
-              <div key={`${src}-${idx}`} className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+              <div
+                key={`${src}-${idx}`}
+                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+              >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
                 <button
@@ -582,29 +567,49 @@ export default function QuoteForm({
             </button>
           </div>
 
-          {/* Second-step rendering status (customer-friendly, boring) */}
+          {/* ✅ Rendering status/result (separate from base assessment) */}
           {aiRenderingEnabled && renderOptIn ? (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-              <div className="font-semibold">AI Rendering (optional)</div>
-              <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                This runs after your estimate. If available, it will appear in the shop’s admin view.
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
+              <div className="font-semibold text-gray-900 dark:text-gray-100">
+                AI Rendering (optional second step)
               </div>
 
-              <div className="mt-2 text-xs">
-                {renderKickoff.state === "idle" ? (
-                  <span className="text-gray-600 dark:text-gray-300">Status: —</span>
-                ) : renderKickoff.state === "starting" ? (
-                  <span className="text-gray-600 dark:text-gray-300">Status: requesting…</span>
-                ) : renderKickoff.state === "queued" ? (
-                  <span className="text-gray-600 dark:text-gray-300">
-                    Status: queued{renderKickoff.message ? ` — ${renderKickoff.message}` : ""}
-                  </span>
-                ) : renderKickoff.state === "skipped" ? (
-                  <span className="text-gray-600 dark:text-gray-300">Status: {renderKickoff.reason}</span>
-                ) : (
-                  <span className="text-red-700 dark:text-red-200">Status: {renderKickoff.error}</span>
-                )}
-              </div>
+              {renderState.phase === "idle" ? (
+                <div className="mt-1 text-gray-700 dark:text-gray-200">
+                  Waiting to start…
+                </div>
+              ) : renderState.phase === "queued" ? (
+                <div className="mt-1 text-gray-700 dark:text-gray-200">
+                  Queued…
+                </div>
+              ) : renderState.phase === "rendering" ? (
+                <div className="mt-1 text-gray-700 dark:text-gray-200">
+                  Generating preview…
+                </div>
+              ) : renderState.phase === "failed" ? (
+                <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                  Render failed: {renderState.message}
+                </div>
+              ) : renderState.phase === "rendered" ? (
+                <div className="mt-3">
+                  <a
+                    href={renderState.imageUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={renderState.imageUrl}
+                      alt="AI concept rendering"
+                      className="h-72 w-full object-contain bg-white dark:bg-black"
+                    />
+                  </a>
+                  <div className="mt-2 text-xs text-gray-600 dark:text-gray-300 break-all">
+                    {renderState.imageUrl}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 
