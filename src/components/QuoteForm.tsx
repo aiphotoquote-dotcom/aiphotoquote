@@ -28,7 +28,6 @@ function formatUSPhone(input: string) {
 
 function isValidEmail(email: string) {
   const s = (email || "").trim();
-  // Simple and safe (we don't need RFC perfection)
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
@@ -90,96 +89,12 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-/**
- * Read a fetch Response safely:
- * - If JSON, return parsed JSON
- * - If not JSON, return text
- */
-async function readResponse(res: Response): Promise<{
-  ok: boolean;
-  status: number;
-  contentType: string;
-  json: any | null;
-  text: string | null;
-}> {
-  const status = res.status;
-  const contentType = res.headers.get("content-type") || "";
-  const isJson = contentType.includes("application/json");
-
-  if (isJson) {
-    const j = await res.json().catch(() => null);
-    return { ok: res.ok, status, contentType, json: j, text: null };
-  }
-
-  const t = await res.text().catch(() => "");
-  return { ok: res.ok, status, contentType, json: null, text: t || "" };
-}
-
-function fmtIssues(issues: any) {
-  if (!Array.isArray(issues) || issues.length === 0) return null;
-  const lines = issues.slice(0, 8).map((it: any) => {
-    const path = Array.isArray(it?.path) ? it.path.join(".") : String(it?.path ?? "");
-    const msg = it?.message ?? "Invalid value";
-    return path ? `${path}: ${msg}` : msg;
-  });
-  return lines.join("\n");
-}
-
-function buildUserError(args: {
-  stage: "upload" | "quote";
-  r: { ok: boolean; status: number; contentType: string; json: any | null; text: string | null };
-}) {
-  const { stage, r } = args;
-
-  // JSON errors from our API
-  if (r.json) {
-    const debugId = r.json?.debugId || r.json?.xDebugId || null;
-    const code = r.json?.error || "UNKNOWN_ERROR";
-    const msg =
-      r.json?.message ||
-      r.json?.error?.message ||
-      r.json?.error_message ||
-      null;
-
-    const issuesText = fmtIssues(r.json?.issues);
-
-    const details =
-      r.json?.dbErr?.message ||
-      r.json?.error?.detail ||
-      null;
-
-    return [
-      stage === "upload" ? "Upload failed" : "Quote failed",
-      `HTTP ${r.status}`,
-      debugId ? `debugId: ${debugId}` : null,
-      msg ? `message: ${msg}` : null,
-      issuesText ? `issues:\n${issuesText}` : null,
-      details ? `details: ${details}` : null,
-      `code: ${code}`,
-    ]
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  // Non-JSON (HTML / plain text) -> show snippet
-  const snippet = (r.text || "").slice(0, 240).trim();
-  return [
-    stage === "upload" ? "Upload failed" : "Quote failed",
-    `HTTP ${r.status}`,
-    `content-type: ${r.contentType || "(none)"}`,
-    snippet ? `body: ${snippet}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-export default function QuoteForm({
-  tenantSlug,
-  aiRenderingEnabled,
-}: {
-  tenantSlug: string;
+type QuoteFormProps = {
+  tenantSlug?: string;
   aiRenderingEnabled?: boolean;
-}) {
+};
+
+export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormProps) {
   const MIN_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
@@ -192,9 +107,6 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // Customer opt-in for rendering (only shown if tenant enabled)
-  const [renderOptIn, setRenderOptIn] = useState(false);
-
   const [working, setWorking] = useState(false);
   const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
@@ -202,6 +114,24 @@ export default function QuoteForm({
   const [error, setError] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ Bulletproof slug resolution:
+  // - Prefer prop
+  // - Fallback to URL (/q/<slug>)
+  const resolvedTenantSlug = useMemo(() => {
+    const p = (tenantSlug || "").trim();
+    if (p) return p;
+
+    if (typeof window === "undefined") return "";
+
+    const path = window.location.pathname || "";
+    // expected: /q/<slug>
+    const parts = path.split("/").filter(Boolean);
+    const qIdx = parts.indexOf("q");
+    if (qIdx >= 0 && parts[qIdx + 1]) return parts[qIdx + 1];
+
+    return "";
+  }, [tenantSlug]);
 
   const contactOk = useMemo(() => {
     const nOk = customerName.trim().length > 0;
@@ -285,7 +215,6 @@ export default function QuoteForm({
     setError(null);
     setResult(null);
     setNotes("");
-    setRenderOptIn(false);
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
@@ -296,10 +225,9 @@ export default function QuoteForm({
     setError(null);
     setResult(null);
 
-    // ✅ Guardrail: never call API with undefined tenantSlug
-    if (!tenantSlug || typeof tenantSlug !== "string") {
+    if (!resolvedTenantSlug) {
       setError(
-        "This quote link is missing tenant information. Please refresh the page or contact the shop."
+        "Tenant link is missing a slug. Please reload from /admin (Public quote page) or open /q/<tenantSlug> directly."
       );
       return;
     }
@@ -336,41 +264,53 @@ export default function QuoteForm({
       const form = new FormData();
       compressed.forEach((f) => form.append("files", f));
 
-      const upRes = await fetch("/api/blob/upload", { method: "POST", body: form });
-      const up = await readResponse(upRes);
+      const up = await fetch("/api/blob/upload", { method: "POST", body: form });
+      const upJson = await up.json();
+      if (!upJson.ok) throw new Error(upJson.error?.message ?? "Upload failed");
 
-      if (!up.ok || !up.json?.ok) {
-        throw new Error(buildUserError({ stage: "upload", r: up }));
-      }
+      const urls: UploadedFile[] = (upJson.files || [])
+        .map((x: any) => ({ url: x?.url }))
+        .filter((x: any) => typeof x.url === "string" && x.url.startsWith("http"));
 
-      const urls: UploadedFile[] = up.json.files.map((x: any) => ({ url: x.url }));
+      if (!urls.length) throw new Error("Upload succeeded but no public image URLs were returned.");
 
       setPhase("analyzing");
-      const qRes = await fetch("/api/quote/submit", {
+      const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          tenantSlug,
+          tenantSlug: resolvedTenantSlug,
           images: urls,
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
             notes,
           },
+          // we are NOT wiring rendering yet in this file — just making slug bulletproof
+          // aiRenderingEnabled is passed down for next step
         }),
       });
 
-      const q = await readResponse(qRes);
+      const json = await res.json();
 
-      if (!q.ok || !q.json?.ok) {
-        throw new Error(buildUserError({ stage: "quote", r: q }));
+      if (!json.ok) {
+        // Preserve your nice debug payload so mobile shows exact issues
+        const parts = [
+          "Quote failed",
+          `HTTP ${res.status}`,
+          json.debugId ? `debugId: ${json.debugId}` : null,
+          json.error ? `code: ${json.error}` : null,
+          json.message ? `message: ${json.message}` : null,
+          json.issues ? `issues:\n${JSON.stringify(json.issues, null, 2)}` : null,
+        ].filter(Boolean);
+
+        throw new Error(parts.join("\n"));
       }
 
-      setResult(q.json);
+      setResult(json);
     } catch (e: any) {
-      setError(e?.message ?? "Something went wrong.");
+      setError(e.message ?? "Something went wrong.");
       setPhase("idle");
     } finally {
       setWorking(false);
@@ -398,13 +338,16 @@ export default function QuoteForm({
 
         <div className="mt-3 grid grid-cols-3 text-xs text-gray-600">
           <div className={step >= 1 ? "font-semibold text-gray-900" : ""}>Photos</div>
-          <div className={`text-center ${step >= 2 ? "font-semibold text-gray-900" : ""}`}>
-            Details
-          </div>
-          <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900" : ""}`}>
-            Estimate
-          </div>
+          <div className={`text-center ${step >= 2 ? "font-semibold text-gray-900" : ""}`}>Details</div>
+          <div className={`text-right ${step >= 3 ? "font-semibold text-gray-900" : ""}`}>Estimate</div>
         </div>
+
+        {/* Tiny debug helper (only when missing slug) */}
+        {!resolvedTenantSlug ? (
+          <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+            Missing tenant slug. Current URL must be <span className="font-mono">/q/&lt;tenantSlug&gt;</span>.
+          </div>
+        ) : null}
       </div>
 
       {/* Pre-photos hint */}
@@ -436,21 +379,15 @@ export default function QuoteForm({
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="rounded-xl border p-4">
             <div className="text-sm font-semibold">1) Wide shot</div>
-            <p className="mt-1 text-xs text-gray-600">
-              Step back. Capture the full seat/cushion/panel.
-            </p>
+            <p className="mt-1 text-xs text-gray-600">Step back. Capture the full seat/cushion/panel.</p>
           </div>
           <div className="rounded-xl border p-4">
             <div className="text-sm font-semibold">2) Close-up</div>
-            <p className="mt-1 text-xs text-gray-600">
-              Get the damage/stitching/material texture clearly.
-            </p>
+            <p className="mt-1 text-xs text-gray-600">Get the damage/stitching/material texture clearly.</p>
           </div>
           <div className="rounded-xl border p-4">
             <div className="text-sm font-semibold">Optional: Angle</div>
-            <p className="mt-1 text-xs text-gray-600">
-              Helps estimate seam complexity + foam condition.
-            </p>
+            <p className="mt-1 text-xs text-gray-600">Helps estimate seam complexity + foam condition.</p>
           </div>
         </div>
 
@@ -501,9 +438,7 @@ export default function QuoteForm({
           <ul className="mt-2 space-y-1 text-gray-700">
             <li>{files.length >= 1 ? "✅" : "⬜️"} Wide shot added</li>
             <li>{files.length >= 2 ? "✅" : "⬜️"} Close-up added</li>
-            <li className="text-xs text-gray-600 pt-1">
-              Tip: If you’re unsure, take one extra angle photo.
-            </li>
+            <li className="text-xs text-gray-600 pt-1">Tip: If you’re unsure, take one extra angle photo.</li>
           </ul>
         </div>
 
@@ -543,9 +478,7 @@ export default function QuoteForm({
       <section className="rounded-2xl border p-5 space-y-4">
         <div>
           <h2 className="font-semibold">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600">
-            Required so we can send your estimate and follow up if needed.
-          </p>
+          <p className="mt-1 text-xs text-gray-600">Required so we can send your estimate and follow up if needed.</p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -612,29 +545,11 @@ export default function QuoteForm({
           />
         </label>
 
-        {aiRenderingEnabled ? (
-          <label className="flex items-start gap-3 rounded-xl border p-4">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={renderOptIn}
-              onChange={(e) => setRenderOptIn(e.target.checked)}
-              disabled={working}
-            />
-            <div>
-              <div className="text-sm font-semibold">Optional: AI concept rendering</div>
-              <div className="text-xs text-gray-600">
-                If available, we can generate a concept image of the finished result after review.
-              </div>
-            </div>
-          </label>
-        ) : null}
-
         <div className="rounded-xl bg-gray-50 p-4 text-xs text-gray-700">
           <div className="font-semibold">Estimate disclaimer</div>
           <p className="mt-1">
-            This is a photo-based estimate range. Final pricing can change after inspection,
-            measurements, and material selection.
+            This is a photo-based estimate range. Final pricing can change after inspection, measurements, and material
+            selection.
           </p>
         </div>
 
@@ -663,6 +578,13 @@ export default function QuoteForm({
             {error}
           </div>
         )}
+
+        {/* tiny note for next step */}
+        {aiRenderingEnabled ? (
+          <div className="text-xs text-gray-600">
+            (Tenant has AI rendering enabled — customer opt-in will appear in the next step.)
+          </div>
+        ) : null}
       </section>
 
       {/* Results */}
@@ -681,9 +603,7 @@ export default function QuoteForm({
               {formatMoney(result.output.estimate.low)} – {formatMoney(result.output.estimate.high)}
             </div>
             {result.output.inspection_required && (
-              <p className="mt-2 text-xs text-gray-600">
-                Inspection recommended to confirm scope and pricing.
-              </p>
+              <p className="mt-2 text-xs text-gray-600">Inspection recommended to confirm scope and pricing.</p>
             )}
           </div>
 
