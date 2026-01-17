@@ -1,6 +1,8 @@
+// src/components/QuoteForm.tsx
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { upload } from "@vercel/blob/client";
 
 type ShotType = "wide" | "closeup" | "extra";
 
@@ -87,6 +89,15 @@ function ProgressBar({
   );
 }
 
+function safeFileName(name: string) {
+  return (name || "image")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled,
@@ -117,6 +128,9 @@ export default function QuoteForm({
 
   const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
 
+  // Upload UI state (so your Progress bar can show "Working…" while uploading)
+  const [isUploading, setIsUploading] = useState(false);
+
   // Avoid auto-render loops / multiple attempts
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
@@ -128,8 +142,17 @@ export default function QuoteForm({
       imageCount: images.length,
       quoteLogId: result.quoteLogId,
       renderStatus: renderState.status,
+      isUploading,
     };
-  }, [tenantSlug, aiRenderingEnabled, aiRenderOptIn, images.length, result.quoteLogId, renderState.status]);
+  }, [
+    tenantSlug,
+    aiRenderingEnabled,
+    aiRenderOptIn,
+    images.length,
+    result.quoteLogId,
+    renderState.status,
+    isUploading,
+  ]);
 
   // ---------- helpers ----------
   const addImagesFromUrls = useCallback((urls: string[]) => {
@@ -155,35 +178,43 @@ export default function QuoteForm({
     setImages((prev) => prev.filter((x) => x.url !== url));
   }, []);
 
-  // ---------- upload ----------
+  // ---------- upload (DIRECT TO VERCEL BLOB: fixes 413) ----------
   async function uploadFiles(files: FileList) {
     if (!files?.length) return;
+    if (!tenantSlug) throw new Error("Missing tenant slug");
 
-    const form = new FormData();
-    Array.from(files).forEach((f) => form.append("files", f));
+    const existingCount = images.length;
+    const maxLeft = Math.max(0, 12 - existingCount);
+    const picked = Array.from(files).slice(0, maxLeft);
 
-    const res = await fetch("/api/blob/upload", { method: "POST", body: form });
-    const text = await res.text();
+    if (!picked.length) {
+      throw new Error("Max 12 photos reached.");
+    }
 
-    let j: any = null;
+    setIsUploading(true);
     try {
-      j = text ? JSON.parse(text) : null;
-    } catch {
-      throw new Error(`Upload returned non-JSON (${res.status}). ${text?.slice(0, 200) ?? ""}`.trim());
+      const urls: string[] = [];
+
+      for (let i = 0; i < picked.length; i++) {
+        const f = picked[i];
+        const stamp = Date.now();
+        const base = safeFileName(f.name);
+        const pathname = `quotes/${tenantSlug}/${stamp}-${i}-${base}`;
+
+        // This uses your JSON handshake route: POST /api/blob/upload
+        const blob = await upload(pathname, f, {
+          access: "public",
+          handleUploadUrl: "/api/blob/upload",
+        });
+
+        if (blob?.url) urls.push(String(blob.url));
+      }
+
+      if (!urls.length) throw new Error("Upload returned no file urls");
+      addImagesFromUrls(urls);
+    } finally {
+      setIsUploading(false);
     }
-
-    if (!res.ok || !j?.ok) {
-      throw new Error(j?.error?.message || j?.message || "Blob upload failed");
-    }
-
-    const urls: string[] = Array.isArray(j?.urls)
-      ? j.urls.map((x: any) => String(x)).filter(Boolean)
-      : Array.isArray(j?.files)
-        ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
-        : [];
-
-    if (!urls.length) throw new Error("Blob upload returned no file urls");
-    addImagesFromUrls(urls);
   }
 
   // ---------- submit estimate ----------
@@ -234,6 +265,7 @@ export default function QuoteForm({
       setRenderState({ status: "rendering" });
 
       try {
+        // KEEP YOUR EXISTING ENDPOINT (you said you have /render/start)
         const j = await postJson<any>("/api/render/start", { tenantSlug, quoteLogId });
         const imageUrl = (j?.imageUrl ?? j?.url ?? null) as string | null;
         if (!imageUrl) throw new Error("Render completed but no imageUrl returned.");
@@ -300,8 +332,16 @@ export default function QuoteForm({
       <div className="space-y-3">
         <ProgressBar
           labelLeft="Progress"
-          labelRight={isSubmitting ? "Working…" : estimateReady ? "Estimate ready" : "Add photos"}
-          active={isSubmitting}
+          labelRight={
+            isSubmitting
+              ? "Working…"
+              : isUploading
+                ? "Uploading…"
+                : estimateReady
+                  ? "Estimate ready"
+                  : "Add photos"
+          }
+          active={isSubmitting || isUploading}
         />
 
         {aiRenderingEnabled ? (
@@ -392,7 +432,9 @@ export default function QuoteForm({
                     type="button"
                     className={cn(
                       "rounded px-2 py-1 text-xs font-medium",
-                      img.shotType === "wide" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-900"
+                      img.shotType === "wide"
+                        ? "bg-neutral-900 text-white"
+                        : "bg-neutral-100 text-neutral-900"
                     )}
                     onClick={() => setShotType(img.url, "wide")}
                   >
@@ -402,7 +444,9 @@ export default function QuoteForm({
                     type="button"
                     className={cn(
                       "rounded px-2 py-1 text-xs font-medium",
-                      img.shotType === "closeup" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-900"
+                      img.shotType === "closeup"
+                        ? "bg-neutral-900 text-white"
+                        : "bg-neutral-100 text-neutral-900"
                     )}
                     onClick={() => setShotType(img.url, "closeup")}
                   >
@@ -412,7 +456,9 @@ export default function QuoteForm({
                     type="button"
                     className={cn(
                       "rounded px-2 py-1 text-xs font-medium",
-                      img.shotType === "extra" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-900"
+                      img.shotType === "extra"
+                        ? "bg-neutral-900 text-white"
+                        : "bg-neutral-100 text-neutral-900"
                     )}
                     onClick={() => setShotType(img.url, "extra")}
                   >
@@ -478,7 +524,6 @@ export default function QuoteForm({
           </div>
         </div>
 
-        {/* Only show checkbox if tenant supports rendering */}
         {aiRenderingEnabled ? (
           <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
             <label className="flex cursor-pointer items-start gap-2 text-sm">
@@ -501,7 +546,10 @@ export default function QuoteForm({
         <div className="mt-4 flex flex-wrap gap-3">
           <button
             type="button"
-            className={cn("rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white", isSubmitting ? "opacity-60" : "")}
+            className={cn(
+              "rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white",
+              isSubmitting ? "opacity-60" : ""
+            )}
             disabled={isSubmitting}
             onClick={async () => {
               try {
@@ -529,13 +577,17 @@ export default function QuoteForm({
           <div className="mb-2 font-semibold">Result</div>
 
           <div className="rounded-md border border-neutral-200 bg-neutral-50 p-3 text-sm">
-            <pre className="overflow-auto whitespace-pre-wrap">{JSON.stringify(result.output, null, 2)}</pre>
+            <pre className="overflow-auto whitespace-pre-wrap">
+              {JSON.stringify(result.output, null, 2)}
+            </pre>
           </div>
 
           {aiRenderingEnabled && aiRenderOptIn ? (
             <div className="mt-4 rounded-xl border border-neutral-200 bg-white p-4">
               <div className="text-lg font-semibold">AI Rendering</div>
-              <div className="text-sm text-neutral-600">This is a second step after your estimate. It can take a moment.</div>
+              <div className="text-sm text-neutral-600">
+                This is a second step after your estimate. It can take a moment.
+              </div>
 
               <div className="mt-3 text-sm">
                 <div className="font-medium">Status: {renderState.status}</div>
@@ -543,12 +595,18 @@ export default function QuoteForm({
                 {renderState.status === "rendered" ? (
                   <div className="mt-3">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={renderState.imageUrl} alt="AI Rendering" className="w-full rounded-lg border border-neutral-200" />
+                    <img
+                      src={renderState.imageUrl}
+                      alt="AI Rendering"
+                      className="w-full rounded-lg border border-neutral-200"
+                    />
                   </div>
                 ) : null}
 
                 {renderState.status === "failed" ? (
-                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-red-900">{esc(renderState.message)}</div>
+                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-red-900">
+                    {esc(renderState.message)}
+                  </div>
                 ) : null}
 
                 <div className="mt-3">
