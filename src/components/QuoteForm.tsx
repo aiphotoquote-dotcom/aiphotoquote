@@ -1,670 +1,573 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type UploadedFile = { url: string };
+type QuoteOutput = {
+  confidence?: "high" | "medium" | "low";
+  inspection_required?: boolean;
+  summary?: string;
+  questions?: string[];
+  estimate?: { low: number; high: number } | null;
+  render_opt_in?: boolean;
+};
 
-function formatMoney(n: number) {
-  return `$${Math.round(n).toLocaleString()}`;
-}
+type SubmitResponse = {
+  ok: boolean;
+  debugId?: string;
+  quoteLogId?: string;
+  output?: QuoteOutput | null;
+  estimate?: { low: number; high: number } | null;
+  assessment?: any;
+  email?: any;
+  error?: string;
+  message?: string;
+  server_debug?: any;
+};
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+type RenderResponse = {
+  ok: boolean;
+  debugId?: string;
+  quoteLogId?: string;
+  imageUrl?: string | null;
+  error?: string;
+  message?: string;
+  stored?: any;
+  queuedMark?: any;
+};
 
-function digitsOnly(s: string) {
-  return (s || "").replace(/\D/g, "");
-}
+type UploadResponse = {
+  ok: boolean;
+  files?: Array<{ url?: string }>;
+  error?: any;
+};
 
-function formatUSPhone(input: string) {
-  const d = digitsOnly(input).slice(0, 10);
-  const a = d.slice(0, 3);
-  const b = d.slice(3, 6);
-  const c = d.slice(6, 10);
-  if (d.length <= 3) return a ? `(${a}` : "";
-  if (d.length <= 6) return `(${a}) ${b}`;
-  return `(${a}) ${b}-${c}`;
-}
-
-function isValidEmail(email: string) {
-  const s = (email || "").trim();
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
-}
-
-async function compressImage(
-  file: File,
-  opts?: { maxDim?: number; quality?: number }
-): Promise<File> {
-  const maxDim = opts?.maxDim ?? 1600;
-  const quality = opts?.quality ?? 0.78;
-
-  if (!file.type.startsWith("image/")) return file;
-
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Failed to read image"));
-    reader.readAsDataURL(file);
-  });
-
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = () => reject(new Error("Failed to load image"));
-    i.src = dataUrl;
-  });
-
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-
-  const scale = Math.min(1, maxDim / Math.max(w, h));
-  const outW = Math.max(1, Math.round(w * scale));
-  const outH = Math.max(1, Math.round(h * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = outW;
-  canvas.height = outH;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return file;
-
-  ctx.drawImage(img, 0, 0, outW, outH);
-
-  const blob: Blob = await new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("Compression failed"))),
-      "image/jpeg",
-      quality
-    );
-  });
-
-  const baseName = file.name.replace(/\.[^/.]+$/, "");
-  const outName = `${baseName}.jpg`;
-  return new File([blob], outName, { type: "image/jpeg" });
-}
-
-type RenderState =
-  | { status: "idle"; imageUrl: null; error: null }
-  | { status: "working"; imageUrl: null; error: null }
-  | { status: "rendered"; imageUrl: string; error: null }
-  | { status: "failed"; imageUrl: null; error: string };
-
-export default function QuoteForm({
-  tenantSlug,
-  aiRenderingEnabled,
-}: {
+export default function QuoteForm(props: {
   tenantSlug: string;
-  aiRenderingEnabled?: boolean;
+  aiRenderingEnabled: boolean;
 }) {
-  const MIN_PHOTOS = 2;
-  const MAX_PHOTOS = 12;
+  const { tenantSlug, aiRenderingEnabled } = props;
 
-  const [customerName, setCustomerName] = useState("");
+  // ---- form state ----
+  const [files, setFiles] = useState<File[]>([]);
+  const [imageUrls, setImageUrls] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadErr, setUploadErr] = useState<string | null>(null);
+
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-
   const [notes, setNotes] = useState("");
-  const [files, setFiles] = useState<File[]>([]);
-  const [previews, setPreviews] = useState<string[]>([]);
 
-  // ✅ customer opt-in (tenant-enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
-  const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<
-    "idle" | "compressing" | "uploading" | "analyzing"
+  // ---- submit state ----
+  const [submitting, setSubmitting] = useState(false);
+  const [submitErr, setSubmitErr] = useState<string | null>(null);
+  const [result, setResult] = useState<SubmitResponse | null>(null);
+
+  // ---- rendering state ----
+  const [renderStatus, setRenderStatus] = useState<
+    "idle" | "queued" | "rendered" | "failed"
   >("idle");
+  const [renderMsg, setRenderMsg] = useState<string | null>(null);
+  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
+  const [renderMeta, setRenderMeta] = useState<any>(null);
 
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // ✅ step 2 rendering UI/state
-  const [renderState, setRenderState] = useState<RenderState>({
-    status: "idle",
-    imageUrl: null,
-    error: null,
-  });
-
+  // Prevent double-trigger for same quoteLogId
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
-  const resultsRef = useRef<HTMLDivElement | null>(null);
+  const canSubmit = useMemo(() => {
+    return (
+      tenantSlug?.length >= 3 &&
+      imageUrls.length >= 1 &&
+      name.trim().length >= 1 &&
+      email.trim().length >= 3 &&
+      phone.trim().length >= 7 &&
+      !uploading &&
+      !submitting
+    );
+  }, [tenantSlug, imageUrls.length, name, email, phone, uploading, submitting]);
 
-  const contactOk = useMemo(() => {
-    const nOk = customerName.trim().length > 0;
-    const eOk = isValidEmail(email);
-    const pOk = digitsOnly(phone).length === 10;
-    return nOk && eOk && pOk;
-  }, [customerName, email, phone]);
+  // ---- helpers ----
+  const formatPhone = useCallback((raw: string) => {
+    const digits = raw.replace(/\D/g, "").slice(0, 10);
+    const a = digits.slice(0, 3);
+    const b = digits.slice(3, 6);
+    const c = digits.slice(6, 10);
+    if (digits.length <= 3) return a ? `(${a}` : "";
+    if (digits.length <= 6) return `(${a}) ${b}`;
+    return `(${a}) ${b}-${c}`;
+  }, []);
 
-  const step = useMemo(() => {
-    if (result?.output) return 3;
-    if (files.length > 0) return 2;
-    return 1;
-  }, [files.length, result?.output]);
-
-  const progress = useMemo(() => {
-    let p = 0.15;
-    if (step === 1) p = 0.25;
-    if (step === 2) p = 0.55;
-    if (step === 3) p = 0.85;
-
-    if (working) {
-      if (phase === "compressing") p = 0.62;
-      if (phase === "uploading") p = 0.72;
-      if (phase === "analyzing") p = 0.82;
+  const pretty = useCallback((v: any) => {
+    try {
+      return JSON.stringify(v, null, 2);
+    } catch {
+      return String(v);
     }
+  }, []);
 
-    if (result?.output) p = 1.0;
+  async function uploadToBlob(selected: File[]) {
+    setUploadErr(null);
+    setUploading(true);
 
-    return Math.max(0, Math.min(1, p));
-  }, [step, working, phase, result?.output]);
+    try {
+      const fd = new FormData();
+      for (const f of selected) fd.append("files", f, f.name);
 
-  const progressLabel = useMemo(() => {
-    if (result?.output) return "Estimate ready";
-    if (working) {
-      if (phase === "compressing") return "Optimizing photos…";
-      if (phase === "uploading") return "Uploading…";
-      if (phase === "analyzing") return "Analyzing…";
-    }
-    if (step === 1) return "Add photos";
-    if (step === 2) return "Add details";
-    return "Review estimate";
-  }, [result?.output, working, phase, step]);
-
-  const progressText = useMemo(() => {
-    if (files.length >= MIN_PHOTOS) {
-      const c = contactOk ? " • ✅ contact info" : " • add contact info";
-      return `✅ ${files.length} photo${files.length === 1 ? "" : "s"} added${c}`;
-    }
-    return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
-  }, [files.length, contactOk]);
-
-  useEffect(() => {
-    if (!result?.output) return;
-    (async () => {
-      await sleep(50);
-      resultsRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
+      const res = await fetch("/api/blob/upload", {
+        method: "POST",
+        body: fd,
       });
-    })();
-  }, [result?.output]);
 
-  function rebuildPreviews(nextFiles: File[]) {
-    previews.forEach((p) => URL.revokeObjectURL(p));
-    setPreviews(nextFiles.map((f) => URL.createObjectURL(f)));
+      const j: UploadResponse | null = await res.json().catch(() => null);
+
+      if (!res.ok || !j?.ok) {
+        throw new Error(
+          j?.error?.message ||
+            j?.error?.toString?.() ||
+            `Upload failed (HTTP ${res.status})`
+        );
+      }
+
+      const urls =
+        j.files?.map((x) => (x?.url ? String(x.url) : "")).filter(Boolean) ?? [];
+
+      if (!urls.length) {
+        throw new Error("Upload succeeded but returned no file URLs.");
+      }
+
+      setImageUrls(urls);
+      return urls;
+    } finally {
+      setUploading(false);
+    }
   }
 
-  function addFiles(newOnes: File[]) {
-    if (!newOnes.length) return;
-    const combined = [...files, ...newOnes].slice(0, MAX_PHOTOS);
-    setFiles(combined);
-    rebuildPreviews(combined);
-  }
+  async function submitQuote(payload: any) {
+    const res = await fetch("/api/quote/submit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const j: SubmitResponse | null = await res.json().catch(() => null);
 
-  function removeFileAt(idx: number) {
-    const next = files.filter((_, i) => i !== idx);
-    setFiles(next);
-    rebuildPreviews(next);
-  }
+    if (!res.ok || !j?.ok) {
+      const msg =
+        j?.message ||
+        j?.error ||
+        (j as any)?.server_debug?.[0]?.message ||
+        `Quote failed (HTTP ${res.status})`;
+      throw new Error(msg);
+    }
 
-  function retake() {
-    setError(null);
-    setResult(null);
-    setNotes("");
-    setRenderOptIn(false);
-
-    // reset step2 UI too
-    setRenderState({ status: "idle", imageUrl: null, error: null });
-    renderAttemptedForQuoteRef.current = null;
-
-    previews.forEach((p) => URL.revokeObjectURL(p));
-    setPreviews([]);
-    setFiles([]);
-    setPhase("idle");
+    return j;
   }
 
   async function triggerRendering(args: { tenantSlug: string; quoteLogId: string }) {
-    setRenderState({ status: "working", imageUrl: null, error: null });
+    // UI rule: rendering is SUCCESS if ANY imageUrl comes back.
+    // Blob upload is nice-to-have; not required to mark success.
+    setRenderStatus("queued");
+    setRenderMsg("Rendering queued…");
+    setRenderImageUrl(null);
+    setRenderMeta(null);
 
-    try {
-      // ✅ must call /api/render/start (not /api/render/trigger)
-      // ✅ must be POST
-      const res = await fetch("/api/render/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenantSlug: args.tenantSlug,
-          quoteLogId: args.quoteLogId,
-        }),
-      });
+    const res = await fetch("/api/render/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(args),
+    });
 
-      const json = await res.json().catch(() => null);
+    const j: RenderResponse | null = await res.json().catch(() => null);
 
-      if (!res.ok || !json?.ok) {
-        const msg =
-          json?.message ||
-          json?.error ||
-          `Render failed (HTTP ${res.status})`;
-        setRenderState({ status: "failed", imageUrl: null, error: msg });
-        return;
-      }
-
-      const imageUrl = json?.imageUrl ? String(json.imageUrl) : null;
-      if (!imageUrl) {
-        setRenderState({
-          status: "failed",
-          imageUrl: null,
-          error: "Render completed but no imageUrl returned.",
-        });
-        return;
-      }
-
-      setRenderState({ status: "rendered", imageUrl, error: null });
-    } catch (e: any) {
-      setRenderState({
-        status: "failed",
-        imageUrl: null,
-        error: e?.message ?? "Render request failed.",
-      });
+    if (!res.ok || !j?.ok) {
+      const msg = j?.message || j?.error || `Render failed (HTTP ${res.status})`;
+      setRenderStatus("failed");
+      setRenderMsg(msg);
+      setRenderMeta(j);
+      return;
     }
+
+    const imgUrl = j?.imageUrl ? String(j.imageUrl) : null;
+
+    if (imgUrl) {
+      setRenderStatus("rendered");
+      setRenderMsg(null);
+      setRenderImageUrl(imgUrl);
+      setRenderMeta(j);
+      return;
+    }
+
+    // If backend says ok but no image URL, treat as failed (true failure)
+    setRenderStatus("failed");
+    setRenderMsg("Render returned ok but no image URL was provided.");
+    setRenderMeta(j);
   }
 
-  // ✅ Auto-run Step 2 once per quote when tenant enables it AND customer opted in
+  // ---- auto-trigger rendering after estimate (ONLY if opted-in + tenant enabled) ----
   useEffect(() => {
-    const quoteLogId = result?.quoteLogId ? String(result.quoteLogId) : null;
-    const out = result?.output ?? null;
+    const quoteLogId = result?.quoteLogId ?? null;
 
-    const shouldRun =
-      Boolean(aiRenderingEnabled) &&
-      Boolean(out?.render_opt_in) &&
-      Boolean(quoteLogId);
+    const optedIn = result?.output?.render_opt_in === true;
+    const shouldAutoRender = Boolean(aiRenderingEnabled && optedIn);
 
-    if (!shouldRun) return;
-
-    // ✅ TS narrowing (fixes: string | null not assignable to string)
     if (!quoteLogId) return;
+    if (!shouldAutoRender) return;
 
+    // avoid duplicate triggers for same quote id
     if (renderAttemptedForQuoteRef.current === quoteLogId) return;
     renderAttemptedForQuoteRef.current = quoteLogId;
 
     triggerRendering({ tenantSlug, quoteLogId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result?.quoteLogId, result?.output, aiRenderingEnabled, tenantSlug]);
+  }, [result?.quoteLogId, result?.output?.render_opt_in, aiRenderingEnabled, tenantSlug]);
 
-  async function onSubmit() {
-    setError(null);
+  // ---- events ----
+  const onPickFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSubmitErr(null);
     setResult(null);
-
-    // reset step2 state for a new quote attempt
-    setRenderState({ status: "idle", imageUrl: null, error: null });
+    setRenderStatus("idle");
+    setRenderMsg(null);
+    setRenderImageUrl(null);
+    setRenderMeta(null);
     renderAttemptedForQuoteRef.current = null;
 
-    if (!tenantSlug || typeof tenantSlug !== "string") {
-      setError("Missing tenant slug. Please reload the page (invalid tenant link).");
-      return;
-    }
+    const picked = Array.from(e.target.files ?? []).slice(0, 12);
+    setFiles(picked);
 
-    if (files.length < MIN_PHOTOS) {
-      setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
+    if (!picked.length) {
+      setImageUrls([]);
       return;
     }
-    if (files.length > MAX_PHOTOS) {
-      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
-      return;
-    }
-
-    if (!customerName.trim()) {
-      setError("Please enter your name.");
-      return;
-    }
-    if (!isValidEmail(email)) {
-      setError("Please enter a valid email address.");
-      return;
-    }
-    if (digitsOnly(phone).length !== 10) {
-      setError("Please enter a valid 10-digit phone number.");
-      return;
-    }
-
-    setWorking(true);
 
     try {
-      setPhase("compressing");
-      const compressed = await Promise.all(files.map((f) => compressImage(f)));
-
-      setPhase("uploading");
-      const form = new FormData();
-      compressed.forEach((f) => form.append("files", f));
-
-      const up = await fetch("/api/blob/upload", { method: "POST", body: form });
-      const upJson = await up.json();
-      if (!upJson.ok) throw new Error(upJson.error?.message ?? "Upload failed");
-
-      const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
-
-      setPhase("analyzing");
-
-      // ✅ IMPORTANT: server schema expects render_opt_in top-level, not inside customer_context
-      const res = await fetch("/api/quote/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenantSlug,
-          images: urls,
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
-          customer_context: {
-            name: customerName.trim(),
-            email: email.trim(),
-            phone: digitsOnly(phone),
-            notes,
-          },
-        }),
-      });
-
-      const json = await res.json();
-
-      if (!json.ok) {
-        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
-        const code = json?.error ? `\ncode: ${json.error}` : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
-        const issues = json?.issues
-          ? `\nissues:\n${json.issues
-              .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
-              .join("\n")}`
-          : "";
-        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
-      }
-
-      setResult(json);
-    } catch (e: any) {
-      setError(e.message ?? "Something went wrong.");
-      setPhase("idle");
-    } finally {
-      setWorking(false);
+      await uploadToBlob(picked);
+    } catch (err: any) {
+      setUploadErr(err?.message ?? String(err));
+      setImageUrls([]);
     }
-  }
+  };
 
-  const out = result?.output ?? null;
+  const onSubmit = async () => {
+    setSubmitErr(null);
+    setResult(null);
+
+    // clear rendering state for new submission
+    setRenderStatus("idle");
+    setRenderMsg(null);
+    setRenderImageUrl(null);
+    setRenderMeta(null);
+    renderAttemptedForQuoteRef.current = null;
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        tenantSlug,
+        images: imageUrls.map((url) => ({ url })),
+        render_opt_in: Boolean(aiRenderingEnabled && renderOptIn),
+        customer_context: {
+          name: name.trim(),
+          email: email.trim(),
+          phone: phone.trim(),
+          notes: notes.trim() || undefined,
+          category: "upholstery",
+          service_type: "estimate",
+        },
+      };
+
+      const j = await submitQuote(payload);
+      setResult(j);
+    } catch (err: any) {
+      setSubmitErr(err?.message ?? String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const quoteLogId = result?.quoteLogId ?? null;
 
   return (
     <div className="space-y-6">
-      {/* Progress bar */}
-      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-        <div className="flex items-center justify-between gap-4">
+      {/* Progress */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-center justify-between">
           <div>
             <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              {progressLabel}
+              {result?.ok ? "Estimate ready" : "Add photos"}
             </div>
           </div>
-          <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
+          <div className="text-xs text-gray-600 dark:text-gray-300">
+            {imageUrls.length >= 2
+              ? `Photos: ${imageUrls.length}`
+              : `Add 2 photos (you have ${imageUrls.length})`}
+          </div>
         </div>
 
-        <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-900">
           <div
-            className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
-            style={{ width: `${Math.round(progress * 100)}%` }}
+            className="h-full bg-black dark:bg-white"
+            style={{
+              width: result?.ok ? "100%" : imageUrls.length ? "50%" : "10%",
+            }}
           />
         </div>
 
-        {/* (optional) tiny debug for tenant slug */}
-        <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-          tenantSlug: {tenantSlug || "(missing)"}
+        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          tenantSlug: <span className="font-mono">{tenantSlug}</span>
         </div>
       </div>
 
       {/* Photos */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
-        <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
-          </p>
+      <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          Take 2 quick photos
+        </div>
+        <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+          These two shots give the best accuracy. Add more if you want (max 12).
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <input
-              className="hidden"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => {
-                const next = Array.from(e.target.files ?? []);
-                addFiles(next);
-                e.currentTarget.value = "";
-              }}
-              disabled={working}
-            />
-            <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
-              Take Photo (Camera)
-            </div>
-          </label>
-
-          <label className="block">
-            <input
-              className="hidden"
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={(e) => {
-                const next = Array.from(e.target.files ?? []);
-                addFiles(next);
-                e.currentTarget.value = "";
-              }}
-              disabled={working}
-            />
-            <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
-              Upload Photos
-            </div>
-          </label>
-        </div>
-
-        {previews.length > 0 && (
-          <div className="grid grid-cols-3 gap-3">
-            {previews.map((src, idx) => (
-              <div
-                key={`${src}-${idx}`}
-                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
-                <button
-                  type="button"
-                  className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                  onClick={() => removeFileAt(idx)}
-                  disabled={working}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Details */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
-        <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Required so we can send your estimate and follow up if needed.
-          </p>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <div className="text-xs text-gray-700 dark:text-gray-200">
-              Name <span className="text-red-600">*</span>
-            </div>
-            <input
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Your name"
-              disabled={working}
-              autoComplete="name"
-            />
-          </label>
-
-          <label className="block">
-            <div className="text-xs text-gray-700 dark:text-gray-200">
-              Email <span className="text-red-600">*</span>
-            </div>
-            <input
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@email.com"
-              disabled={working}
-              inputMode="email"
-              autoComplete="email"
-            />
-          </label>
-        </div>
-
-        <label className="block">
-          <div className="text-xs text-gray-700 dark:text-gray-200">
-            Phone <span className="text-red-600">*</span>
-          </div>
+        <div className="mt-4">
           <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            value={phone}
-            onChange={(e) => setPhone(formatUSPhone(e.target.value))}
-            placeholder="(555) 555-5555"
-            disabled={working}
-            inputMode="tel"
-            autoComplete="tel"
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={onPickFiles}
+            className="block w-full text-sm"
           />
-        </label>
+        </div>
 
-        <label className="block">
-          <div className="text-xs text-gray-700 dark:text-gray-200">Notes</div>
-          <textarea
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            rows={4}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="What are you looking to do? Material preference, timeline, constraints?"
-            disabled={working}
-          />
-        </label>
-
-        {aiRenderingEnabled ? (
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-start gap-3">
-              <input
-                id="renderOptIn"
-                type="checkbox"
-                className="mt-1 h-4 w-4"
-                checked={renderOptIn}
-                onChange={(e) => setRenderOptIn(e.target.checked)}
-                disabled={working}
-              />
-              <label htmlFor="renderOptIn" className="cursor-pointer">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  Optional: AI rendering preview
-                </div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
-                </div>
-              </label>
-            </div>
+        {uploading ? (
+          <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+            Uploading photos…
           </div>
         ) : null}
 
-        <button
-          className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
-          onClick={onSubmit}
-          disabled={working || files.length < MIN_PHOTOS || !contactOk}
-        >
-          {working ? "Working…" : "Get Estimate"}
-        </button>
-
-        {error && (
-          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-            {error}
+        {uploadErr ? (
+          <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+            {uploadErr}
           </div>
-        )}
-      </section>
+        ) : null}
 
-      {out ? (
-        <section
-          ref={resultsRef}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-        >
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
-            <button
-              type="button"
-              className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
-              onClick={retake}
-              disabled={working}
-            >
-              Start Over
-            </button>
+        {imageUrls.length ? (
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            {imageUrls.slice(0, 6).map((u) => (
+              <div
+                key={u}
+                className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={u} alt="uploaded" className="h-28 w-full object-cover" />
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Customer */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Your info</div>
+        <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+          Required so we can send your estimate and follow up if needed.
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+              Name <span className="text-red-500">*</span>
+            </label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoComplete="name"
+              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10 dark:border-gray-800 dark:bg-gray-950 dark:focus:ring-white/10"
+              placeholder="Your name"
+            />
           </div>
 
-          <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(out, null, 2)}
-          </pre>
+          <div>
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+              Email <span className="text-red-500">*</span>
+            </label>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
+              inputMode="email"
+              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10 dark:border-gray-800 dark:bg-gray-950 dark:focus:ring-white/10"
+              placeholder="you@email.com"
+            />
+          </div>
 
-          {/* ✅ Step 2 Rendering result (if tenant enabled + user opted in) */}
-          {aiRenderingEnabled && out?.render_opt_in ? (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+          <div>
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+              Phone <span className="text-red-500">*</span>
+            </label>
+            <input
+              value={phone}
+              onChange={(e) => setPhone(formatPhone(e.target.value))}
+              autoComplete="tel"
+              inputMode="tel"
+              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10 dark:border-gray-800 dark:bg-gray-950 dark:focus:ring-white/10"
+              placeholder="(555) 555-5555"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+              Notes
+            </label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={4}
+              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10 dark:border-gray-800 dark:bg-gray-950 dark:focus:ring-white/10"
+              placeholder="What are you looking to do? Material preference, timeline, constraints?"
+            />
+          </div>
+
+          {aiRenderingEnabled ? (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-950">
+              <label className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={renderOptIn}
+                  onChange={(e) => setRenderOptIn(e.target.checked)}
+                  className="mt-1"
+                />
+                <div>
+                  <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+                    Optional: AI rendering preview
+                  </div>
+                  <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">
+                    If selected, we may generate a visual “after” concept based on your photos.
+                    This happens as a second step after your estimate.
+                  </div>
+                </div>
+              </label>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Submit */}
+      <button
+        onClick={onSubmit}
+        disabled={!canSubmit}
+        className="w-full rounded-2xl bg-black px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
+      >
+        {submitting ? "Working…" : "Get Estimate"}
+      </button>
+
+      {submitErr ? (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+          <div className="font-semibold">Quote failed</div>
+          <div className="mt-1">{submitErr}</div>
+          {result?.debugId ? (
+            <div className="mt-2 text-xs opacity-80">debugId: {result.debugId}</div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Result */}
+      {result?.ok ? (
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Result</div>
+          <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
+            <pre className="max-h-[320px] overflow-auto bg-gray-50 p-3 text-[11px] leading-4 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+              {pretty(result.output ?? result)}
+            </pre>
+          </div>
+
+          {/* Rendering */}
+          {aiRenderingEnabled && result?.output?.render_opt_in ? (
+            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-950">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                AI Rendering
+              </div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
                 This is a second step after your estimate. It can take a moment.
               </div>
 
-              <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">
-                {renderState.status === "idle" ? (
-                  <div>Status: Waiting…</div>
-                ) : renderState.status === "working" ? (
-                  <div>Status: Working…</div>
-                ) : renderState.status === "rendered" ? (
-                  <div>Status: Ready</div>
-                ) : (
-                  <div>Status: Failed</div>
-                )}
+              <div className="mt-3 text-xs text-gray-700 dark:text-gray-200">
+                Status:{" "}
+                <span className="font-semibold">
+                  {renderStatus === "idle"
+                    ? "Not started"
+                    : renderStatus === "queued"
+                      ? "Queued / Working"
+                      : renderStatus === "rendered"
+                        ? "Rendered"
+                        : "Failed"}
+                </span>
               </div>
 
-              {renderState.status === "failed" ? (
-                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                  {renderState.error}
+              {renderStatus === "failed" ? (
+                <div className="mt-2 rounded-xl border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                  {renderMsg || "Render failed"}
                 </div>
               ) : null}
 
-              {renderState.status === "rendered" ? (
-                <div className="mt-3">
+              {renderStatus === "queued" && renderMsg ? (
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+                  {renderMsg}
+                </div>
+              ) : null}
+
+              {renderImageUrl ? (
+                <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={renderState.imageUrl}
-                    alt="AI rendering result"
-                    className="w-full rounded-xl border border-gray-200 dark:border-gray-800"
+                    src={renderImageUrl}
+                    alt="AI rendering"
+                    className="w-full object-cover"
                   />
                 </div>
               ) : null}
 
-              <div className="mt-4 flex gap-2">
+              <div className="mt-3 flex items-center gap-2">
                 <button
-                  type="button"
-                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
                   onClick={() => {
-                    const quoteLogId = result?.quoteLogId ? String(result.quoteLogId) : null;
                     if (!quoteLogId) return;
-                    renderAttemptedForQuoteRef.current = quoteLogId; // lock to this quote
                     triggerRendering({ tenantSlug, quoteLogId });
                   }}
-                  disabled={renderState.status === "working" || !result?.quoteLogId}
+                  className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                 >
                   Retry Render
                 </button>
+
+                {renderMeta ? (
+                  <button
+                    onClick={() => {
+                      const text = pretty(renderMeta);
+                      // best-effort copy
+                      navigator.clipboard?.writeText?.(text).catch(() => {});
+                    }}
+                    className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+                  >
+                    Copy debug
+                  </button>
+                ) : null}
               </div>
+
+              {renderMeta ? (
+                <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
+                  <pre className="max-h-[220px] overflow-auto bg-gray-50 p-3 text-[11px] leading-4 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+                    {pretty(renderMeta)}
+                  </pre>
+                </div>
+              ) : null}
             </div>
-          ) : null}
-        </section>
+          ) : aiRenderingEnabled ? (
+            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+              AI Rendering: disabled (customer did not opt in).
+            </div>
+          ) : (
+            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+              AI Rendering: not enabled for this tenant.
+            </div>
+          )}
+        </div>
       ) : null}
     </div>
   );
