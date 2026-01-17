@@ -1,16 +1,19 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { sql, eq } from "drizzle-orm";
-import crypto from "crypto";
+import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
+import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
+// Accept both POST JSON body and GET query params.
 const Req = z.object({
+  tenantSlug: z.string().min(3),
   quoteLogId: z.string().uuid(),
 });
 
@@ -48,6 +51,11 @@ function safeJsonParse(v: any) {
   }
 }
 
+async function getTenantBySlug(tenantSlug: string) {
+  const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
+  return rows[0] ?? null;
+}
+
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
@@ -58,19 +66,40 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   return decryptSecret(enc);
 }
 
-async function getTenantAiRenderingEnabled(tenantId: string): Promise<boolean> {
+async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | null> {
   try {
     const r = await db.execute(sql`
       select ai_rendering_enabled
       from tenant_settings
-      where tenant_id = ${tenantId}
+      where tenant_id = ${tenantId}::uuid
       limit 1
     `);
     const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    return row?.ai_rendering_enabled === true ? true : false;
+    if (typeof row?.ai_rendering_enabled === "boolean") return row.ai_rendering_enabled;
+    return null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function pickRenderOptInFromRecord(args: { row: any; renderingCols: boolean }) {
+  const { row, renderingCols } = args;
+
+  // Prefer explicit column if it exists
+  if (renderingCols && typeof row?.render_opt_in === "boolean") return row.render_opt_in;
+
+  // Fall back to input JSON stored in quote_logs.input
+  const input = safeJsonParse(row?.input) ?? {};
+  if (typeof input?.render_opt_in === "boolean") return input.render_opt_in;
+
+  // Fall back to output meta
+  const output = safeJsonParse(row?.output) ?? {};
+  if (typeof output?.meta?.render_opt_in === "boolean") return output.meta.render_opt_in;
+
+  // Fall back to normalized output shape
+  if (typeof output?.output?.render_opt_in === "boolean") return output.output.render_opt_in;
+
+  return false;
 }
 
 async function updateQuoteLogOutput(quoteLogId: string, output: any) {
@@ -82,103 +111,137 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
-async function tryUpdateRenderScalars(args: {
+async function markRenderQueuedBestEffort(args: {
   quoteLogId: string;
-  renderOptIn?: boolean | null;
-  status?: string | null;
-  imageUrl?: string | null;
-  prompt?: string | null;
-  error?: string | null;
+  prompt: string;
 }) {
-  const { quoteLogId, renderOptIn, status, imageUrl, prompt, error } = args;
+  const { quoteLogId, prompt } = args;
 
   try {
     await db.execute(sql`
       update quote_logs
       set
-        render_opt_in = ${renderOptIn ?? null},
-        render_status = ${status ?? null},
-        render_image_url = ${imageUrl ?? null},
-        render_prompt = ${prompt ?? null},
-        render_error = ${error ?? null},
-        rendered_at = case when ${status ?? null} = 'rendered' then now() else rendered_at end
+        render_status = 'queued',
+        render_prompt = ${prompt},
+        render_error = null
       where id = ${quoteLogId}::uuid
     `);
-  } catch {
-    // ignore if columns don't exist
-  }
-}
-
-function buildRenderPrompt(args: {
-  tenantName?: string;
-  notes?: string;
-  category?: string;
-  assessment?: any;
-  imageCount: number;
-}) {
-  const { tenantName, notes, category, assessment, imageCount } = args;
-
-  const summary = assessment?.summary ? String(assessment.summary) : "";
-  const visible = Array.isArray(assessment?.visible_scope) ? assessment.visible_scope : [];
-  const assumptions = Array.isArray(assessment?.assumptions) ? assessment.assumptions : [];
-
-  const lines: string[] = [];
-  lines.push("Generate a photorealistic concept rendering of the finished upholstery/job outcome.");
-  lines.push("Use the provided customer photos ONLY as reference for structure and context.");
-  lines.push("Do NOT add logos, watermarks, text overlays, or framing.");
-  lines.push("The result should look like a real finished product photo taken in good lighting.");
-  lines.push("");
-  if (tenantName) lines.push(`Business context: ${tenantName}`);
-  if (category) lines.push(`Category: ${category}`);
-  if (notes) lines.push(`Customer notes: ${notes}`);
-  if (summary) lines.push(`Assessment summary: ${summary}`);
-  if (visible.length) lines.push(`Visible scope: ${visible.join("; ")}`);
-  if (assumptions.length) lines.push(`Assumptions: ${assumptions.join("; ")}`);
-  lines.push("");
-  lines.push(`Reference photos: ${imageCount} image(s).`);
-  lines.push("Output: one single final image. No variations. No split panels.");
-
-  return lines.join("\n");
-}
-
-async function uploadPngToVercelBlob(args: { quoteLogId: string; bytes: Buffer }) {
-  // Lazy import so build won’t fail if @vercel/blob isn’t present in some env
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const mod = require("@vercel/blob") as typeof import("@vercel/blob");
-    const put = mod.put;
-    if (typeof put !== "function") throw new Error("put() not available from @vercel/blob");
-
-    const path = `renders/${args.quoteLogId}.png`;
-    const res = await put(path, args.bytes, {
-      access: "public",
-      contentType: "image/png",
-      addRandomSuffix: true,
-    });
-
-    return { ok: true as const, url: res.url, pathname: res.pathname };
+    return { ok: true as const, columns: true as const };
   } catch (e: any) {
-    return { ok: false as const, error: e?.message ?? String(e) };
+    const msg = e?.message ?? e?.cause?.message ?? "";
+    const code = e?.code ?? e?.cause?.code;
+    const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
+    if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+    return { ok: true as const, columns: false as const };
   }
 }
 
-export async function POST(req: Request) {
+async function storeRenderResultBestEffort(args: {
+  quoteLogId: string;
+  imageUrl: string | null;
+  error: string | null;
+  prompt: string;
+}) {
+  const { quoteLogId, imageUrl, error, prompt } = args;
+
+  // First try dedicated columns if present
+  try {
+    await db.execute(sql`
+      update quote_logs
+      set
+        render_status = ${error ? "failed" : "rendered"},
+        render_image_url = ${imageUrl},
+        render_prompt = ${prompt},
+        render_error = ${error},
+        rendered_at = now()
+      where id = ${quoteLogId}::uuid
+    `);
+    return { ok: true as const, columns: true as const };
+  } catch (e: any) {
+    const msg = e?.message ?? e?.cause?.message ?? "";
+    const code = e?.code ?? e?.cause?.code;
+    const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
+    if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+  }
+
+  // Fallback: merge into output.rendering
+  try {
+    const r = await db.execute(sql`
+      select output
+      from quote_logs
+      where id = ${quoteLogId}::uuid
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const out = safeJsonParse(row?.output) ?? {};
+
+    const next = {
+      ...out,
+      rendering: {
+        requested: true,
+        status: error ? "failed" : "rendered",
+        imageUrl,
+        prompt,
+        error,
+        renderedAt: new Date().toISOString(),
+      },
+    };
+
+    await updateQuoteLogOutput(quoteLogId, next);
+    return { ok: true as const, columns: false as const, merged: true as const };
+  } catch (e: any) {
+    return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+  }
+}
+
+async function blobUploadFromUrl(args: { imageUrl: string; filename: string }) {
+  const { imageUrl, filename } = args;
+
+  const imgRes = await fetch(imageUrl);
+  if (!imgRes.ok) throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
+
+  const arr = await imgRes.arrayBuffer();
+  const contentType = imgRes.headers.get("content-type") || "image/png";
+  const blob = new Blob([arr], { type: contentType });
+
+  const fd = new FormData();
+  fd.append("files", blob, filename);
+
+  const base = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") || "";
+  const uploadUrl = base ? `${base}/api/blob/upload` : "/api/blob/upload";
+
+  const upRes = await fetch(uploadUrl, { method: "POST", body: fd });
+  const j = await upRes.json().catch(() => null);
+
+  if (!j?.ok) throw new Error(j?.error?.message ?? "Blob upload failed");
+  const first = j?.files?.[0];
+  const url = first?.url ? String(first.url) : null;
+  if (!url) throw new Error("Blob upload did not return a file url");
+  return url;
+}
+
+async function readReq(method: "GET" | "POST", req: Request) {
+  if (method === "POST") {
+    const raw = await req.json().catch(() => null);
+    return raw;
+  }
+
+  // GET
+  const url = new URL(req.url);
+  return {
+    tenantSlug: url.searchParams.get("tenantSlug"),
+    quoteLogId: url.searchParams.get("quoteLogId"),
+  };
+}
+
+async function handler(method: "GET" | "POST", req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
   try {
-    // Accept either JSON or form POST
-    let raw: any = null;
-    const ct = req.headers.get("content-type") || "";
-
-    if (ct.includes("application/json")) {
-      raw = await req.json().catch(() => null);
-    } else {
-      const fd = await req.formData().catch(() => null);
-      if (fd) raw = { quoteLogId: String(fd.get("quoteLogId") || "") };
-    }
-
+    const raw = await readReq(method, req);
     const parsed = Req.safeParse(raw);
+
     if (!parsed.success) {
       return json(
         { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues, received: raw },
@@ -187,221 +250,177 @@ export async function POST(req: Request) {
       );
     }
 
-    const { quoteLogId } = parsed.data;
+    const { tenantSlug, quoteLogId } = parsed.data;
 
-    // Load quote log
-    const r = await db.execute(sql`
-      select id, tenant_id, input, output, created_at
-      from quote_logs
-      where id = ${quoteLogId}::uuid
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const tenant = await getTenantBySlug(tenantSlug);
+    if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
+    const tenantId = (tenant as any).id as string;
 
-    if (!row) {
-      return json({ ok: false, error: "QUOTE_NOT_FOUND", quoteLogId }, 404, debugId);
-    }
-
-    const input = safeJsonParse(row.input) ?? {};
-    const output = safeJsonParse(row.output) ?? {};
-
-    const tenantId = String(row.tenant_id);
-
-    // Verify tenant still exists (nice-to-have)
-    const trows = await db.select().from(tenants).where(eq(tenants.id, tenantId as any)).limit(1);
-    const tenant = trows[0] ?? null;
-
-    // Tenant must have rendering enabled
-    const tenantRenderingEnabled = await getTenantAiRenderingEnabled(tenantId);
-    if (!tenantRenderingEnabled) {
+    // Tenant gating (best-effort; if unknown treat as disabled)
+    const enabled = await isTenantRenderingEnabled(tenantId);
+    if (enabled !== true) {
       return json(
-        { ok: false, error: "TENANT_RENDERING_DISABLED", tenantId, quoteLogId },
-        403,
-        debugId
-      );
-    }
-
-    const existingRendering = output?.rendering ?? {};
-    const requested = existingRendering?.requested === true || input?.render_opt_in === true;
-
-    if (!requested) {
-      return json(
-        { ok: false, error: "RENDER_NOT_REQUESTED", message: "Customer did not opt-in for rendering." },
+        {
+          ok: false,
+          error: "RENDERING_DISABLED",
+          message: enabled === false ? "Tenant disabled AI rendering." : "Tenant rendering setting unknown.",
+        },
         400,
         debugId
       );
     }
 
-    const images: string[] = (input?.images ?? []).map((x: any) => x?.url).filter(Boolean);
-    if (!images.length) {
-      return json({ ok: false, error: "NO_IMAGES", message: "No images found on quote input." }, 400, debugId);
+    // Load quote log (try render columns first)
+    let quoteRow: any = null;
+    let renderingCols = true;
+
+    try {
+      const rNew = await db.execute(sql`
+        select
+          id,
+          tenant_id,
+          input,
+          output,
+          render_opt_in,
+          render_status,
+          render_image_url,
+          render_prompt,
+          render_error,
+          rendered_at
+        from quote_logs
+        where id = ${quoteLogId}::uuid
+        limit 1
+      `);
+      quoteRow = (rNew as any)?.rows?.[0] ?? (Array.isArray(rNew) ? (rNew as any)[0] : null);
+    } catch {
+      renderingCols = false;
+      const rOld = await db.execute(sql`
+        select id, tenant_id, input, output
+        from quote_logs
+        where id = ${quoteLogId}::uuid
+        limit 1
+      `);
+      quoteRow = (rOld as any)?.rows?.[0] ?? (Array.isArray(rOld) ? (rOld as any)[0] : null);
     }
 
-    // If already rendered, don’t redo unless you want that behavior later
-    const currentStatus = String(existingRendering?.status ?? "");
-    if (currentStatus === "rendered" && existingRendering?.imageUrl) {
+    if (!quoteRow) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
+    if (String(quoteRow.tenant_id) !== String(tenantId)) return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
+
+    // Customer opt-in required
+    const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
+    if (!optIn) {
       return json(
-        {
-          ok: true,
-          quoteLogId,
-          tenantId,
-          rendering: existingRendering,
-          message: "Already rendered.",
-          durationMs: Date.now() - startedAt,
-        },
-        200,
+        { ok: false, error: "NOT_OPTED_IN", message: "Customer did not opt in to AI rendering." },
+        400,
         debugId
       );
     }
+
+    // Pull images + context from stored input
+    const input = safeJsonParse(quoteRow.input) ?? {};
+    const images: string[] = Array.isArray(input?.images)
+      ? input.images.map((x: any) => x?.url).filter(Boolean)
+      : [];
+
+    if (!images.length) {
+      return json(
+        { ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." },
+        400,
+        debugId
+      );
+    }
+
+    const customerCtx = input?.customer_context ?? {};
+    const notes = (customerCtx?.notes ?? "").toString().trim();
+    const category = (customerCtx?.category ?? "").toString().trim();
+    const serviceType = (customerCtx?.service_type ?? "").toString().trim();
 
     const openAiKey = await getTenantOpenAiKey(tenantId);
-    if (!openAiKey) {
-      return json(
-        {
-          ok: false,
-          error: "OPENAI_KEY_MISSING",
-          message: "Tenant OpenAI key not configured in tenant_secrets.openai_key_enc.",
-        },
-        500,
-        debugId
-      );
-    }
+    if (!openAiKey) return json({ ok: false, error: "OPENAI_KEY_MISSING" }, 500, debugId);
 
-    const assessment = output?.assessment ?? null;
-    const notes = input?.customer_context?.notes?.trim?.() || "";
-    const category = input?.customer_context?.category?.trim?.() || "";
+    const prompt = [
+      "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
+      "This is a second-step visual preview. Do NOT provide pricing. Do NOT provide text overlays.",
+      "Preserve the subject and original photo perspective as much as possible.",
+      "Output should look like a professional shop result, clean and plausible.",
+      category ? `Category: ${category}` : "",
+      serviceType ? `Service type: ${serviceType}` : "",
+      notes ? `Customer notes: ${notes}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
 
-    const prompt = buildRenderPrompt({
-      tenantName: tenant?.name ?? "",
-      notes,
-      category,
-      assessment,
-      imageCount: images.length,
-    });
+    // mark queued (best-effort)
+    const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
 
-    // Mark queued/in_progress in output early
-    const preRendering = {
-      tenant_enabled: true,
-      requested: true,
-      status: "in_progress",
-      imageUrl: null as string | null,
-      error: null as string | null,
-    };
-
-    try {
-      await updateQuoteLogOutput(quoteLogId, {
-        ...output,
-        rendering: preRendering,
-      });
-      await tryUpdateRenderScalars({
-        quoteLogId,
-        renderOptIn: true,
-        status: "in_progress",
-        imageUrl: null,
-        prompt,
-        error: null,
-      });
-    } catch {
-      // non-fatal
-    }
-
-    // Generate image
     const openai = new OpenAI({ apiKey: openAiKey });
 
-    // NOTE: We only provide a text prompt here (no image conditioning yet).
-    // Next task can enhance to use reference images if you want.
-    let imageBase64: string | null = null;
+    let finalImageUrl: string | null = null;
+    let renderError: string | null = null;
 
     try {
-      const gen = await openai.images.generate({
+      const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
         size: "1024x1024",
-      });
+      } as any);
 
-      // Node SDK shape may differ across versions; handle common cases
-      const b64 =
-        (gen as any)?.data?.[0]?.b64_json ??
-        (gen as any)?.data?.[0]?.b64 ??
-        (gen as any)?.data?.[0]?.base64 ??
-        null;
+      const first: any = (img as any)?.data?.[0] ?? null;
+      const url = first?.url ? String(first.url) : null;
+      const b64 = first?.b64_json ? String(first.b64_json) : null;
 
-      if (!b64) {
-        throw new Error("Image generation returned no base64 payload.");
+      if (url) {
+        try {
+          finalImageUrl = await blobUploadFromUrl({
+            imageUrl: url,
+            filename: `render-${quoteLogId}.png`,
+          });
+        } catch {
+          finalImageUrl = url;
+        }
+      } else if (b64) {
+        const bin = Buffer.from(b64, "base64");
+        const blob = new Blob([bin], { type: "image/png" });
+        const fd = new FormData();
+        fd.append("files", blob, `render-${quoteLogId}.png`);
+
+        const base = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") || "";
+        const uploadUrl = base ? `${base}/api/blob/upload` : "/api/blob/upload";
+
+        const upRes = await fetch(uploadUrl, { method: "POST", body: fd });
+        const j = await upRes.json().catch(() => null);
+
+        if (j?.ok) {
+          finalImageUrl = j?.files?.[0]?.url ? String(j.files[0].url) : null;
+        } else {
+          throw new Error(j?.error?.message ?? "Blob upload failed");
+        }
+      } else {
+        throw new Error("OpenAI image response missing url/b64_json");
       }
-
-      imageBase64 = String(b64);
     } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      const failedRendering = {
-        tenant_enabled: true,
-        requested: true,
-        status: "failed",
-        imageUrl: null,
-        error: msg,
-      };
-
-      try {
-        await updateQuoteLogOutput(quoteLogId, { ...output, rendering: failedRendering });
-        await tryUpdateRenderScalars({
-          quoteLogId,
-          renderOptIn: true,
-          status: "failed",
-          imageUrl: null,
-          prompt,
-          error: msg,
-        });
-      } catch {}
-
-      return json(
-        { ok: false, error: "RENDER_GENERATION_FAILED", message: msg, quoteLogId, tenantId },
-        500,
-        debugId
-      );
+      renderError = e?.message ?? "Render generation failed.";
     }
 
-    // Upload to Blob (preferred) — fallback to data URL if blob not configured
-    const pngBytes = Buffer.from(imageBase64!, "base64");
+    const stored = await storeRenderResultBestEffort({
+      quoteLogId,
+      imageUrl: finalImageUrl,
+      error: renderError,
+      prompt,
+    });
 
-    const blobRes = await uploadPngToVercelBlob({ quoteLogId, bytes: pngBytes });
-
-    const imageUrl = blobRes.ok
-      ? blobRes.url
-      : `data:image/png;base64,${imageBase64}`; // fallback (large, but works for dev)
-
-    const finalRendering = {
-      tenant_enabled: true,
-      requested: true,
-      status: "rendered",
-      imageUrl,
-      error: blobRes.ok ? null : `Blob upload failed: ${blobRes.error}`,
-    };
-
-    // Persist
-    try {
-      await updateQuoteLogOutput(quoteLogId, {
-        ...output,
-        rendering: finalRendering,
-      });
-      await tryUpdateRenderScalars({
-        quoteLogId,
-        renderOptIn: true,
-        status: "rendered",
-        imageUrl: blobRes.ok ? blobRes.url : null, // only store url in scalar if real url
-        prompt,
-        error: finalRendering.error,
-      });
-    } catch (e: any) {
+    if (renderError) {
       return json(
         {
-          ok: true,
+          ok: false,
+          error: "RENDER_FAILED",
+          message: renderError,
           quoteLogId,
-          tenantId,
-          rendering: finalRendering,
-          warning: `quote_logs update failed: ${normalizeDbErr(e).message}`,
+          stored,
+          queuedMark,
           durationMs: Date.now() - startedAt,
         },
-        200,
+        500,
         debugId
       );
     }
@@ -410,9 +429,9 @@ export async function POST(req: Request) {
       {
         ok: true,
         quoteLogId,
-        tenantId,
-        rendering: finalRendering,
-        blob: blobRes,
+        imageUrl: finalImageUrl,
+        stored,
+        queuedMark,
         durationMs: Date.now() - startedAt,
       },
       200,
@@ -422,7 +441,23 @@ export async function POST(req: Request) {
     return json(
       { ok: false, error: "REQUEST_FAILED", message: err?.message ?? String(err) },
       500,
-      debugId
+      crypto.randomBytes(6).toString("hex")
     );
   }
+}
+
+// ✅ Support BOTH methods so client can never 405 here.
+export async function POST(req: Request) {
+  return handler("POST", req);
+}
+
+export async function GET(req: Request) {
+  return handler("GET", req);
+}
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: { Allow: "GET, POST, OPTIONS" },
+  });
 }
