@@ -20,6 +20,17 @@ function json(data: any, status = 200, debugId?: string) {
   return res;
 }
 
+function safeJsonParse(v: any) {
+  try {
+    if (v == null) return null;
+    if (typeof v === "object") return v;
+    if (typeof v === "string") return JSON.parse(v);
+    return v;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeDbErr(err: any) {
   return {
     name: err?.name,
@@ -37,92 +48,37 @@ function normalizeDbErr(err: any) {
   };
 }
 
-function safeJsonParse(v: any) {
-  try {
-    if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v === "string") return JSON.parse(v);
-    return v;
-  } catch {
-    return null;
-  }
-}
-
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
 }
 
-function normalizeStatus(args: {
-  renderingCols: boolean;
-  row: any;
-}): { status: "queued" | "running" | "rendered" | "failed" | "idle"; imageUrl: string | null; error: string | null } {
-  const { renderingCols, row } = args;
+function inferStatusFromOutputFallback(out: any): {
+  status: "idle" | "queued" | "running" | "rendered" | "failed";
+  imageUrl: string | null;
+  error: string | null;
+} {
+  const rendering = out?.rendering ?? null;
+  const status = String(rendering?.status ?? "idle");
 
-  // --- Prefer explicit render_* columns if present ---
-  if (renderingCols) {
-    const rs = row?.render_status != null ? String(row.render_status) : "";
-    const url = row?.render_image_url ? String(row.render_image_url) : null;
-    const err = row?.render_error ? String(row.render_error) : null;
+  const imageUrl = rendering?.imageUrl ? String(rendering.imageUrl) : null;
+  const error = rendering?.error ? String(rendering.error) : null;
 
-    const s = rs.toLowerCase();
-
-    if ((s === "rendered" || s === "completed" || s === "done") && url) {
-      return { status: "rendered", imageUrl: url, error: null };
-    }
-
-    if (s === "failed" || s === "error") {
-      return { status: "failed", imageUrl: url, error: err ?? "Render failed" };
-    }
-
-    if (s === "queued") return { status: "queued", imageUrl: null, error: null };
-    if (s === "running" || s === "processing" || s === "rendering") return { status: "running", imageUrl: null, error: null };
-
-    // If status is empty but we have a URL, treat as rendered
-    if (!s && url) return { status: "rendered", imageUrl: url, error: null };
-
-    // If status is set but unknown, report "running" to keep UI progressing
-    if (s) return { status: "running", imageUrl: null, error: null };
+  if (status === "queued" || status === "running" || status === "rendered" || status === "failed") {
+    return { status, imageUrl, error };
   }
 
-  // --- Fallback: read from quote_logs.output JSON (schema drift safe) ---
-  const out = safeJsonParse(row?.output) ?? {};
-  const rendering = out?.rendering ?? out?.output?.rendering ?? null;
+  // If we see an imageUrl but no status, assume rendered
+  if (imageUrl) return { status: "rendered", imageUrl, error: null };
 
-  // Expected fallback shape:
-  // output.rendering = { status:"rendered"|"failed"|..., imageUrl, error }
-  const st = rendering?.status != null ? String(rendering.status).toLowerCase() : "";
-  const imageUrl =
-    rendering?.imageUrl ? String(rendering.imageUrl) :
-    rendering?.render_image_url ? String(rendering.render_image_url) :
-    null;
-  const error =
-    rendering?.error ? String(rendering.error) :
-    rendering?.render_error ? String(rendering.render_error) :
-    null;
+  // If we see an error but no status, assume failed
+  if (error) return { status: "failed", imageUrl: null, error };
 
-  if (st === "rendered" && imageUrl) return { status: "rendered", imageUrl, error: null };
-  if (st === "failed") return { status: "failed", imageUrl, error: error ?? "Render failed" };
-  if (st === "queued") return { status: "queued", imageUrl: null, error: null };
-  if (st === "running" || st === "processing" || st === "rendering") return { status: "running", imageUrl: null, error: null };
-
-  // Some older shapes might store a top-level render_status / render_image_url in output
-  const st2 = out?.render_status != null ? String(out.render_status).toLowerCase() : "";
-  const url2 = out?.render_image_url ? String(out.render_image_url) : null;
-  const err2 = out?.render_error ? String(out.render_error) : null;
-
-  if (st2 === "rendered" && url2) return { status: "rendered", imageUrl: url2, error: null };
-  if (st2 === "failed") return { status: "failed", imageUrl: url2, error: err2 ?? "Render failed" };
-  if (st2 === "queued") return { status: "queued", imageUrl: null, error: null };
-  if (st2 === "running" || st2 === "processing" || st2 === "rendering") return { status: "running", imageUrl: null, error: null };
-
-  // Unknown / not requested yet
   return { status: "idle", imageUrl: null, error: null };
 }
 
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
-  const startedAt = Date.now();
 
   try {
     const raw = await req.json().catch(() => null);
@@ -139,15 +95,14 @@ export async function POST(req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
-
     const tenantId = (tenant as any).id as string;
 
-    // Load quote log (try render columns first)
+    // Try render columns first; if they don't exist, fall back to output.rendering
     let row: any = null;
-    let renderingCols = true;
+    let hasColumns = true;
 
     try {
-      const rNew = await db.execute(sql`
+      const r = await db.execute(sql`
         select
           id,
           tenant_id,
@@ -155,40 +110,79 @@ export async function POST(req: Request) {
           render_status,
           render_image_url,
           render_error,
+          render_prompt,
           rendered_at
         from quote_logs
         where id = ${quoteLogId}::uuid
         limit 1
       `);
-      row = (rNew as any)?.rows?.[0] ?? (Array.isArray(rNew) ? (rNew as any)[0] : null);
+      row = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
     } catch {
-      renderingCols = false;
-      const rOld = await db.execute(sql`
+      hasColumns = false;
+      const r = await db.execute(sql`
         select id, tenant_id, output
         from quote_logs
         where id = ${quoteLogId}::uuid
         limit 1
       `);
-      row = (rOld as any)?.rows?.[0] ?? (Array.isArray(rOld) ? (rOld as any)[0] : null);
+      row = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
     }
 
     if (!row) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
+    if (String(row.tenant_id) !== String(tenantId)) return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
 
-    if (String(row.tenant_id) !== String(tenantId)) {
-      return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
+    if (hasColumns) {
+      const s = String(row.render_status ?? "idle");
+      const status =
+        s === "queued" || s === "running" || s === "rendered" || s === "failed" ? s : "idle";
+
+      const imageUrl = row.render_image_url ? String(row.render_image_url) : null;
+      const error = row.render_error ? String(row.render_error) : null;
+
+      // If the status says rendered but we have no URL, attempt fallback from output JSON
+      if (status === "rendered" && !imageUrl) {
+        const out = safeJsonParse(row.output) ?? {};
+        const fb = inferStatusFromOutputFallback(out);
+        return json(
+          {
+            ok: true,
+            quoteLogId,
+            status: fb.status,
+            imageUrl: fb.imageUrl,
+            error: fb.error,
+            source: "output_fallback",
+          },
+          200,
+          debugId
+        );
+      }
+
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          status,
+          imageUrl,
+          error,
+          source: "columns",
+        },
+        200,
+        debugId
+      );
     }
 
-    const norm = normalizeStatus({ renderingCols, row });
+    // No columns: infer from output.rendering
+    const out = safeJsonParse(row.output) ?? {};
+    const fb = inferStatusFromOutputFallback(out);
 
     return json(
       {
         ok: true,
-        tenantSlug,
         quoteLogId,
-        status: norm.status, // "idle" | "queued" | "running" | "rendered" | "failed"
-        imageUrl: norm.imageUrl,
-        error: norm.error,
-        durationMs: Date.now() - startedAt,
+        status: fb.status,
+        imageUrl: fb.imageUrl,
+        error: fb.error,
+        source: "output_rendering",
       },
       200,
       debugId
