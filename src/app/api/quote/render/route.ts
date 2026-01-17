@@ -3,6 +3,7 @@ import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import crypto from "crypto";
+import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
@@ -112,13 +113,9 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
-async function markRenderQueuedBestEffort(args: {
-  quoteLogId: string;
-  prompt: string;
-}) {
+async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: string }) {
   const { quoteLogId, prompt } = args;
 
-  // Try dedicated columns
   try {
     await db.execute(sql`
       update quote_logs
@@ -206,54 +203,39 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
-function inferBaseUrl(req: Request) {
-  // Prefer explicit env, otherwise use request headers (works on Vercel).
-  const env =
-    process.env.NEXT_PUBLIC_APP_URL ||
-    process.env.APP_URL ||
-    process.env.VERCEL_URL ||
-    "";
-
-  if (env) {
-    const v = env.startsWith("http") ? env : `https://${env}`;
-    return v.replace(/\/+$/, "");
-  }
-
-  const h = req.headers;
-  const proto = h.get("x-forwarded-proto") || "https";
-  const host = h.get("x-forwarded-host") || h.get("host") || "";
-  if (!host) return "";
-  return `${proto}://${host}`.replace(/\/+$/, "");
+function getBlobToken() {
+  // People name this a few ways across environments; accept the common ones.
+  return (
+    process.env.BLOB_READ_WRITE_TOKEN ||
+    process.env.VERCEL_BLOB_READ_WRITE_TOKEN ||
+    process.env.VERCEL_BLOB_RW_TOKEN ||
+    ""
+  );
 }
 
-async function blobUploadFromUrl(args: { req: Request; imageUrl: string; filename: string }) {
-  const { req, imageUrl, filename } = args;
+async function uploadRenderToBlob(args: {
+  quoteLogId: string;
+  bytes: Buffer;
+  contentType: string;
+}) {
+  const { quoteLogId, bytes, contentType } = args;
 
-  // Download the image first
-  const imgRes = await fetch(imageUrl);
-  if (!imgRes.ok) throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
-
-  const arr = await imgRes.arrayBuffer();
-  const contentType = imgRes.headers.get("content-type") || "image/png";
-  const blob = new Blob([arr], { type: contentType });
-
-  const fd = new FormData();
-  fd.append("files", blob, filename);
-
-  const baseUrl = inferBaseUrl(req);
-  if (!baseUrl) {
-    throw new Error(
-      "Cannot infer base URL for blob upload. Set NEXT_PUBLIC_APP_URL (or APP_URL / VERCEL_URL)."
-    );
+  const token = getBlobToken();
+  if (!token) {
+    throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
   }
 
-  const upRes = await fetch(`${baseUrl}/api/blob/upload`, { method: "POST", body: fd });
-  const j = await upRes.json().catch(() => null);
-  if (!j?.ok) throw new Error(j?.error?.message ?? "Blob upload failed");
+  const filename = `render-${quoteLogId}.png`;
+  const key = `renders/${filename}`;
 
-  const first = j?.files?.[0];
-  const url = first?.url ? String(first.url) : null;
-  if (!url) throw new Error("Blob upload did not return a file url");
+  const res = await put(key, bytes, {
+    access: "public",
+    contentType,
+    token,
+  });
+
+  const url = res?.url ? String(res.url) : "";
+  if (!url) throw new Error("Vercel Blob put() did not return a URL");
   return url;
 }
 
@@ -398,47 +380,40 @@ export async function POST(req: Request) {
     let renderError: string | null = null;
 
     try {
+      // Prefer b64 to avoid temp URLs + avoid pushing the image through our own /api/blob/upload
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
         size: "1024x1024",
+        response_format: "b64_json",
       } as any);
 
       const first: any = (img as any)?.data?.[0] ?? null;
-      const url = first?.url ? String(first.url) : null;
       const b64 = first?.b64_json ? String(first.b64_json) : null;
+      const url = first?.url ? String(first.url) : null;
 
-      if (url) {
-        // Upload to Vercel Blob through our API using an absolute URL (server-safe)
-        try {
-          finalImageUrl = await blobUploadFromUrl({
-            req,
-            imageUrl: url,
-            filename: `render-${quoteLogId}.png`,
-          });
-        } catch {
-          // If blob upload fails, keep original URL (better than losing it)
-          finalImageUrl = url;
-        }
-      } else if (b64) {
-        // Convert base64 to blob and upload (absolute URL; server-safe)
-        const bin = Buffer.from(b64, "base64");
-        const blob = new Blob([bin], { type: "image/png" });
+      if (b64) {
+        const bytes = Buffer.from(b64, "base64");
+        finalImageUrl = await uploadRenderToBlob({
+          quoteLogId,
+          bytes,
+          contentType: "image/png",
+        });
+      } else if (url) {
+        // Fallback if the API returns a URL anyway: download -> upload direct to blob
+        const dl = await fetch(url);
+        if (!dl.ok) throw new Error(`Failed to download rendered image (HTTP ${dl.status})`);
+        const arr = await dl.arrayBuffer();
+        const ct = dl.headers.get("content-type") || "image/png";
+        const bytes = Buffer.from(arr);
 
-        const fd = new FormData();
-        fd.append("files", blob, `render-${quoteLogId}.png`);
-
-        const baseUrl = inferBaseUrl(req);
-        if (!baseUrl) throw new Error("Cannot infer base URL for blob upload. Set NEXT_PUBLIC_APP_URL.");
-
-        const upRes = await fetch(`${baseUrl}/api/blob/upload`, { method: "POST", body: fd });
-        const j = await upRes.json().catch(() => null);
-        if (!j?.ok) throw new Error(j?.error?.message ?? "Blob upload failed");
-
-        finalImageUrl = j?.files?.[0]?.url ? String(j.files[0].url) : null;
-        if (!finalImageUrl) throw new Error("Blob upload did not return a file url");
+        finalImageUrl = await uploadRenderToBlob({
+          quoteLogId,
+          bytes,
+          contentType: ct,
+        });
       } else {
-        throw new Error("OpenAI image response missing url/b64_json");
+        throw new Error("OpenAI image response missing b64_json/url");
       }
     } catch (e: any) {
       renderError = e?.message ?? "Render generation failed.";
