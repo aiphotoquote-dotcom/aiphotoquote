@@ -35,14 +35,12 @@ async function postJson<T>(url: string, body: any): Promise<T> {
     body: JSON.stringify(body),
   });
 
-  // Always read text first so we never dump HTML into UI by accident.
   const text = await res.text();
 
   let json: any = null;
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
-    // If backend returned HTML, show a short safe error
     const snippet = text?.slice(0, 200) ?? "";
     throw new Error(
       `Server returned non-JSON (${res.status}). ${snippet ? `Snippet: ${snippet}` : ""}`.trim()
@@ -91,8 +89,10 @@ function ProgressBar({
 
 export default function QuoteForm({
   tenantSlug,
+  aiRenderingEnabled,
 }: {
   tenantSlug: string;
+  aiRenderingEnabled: boolean;
 }) {
   // ---------- form state ----------
   const [name, setName] = useState("");
@@ -100,9 +100,16 @@ export default function QuoteForm({
   const [phone, setPhone] = useState("");
   const [notes, setNotes] = useState("");
 
-  // Single camera/file picker, plus tagging after upload
   const [images, setImages] = useState<UploadedImage[]>([]);
-  const [aiRenderOptIn, setAiRenderOptIn] = useState(false);
+
+  // This is the *customer opt-in*. Default it to whatever tenant allows.
+  const [aiRenderOptIn, setAiRenderOptIn] = useState<boolean>(!!aiRenderingEnabled);
+
+  // If tenant disables rendering, force opt-in off.
+  useEffect(() => {
+    if (!aiRenderingEnabled) setAiRenderOptIn(false);
+    else setAiRenderOptIn(true);
+  }, [aiRenderingEnabled]);
 
   // ---------- lifecycle state ----------
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -113,16 +120,16 @@ export default function QuoteForm({
   // Avoid auto-render loops / multiple attempts
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
-  // Debug box (you’ve been using this while chasing slug issues)
   const debug = useMemo(() => {
     return {
       tenantSlug,
+      tenantAiRenderingEnabled: aiRenderingEnabled,
+      customerOptIn: aiRenderOptIn,
       imageCount: images.length,
-      renderOptIn: aiRenderOptIn,
       quoteLogId: result.quoteLogId,
       renderStatus: renderState.status,
     };
-  }, [tenantSlug, images.length, aiRenderOptIn, result.quoteLogId, renderState.status]);
+  }, [tenantSlug, aiRenderingEnabled, aiRenderOptIn, images.length, result.quoteLogId, renderState.status]);
 
   // ---------- helpers ----------
   const addImagesFromUrls = useCallback((urls: string[]) => {
@@ -132,10 +139,6 @@ export default function QuoteForm({
         if (!url) continue;
         if (next.find((x) => x.url === url)) continue;
 
-        // Default tagging behavior:
-        // - First image => wide
-        // - Second image => closeup
-        // - Others => extra
         const idx = next.length;
         const shotType: ShotType = idx === 0 ? "wide" : idx === 1 ? "closeup" : "extra";
         next.push({ url, shotType });
@@ -145,9 +148,7 @@ export default function QuoteForm({
   }, []);
 
   const setShotType = useCallback((url: string, shotType: ShotType) => {
-    setImages((prev) =>
-      prev.map((x) => (x.url === url ? { ...x, shotType } : x))
-    );
+    setImages((prev) => prev.map((x) => (x.url === url ? { ...x, shotType } : x)));
   }, []);
 
   const removeImage = useCallback((url: string) => {
@@ -155,13 +156,9 @@ export default function QuoteForm({
   }, []);
 
   // ---------- upload ----------
-  // Your app already uploads quote photos to Blob earlier in the flow and stores URLs.
-  // This file assumes your existing uploader returns `{ ok: true, urls: string[] }`.
   async function uploadFiles(files: FileList) {
     if (!files?.length) return;
 
-    // Keep request size sane. iOS camera photos can be huge.
-    // We rely on your existing server-side upload route to downscale/compress if implemented.
     const form = new FormData();
     Array.from(files).forEach((f) => form.append("files", f));
 
@@ -172,9 +169,7 @@ export default function QuoteForm({
     try {
       j = text ? JSON.parse(text) : null;
     } catch {
-      throw new Error(
-        `Upload returned non-JSON (${res.status}). ${text?.slice(0, 200) ?? ""}`.trim()
-      );
+      throw new Error(`Upload returned non-JSON (${res.status}). ${text?.slice(0, 200) ?? ""}`.trim());
     }
 
     if (!res.ok || !j?.ok) {
@@ -210,7 +205,7 @@ export default function QuoteForm({
           notes: notes?.trim() || undefined,
           category: "service",
           service_type: "upholstery",
-          render_opt_in: aiRenderOptIn,
+          render_opt_in: aiRenderOptIn && aiRenderingEnabled,
         },
         contact: {
           name: name.trim(),
@@ -226,7 +221,7 @@ export default function QuoteForm({
 
       setResult({ quoteLogId, output });
 
-      // IMPORTANT: on every NEW quote, reset the “attempted” ref
+      // Every NEW quote: reset attempted guard
       renderAttemptedForQuoteRef.current = null;
     } finally {
       setIsSubmitting(false);
@@ -240,10 +235,8 @@ export default function QuoteForm({
 
       try {
         const j = await postJson<any>("/api/render/start", { tenantSlug, quoteLogId });
-
         const imageUrl = (j?.imageUrl ?? j?.url ?? null) as string | null;
         if (!imageUrl) throw new Error("Render completed but no imageUrl returned.");
-
         setRenderState({ status: "rendered", imageUrl });
       } catch (e: any) {
         setRenderState({
@@ -255,24 +248,20 @@ export default function QuoteForm({
     []
   );
 
-  // Auto-trigger rendering ONCE per quote when:
-  // - estimate is ready
-  // - customer opted in
-  // - we have a quoteLogId
   useEffect(() => {
     const quoteLogId = result.quoteLogId;
     if (!quoteLogId) return;
-    if (!aiRenderOptIn) return;
 
-    // Don’t auto-attempt twice for same quoteLogId
+    // tenant must allow + customer opted in
+    if (!aiRenderingEnabled || !aiRenderOptIn) return;
+
     if (renderAttemptedForQuoteRef.current === quoteLogId) return;
 
     renderAttemptedForQuoteRef.current = quoteLogId;
     triggerRendering({ tenantSlug, quoteLogId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result.quoteLogId, aiRenderOptIn, tenantSlug]);
+  }, [result.quoteLogId, aiRenderingEnabled, aiRenderOptIn, tenantSlug]);
 
-  // Retry button: allow manual retry (this is the “I accept token cost” action)
   async function retryRender() {
     const quoteLogId = result.quoteLogId;
     if (!quoteLogId) return;
@@ -280,23 +269,22 @@ export default function QuoteForm({
   }
 
   function startOver() {
-    // TRUE reset so a new quote can render again
     setImages([]);
     setNotes("");
-    setAiRenderOptIn(false);
     setResult({ quoteLogId: null, output: null });
     setRenderState({ status: "idle" });
     setIsSubmitting(false);
     renderAttemptedForQuoteRef.current = null;
+
+    // reset opt-in back to tenant default
+    setAiRenderOptIn(!!aiRenderingEnabled);
   }
 
-  // ---------- UI bits ----------
   const estimateReady = !!result.output;
   const isRendering = renderState.status === "rendering";
 
   return (
     <div className="w-full">
-      {/* Debug box (you can delete later) */}
       <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-900">
         <div className="mb-1 font-bold">DEBUG /q/[tenantSlug]</div>
         <pre className="overflow-auto">{JSON.stringify(debug, null, 2)}</pre>
@@ -309,7 +297,6 @@ export default function QuoteForm({
         </p>
       </div>
 
-      {/* Progress bars */}
       <div className="space-y-3">
         <ProgressBar
           labelLeft="Progress"
@@ -317,25 +304,31 @@ export default function QuoteForm({
           active={isSubmitting}
         />
 
-        {aiRenderOptIn ? (
+        {aiRenderingEnabled ? (
           <ProgressBar
             labelLeft="AI Rendering"
             labelRight={
-              isRendering ? "Rendering…" : renderState.status === "rendered" ? "Ready" : "Waiting"
+              !aiRenderOptIn
+                ? "Off"
+                : isRendering
+                  ? "Rendering…"
+                  : renderState.status === "rendered"
+                    ? "Ready"
+                    : estimateReady
+                      ? "Queued"
+                      : "Waiting"
             }
             active={isRendering}
           />
         ) : null}
       </div>
 
-      {/* Photos */}
       <div className="mt-6 rounded-xl border border-neutral-200 bg-white p-4">
         <div className="mb-2 font-semibold">Take 2 quick photos</div>
         <div className="text-sm text-neutral-600">
           Wide shot + close-up gets the best accuracy. Add more if you want (max 12).
         </div>
 
-        {/* Single “Take Photo” control */}
         <div className="mt-3 flex flex-col gap-2">
           <label className="inline-flex w-fit cursor-pointer items-center justify-center rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white">
             Take Photo (Camera)
@@ -351,7 +344,6 @@ export default function QuoteForm({
                 } catch (err: any) {
                   alert(err?.message ?? "Upload failed");
                 } finally {
-                  // allow re-selecting the same file
                   e.currentTarget.value = "";
                 }
               }}
@@ -378,7 +370,6 @@ export default function QuoteForm({
           </label>
         </div>
 
-        {/* Thumbnails + tagging */}
         {images.length ? (
           <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
             {images.map((img) => (
@@ -401,9 +392,7 @@ export default function QuoteForm({
                     type="button"
                     className={cn(
                       "rounded px-2 py-1 text-xs font-medium",
-                      img.shotType === "wide"
-                        ? "bg-neutral-900 text-white"
-                        : "bg-neutral-100 text-neutral-900"
+                      img.shotType === "wide" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-900"
                     )}
                     onClick={() => setShotType(img.url, "wide")}
                   >
@@ -413,9 +402,7 @@ export default function QuoteForm({
                     type="button"
                     className={cn(
                       "rounded px-2 py-1 text-xs font-medium",
-                      img.shotType === "closeup"
-                        ? "bg-neutral-900 text-white"
-                        : "bg-neutral-100 text-neutral-900"
+                      img.shotType === "closeup" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-900"
                     )}
                     onClick={() => setShotType(img.url, "closeup")}
                   >
@@ -425,9 +412,7 @@ export default function QuoteForm({
                     type="button"
                     className={cn(
                       "rounded px-2 py-1 text-xs font-medium",
-                      img.shotType === "extra"
-                        ? "bg-neutral-900 text-white"
-                        : "bg-neutral-100 text-neutral-900"
+                      img.shotType === "extra" ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-900"
                     )}
                     onClick={() => setShotType(img.url, "extra")}
                   >
@@ -444,7 +429,6 @@ export default function QuoteForm({
         )}
       </div>
 
-      {/* Your info */}
       <div className="mt-6 rounded-xl border border-neutral-200 bg-white p-4">
         <div className="mb-2 font-semibold">Your info</div>
         <div className="text-sm text-neutral-600">
@@ -494,31 +478,30 @@ export default function QuoteForm({
           </div>
         </div>
 
-        <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
-          <label className="flex cursor-pointer items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={aiRenderOptIn}
-              onChange={(e) => setAiRenderOptIn(e.target.checked)}
-              className="mt-1"
-            />
-            <div>
-              <div className="font-medium">Optional: AI rendering preview</div>
-              <div className="text-neutral-600">
-                If selected, we may generate a visual “after” concept based on your photos. This
-                happens as a second step after your estimate.
+        {/* Only show checkbox if tenant supports rendering */}
+        {aiRenderingEnabled ? (
+          <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+            <label className="flex cursor-pointer items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={aiRenderOptIn}
+                onChange={(e) => setAiRenderOptIn(e.target.checked)}
+                className="mt-1"
+              />
+              <div>
+                <div className="font-medium">Optional: AI rendering preview</div>
+                <div className="text-neutral-600">
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
+                </div>
               </div>
-            </div>
-          </label>
-        </div>
+            </label>
+          </div>
+        ) : null}
 
         <div className="mt-4 flex flex-wrap gap-3">
           <button
             type="button"
-            className={cn(
-              "rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white",
-              isSubmitting ? "opacity-60" : ""
-            )}
+            className={cn("rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white", isSubmitting ? "opacity-60" : "")}
             disabled={isSubmitting}
             onClick={async () => {
               try {
@@ -541,24 +524,18 @@ export default function QuoteForm({
         </div>
       </div>
 
-      {/* Result */}
       {estimateReady ? (
         <div className="mt-6 rounded-xl border border-neutral-200 bg-white p-4">
           <div className="mb-2 font-semibold">Result</div>
 
           <div className="rounded-md border border-neutral-200 bg-neutral-50 p-3 text-sm">
-            <pre className="overflow-auto whitespace-pre-wrap">
-              {JSON.stringify(result.output, null, 2)}
-            </pre>
+            <pre className="overflow-auto whitespace-pre-wrap">{JSON.stringify(result.output, null, 2)}</pre>
           </div>
 
-          {/* Rendering */}
-          {aiRenderOptIn ? (
+          {aiRenderingEnabled && aiRenderOptIn ? (
             <div className="mt-4 rounded-xl border border-neutral-200 bg-white p-4">
               <div className="text-lg font-semibold">AI Rendering</div>
-              <div className="text-sm text-neutral-600">
-                This is a second step after your estimate. It can take a moment.
-              </div>
+              <div className="text-sm text-neutral-600">This is a second step after your estimate. It can take a moment.</div>
 
               <div className="mt-3 text-sm">
                 <div className="font-medium">Status: {renderState.status}</div>
@@ -566,18 +543,12 @@ export default function QuoteForm({
                 {renderState.status === "rendered" ? (
                   <div className="mt-3">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={renderState.imageUrl}
-                      alt="AI Rendering"
-                      className="w-full rounded-lg border border-neutral-200"
-                    />
+                    <img src={renderState.imageUrl} alt="AI Rendering" className="w-full rounded-lg border border-neutral-200" />
                   </div>
                 ) : null}
 
                 {renderState.status === "failed" ? (
-                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-red-900">
-                    {esc(renderState.message)}
-                  </div>
+                  <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-red-900">{esc(renderState.message)}</div>
                 ) : null}
 
                 <div className="mt-3">
@@ -597,8 +568,7 @@ export default function QuoteForm({
       ) : null}
 
       <div className="mt-6 text-xs text-neutral-500">
-        By submitting, you agree we may contact you about this request. Photos are used only to
-        prepare your estimate.
+        By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
       </div>
     </div>
   );
