@@ -1,3 +1,4 @@
+// src/app/api/quote/render/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
@@ -87,18 +88,13 @@ async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | nul
 function pickRenderOptInFromRecord(args: { row: any; renderingCols: boolean }) {
   const { row, renderingCols } = args;
 
-  // Prefer explicit column if it exists
   if (renderingCols && typeof row?.render_opt_in === "boolean") return row.render_opt_in;
 
-  // Fall back to input JSON stored in quote_logs.input
   const input = safeJsonParse(row?.input) ?? {};
   if (typeof input?.render_opt_in === "boolean") return input.render_opt_in;
 
-  // Fall back to output meta
   const output = safeJsonParse(row?.output) ?? {};
   if (typeof output?.meta?.render_opt_in === "boolean") return output.meta.render_opt_in;
-
-  // Fall back to normalized output shape
   if (typeof output?.output?.render_opt_in === "boolean") return output.output.render_opt_in;
 
   return false;
@@ -134,8 +130,6 @@ async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: st
     if (!isUndefinedColumn) {
       return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
     }
-
-    // Column drift: okay, we’ll later merge under output.rendering
     return { ok: true as const, columns: false as const };
   }
 }
@@ -149,7 +143,6 @@ async function storeRenderResultBestEffort(args: {
   const { quoteLogId, imageUrl, error, prompt } = args;
   const renderedAtIso = new Date().toISOString();
 
-  // First try dedicated columns if present
   try {
     await db.execute(sql`
       update quote_logs
@@ -161,7 +154,6 @@ async function storeRenderResultBestEffort(args: {
         rendered_at = now()
       where id = ${quoteLogId}::uuid
     `);
-
     return { ok: true as const, columns: true as const };
   } catch (e: any) {
     const msg = e?.message ?? e?.cause?.message ?? "";
@@ -203,40 +195,33 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
-function getBlobToken() {
-  // People name this a few ways across environments; accept the common ones.
-  return (
-    process.env.BLOB_READ_WRITE_TOKEN ||
-    process.env.VERCEL_BLOB_READ_WRITE_TOKEN ||
-    process.env.VERCEL_BLOB_RW_TOKEN ||
-    ""
-  );
+function getBlobTokenOrThrow() {
+  // Vercel Blob server SDK expects BLOB_READ_WRITE_TOKEN in env for local / non-Vercel,
+  // but on Vercel it can also work via project integration.
+  // You already have this in your env flow.
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
+  return token;
 }
 
 async function uploadRenderToBlob(args: {
   quoteLogId: string;
-  bytes: Buffer;
+  bytes: ArrayBuffer;
   contentType: string;
 }) {
   const { quoteLogId, bytes, contentType } = args;
+  const token = getBlobTokenOrThrow();
 
-  const token = getBlobToken();
-  if (!token) {
-    throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
-  }
+  const buf = Buffer.from(bytes);
+  const pathname = `renders/render-${quoteLogId}.png`;
 
-  const filename = `render-${quoteLogId}.png`;
-  const key = `renders/${filename}`;
-
-  const res = await put(key, bytes, {
+  const blob = await put(pathname, buf, {
     access: "public",
     contentType,
     token,
   });
 
-  const url = res?.url ? String(res.url) : "";
-  if (!url) throw new Error("Vercel Blob put() did not return a URL");
-  return url;
+  return blob.url;
 }
 
 export async function POST(req: Request) {
@@ -260,14 +245,16 @@ export async function POST(req: Request) {
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
     const tenantId = (tenant as any).id as string;
 
-    // Tenant gating (best-effort; if unknown treat as disabled)
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
         {
           ok: false,
           error: "RENDERING_DISABLED",
-          message: enabled === false ? "Tenant disabled AI rendering." : "Tenant rendering setting unknown.",
+          message:
+            enabled === false
+              ? "Tenant disabled AI rendering."
+              : "Tenant rendering setting unknown.",
         },
         400,
         debugId
@@ -312,7 +299,7 @@ export async function POST(req: Request) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
 
-    // Prevent duplicate renders (boring + safe)
+    // Prevent duplicate renders if we have columns
     const currentStatus = renderingCols ? String(quoteRow.render_status ?? "") : "";
     const alreadyHasImage = renderingCols ? Boolean(quoteRow.render_image_url) : false;
     if (renderingCols && (currentStatus === "rendered" || alreadyHasImage)) {
@@ -331,7 +318,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
       return json(
@@ -341,14 +327,17 @@ export async function POST(req: Request) {
       );
     }
 
-    // Pull images + context from stored input
     const input = safeJsonParse(quoteRow.input) ?? {};
     const images: string[] = Array.isArray(input?.images)
       ? input.images.map((x: any) => x?.url).filter(Boolean)
       : [];
 
     if (!images.length) {
-      return json({ ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." }, 400, debugId);
+      return json(
+        { ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." },
+        400,
+        debugId
+      );
     }
 
     const customerCtx = input?.customer_context ?? {};
@@ -371,7 +360,6 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join("\n");
 
-    // mark queued (best-effort)
     const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
 
     const openai = new OpenAI({ apiKey: openAiKey });
@@ -380,40 +368,38 @@ export async function POST(req: Request) {
     let renderError: string | null = null;
 
     try {
-      // Prefer b64 to avoid temp URLs + avoid pushing the image through our own /api/blob/upload
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
         size: "1024x1024",
-        response_format: "b64_json",
       } as any);
 
       const first: any = (img as any)?.data?.[0] ?? null;
-      const b64 = first?.b64_json ? String(first.b64_json) : null;
       const url = first?.url ? String(first.url) : null;
+      const b64 = first?.b64_json ? String(first.b64_json) : null;
 
-      if (b64) {
-        const bytes = Buffer.from(b64, "base64");
-        finalImageUrl = await uploadRenderToBlob({
-          quoteLogId,
-          bytes,
+      if (url) {
+        // Fetch the image bytes from the temp URL, then upload to Blob (server->Blob)
+        const imgRes = await fetch(url);
+        if (!imgRes.ok) throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
+
+        const arr = await imgRes.arrayBuffer();
+        const contentType = imgRes.headers.get("content-type") || "image/png";
+        finalImageUrl = await uploadRenderToBlob({ quoteLogId, bytes: arr, contentType });
+      } else if (b64) {
+        const bytes = Buffer.from(b64, "base64"); // Buffer is valid for put()
+        const token = getBlobTokenOrThrow();
+        const pathname = `renders/render-${quoteLogId}.png`;
+
+        const blob = await put(pathname, bytes, {
+          access: "public",
           contentType: "image/png",
+          token,
         });
-      } else if (url) {
-        // Fallback if the API returns a URL anyway: download -> upload direct to blob
-        const dl = await fetch(url);
-        if (!dl.ok) throw new Error(`Failed to download rendered image (HTTP ${dl.status})`);
-        const arr = await dl.arrayBuffer();
-        const ct = dl.headers.get("content-type") || "image/png";
-        const bytes = Buffer.from(arr);
 
-        finalImageUrl = await uploadRenderToBlob({
-          quoteLogId,
-          bytes,
-          contentType: ct,
-        });
+        finalImageUrl = blob.url;
       } else {
-        throw new Error("OpenAI image response missing b64_json/url");
+        throw new Error("OpenAI image response missing url/b64_json");
       }
     } catch (e: any) {
       renderError = e?.message ?? "Render generation failed.";
