@@ -197,16 +197,16 @@ async function storeRenderResultBestEffort(args: {
 }
 
 /**
- * Upload rendered image to Vercel Blob *directly from the server*.
- * This avoids 413 errors from proxy-posting large bodies to /api/blob/upload.
+ * Upload rendered image to Vercel Blob directly from server.
+ * IMPORTANT: put() expects Blob | Buffer | ReadableStream | File, not Uint8Array.
  */
-async function blobPutBytes(args: { bytes: Uint8Array; filename: string; contentType: string }) {
-  const { bytes, filename, contentType } = args;
+async function blobPutBuffer(args: { buf: Buffer; filename: string; contentType: string }) {
+  const { buf, filename, contentType } = args;
 
   const token = process.env.BLOB_READ_WRITE_TOKEN;
   if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
 
-  const res = await put(`renders/${filename}`, bytes, {
+  const res = await put(`renders/${filename}`, buf, {
     access: "public",
     contentType,
     token,
@@ -223,7 +223,7 @@ async function blobPutFromUrl(args: { imageUrl: string; filename: string }) {
 
   const arr = await imgRes.arrayBuffer();
   const ct = imgRes.headers.get("content-type") || "image/png";
-  return blobPutBytes({ bytes: new Uint8Array(arr), filename, contentType: ct });
+  return blobPutBuffer({ buf: Buffer.from(arr), filename, contentType: ct });
 }
 
 export async function POST(req: Request) {
@@ -247,6 +247,7 @@ export async function POST(req: Request) {
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
     const tenantId = (tenant as any).id as string;
 
+    // Tenant gating (best-effort; if unknown treat as disabled)
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
@@ -297,10 +298,12 @@ export async function POST(req: Request) {
     }
 
     if (!quoteRow) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
+
     if (String(quoteRow.tenant_id) !== String(tenantId)) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
 
+    // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
       return json(
@@ -310,6 +313,7 @@ export async function POST(req: Request) {
       );
     }
 
+    // Pull images + context from stored input
     const input = safeJsonParse(quoteRow.input) ?? {};
     const images: string[] = Array.isArray(input?.images)
       ? input.images.map((x: any) => x?.url).filter(Boolean)
@@ -364,13 +368,10 @@ export async function POST(req: Request) {
       const filename = `render-${quoteLogId}.png`;
 
       if (url) {
-        // Download + put to Blob server-side (no 413)
         finalImageUrl = await blobPutFromUrl({ imageUrl: url, filename });
       } else if (b64) {
-        // Put bytes directly (no proxy upload)
-        const bin = Buffer.from(b64, "base64");
-        finalImageUrl = await blobPutBytes({
-          bytes: new Uint8Array(bin),
+        finalImageUrl = await blobPutBuffer({
+          buf: Buffer.from(b64, "base64"),
           filename,
           contentType: "image/png",
         });
