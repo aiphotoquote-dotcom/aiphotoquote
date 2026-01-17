@@ -1,39 +1,75 @@
-// src/app/api/blob/upload/route.ts
-import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
+import { NextResponse } from "next/server";
+import { put } from "@vercel/blob";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+function safeName(name: string) {
+  return (name || "upload")
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .slice(0, 180);
+}
 
-export async function POST(request: Request) {
-  // IMPORTANT:
-  // This route is NOT a multipart endpoint anymore.
-  // It is a JSON handshake endpoint used by @vercel/blob/client upload().
-  const body = (await request.json()) as HandleUploadBody;
+export async function POST(req: Request) {
+  try {
+    const token = process.env.BLOB_READ_WRITE_TOKEN;
+    if (!token) {
+      return NextResponse.json(
+        { ok: false, error: { message: "Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var" } },
+        { status: 500 }
+      );
+    }
 
-  return handleUpload({
-    request,
-    body,
+    const form = await req.formData();
+    const raw = form.getAll("files");
+    const files = raw.filter((x): x is File => x instanceof File);
 
-    // Decide what’s allowed BEFORE issuing an upload token
-    onBeforeGenerateToken: async (pathname: string /*, clientPayload */) => {
-      // You can add tenant-based rules here later (read tenantSlug from clientPayload if you want).
-      return {
-        allowedContentTypes: ALLOWED,
-        tokenPayload: JSON.stringify({
-          pathname,
-          // keep room for future tenantSlug, quoteLogId, etc.
-        }),
-      };
-    },
+    if (!files.length) {
+      return NextResponse.json(
+        { ok: false, error: { message: "No files provided (expected form field: files)" } },
+        { status: 400 }
+      );
+    }
 
-    // Optional: called after upload completes (runs server-side)
-    onUploadCompleted: async ({ blob, tokenPayload }) => {
-      // You can log / persist blob.url here later if you want.
-      // For now, we keep it simple (no DB writes).
-      void blob;
-      void tokenPayload;
-    },
-  });
+    const uploaded: Array<{ url: string; pathname: string; contentType: string; size: number }> = [];
+
+    for (const file of files) {
+      // NOTE: This route is best for small server-side uploads (like rendered images).
+      // Browser uploads should use direct-to-Blob client upload to avoid 413.
+      const ab = await file.arrayBuffer();
+      const buf = Buffer.from(ab);
+
+      const filename = `${Date.now()}-${safeName(file.name)}`;
+      const pathname = `quotes/${filename}`;
+      const contentType = file.type || "application/octet-stream";
+
+      const res = await put(pathname, buf, {
+        access: "public",
+        contentType,
+        token,
+      });
+
+      uploaded.push({
+        url: res.url,
+        pathname,
+        contentType,
+        size: file.size,
+      });
+    }
+
+    return NextResponse.json(
+      {
+        ok: true,
+        urls: uploaded.map((x) => x.url),
+        files: uploaded,
+      },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: { message: e?.message ?? String(e) } },
+      { status: 500 }
+    );
+  }
 }
