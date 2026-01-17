@@ -7,10 +7,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function firstRow<T = any>(r: any): T | null {
-  // drizzle execute() can return:
-  // - { rows: [...] } (postgres-js)
-  // - [...] (some adapters)
   return (r?.rows?.[0] ?? (Array.isArray(r) ? r?.[0] : null)) as T | null;
+}
+
+function rowCount(r: any): number {
+  if (Array.isArray(r)) return r.length;
+  if (Array.isArray(r?.rows)) return r.rows.length;
+  return 0;
 }
 
 export default async function Page({
@@ -20,7 +23,13 @@ export default async function Page({
 }) {
   const tenantSlug = params.tenantSlug;
 
-  // Default/fallback values so this page never hard-crashes.
+  // Debug telemetry
+  let fatalError: string | null = null;
+  let dbInfo: any = null;
+  let tenantLookupCount = 0;
+  let settingsLookupCount = 0;
+
+  // Results
   let tenantId: string | null = null;
   let tenantName: string | null = null;
   let industry_key: string | null = null;
@@ -28,12 +37,25 @@ export default async function Page({
   let settingsReadPath: "none" | "full" | "fallback" = "none";
   let aiRenderingEnabledComputed = false;
 
-  // Display defaults (what the user sees)
+  // Display defaults
   let displayTenantName = "Get a Photo Quote";
   let displayIndustry = "service";
   let aiRenderingEnabled = false;
 
   try {
+    // Prove what DB we’re connected to (helps catch “wrong env / wrong database” instantly)
+    try {
+      const dbInfoRes = await db.execute(sql`
+        select
+          current_database() as db,
+          current_schema() as schema,
+          inet_server_addr()::text as server_addr
+      `);
+      dbInfo = firstRow(dbInfoRes);
+    } catch (e: any) {
+      dbInfo = { error: e?.message ?? String(e) };
+    }
+
     // Tenant lookup
     const tenantRes = await db.execute(sql`
       select "id", "name", "slug"
@@ -42,8 +64,9 @@ export default async function Page({
       limit 1
     `);
 
-    const tenant = firstRow<{ id: string; name: string | null; slug: string }>(tenantRes);
+    tenantLookupCount = rowCount(tenantRes);
 
+    const tenant = firstRow<{ id: string; name: string | null; slug: string }>(tenantRes);
     tenantId = tenant?.id ?? null;
     tenantName = tenant?.name ?? null;
 
@@ -59,16 +82,25 @@ export default async function Page({
           limit 1
         `);
 
-        const settings = firstRow<{ industry_key: string | null; ai_rendering_enabled: boolean | null }>(settingsRes);
+        settingsLookupCount = rowCount(settingsRes);
+
+        const settings = firstRow<{
+          industry_key: string | null;
+          ai_rendering_enabled: boolean | null;
+        }>(settingsRes);
 
         industry_key = settings?.industry_key ?? null;
-        ai_rendering_enabled = typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
+        ai_rendering_enabled =
+          typeof settings?.ai_rendering_enabled === "boolean"
+            ? settings.ai_rendering_enabled
+            : null;
 
         if (industry_key) displayIndustry = industry_key;
         aiRenderingEnabled = ai_rendering_enabled === true;
+
         settingsReadPath = "full";
         aiRenderingEnabledComputed = aiRenderingEnabled;
-      } catch {
+      } catch (e: any) {
         // Fallback if ai_rendering_enabled column isn't present yet
         const settingsRes = await db.execute(sql`
           select "industry_key"
@@ -77,30 +109,37 @@ export default async function Page({
           limit 1
         `);
 
-        const settings = firstRow<{ industry_key: string | null }>(settingsRes);
+        settingsLookupCount = rowCount(settingsRes);
 
+        const settings = firstRow<{ industry_key: string | null }>(settingsRes);
         industry_key = settings?.industry_key ?? null;
 
         if (industry_key) displayIndustry = industry_key;
         aiRenderingEnabled = false;
+
         settingsReadPath = "fallback";
         aiRenderingEnabledComputed = false;
       }
     }
-  } catch {
-    // Intentionally swallow errors so the page still renders.
+  } catch (e: any) {
+    // DO NOT swallow — show it in debug
+    fatalError = e?.message ?? String(e);
   }
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-12">
-        {/* DEBUG block (leave for now until stable) */}
+        {/* DEBUG */}
         <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
           <div className="font-semibold mb-2">DEBUG /q/[tenantSlug]</div>
           <pre className="whitespace-pre-wrap">
 {JSON.stringify(
   {
     tenantSlug,
+    dbInfo,
+    fatalError,
+    tenantLookupCount,
+    settingsLookupCount,
     tenantId,
     tenantName,
     industry_key,
@@ -161,8 +200,7 @@ export default async function Page({
                 <div>
                   <h2 className="text-2xl font-semibold">Get a Photo Quote</h2>
                   <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                    Upload photos and add a quick note. We’ll return an estimate
-                    range.
+                    Upload photos and add a quick note. We’ll return an estimate range.
                   </p>
                 </div>
 
