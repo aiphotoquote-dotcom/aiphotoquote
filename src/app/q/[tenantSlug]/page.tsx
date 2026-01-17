@@ -1,3 +1,4 @@
+// src/app/q/[tenantSlug]/page.tsx
 import QuoteForm from "@/components/QuoteForm";
 import { db } from "@/lib/db/client";
 import { sql } from "drizzle-orm";
@@ -5,14 +6,11 @@ import { sql } from "drizzle-orm";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type TenantRow = { id: string; name: string | null; slug: string };
-type SettingsRow = {
-  industry_key: string | null;
-  ai_rendering_enabled?: boolean | null;
-};
-
-function firstRow(r: any) {
-  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? r[0] : null);
+function firstRow<T = any>(r: any): T | null {
+  // drizzle execute() can return:
+  // - { rows: [...] } (postgres-js)
+  // - [...] (some adapters)
+  return (r?.rows?.[0] ?? (Array.isArray(r) ? r?.[0] : null)) as T | null;
 }
 
 export default async function Page({
@@ -24,19 +22,16 @@ export default async function Page({
 
   // Default/fallback values so this page never hard-crashes.
   let tenantId: string | null = null;
-  let tenantName = "Get a Photo Quote";
-  let industry = "service";
-  let aiRenderingEnabled = false;
+  let tenantName: string | null = null;
+  let industry_key: string | null = null;
+  let ai_rendering_enabled: boolean | null = null;
+  let settingsReadPath: "none" | "full" | "fallback" = "none";
+  let aiRenderingEnabledComputed = false;
 
-  // Debug (helps verify reads without crashing)
-  const debug: any = {
-    tenantId: null,
-    tenantName: null,
-    industry_key: null,
-    ai_rendering_enabled: null,
-    settingsReadPath: "none",
-    aiRenderingEnabledComputed: false,
-  };
+  // Display defaults (what the user sees)
+  let displayTenantName = "Get a Photo Quote";
+  let displayIndustry = "service";
+  let aiRenderingEnabled = false;
 
   try {
     // Tenant lookup
@@ -47,67 +42,75 @@ export default async function Page({
       limit 1
     `);
 
-    const tenant = firstRow(tenantRes) as TenantRow | null;
+    const tenant = firstRow<{ id: string; name: string | null; slug: string }>(tenantRes);
 
-    if (tenant?.id) tenantId = tenant.id;
-    if (tenant?.name) tenantName = tenant.name;
+    tenantId = tenant?.id ?? null;
+    tenantName = tenant?.name ?? null;
 
-    debug.tenantId = tenant?.id ?? null;
-    debug.tenantName = tenant?.name ?? null;
+    if (tenantName) displayTenantName = tenantName;
 
-    // Settings lookup (best-effort; column may not exist in some envs)
-    if (tenant?.id) {
+    // Settings lookup
+    if (tenantId) {
       try {
         const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
           from "tenant_settings"
-          where "tenant_id" = ${tenant.id}::uuid
+          where "tenant_id" = ${tenantId}::uuid
           limit 1
         `);
 
-        const settings = firstRow(settingsRes) as SettingsRow | null;
+        const settings = firstRow<{ industry_key: string | null; ai_rendering_enabled: boolean | null }>(settingsRes);
 
-        if (settings?.industry_key) industry = settings.industry_key;
-        aiRenderingEnabled = settings?.ai_rendering_enabled === true;
+        industry_key = settings?.industry_key ?? null;
+        ai_rendering_enabled = typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
 
-        debug.industry_key = settings?.industry_key ?? null;
-        debug.ai_rendering_enabled =
-          typeof settings?.ai_rendering_enabled === "boolean"
-            ? settings.ai_rendering_enabled
-            : null;
-        debug.settingsReadPath = "industry_key + ai_rendering_enabled";
-        debug.aiRenderingEnabledComputed = aiRenderingEnabled;
+        if (industry_key) displayIndustry = industry_key;
+        aiRenderingEnabled = ai_rendering_enabled === true;
+        settingsReadPath = "full";
+        aiRenderingEnabledComputed = aiRenderingEnabled;
       } catch {
+        // Fallback if ai_rendering_enabled column isn't present yet
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
-          where "tenant_id" = ${tenant.id}::uuid
+          where "tenant_id" = ${tenantId}::uuid
           limit 1
         `);
 
-        const settings = firstRow(settingsRes) as { industry_key: string | null } | null;
+        const settings = firstRow<{ industry_key: string | null }>(settingsRes);
 
-        if (settings?.industry_key) industry = settings.industry_key;
+        industry_key = settings?.industry_key ?? null;
 
-        debug.industry_key = settings?.industry_key ?? null;
-        debug.ai_rendering_enabled = null;
-        debug.settingsReadPath = "industry_key only (ai_rendering_enabled missing)";
-        debug.aiRenderingEnabledComputed = false;
+        if (industry_key) displayIndustry = industry_key;
+        aiRenderingEnabled = false;
+        settingsReadPath = "fallback";
+        aiRenderingEnabledComputed = false;
       }
     }
   } catch {
     // Intentionally swallow errors so the page still renders.
-    // QuoteForm can still submit using tenantSlug even if branding fails.
   }
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-12">
-        {/* DEBUG BLOCK (remove later) */}
-        <div className="mb-8 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+        {/* DEBUG block (leave for now until stable) */}
+        <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
           <div className="font-semibold mb-2">DEBUG /q/[tenantSlug]</div>
-          <pre className="overflow-auto whitespace-pre-wrap">
-            {JSON.stringify(debug, null, 2)}
+          <pre className="whitespace-pre-wrap">
+{JSON.stringify(
+  {
+    tenantSlug,
+    tenantId,
+    tenantName,
+    industry_key,
+    ai_rendering_enabled,
+    settingsReadPath,
+    aiRenderingEnabledComputed,
+  },
+  null,
+  2
+)}
           </pre>
         </div>
 
@@ -119,7 +122,7 @@ export default async function Page({
             </div>
 
             <h1 className="mt-4 text-4xl font-semibold tracking-tight">
-              {tenantName}
+              {displayTenantName}
             </h1>
 
             <p className="mt-3 text-base text-gray-700 dark:text-gray-200">
@@ -145,7 +148,7 @@ export default async function Page({
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  Tailored for <span className="font-semibold">{industry}</span>{" "}
+                  Tailored for <span className="font-semibold">{displayIndustry}</span>{" "}
                   quotes. We’ll follow up if anything needs clarification.
                 </p>
               </div>
@@ -174,10 +177,7 @@ export default async function Page({
               </div>
 
               <div className="mt-6">
-                <QuoteForm
-                  tenantSlug={tenantSlug}
-                  aiRenderingEnabled={aiRenderingEnabled}
-                />
+                <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
               </div>
 
               <p className="mt-6 text-xs text-gray-600 dark:text-gray-300">
