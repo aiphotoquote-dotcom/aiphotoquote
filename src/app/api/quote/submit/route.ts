@@ -1,26 +1,30 @@
-// src/app/api/quote/submit/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import OpenAI from "openai";
 
 import { db } from "@/lib/db/client";
-import { tenants, quoteLogs } from "@/lib/db/schema";
+import { tenants, tenantSecrets, quoteLogs } from "@/lib/db/schema";
+import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * IMPORTANT CONTRACT:
- * - We accept render_opt_in at TOP LEVEL (so it can be saved into quote_logs.input.render_opt_in).
- * - We DO NOT force render_opt_in into customer_context (keep customer_context purely customer-facing).
- * - On submit, we ONLY insert what we actually know now:
- *     tenant_id, input, output, confidence, estimate_low/high, inspection_required, render_opt_in
- *   Everything else (render_status, timestamps, render_* fields) should default in DB and be updated later.
+ * Contract:
+ * - tenantSlug: string
+ * - images: [{ url, shotType }]
+ * - customer_context: optional (notes/category/service_type/etc)
+ * - contact: optional (name/email/phone)
+ * - render_opt_in: optional boolean (TOP LEVEL)
+ *
+ * IMPORTANT: Tenant-key-only mode
+ * - We DO NOT use OPENAI_API_KEY fallback.
+ * - If tenant key missing => 400 TENANT_OPENAI_KEY_MISSING
  */
 
 const Req = z.object({
-  tenantSlug: z.string().min(2),
+  tenantSlug: z.string().min(3),
   images: z
     .array(
       z.object({
@@ -41,203 +45,218 @@ const Req = z.object({
 
   contact: z
     .object({
-      name: z.string().min(1),
-      email: z.string().email(),
-      phone: z.string().min(7),
+      name: z.string().optional(),
+      email: z.string().optional(),
+      phone: z.string().optional(),
     })
     .optional(),
 
-  // ✅ top-level render opt in
+  // ✅ TOP LEVEL (so it can be stored in quote_logs.render_opt_in)
   render_opt_in: z.boolean().optional().default(false),
 });
 
-function jsonErr(message: string, init?: { status?: number; debugId?: string; code?: string; extra?: any }) {
-  return NextResponse.json(
-    {
-      ok: false,
-      error: init?.code || "REQUEST_FAILED",
-      message,
-      debugId: init?.debugId,
-      ...((init?.extra ?? null) ? { extra: init!.extra } : {}),
-    },
-    { status: init?.status ?? 500 }
-  );
+function jsonOk(data: any, init?: ResponseInit) {
+  return NextResponse.json({ ok: true, ...data }, init);
 }
 
-function safeAnyJson(x: unknown) {
-  try {
-    return JSON.parse(JSON.stringify(x ?? null));
-  } catch {
-    return null;
-  }
+function jsonErr(
+  error: string,
+  message: string,
+  init?: ResponseInit & { debugId?: string; issues?: any[] }
+) {
+  const payload: any = { ok: false, error, message };
+  if (init?.debugId) payload.debugId = init.debugId;
+  if (init?.issues) payload.issues = init.issues;
+  return NextResponse.json(payload, init);
 }
 
-function buildPrompt(args: {
-  tenantSlug: string;
-  images: Array<{ url: string; shotType?: string }>;
-  customer_context?: any;
-  contact?: any;
-}) {
-  const { tenantSlug, images, customer_context, contact } = args;
-
-  return `
-You are an expert estimator for upholstery/service work. Given the photos and the customer's note, return a JSON object with:
-
-{
-  "confidence": "high" | "medium" | "low",
-  "inspection_required": boolean,
-  "summary": string,
-  "questions": string[],
-  "estimate": { "low": number, "high": number }
-}
-
-Rules:
-- Be conservative; if unsure, set inspection_required true.
-- Questions should be short and actionable.
-- estimate.low/high must be integers (USD).
-- Do not include markdown. Output JSON only.
-
-Context:
-tenantSlug: ${tenantSlug}
-customer_context: ${JSON.stringify(customer_context ?? {}, null, 2)}
-contact: ${JSON.stringify(contact ?? {}, null, 2)}
-images: ${JSON.stringify(images, null, 2)}
-`.trim();
+function safeDebugId() {
+  return `dbg_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export async function POST(req: Request) {
-  const debugId = `dbg_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+  const debugId = safeDebugId();
 
   try {
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
 
     if (!parsed.success) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "BAD_REQUEST",
-          message: "Invalid request payload",
-          debugId,
-          issues: parsed.error.issues,
-        },
-        { status: 400 }
-      );
+      return jsonErr("BAD_REQUEST", "Invalid request", {
+        status: 400,
+        debugId,
+        issues: parsed.error.issues,
+      });
     }
 
-    const { tenantSlug, images, customer_context, contact, render_opt_in } = parsed.data;
+    const { tenantSlug, images, customer_context, contact, render_opt_in } =
+      parsed.data;
 
-    // ---- tenant lookup (avoid db.query.* so you don't need drizzle schema generics)
-    const t = await db
+    // ---- tenant lookup (no db.query.* so we avoid schema-generic TS issues) ----
+    const tenantRows = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
       .limit(1);
 
-    const tenant = t?.[0];
-    if (!tenant?.id) {
-      return jsonErr(`Unknown tenant slug: ${tenantSlug}`, {
-        status: 404,
-        debugId,
-        code: "TENANT_NOT_FOUND",
-      });
+    const tenant = tenantRows[0] ?? null;
+
+    if (!tenant) {
+      return jsonErr(
+        "TENANT_NOT_FOUND",
+        `Unknown tenant: ${tenantSlug}`,
+        { status: 404, debugId }
+      );
     }
 
-    // ---- OpenAI vision input
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    // ---- tenant secret lookup (tenant-key-only mode) ----
+    const secretRows = await db
+      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+      .from(tenantSecrets)
+      .where(eq(tenantSecrets.tenantId, tenant.id))
+      .limit(1);
 
-    const prompt = buildPrompt({ tenantSlug, images, customer_context, contact });
+    const secret = secretRows[0] ?? null;
 
-    // OpenAI chat content parts typing can be strict; cast to any to keep TS happy.
-    const visionInput = images.map((img) => ({
-      type: "image_url",
-      image_url: { url: img.url },
-    })) as any[];
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_VISION_MODEL || "gpt-4o-mini",
-      temperature: 0.2,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt } as any,
-            ...visionInput,
-          ] as any,
-        },
-      ],
-    });
-
-    const raw = completion.choices?.[0]?.message?.content ?? "";
-    let output: any = null;
-
-    try {
-      // try parse JSON directly
-      output = raw ? JSON.parse(raw) : null;
-    } catch {
-      // fallback: best-effort wrap
-      output = { confidence: "low", inspection_required: true, summary: String(raw).slice(0, 2000), questions: [], estimate: { low: 0, high: 0 } };
+    if (!secret?.openaiKeyEnc) {
+      return jsonErr(
+        "TENANT_OPENAI_KEY_MISSING",
+        "This shop has not connected an OpenAI API key yet. Please contact the shop owner.",
+        { status: 400, debugId }
+      );
     }
 
-    const confidence = String(output?.confidence ?? "low");
-    const inspection_required = Boolean(output?.inspection_required ?? true);
-    const estimateLow = Number.isFinite(Number(output?.estimate?.low)) ? Math.round(Number(output.estimate.low)) : null;
-    const estimateHigh = Number.isFinite(Number(output?.estimate?.high)) ? Math.round(Number(output.estimate.high)) : null;
+    const tenantApiKey = decryptSecret(secret.openaiKeyEnc);
+    if (!tenantApiKey || String(tenantApiKey).trim().length < 20) {
+      return jsonErr(
+        "TENANT_OPENAI_KEY_INVALID",
+        "The shop’s OpenAI key could not be decrypted. Please reconnect the key in settings.",
+        { status: 400, debugId }
+      );
+    }
 
-    // ---- Build input JSON saved to DB
-    const input = safeAnyJson({
+    // ---- create quote log first (output is NOT NULL in DB) ----
+    const input = {
       tenantSlug,
       images,
       customer_context: customer_context ?? null,
       contact: contact ?? null,
       render_opt_in: Boolean(render_opt_in),
       createdAt: new Date().toISOString(),
-    });
+    };
 
-    const outputJson = safeAnyJson(output);
-
-    // ✅ THE FIX: ONLY insert the fields we know now. Let DB defaults handle the rest.
-    const inserted = await db
+    const insertRows = await db
       .insert(quoteLogs)
       .values({
         tenantId: tenant.id,
         input,
-        output: outputJson,
-        confidence,
-        estimateLow: estimateLow ?? undefined,
-        estimateHigh: estimateHigh ?? undefined,
-        inspectionRequired: inspection_required,
+        output: {}, // ✅ satisfy NOT NULL immediately
         renderOptIn: Boolean(render_opt_in),
+        renderStatus: Boolean(render_opt_in) ? "queued" : "not_requested",
       })
       .returning({ id: quoteLogs.id });
 
-    const quoteLogId = inserted?.[0]?.id ?? null;
+    const quoteLogId = insertRows[0]?.id ?? null;
 
-    return NextResponse.json(
+    // ---- OpenAI call using TENANT KEY ONLY ----
+    const openai = new OpenAI({ apiKey: tenantApiKey });
+
+    const prompt = `
+You are an expert estimator for service work (starting with upholstery).
+Given the customer's photos and note, produce a concise JSON-only assessment:
+
+Return JSON with:
+- confidence: "high" | "medium" | "low"
+- inspection_required: boolean
+- summary: string (customer-friendly)
+- visible_scope: string[] (what you can see in photos)
+- assumptions: string[] (what you assumed)
+- questions: string[] (what you need to confirm)
+- estimate: { low: number, high: number }
+- render_opt_in: boolean (echo back the input render opt-in)
+`;
+
+    // Use any[] to avoid OpenAI SDK content-part typing mismatches across versions.
+    const visionInput: any[] = images.map((img) => ({
+      type: "image_url",
+      image_url: { url: img.url },
+    }));
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" as any },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt } as any,
+            ...visionInput,
+            ...(customer_context?.notes
+              ? ([{ type: "text", text: `Customer notes: ${customer_context.notes}` }] as any[])
+              : []),
+          ] as any,
+        },
+      ],
+    });
+
+    const raw = completion.choices?.[0]?.message?.content ?? "{}";
+
+    let output: any = {};
+    try {
+      output = raw ? JSON.parse(raw) : {};
+    } catch {
+      output = { raw };
+    }
+
+    // Ensure output includes the opt-in (truthful UI/debug)
+    output.render_opt_in = Boolean(render_opt_in);
+
+    // ---- update quote log with output ----
+    if (quoteLogId) {
+      await db
+        .update(quoteLogs)
+        .set({
+          output,
+          confidence: output?.confidence ?? null,
+          inspectionRequired:
+            typeof output?.inspection_required === "boolean"
+              ? output.inspection_required
+              : null,
+          estimateLow:
+            typeof output?.estimate?.low === "number" ? output.estimate.low : null,
+          estimateHigh:
+            typeof output?.estimate?.high === "number" ? output.estimate.high : null,
+        })
+        .where(eq(quoteLogs.id, quoteLogId));
+    }
+
+    return jsonOk(
       {
-        ok: true,
         quoteLogId,
-        tenantId: tenant.id,
-        output: outputJson,
+        output,
         render_opt_in: Boolean(render_opt_in),
       },
       { status: 200 }
     );
   } catch (err: any) {
-    // make sure we return useful debug data like your UI shows
-    const message = err?.message ? String(err.message) : String(err);
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "REQUEST_FAILED",
-        message: `Failed query: ${message}`,
-        debugId,
-        // keep a small hint, never dump giant stacks to client
-        hint: message.includes("insert into quote_logs")
-          ? "Insert mismatch. Ensure quote_logs columns match drizzle schema and do not force defaults."
-          : undefined,
-      },
-      { status: 500 }
-    );
+    const msg = err?.message ? String(err.message) : String(err);
+    console.error("QUOTE_SUBMIT_ERROR", { debugId, msg, err });
+
+    // If OpenAI complains about missing/invalid key, surface as tenant-key error (still 400)
+    if (
+      msg.toLowerCase().includes("missing credentials") ||
+      msg.toLowerCase().includes("api key") ||
+      msg.toLowerCase().includes("incorrect api key") ||
+      msg.toLowerCase().includes("invalid api key")
+    ) {
+      return jsonErr(
+        "TENANT_OPENAI_KEY_INVALID",
+        "The shop’s OpenAI key is missing or invalid. Please reconnect the key in settings.",
+        { status: 400, debugId }
+      );
+    }
+
+    return jsonErr("REQUEST_FAILED", msg, { status: 500, debugId });
   }
 }
