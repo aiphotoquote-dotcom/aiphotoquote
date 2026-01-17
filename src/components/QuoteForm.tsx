@@ -1,13 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type ShotType = "wide" | "closeup" | "extra";
-
-type UploadedImage = {
-  url: string;
-  shotType: ShotType;
-};
 
 type QuoteApiOk = {
   ok: true;
@@ -43,15 +38,16 @@ type UploadErr = {
 
 type UploadResp = UploadOk | UploadErr;
 
-type RenderStatus =
-  | "idle"
-  | "queued"
-  | "running"
-  | "rendered"
-  | "failed";
+type RenderStatus = "idle" | "queued" | "running" | "rendered" | "failed";
 
 type RenderStatusResp =
-  | { ok: true; quoteLogId: string; status: RenderStatus; imageUrl?: string | null; error?: string | null }
+  | {
+      ok: true;
+      quoteLogId: string;
+      status: RenderStatus;
+      imageUrl?: string | null;
+      error?: string | null;
+    }
   | { ok: false; error: string; message?: string; status?: number };
 
 function digitsOnly(s: string) {
@@ -145,7 +141,9 @@ function ProgressBar({
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="flex items-center justify-between gap-4">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          {title}
+        </div>
         <div className="text-xs text-gray-700 dark:text-gray-200">{label}</div>
       </div>
       <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
@@ -176,10 +174,17 @@ export default function QuoteForm({
   const [phone, setPhone] = useState("");
   const [notes, setNotes] = useState("");
 
-  // local files + previews
+  // local camera files (not yet uploaded)
   const [files, setFiles] = useState<File[]>([]);
+
+  // displayed previews (can be blob: object URLs or remote URLs)
   const [previews, setPreviews] = useState<string[]>([]);
-  const [shotTypes, setShotTypes] = useState<ShotType[]>([]); // same length as files
+
+  // uploaded URLs (remote), in display order
+  const [uploadedUrls, setUploadedUrls] = useState<string[]>([]);
+
+  // shot types aligned to displayed photos (previews[])
+  const [shotTypes, setShotTypes] = useState<ShotType[]>([]);
 
   // rendering opt-in (only if tenant allows)
   const [renderOptIn, setRenderOptIn] = useState(false);
@@ -214,8 +219,8 @@ export default function QuoteForm({
   }, [customerName, email, phone]);
 
   const canSubmit = useMemo(() => {
-    return !working && files.length >= MIN_PHOTOS && contactOk;
-  }, [working, files.length, contactOk]);
+    return !working && previews.length >= MIN_PHOTOS && contactOk;
+  }, [working, previews.length, contactOk]);
 
   useEffect(() => {
     if (!result) return;
@@ -230,39 +235,86 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) setRenderOptIn(false);
   }, [aiRenderingEnabled]);
 
-  function rebuildPreviews(nextFiles: File[]) {
-    previews.forEach((p) => URL.revokeObjectURL(p));
-    setPreviews(nextFiles.map((f) => URL.createObjectURL(f)));
-  }
-
   function defaultShotTypeForIndex(idx: number): ShotType {
     if (idx === 0) return "wide";
     if (idx === 1) return "closeup";
     return "extra";
   }
 
-  function addFiles(newOnes: File[]) {
-    if (!newOnes.length) return;
-
-    const combined = [...files, ...newOnes].slice(0, MAX_PHOTOS);
-
-    // shot types: preserve existing, append defaults for new
-    const nextShotTypes = [...shotTypes];
-    while (nextShotTypes.length < combined.length) {
-      nextShotTypes.push(defaultShotTypeForIndex(nextShotTypes.length));
-    }
-
-    setFiles(combined);
-    setShotTypes(nextShotTypes.slice(0, combined.length));
-    rebuildPreviews(combined);
+  function ensureShotTypesLen(n: number) {
+    setShotTypes((prev) => {
+      const out = [...prev];
+      while (out.length < n) out.push(defaultShotTypeForIndex(out.length));
+      return out.slice(0, n);
+    });
   }
 
-  function removeFileAt(idx: number) {
-    const next = files.filter((_, i) => i !== idx);
+  function addCameraFiles(newOnes: File[]) {
+    if (!newOnes.length) return;
+
+    // create object URLs for display immediately
+    const nextPreviews = [...previews];
+    for (const f of newOnes) {
+      if (nextPreviews.length >= MAX_PHOTOS) break;
+      nextPreviews.push(URL.createObjectURL(f));
+    }
+
+    const nextFiles = [...files, ...newOnes].slice(0, MAX_PHOTOS - uploadedUrls.length);
+
+    setFiles(nextFiles);
+    setPreviews(nextPreviews.slice(0, MAX_PHOTOS));
+    ensureShotTypesLen(Math.min(MAX_PHOTOS, nextPreviews.length));
+  }
+
+  function addUploadedUrls(urls: string[]) {
+    if (!urls.length) return;
+
+    const nextUploaded = [...uploadedUrls, ...urls].slice(0, MAX_PHOTOS);
+    const nextPreviews = [...previews, ...urls].slice(0, MAX_PHOTOS);
+
+    setUploadedUrls(nextUploaded);
+    setPreviews(nextPreviews);
+    ensureShotTypesLen(nextPreviews.length);
+  }
+
+  function removeAt(idx: number) {
+    // remove preview
+    const src = previews[idx];
+
+    // revoke object url if applicable
+    if (src && src.startsWith("blob:")) {
+      try {
+        URL.revokeObjectURL(src);
+      } catch {}
+    }
+
+    // remove from previews
+    const nextPreviews = previews.filter((_, i) => i !== idx);
+
+    // remove from shot types
     const nextShots = shotTypes.filter((_, i) => i !== idx);
-    setFiles(next);
+
+    // remove from uploadedUrls if that preview is a remote URL we tracked
+    const nextUploaded = uploadedUrls.filter((u) => u !== src);
+
+    // if it was a camera file (blob preview), remove ONE from files (best-effort by position)
+    // Note: camera previews are appended in the same order as files, so we can remove by
+    // counting how many blob: previews existed up to idx.
+    if (src && src.startsWith("blob:")) {
+      const blobIndex = previews
+        .slice(0, idx + 1)
+        .filter((p) => p.startsWith("blob:")).length - 1;
+      if (blobIndex >= 0) {
+        setFiles((prev) => prev.filter((_, i) => i !== blobIndex));
+      }
+    }
+
+    setPreviews(nextPreviews);
     setShotTypes(nextShots);
-    rebuildPreviews(next);
+    setUploadedUrls(nextUploaded);
+
+    // ensure shot types still long enough
+    ensureShotTypesLen(nextPreviews.length);
   }
 
   function setShotTypeAt(idx: number, t: ShotType) {
@@ -278,9 +330,17 @@ export default function QuoteForm({
     setEmail("");
     setPhone("");
 
-    previews.forEach((p) => URL.revokeObjectURL(p));
+    previews.forEach((p) => {
+      if (p.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(p);
+        } catch {}
+      }
+    });
+
     setPreviews([]);
     setFiles([]);
+    setUploadedUrls([]);
     setShotTypes([]);
 
     setWorking(false);
@@ -298,7 +358,6 @@ export default function QuoteForm({
     const arr = Array.from(filesList ?? []);
     if (!arr.length) return;
 
-    // Compress browser uploads to avoid 413 / huge payloads
     setWorking(true);
     setPhase("compressing");
 
@@ -335,17 +394,6 @@ export default function QuoteForm({
 
       if (!urls.length) throw new Error("Blob upload returned no file urls.");
 
-      // convert urls to "virtual files" by fetching as blobs? NO — we keep them separate.
-      // For this flow, we still need the *File* objects for /api/quote/submit (which expects urls).
-      // So we store only local files + previews for UI, and we submit URLs later after upload.
-      // ----
-      // We keep it simple: after upload, we do NOT re-add as file objects; we just add preview cards
-      // that reference *uploaded urls* as images, but we also keep the urls list for submit.
-      //
-      // To avoid rewriting everything, we re-use "files" state as local Files and keep a parallel
-      // "uploadedUrls" list.
-      //
-      // ✅ Instead: we attach urls onto a hidden state: uploadedUrls in the same index order.
       addUploadedUrls(urls);
     } finally {
       setWorking(false);
@@ -353,40 +401,7 @@ export default function QuoteForm({
     }
   }
 
-  // uploaded urls aligned to images shown (same order as previews)
-  const [uploadedUrls, setUploadedUrls] = useState<string[]>([]);
-
-  function addUploadedUrls(urls: string[]) {
-    // Add a "card" per uploaded URL. We don’t have local File objects here (they were uploaded already),
-    // so we push a placeholder File? No — we track urls and show them directly.
-    // We also keep a lightweight preview list using the URL itself.
-    setUploadedUrls((prev) => [...prev, ...urls].slice(0, MAX_PHOTOS));
-
-    // For display, we append to previews using the actual remote url (no object URL).
-    // But previews[] currently contains object URLs for camera-taken files.
-    // We’ll treat previews as generic image src list.
-    setPreviews((prev) => [...prev, ...urls].slice(0, MAX_PHOTOS));
-
-    // For shot types, append defaults
-    setShotTypes((prev) => {
-      const next = [...prev];
-      while (next.length < Math.min(MAX_PHOTOS, (previews.length + urls.length))) {
-        next.push(defaultShotTypeForIndex(next.length));
-      }
-      return next.slice(0, MAX_PHOTOS);
-    });
-
-    // Also bump "files" count so validation works (we use files OR uploadedUrls for count)
-    // We’ll keep files[] ONLY for camera captures (local). Upload button uses urls only.
-  }
-
-  const totalPhotosCount = useMemo(() => {
-    // photos can be from camera (local files) OR upload (already uploaded urls)
-    return Math.max(previews.length, uploadedUrls.length, files.length);
-  }, [previews.length, uploadedUrls.length, files.length]);
-
   const effectiveShotTypes = useMemo(() => {
-    // ensure shotTypes length matches previews length
     const n = previews.length;
     const out = [...shotTypes];
     while (out.length < n) out.push(defaultShotTypeForIndex(out.length));
@@ -428,7 +443,7 @@ export default function QuoteForm({
       return;
     }
 
-    const nPhotos = previews.length; // what we show
+    const nPhotos = previews.length;
     if (nPhotos < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
       return;
@@ -454,8 +469,7 @@ export default function QuoteForm({
     setWorking(true);
 
     try {
-      // If some photos are still local camera Files, compress+upload them first
-      // and merge with already-uploaded urls.
+      // 1) upload any camera files first (best-effort)
       let urls: string[] = [...uploadedUrls];
 
       if (files.length) {
@@ -495,27 +509,35 @@ export default function QuoteForm({
         urls = [...urls, ...newUrls].slice(0, MAX_PHOTOS);
       }
 
-      // Align shot types to urls order:
-      // previews currently has BOTH remote urls and object urls; we want shot types in displayed order,
-      // but submission needs urls. We’ll use the displayed shot types for the first N urls.
-      const shots = effectiveShotTypes.slice(0, urls.length);
+      if (!urls.length) {
+        throw new Error("No uploaded image URLs available. Please try again.");
+      }
 
       setPhase("analyzing");
+
+      // 2) IMPORTANT: match server Zod schema exactly.
+      // Server expects:
+      // - tenantSlug
+      // - images: [{ url }]
+      // - render_opt_in: boolean (TOP LEVEL)
+      // - customer_context: { name,email,phone,notes,category,service_type }
+      const renderOpt = aiRenderingEnabled ? Boolean(renderOptIn) : false;
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
-          images: urls.map((u, idx) => ({ url: u, shotType: shots[idx] ?? defaultShotTypeForIndex(idx) })),
+          images: urls.map((u) => ({ url: u })), // ✅ no shotType
+          render_opt_in: renderOpt, // ✅ top-level
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
-            notes,
-            render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+            notes: notes?.trim() || undefined,
+            category: "service",
+            service_type: "upholstery",
           },
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
         }),
       });
 
@@ -541,37 +563,38 @@ export default function QuoteForm({
 
       const qid = (json?.quoteLogId ?? null) as string | null;
       setQuoteLogId(qid);
-      setResult(json?.output ?? json);
 
-      // Once estimate is done, clear local camera files so we don't double-upload later
-      if (files.length) {
-        setFiles([]);
-      }
+      // the submit route returns a normalized `output` object; fall back safely.
+      setResult(json?.output ?? json?.assessment ?? json);
 
-      // If we uploaded local files during submit, update uploadedUrls so the UI stays consistent
-      // (best-effort: keep what we submitted)
-      setUploadedUrls(urls);
-
-      // And ensure previews are remote urls (no object urls) after submit for consistency
-      // (We cannot map old object urls to their final remote urls perfectly without more plumbing,
-      // but after submit we can just show the submitted urls list.)
+      // sync UI state to remote URLs after submit
       previews.forEach((p) => {
-        if (p.startsWith("blob:")) URL.revokeObjectURL(p);
+        if (p.startsWith("blob:")) {
+          try {
+            URL.revokeObjectURL(p);
+          } catch {}
+        }
       });
-      setPreviews(urls);
 
-      // Reset attempted guard for this NEW quote id
+      setUploadedUrls(urls);
+      setPreviews(urls);
+      setFiles([]);
+
+      ensureShotTypesLen(urls.length);
+
+      // reset attempted guard for this NEW quote id
       renderAttemptedForQuoteRef.current = null;
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
     } finally {
       setWorking(false);
+      setPhase("idle");
     }
   }
 
   async function startRenderOnce(qid: string) {
-    // Idempotency guard client-side
+    // client-side idempotency guard
     if (renderAttemptedForQuoteRef.current === qid) return;
     renderAttemptedForQuoteRef.current = qid;
 
@@ -580,7 +603,7 @@ export default function QuoteForm({
     setRenderImageUrl(null);
 
     try {
-      // Kick off render (server is idempotent; may immediately return "already_in_progress/final")
+      // Kick off render
       await fetch("/api/render/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -613,8 +636,6 @@ export default function QuoteForm({
             setRenderError(msg);
             return;
           }
-        } else {
-          // If status route fails, don't spam; just keep the render bar running and try again
         }
 
         await sleep(2000);
@@ -634,17 +655,14 @@ export default function QuoteForm({
     if (!renderOptIn) return;
     if (!quoteLogId) return;
 
-    // only once per quote id
     if (renderAttemptedForQuoteRef.current === quoteLogId) return;
 
-    // start
     startRenderOnce(quoteLogId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
 
   async function retryRender() {
     if (!quoteLogId) return;
-    // allow retry (reset guard)
     renderAttemptedForQuoteRef.current = null;
     await startRenderOnce(quoteLogId);
   }
@@ -668,9 +686,12 @@ export default function QuoteForm({
       {/* Photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
+            Take 2 quick photos
+          </h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Take a wide shot, then a close-up. You can label each photo after it uploads. (max {MAX_PHOTOS})
+            Take a wide shot, then a close-up. You can label each photo after it uploads. (max{" "}
+            {MAX_PHOTOS})
           </p>
         </div>
 
@@ -685,17 +706,14 @@ export default function QuoteForm({
               onChange={async (e) => {
                 try {
                   const f = Array.from(e.target.files ?? []);
-                  if (f.length) {
-                    // camera returns local File(s). add to UI immediately.
-                    addFiles(f);
-                  }
+                  if (f.length) addCameraFiles(f);
                 } catch (err: any) {
                   setError(err?.message ?? "Failed to add photo");
                 } finally {
                   e.currentTarget.value = "";
                 }
               }}
-              disabled={working}
+              disabled={working || previews.length >= MAX_PHOTOS}
             />
             <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
               Take Photo
@@ -710,17 +728,14 @@ export default function QuoteForm({
               multiple
               onChange={async (e) => {
                 try {
-                  if (e.target.files) {
-                    // Upload flow: direct upload now, adds preview cards from remote urls
-                    await uploadFiles(e.target.files);
-                  }
+                  if (e.target.files) await uploadFiles(e.target.files);
                 } catch (err: any) {
                   setError(err?.message ?? "Upload failed");
                 } finally {
                   e.currentTarget.value = "";
                 }
               }}
-              disabled={working}
+              disabled={working || previews.length >= MAX_PHOTOS}
             />
             <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
               Upload Photos
@@ -732,10 +747,12 @@ export default function QuoteForm({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {previews.map((src, idx) => {
               const st = effectiveShotTypes[idx] ?? defaultShotTypeForIndex(idx);
-              const badge =
-                st === "wide" ? "Wide shot" : st === "closeup" ? "Close-up" : "Extra";
+              const badge = st === "wide" ? "Wide shot" : st === "closeup" ? "Close-up" : "Extra";
               return (
-                <div key={`${src}-${idx}`} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+                <div
+                  key={`${src}-${idx}`}
+                  className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+                >
                   <div className="relative">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={src} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
@@ -745,14 +762,14 @@ export default function QuoteForm({
                     <button
                       type="button"
                       className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                      onClick={() => removeFileAt(idx)}
+                      onClick={() => removeAt(idx)}
                       disabled={working}
                     >
                       Remove
                     </button>
                   </div>
 
-                  {/* Label controls (the customer-friendly wide/close selectors) */}
+                  {/* Label controls */}
                   <div className="p-3 flex flex-wrap items-center gap-2">
                     <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
                     <button
@@ -806,9 +823,9 @@ export default function QuoteForm({
         )}
 
         <div className="text-xs text-gray-600 dark:text-gray-300">
-          {totalPhotosCount >= MIN_PHOTOS
-            ? `✅ ${totalPhotosCount} photo${totalPhotosCount === 1 ? "" : "s"} added`
-            : `Add ${MIN_PHOTOS} photos (you have ${totalPhotosCount})`}
+          {previews.length >= MIN_PHOTOS
+            ? `✅ ${previews.length} photo${previews.length === 1 ? "" : "s"} added`
+            : `Add ${MIN_PHOTOS} photos (you have ${previews.length})`}
         </div>
       </section>
 
@@ -895,7 +912,8 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we’ll generate a visual “after” concept as a second step after your estimate.
+                  If selected, we’ll generate a visual “after” concept as a second step after your
+                  estimate.
                 </div>
               </label>
             </div>
@@ -948,9 +966,7 @@ export default function QuoteForm({
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">
-                    Status: {renderStatus}
-                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
                 </div>
 
                 <button
