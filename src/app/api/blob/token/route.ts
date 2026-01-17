@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { handleUpload } from "@vercel/blob/client";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
@@ -23,7 +24,6 @@ export async function POST(request: NextRequest) {
       },
 
       onUploadCompleted: async ({ blob, tokenPayload }) => {
-        // Don't reference blob.size; your SDK type doesn't include it.
         console.log("Blob upload completed:", {
           url: blob.url,
           pathname: blob.pathname,
@@ -33,7 +33,8 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    return NextResponse.json(jsonResponse);
+    // ✅ Must return a Response
+    return NextResponse.json(jsonResponse, { status: 200 });
   } catch (err: any) {
     console.error("BLOB_TOKEN_ROUTE_ERROR", err);
     return NextResponse.json(
