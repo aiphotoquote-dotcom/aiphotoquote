@@ -5,17 +5,12 @@ import { sql } from "drizzle-orm";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function firstRow<T = any>(r: any): T | null {
+function firstRow(r: any) {
+  // Drizzle adapters differ: sometimes { rows: [...] }, sometimes it's an array.
   if (!r) return null;
-
-  // Drizzle/Vercel Postgres often returns { rows: [...] }
-  if (Array.isArray(r?.rows)) return (r.rows[0] as T) ?? null;
-
-  // Some adapters return an array directly
-  if (Array.isArray(r)) return (r[0] as T) ?? null;
-
-  // Last resort
-  return (r?.[0] as T) ?? null;
+  if (Array.isArray(r)) return r[0] ?? null;
+  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
+  return null;
 }
 
 export default async function Page({
@@ -31,90 +26,94 @@ export default async function Page({
   let industry = "service";
   let aiRenderingEnabled = false;
 
-  // Debug (helps us confirm DB reads in prod)
-  const debug: any = {
+  // DEBUG (safe to leave while you’re validating; remove/guard later)
+  let debug = {
     tenantId: null as string | null,
     tenantName: null as string | null,
     industry_key: null as string | null,
     ai_rendering_enabled: null as boolean | null,
-    settingsReadPath: "none" as "none" | "with_ai_col" | "without_ai_col",
+    settingsReadPath: "none" as "none" | "full" | "fallback",
     aiRenderingEnabledComputed: false,
-    tenantSlug,
   };
 
   try {
     // Tenant lookup (safe)
     const tenantRes = await db.execute(sql`
-      select id, name, slug
-      from tenants
-      where slug = ${tenantSlug}
+      select "id", "name", "slug"
+      from "tenants"
+      where "slug" = ${tenantSlug}
       limit 1
     `);
 
-    const tenant = firstRow<{ id: string; name: string | null; slug: string }>(tenantRes);
+    const tenant = firstRow(tenantRes) as
+      | { id: string; name: string | null; slug: string }
+      | null;
 
     tenantId = tenant?.id ?? null;
+    if (tenant?.name) tenantName = tenant.name;
+
     debug.tenantId = tenantId;
     debug.tenantName = tenant?.name ?? null;
 
-    if (tenant?.name) tenantName = tenant.name;
-
     // Settings lookup (safe)
     if (tenantId) {
-      // Try reading ai_rendering_enabled (newer schema)
+      // Try reading ai_rendering_enabled if the column exists
       try {
         const settingsRes = await db.execute(sql`
-          select industry_key, ai_rendering_enabled
-          from tenant_settings
-          where tenant_id = ${tenantId}::uuid
+          select "industry_key", "ai_rendering_enabled"
+          from "tenant_settings"
+          where "tenant_id" = ${tenantId}::uuid
           limit 1
         `);
 
-        const settings = firstRow<{ industry_key: string | null; ai_rendering_enabled: boolean | null }>(
-          settingsRes
-        );
-
-        debug.settingsReadPath = "with_ai_col";
-        debug.industry_key = settings?.industry_key ?? null;
-        debug.ai_rendering_enabled =
-          typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
+        const settings = firstRow(settingsRes) as
+          | { industry_key: string | null; ai_rendering_enabled: boolean | null }
+          | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
+
+        debug.industry_key = settings?.industry_key ?? null;
+        debug.ai_rendering_enabled =
+          typeof settings?.ai_rendering_enabled === "boolean"
+            ? settings.ai_rendering_enabled
+            : null;
+        debug.settingsReadPath = "full";
       } catch {
         // Fallback if ai_rendering_enabled column isn't present yet
         const settingsRes = await db.execute(sql`
-          select industry_key
-          from tenant_settings
-          where tenant_id = ${tenantId}::uuid
+          select "industry_key"
+          from "tenant_settings"
+          where "tenant_id" = ${tenantId}::uuid
           limit 1
         `);
 
-        const settings = firstRow<{ industry_key: string | null }>(settingsRes);
-
-        debug.settingsReadPath = "without_ai_col";
-        debug.industry_key = settings?.industry_key ?? null;
+        const settings = firstRow(settingsRes) as
+          | { industry_key: string | null }
+          | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
+
+        debug.industry_key = settings?.industry_key ?? null;
+        debug.ai_rendering_enabled = null;
+        debug.settingsReadPath = "fallback";
       }
     }
   } catch {
-    // Intentionally swallow errors so the page still renders.
-    // QuoteForm can still submit using tenantSlug even if branding fails.
+    // swallow errors; page still renders
   }
 
-  debug.aiRenderingEnabledComputed = Boolean(aiRenderingEnabled);
+  debug.aiRenderingEnabledComputed = aiRenderingEnabled;
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-      {/* DEBUG BOX (remove later) */}
-      <div className="mx-auto max-w-5xl px-6 pt-6">
-        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+      <div className="mx-auto max-w-5xl px-6 py-12">
+        {/* DEBUG PANEL */}
+        <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+          <div className="font-semibold mb-2">DEBUG /q/[tenantSlug]</div>
           <pre className="whitespace-pre-wrap">{JSON.stringify(debug, null, 2)}</pre>
         </div>
-      </div>
 
-      <div className="mx-auto max-w-5xl px-6 py-12">
         <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
           <div className="lg:col-span-2">
             <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
@@ -122,32 +121,35 @@ export default async function Page({
               Photo quote powered by AI
             </div>
 
-            <h1 className="mt-4 text-4xl font-semibold tracking-tight">{tenantName}</h1>
+            <h1 className="mt-4 text-4xl font-semibold tracking-tight">
+              {tenantName}
+            </h1>
 
             <p className="mt-3 text-base text-gray-700 dark:text-gray-200">
-              Get a fast estimate range by uploading a few clear photos. No phone calls required.
+              Get a fast estimate range by uploading a few clear photos. No phone
+              calls required.
             </p>
 
             <div className="mt-6 space-y-3 text-sm text-gray-800 dark:text-gray-200">
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">No obligation.</span> This is an estimate range — final pricing depends
-                  on inspection and scope.
+                  <span className="font-semibold">No obligation.</span> This is an
+                  estimate range — final pricing depends on inspection and scope.
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include close-ups + a
-                  full view.
+                  <span className="font-semibold">Best results:</span> 2–6 photos,
+                  good lighting, include close-ups + a full view.
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  Tailored for <span className="font-semibold">{industry}</span> quotes. We’ll follow up if anything
-                  needs clarification.
+                  Tailored for <span className="font-semibold">{industry}</span>{" "}
+                  quotes. We’ll follow up if anything needs clarification.
                 </p>
               </div>
             </div>
@@ -159,12 +161,15 @@ export default async function Page({
                 <div>
                   <h2 className="text-2xl font-semibold">Get a Photo Quote</h2>
                   <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                    Upload photos and add a quick note. We’ll return an estimate range.
+                    Upload photos and add a quick note. We’ll return an estimate
+                    range.
                   </p>
                 </div>
 
                 <div className="hidden md:flex flex-col items-end text-xs text-gray-600 dark:text-gray-300">
-                  <span className="font-semibold text-gray-900 dark:text-gray-100">Tenant</span>
+                  <span className="font-semibold text-gray-900 dark:text-gray-100">
+                    Tenant
+                  </span>
                   <span className="rounded-md bg-gray-50 px-2 py-1 dark:bg-gray-950 dark:border dark:border-gray-800">
                     /q/{tenantSlug}
                   </span>
@@ -172,12 +177,15 @@ export default async function Page({
               </div>
 
               <div className="mt-6">
-                <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
+                <QuoteForm
+                  tenantSlug={tenantSlug}
+                  aiRenderingEnabled={aiRenderingEnabled}
+                />
               </div>
 
               <p className="mt-6 text-xs text-gray-600 dark:text-gray-300">
-                By submitting, you agree we may contact you about this request. Photos are used only to prepare your
-                estimate.
+                By submitting, you agree we may contact you about this request.
+                Photos are used only to prepare your estimate.
               </p>
             </div>
           </div>
