@@ -3,10 +3,41 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
+type ShotType = "wide" | "closeup";
 
-function formatMoney(n: number) {
-  return `$${Math.round(n).toLocaleString()}`;
-}
+type QuoteSubmitOk = {
+  ok: true;
+  quoteLogId: string | null;
+  output: any;
+  debugId?: string;
+};
+
+type QuoteSubmitFail = {
+  ok: false;
+  error?: string;
+  message?: string;
+  debugId?: string;
+  issues?: any[];
+};
+
+type QuoteSubmitResp = QuoteSubmitOk | QuoteSubmitFail;
+
+type RenderStartOk = {
+  ok: true;
+  quoteLogId?: string;
+  imageUrl?: string | null;
+  durationMs?: number;
+  debugId?: string;
+};
+
+type RenderStartFail = {
+  ok: false;
+  error?: string;
+  message?: string;
+  debugId?: string;
+};
+
+type RenderStartResp = RenderStartOk | RenderStartFail;
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -14,6 +45,11 @@ function sleep(ms: number) {
 
 function digitsOnly(s: string) {
   return (s || "").replace(/\D/g, "");
+}
+
+function isValidEmail(email: string) {
+  const s = (email || "").trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
 function formatUSPhone(input: string) {
@@ -24,11 +60,6 @@ function formatUSPhone(input: string) {
   if (d.length <= 3) return a ? `(${a}` : "";
   if (d.length <= 6) return `(${a}) ${b}`;
   return `(${a}) ${b}-${c}`;
-}
-
-function isValidEmail(email: string) {
-  const s = (email || "").trim();
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
 async function compressImage(
@@ -92,6 +123,7 @@ async function uploadBatchToBlob(files: File[]): Promise<string[]> {
   files.forEach((f) => form.append("files", f));
 
   const res = await fetch("/api/blob/upload", { method: "POST", body: form });
+
   let j: UploadResp | null = null;
   try {
     j = (await res.json()) as UploadResp;
@@ -100,9 +132,7 @@ async function uploadBatchToBlob(files: File[]): Promise<string[]> {
   }
 
   if (!res.ok) {
-    const msg =
-      (j as any)?.error?.message ||
-      `Blob upload failed (HTTP ${res.status})`;
+    const msg = (j as any)?.error?.message || `Blob upload failed (HTTP ${res.status})`;
     throw new Error(msg);
   }
 
@@ -122,6 +152,14 @@ function chunk<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
+function ShotPill({ type }: { type: ShotType }) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+      {type === "wide" ? "Wide shot" : "Close-up"}
+    </span>
+  );
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled,
@@ -135,21 +173,31 @@ export default function QuoteForm({
   const [customerName, setCustomerName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-
   const [notes, setNotes] = useState("");
+
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
+  const [shotTypes, setShotTypes] = useState<Record<number, ShotType>>({}); // index -> type
 
   // customer opt-in (tenant-enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
+  // Estimate state
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<
-    "idle" | "compressing" | "uploading" | "analyzing"
-  >("idle");
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<QuoteSubmitOk | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Rendering state
+  const [renderStatus, setRenderStatus] = useState<
+    "idle" | "queued" | "starting" | "rendering" | "uploaded" | "done" | "failed"
+  >("idle");
+  const [renderMessage, setRenderMessage] = useState<string | null>(null);
+  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
+  const [renderDebugId, setRenderDebugId] = useState<string | null>(null);
+
+  const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -160,56 +208,47 @@ export default function QuoteForm({
     return nOk && eOk && pOk;
   }, [customerName, email, phone]);
 
-  const step = useMemo(() => {
-    if (result?.output) return 3;
-    if (files.length > 0) return 2;
-    return 1;
-  }, [files.length, result?.output]);
+  const estimateReady = Boolean(result?.output);
 
-  const progress = useMemo(() => {
-    let p = 0.15;
-    if (step === 1) p = 0.25;
-    if (step === 2) p = 0.55;
-    if (step === 3) p = 0.85;
-
+  // Progress (Estimate)
+  const estimateProgress = useMemo(() => {
+    if (estimateReady) return 1;
     if (working) {
-      if (phase === "compressing") p = 0.62;
-      if (phase === "uploading") p = 0.72;
-      if (phase === "analyzing") p = 0.82;
+      if (phase === "compressing") return 0.55;
+      if (phase === "uploading") return 0.7;
+      if (phase === "analyzing") return 0.85;
     }
+    if (files.length === 0) return 0.2;
+    if (files.length < MIN_PHOTOS) return 0.35;
+    if (!contactOk) return 0.5;
+    return 0.6;
+  }, [estimateReady, working, phase, files.length, contactOk]);
 
-    if (result?.output) p = 1.0;
-
-    return Math.max(0, Math.min(1, p));
-  }, [step, working, phase, result?.output]);
-
-  const progressLabel = useMemo(() => {
-    if (result?.output) return "Estimate ready";
+  const estimateLabel = useMemo(() => {
+    if (estimateReady) return "Estimate ready";
     if (working) {
-      if (phase === "compressing") return "Optimizing photos…";
-      if (phase === "uploading") return "Uploading…";
-      if (phase === "analyzing") return "Analyzing…";
+      if (phase === "compressing") return "Working: optimizing photos…";
+      if (phase === "uploading") return "Working: uploading…";
+      if (phase === "analyzing") return "Working: analyzing…";
     }
-    if (step === 1) return "Add photos";
-    if (step === 2) return "Add details";
-    return "Review estimate";
-  }, [result?.output, working, phase, step]);
+    return "Progress";
+  }, [estimateReady, working, phase]);
 
-  const progressText = useMemo(() => {
-    if (files.length >= MIN_PHOTOS) {
-      const c = contactOk ? " • ✅ contact info" : " • add contact info";
-      return `✅ ${files.length} photo${files.length === 1 ? "" : "s"} added${c}`;
-    }
-    return `Add ${MIN_PHOTOS} photos (you have ${files.length})`;
-  }, [files.length, contactOk]);
+  // Progress (Rendering)
+  const renderingEnabledForThis = Boolean(aiRenderingEnabled) && Boolean(renderOptIn);
+  const quoteLogId = result?.quoteLogId ?? null;
 
-  useEffect(() => {
-    if (!result?.output) return;
-    (async () => {
-      await sleep(50);
-      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    })();
-  }, [result?.output]);
+  const renderProgress = useMemo(() => {
+    if (!renderingEnabledForThis) return 0;
+    if (renderStatus === "idle") return 0.1;
+    if (renderStatus === "starting") return 0.25;
+    if (renderStatus === "queued") return 0.35;
+    if (renderStatus === "rendering") return 0.6;
+    if (renderStatus === "uploaded") return 0.85;
+    if (renderStatus === "done") return 1;
+    if (renderStatus === "failed") return 1;
+    return 0.1;
+  }, [renderingEnabledForThis, renderStatus]);
 
   function rebuildPreviews(nextFiles: File[]) {
     previews.forEach((p) => URL.revokeObjectURL(p));
@@ -218,31 +257,74 @@ export default function QuoteForm({
 
   function addFiles(newOnes: File[]) {
     if (!newOnes.length) return;
+
+    const startIdx = files.length;
     const combined = [...files, ...newOnes].slice(0, MAX_PHOTOS);
+
     setFiles(combined);
     rebuildPreviews(combined);
+
+    // default shot typing: first photo wide, second close-up, rest wide (editable)
+    setShotTypes((prev) => {
+      const next = { ...prev };
+      for (let i = startIdx; i < combined.length; i++) {
+        if (next[i]) continue;
+        if (i === 0) next[i] = "wide";
+        else if (i === 1) next[i] = "closeup";
+        else next[i] = "wide";
+      }
+      return next;
+    });
   }
 
   function removeFileAt(idx: number) {
-    const next = files.filter((_, i) => i !== idx);
-    setFiles(next);
-    rebuildPreviews(next);
+    const nextFiles = files.filter((_, i) => i !== idx);
+    setFiles(nextFiles);
+    rebuildPreviews(nextFiles);
+
+    // re-index shotTypes
+    setShotTypes((prev) => {
+      const next: Record<number, ShotType> = {};
+      let j = 0;
+      for (let i = 0; i < files.length; i++) {
+        if (i === idx) continue;
+        next[j] = prev[i] ?? (j === 0 ? "wide" : j === 1 ? "closeup" : "wide");
+        j++;
+      }
+      return next;
+    });
   }
 
-  function retake() {
+  function resetAll() {
     setError(null);
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
+
+    // rendering reset
+    setRenderStatus("idle");
+    setRenderMessage(null);
+    setRenderImageUrl(null);
+    setRenderDebugId(null);
+    renderAttemptedForQuoteRef.current = null;
+
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
+    setShotTypes({});
     setPhase("idle");
   }
 
-  async function onSubmit() {
+  async function submitEstimate() {
     setError(null);
     setResult(null);
+
+    // reset rendering for new run
+    setRenderStatus("idle");
+    setRenderMessage(null);
+    setRenderImageUrl(null);
+    setRenderDebugId(null);
+    renderAttemptedForQuoteRef.current = null;
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
@@ -277,64 +359,57 @@ export default function QuoteForm({
       setPhase("compressing");
       const compressed = await Promise.all(files.map((f) => compressImage(f)));
 
-      // ✅ KEY FIX: upload in small batches to avoid HTTP 413
+      // ✅ key fix: upload in batches to avoid 413
       setPhase("uploading");
-
-      const BATCH_SIZE = 2; // conservative; avoids payload limits
+      const BATCH_SIZE = 2;
       const batches = chunk(compressed, BATCH_SIZE);
 
       const uploadedUrls: string[] = [];
-      for (let bi = 0; bi < batches.length; bi++) {
-        const batch = batches[bi];
-
-        // one retry for transient failures (does NOT waste OpenAI tokens)
+      for (const batch of batches) {
+        // one retry; doesn't waste tokens
         try {
           const urls = await uploadBatchToBlob(batch);
           uploadedUrls.push(...urls);
-        } catch (e1: any) {
-          // Retry once
+        } catch {
           const urls = await uploadBatchToBlob(batch);
           uploadedUrls.push(...urls);
         }
       }
 
-      const urls: UploadedFile[] = uploadedUrls.map((u) => ({ url: u }));
+      const images: UploadedFile[] = uploadedUrls.map((u) => ({ url: u }));
 
       setPhase("analyzing");
+
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
-          images: urls,
-
-          // ✅ server expects top-level render_opt_in (and we keep it in meta too)
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
-
+          images,
+          render_opt_in: Boolean(aiRenderingEnabled) && Boolean(renderOptIn),
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
             notes,
+            // Optional metadata: wide/close selection per image (server can ignore)
+            shot_types: images.map((_, i) => shotTypes[i] ?? (i === 0 ? "wide" : i === 1 ? "closeup" : "wide")),
           },
         }),
       });
 
-      const json = await res.json();
+      const j = (await res.json().catch(() => null)) as QuoteSubmitResp | null;
 
-      if (!json.ok) {
-        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
-        const code = json?.error ? `\ncode: ${json.error}` : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
-        const issues = json?.issues
-          ? `\nissues:\n${json.issues
-              .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
-              .join("\n")}`
-          : "";
-        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
+      if (!j || j.ok !== true) {
+        const dbg = (j as any)?.debugId ? `\ndebugId: ${(j as any).debugId}` : "";
+        const code = (j as any)?.error ? `\ncode: ${(j as any).error}` : "";
+        const msg = (j as any)?.message ? `\nmessage: ${(j as any).message}` : "";
+        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}`.trim());
       }
 
-      setResult(json);
+      setResult(j);
+      await sleep(50);
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
@@ -343,24 +418,89 @@ export default function QuoteForm({
     }
   }
 
-  const out = result?.output ?? null;
+  async function startRender(args: { tenantSlug: string; quoteLogId: string }) {
+    setRenderStatus("starting");
+    setRenderMessage(null);
+    setRenderImageUrl(null);
+    setRenderDebugId(null);
+
+    try {
+      const res = await fetch("/api/render/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenantSlug: args.tenantSlug,
+          quoteLogId: args.quoteLogId,
+        }),
+      });
+
+      const j = (await res.json().catch(() => null)) as RenderStartResp | null;
+
+      if (!res.ok || !j || (j as any).ok !== true) {
+        const dbg = (j as any)?.debugId ? `debugId: ${(j as any).debugId}` : "";
+        const msg = (j as any)?.message || (j as any)?.error || `Render failed (HTTP ${res.status})`;
+        setRenderStatus("failed");
+        setRenderMessage([msg, dbg].filter(Boolean).join("\n"));
+        return;
+      }
+
+      // If your API returns the final URL immediately, show it.
+      // If it queues async, still show success state and keep message minimal.
+      const imageUrl = (j as any)?.imageUrl ? String((j as any).imageUrl) : null;
+
+      if (imageUrl) {
+        setRenderStatus("done");
+        setRenderImageUrl(imageUrl);
+        setRenderMessage(null);
+      } else {
+        // best-effort: treat as queued/started
+        setRenderStatus("queued");
+        setRenderMessage("Render started. It can take a moment…");
+      }
+      setRenderDebugId((j as any)?.debugId ?? null);
+    } catch (e: any) {
+      setRenderStatus("failed");
+      setRenderMessage(e?.message ?? "Render failed.");
+    }
+  }
+
+  // ✅ AUTO-TRIGGER render after estimate (only once per quoteLogId)
+  useEffect(() => {
+    if (!renderingEnabledForThis) return;
+    if (!estimateReady) return;
+
+    const qid = quoteLogId;
+    if (!qid || typeof qid !== "string") return;
+
+    if (renderAttemptedForQuoteRef.current === qid) return;
+    renderAttemptedForQuoteRef.current = qid;
+
+    startRender({ tenantSlug, quoteLogId: qid });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estimateReady, quoteLogId, renderingEnabledForThis, tenantSlug]);
+
+  const showRenderingBlock = estimateReady && Boolean(aiRenderingEnabled);
 
   return (
     <div className="space-y-6">
-      {/* Progress bar */}
+      {/* Estimate progress (WORKING bar) */}
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">{estimateLabel}</div>
+            <div className="mt-0.5 text-xs text-gray-700 dark:text-gray-200">
+              tenantSlug: <span className="font-semibold">{tenantSlug}</span>
+            </div>
           </div>
-          <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
+          <div className="text-xs text-gray-700 dark:text-gray-200">
+            {estimateReady ? "Estimate ready" : working ? "Working…" : files.length < MIN_PHOTOS ? `Add ${MIN_PHOTOS} photos` : "Ready"}
+          </div>
         </div>
 
         <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
           <div
             className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
-            style={{ width: `${Math.round(progress * 100)}%` }}
+            style={{ width: `${Math.round(estimateProgress * 100)}%` }}
           />
         </div>
       </div>
@@ -370,11 +510,12 @@ export default function QuoteForm({
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
+            Wide shot + close-up gets the best accuracy. Add more if you want (max {MAX_PHOTOS}).
           </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
+          {/* Single Take Photo */}
           <label className="block">
             <input
               className="hidden"
@@ -393,6 +534,7 @@ export default function QuoteForm({
             </div>
           </label>
 
+          {/* Upload */}
           <label className="block">
             <input
               className="hidden"
@@ -413,22 +555,52 @@ export default function QuoteForm({
         </div>
 
         {previews.length > 0 && (
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             {previews.map((src, idx) => (
               <div
                 key={`${src}-${idx}`}
                 className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
-                <button
-                  type="button"
-                  className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                  onClick={() => removeFileAt(idx)}
-                  disabled={working}
-                >
-                  Remove
-                </button>
+                <img src={src} alt={`photo ${idx + 1}`} className="h-32 w-full object-cover" />
+
+                <div className="absolute left-2 top-2 flex items-center gap-2">
+                  <ShotPill type={shotTypes[idx] ?? (idx === 0 ? "wide" : idx === 1 ? "closeup" : "wide")} />
+                </div>
+
+                <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs font-semibold dark:bg-gray-900/90 dark:border-gray-800"
+                      onClick={() =>
+                        setShotTypes((p) => ({ ...p, [idx]: "wide" }))
+                      }
+                      disabled={working}
+                    >
+                      Wide
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs font-semibold dark:bg-gray-900/90 dark:border-gray-800"
+                      onClick={() =>
+                        setShotTypes((p) => ({ ...p, [idx]: "closeup" }))
+                      }
+                      disabled={working}
+                    >
+                      Close-up
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
+                    onClick={() => removeFileAt(idx)}
+                    disabled={working}
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -518,7 +690,7 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
+                  If selected, we’ll generate a visual “after” concept as a second step after your estimate.
                 </div>
               </label>
             </div>
@@ -527,7 +699,7 @@ export default function QuoteForm({
 
         <button
           className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
-          onClick={onSubmit}
+          onClick={submitEstimate}
           disabled={working || files.length < MIN_PHOTOS || !contactOk}
         >
           {working ? "Working…" : "Get Estimate"}
@@ -538,28 +710,114 @@ export default function QuoteForm({
             {error}
           </div>
         )}
+
+        <button
+          type="button"
+          className="w-full rounded-xl border border-gray-200 py-3 text-sm font-semibold dark:border-gray-800"
+          onClick={resetAll}
+          disabled={working}
+        >
+          Start Over
+        </button>
       </section>
 
-      {out ? (
+      {/* Result + Rendering */}
+      {estimateReady ? (
         <section
           ref={resultsRef}
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
         >
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
-            <button
-              type="button"
-              className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
-              onClick={retake}
-              disabled={working}
-            >
-              Start Over
-            </button>
-          </div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
 
           <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(out, null, 2)}
+            {JSON.stringify(result?.output ?? {}, null, 2)}
           </pre>
+
+          {showRenderingBlock ? (
+            <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3 dark:border-gray-800 dark:bg-gray-900">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-base font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                    This is a second step after your estimate. It can take a moment.
+                  </div>
+                </div>
+
+                <div className="text-xs text-gray-700 dark:text-gray-200">
+                  {renderingEnabledForThis ? (
+                    <>
+                      Status:{" "}
+                      <span className="font-semibold">
+                        {renderStatus === "idle"
+                          ? "Ready"
+                          : renderStatus === "starting"
+                          ? "Starting"
+                          : renderStatus === "queued"
+                          ? "Queued"
+                          : renderStatus === "rendering"
+                          ? "Rendering"
+                          : renderStatus === "uploaded"
+                          ? "Uploading"
+                          : renderStatus === "done"
+                          ? "Done"
+                          : "Failed"}
+                      </span>
+                    </>
+                  ) : (
+                    <>Not requested</>
+                  )}
+                </div>
+              </div>
+
+              <div className="h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
+                <div
+                  className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
+                  style={{ width: `${Math.round(renderProgress * 100)}%` }}
+                />
+              </div>
+
+              {renderingEnabledForThis ? (
+                <div className="space-y-2">
+                  {renderImageUrl ? (
+                    <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={renderImageUrl} alt="AI render" className="w-full h-auto" />
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-700 dark:text-gray-200">
+                      {renderStatus === "idle"
+                        ? "Will start automatically after estimate."
+                        : renderStatus === "queued"
+                        ? "Queued — working on it…"
+                        : renderStatus === "starting"
+                        ? "Starting…"
+                        : renderStatus === "failed"
+                        ? "Failed."
+                        : "Working…"}
+                    </div>
+                  )}
+
+                  {renderStatus === "failed" && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                      {renderMessage ?? "Render failed."}
+                      {renderDebugId ? `\ndebugId: ${renderDebugId}` : ""}
+                    </div>
+                  )}
+
+                  {renderingEnabledForThis && estimateReady && quoteLogId && typeof quoteLogId === "string" ? (
+                    <button
+                      type="button"
+                      className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
+                      onClick={() => startRender({ tenantSlug, quoteLogId })}
+                      disabled={renderStatus === "starting" || working}
+                    >
+                      Retry Render
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       ) : null}
     </div>
