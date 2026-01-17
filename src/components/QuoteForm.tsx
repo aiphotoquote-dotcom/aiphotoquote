@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 type QuoteFormProps = {
   tenantSlug: string;
@@ -55,6 +55,36 @@ function fmtMoney(n: any) {
 
 function uid() {
   return Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
+}
+
+/** Simple indeterminate bar (like “working…”) */
+function WorkingBar({ label }: { label: string }) {
+  return (
+    <div className="mt-3">
+      <div className="mb-2 flex items-center justify-between text-xs">
+        <span className="font-semibold text-gray-700 dark:text-gray-200">{label}</span>
+        <span className="text-gray-500 dark:text-gray-400">Working…</span>
+      </div>
+      <div className="relative h-2 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
+        <div className="absolute left-0 top-0 h-full w-1/3 animate-[progress_1.1s_ease-in-out_infinite] rounded-full bg-gray-900 dark:bg-gray-100" />
+      </div>
+
+      {/* Keyframes via inline style so no CSS hunting */}
+      <style jsx>{`
+        @keyframes progress {
+          0% {
+            transform: translateX(-120%);
+          }
+          50% {
+            transform: translateX(120%);
+          }
+          100% {
+            transform: translateX(360%);
+          }
+        }
+      `}</style>
+    </div>
+  );
 }
 
 export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormProps) {
@@ -133,7 +163,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
 
   function setShotType(id: string, nextType: ShotType) {
     setPhotos((prev) => {
-      // if setting to wide or close, ensure uniqueness by demoting existing one to unassigned
       let out = prev.map((p) => ({ ...p }));
       if (nextType === "wide") {
         out = out.map((p) => (p.shotType === "wide" ? { ...p, shotType: "unassigned" } : p));
@@ -153,7 +182,7 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
       .filter((p) => p.shotType !== "wide" && p.shotType !== "close")
       .map((p) => p.file);
 
-    return [ ...(wideFile ? [wideFile] : []), ...(closeFile ? [closeFile] : []), ...rest ];
+    return [...(wideFile ? [wideFile] : []), ...(closeFile ? [closeFile] : []), ...rest];
   }
 
   async function uploadFiles(files: File[]): Promise<string[]> {
@@ -164,7 +193,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
     const j = (await res.json().catch(() => null)) as UploadResp | null;
 
     if (!res.ok || !j) throw new Error(`Blob upload failed (HTTP ${res.status})`);
-
     if (!j.ok) throw new Error(j.error?.message ?? `Blob upload failed (HTTP ${res.status})`);
 
     const urls = (j.files ?? []).map((x) => String(x.url)).filter(Boolean);
@@ -185,8 +213,13 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
     if (photos.length === 0) return setErrMsg("Please add at least one photo.");
     if (!wide || !close) return setErrMsg("Please mark one photo as Wide and one as Close-up.");
 
-    setSubmitting(true);
+    // reset prior outputs
     setResult(null);
+    setRenderStatus("idle");
+    setRenderError(null);
+    setRenderImageUrl(null);
+
+    setSubmitting(true);
 
     try {
       const filesToUpload = orderedFilesForUpload();
@@ -220,10 +253,6 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
 
       if (aiRenderingEnabled && renderOptIn && (j as any).quoteLogId) {
         triggerRendering({ tenantSlug, quoteLogId: String((j as any).quoteLogId) });
-      } else {
-        setRenderStatus("idle");
-        setRenderError(null);
-        setRenderImageUrl(null);
       }
     } catch (e: any) {
       setErrMsg(escErr(e));
@@ -262,6 +291,7 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
         setRenderStatus("rendered");
         setRenderImageUrl(url);
       } else {
+        // If backend queues async later, we still show as queued
         setRenderStatus("queued");
       }
     } catch (e: any) {
@@ -282,21 +312,20 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
 
   const showAiOptIn = aiRenderingEnabled === true;
 
-  // Preview URLs (avoid leaking memory)
-  const previews = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const p of photos) {
-      map.set(p.id, URL.createObjectURL(p.file));
-    }
-    return map;
+  // Previews
+  const previewUrls = useMemo(() => {
+    const entries = photos.map((p) => [p.id, URL.createObjectURL(p.file)] as const);
+    return new Map(entries);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [photos.map((p) => p.id).join("|")]);
 
   useEffect(() => {
     return () => {
-      previews.forEach((u) => URL.revokeObjectURL(u));
+      previewUrls.forEach((u) => URL.revokeObjectURL(u));
     };
-  }, [previews]);
+  }, [previewUrls]);
+
+  const showRenderingBar = rendering || renderStatus === "queued";
 
   return (
     <div className="space-y-6">
@@ -322,9 +351,7 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
       <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              Take photos
-            </h3>
+            <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Take photos</h3>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               Best results: take one <span className="font-semibold">Wide shot</span> and one{" "}
               <span className="font-semibold">Close-up</span>. After you take a photo, pick which
@@ -387,7 +414,7 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
                   <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src={previews.get(p.id)}
+                      src={previewUrls.get(p.id)}
                       alt="uploaded"
                       className="h-[96px] w-full object-cover"
                     />
@@ -509,6 +536,8 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
         >
           {submitting ? "Working..." : "Get Estimate"}
         </button>
+
+        {submitting ? <WorkingBar label="Preparing estimate" /> : null}
       </div>
 
       {result && (result as any)?.ok ? (
@@ -545,6 +574,8 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
                 </span>
               </div>
 
+              {showRenderingBar ? <WorkingBar label="Generating rendering" /> : null}
+
               {renderError ? (
                 <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
                   {renderError}
@@ -553,12 +584,24 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: QuoteFormP
 
               {renderImageUrl ? (
                 <div className="mt-4">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={renderImageUrl}
-                    alt="AI rendering preview"
-                    className="w-full rounded-lg border border-gray-200 dark:border-gray-800"
-                  />
+                  <a
+                    href={renderImageUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block"
+                    title="Open full size"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={renderImageUrl}
+                      alt="AI rendering preview"
+                      className="w-full rounded-lg border border-gray-200 object-contain dark:border-gray-800"
+                      style={{ maxHeight: 520 }}
+                    />
+                  </a>
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    Preview is constrained in height. Tap image to open full size.
+                  </div>
                 </div>
               ) : null}
 
