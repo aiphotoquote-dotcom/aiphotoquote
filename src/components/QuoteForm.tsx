@@ -4,6 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
 
+function formatMoney(n: number) {
+  return `$${Math.round(n).toLocaleString()}`;
+}
+
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -79,23 +83,11 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-type QuoteSubmitOk = {
-  ok: true;
-  debugId?: string;
-  quoteLogId: string;
-  tenantId?: string;
-  output?: any;
-  estimate?: any;
-  email?: any;
-  assessment?: any;
-};
-
-type RenderOk = {
-  ok: true;
-  debugId?: string;
-  quoteLogId: string;
-  imageUrl: string | null;
-};
+type RenderState =
+  | { status: "idle" }
+  | { status: "working" }
+  | { status: "rendered"; imageUrl: string }
+  | { status: "failed"; message: string };
 
 export default function QuoteForm({
   tenantSlug,
@@ -126,13 +118,9 @@ export default function QuoteForm({
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // ✅ step-2 rendering state
-  const [renderWorking, setRenderWorking] = useState(false);
-  const [renderStatus, setRenderStatus] = useState<
-    "idle" | "queued" | "rendering" | "rendered" | "failed"
-  >("idle");
-  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
-  const [renderErr, setRenderErr] = useState<string | null>(null);
+  // ✅ Step 2 rendering UI state
+  const [rendering, setRendering] = useState<RenderState>({ status: "idle" });
+  const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -190,7 +178,10 @@ export default function QuoteForm({
     if (!result?.output) return;
     (async () => {
       await sleep(50);
-      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      resultsRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     })();
   }, [result?.output]);
 
@@ -217,29 +208,20 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
-
-    // reset render state
-    setRenderWorking(false);
-    setRenderStatus("idle");
-    setRenderImageUrl(null);
-    setRenderErr(null);
-
+    setRendering({ status: "idle" });
+    renderAttemptedForQuoteRef.current = null;
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
-  async function requestRender(args: { tenantSlug: string; quoteLogId: string }) {
+  async function triggerRendering(args: { tenantSlug: string; quoteLogId: string }) {
     const { tenantSlug, quoteLogId } = args;
 
-    setRenderWorking(true);
-    setRenderStatus("queued");
-    setRenderErr(null);
-    setRenderImageUrl(null);
+    setRendering({ status: "working" });
 
     try {
-      // ✅ THIS IS THE FIX: MUST BE POST (otherwise you get HTTP 405)
       const res = await fetch("/api/render/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -249,34 +231,53 @@ export default function QuoteForm({
       const j = await res.json().catch(() => null);
 
       if (!res.ok || !j?.ok) {
-        const dbg = j?.debugId ? `\ndebugId: ${j.debugId}` : "";
         const msg =
-          j?.message ??
-          j?.error ??
-          (res.status === 405 ? "Method not allowed (must be POST)" : "Render request failed");
-        throw new Error(`${msg} (HTTP ${res.status})${dbg}`.trim());
+          j?.message ||
+          j?.error ||
+          `Render failed (HTTP ${res.status})`;
+        throw new Error(msg);
       }
 
-      const ok = j as RenderOk;
-      setRenderImageUrl(ok.imageUrl ?? null);
-      setRenderStatus(ok.imageUrl ? "rendered" : "rendered");
+      const imageUrl = j?.imageUrl ? String(j.imageUrl) : null;
+      if (!imageUrl) throw new Error("Render succeeded but no imageUrl returned.");
+
+      setRendering({ status: "rendered", imageUrl });
     } catch (e: any) {
-      setRenderStatus("failed");
-      setRenderErr(e?.message ?? "Render failed.");
-    } finally {
-      setRenderWorking(false);
+      setRendering({
+        status: "failed",
+        message: e?.message ?? "Render failed.",
+      });
     }
   }
+
+  // ✅ Auto-run step 2 once per quote when:
+  // - tenant allows rendering
+  // - customer opted in
+  // - quote returned a quoteLogId
+  useEffect(() => {
+    const quoteLogId = result?.quoteLogId ? String(result.quoteLogId) : null;
+    const out = result?.output ?? null;
+
+    const shouldRun =
+      Boolean(aiRenderingEnabled) &&
+      Boolean(out?.render_opt_in) &&
+      Boolean(quoteLogId);
+
+    if (!shouldRun) return;
+
+    // Only attempt once per quote id unless user hits Retry
+    if (renderAttemptedForQuoteRef.current === quoteLogId) return;
+    renderAttemptedForQuoteRef.current = quoteLogId;
+
+    triggerRendering({ tenantSlug, quoteLogId });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result?.quoteLogId, result?.output, aiRenderingEnabled, tenantSlug]);
 
   async function onSubmit() {
     setError(null);
     setResult(null);
-
-    // reset render state each new submit
-    setRenderWorking(false);
-    setRenderStatus("idle");
-    setRenderImageUrl(null);
-    setRenderErr(null);
+    setRendering({ status: "idle" });
+    renderAttemptedForQuoteRef.current = null;
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
@@ -328,19 +329,16 @@ export default function QuoteForm({
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-
-          // ✅ IMPORTANT: render_opt_in is TOP-LEVEL in your API schema
-          // (customer_context.render_opt_in is ignored by the server)
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
-
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
             notes,
-            // keep these for future expansion if you want; harmless
-            // category/service_type can be wired later from UI selects
           },
+          // IMPORTANT:
+          // render_opt_in must be top-level to match your server schema.
+          // (You previously had it nested under customer_context in one version.)
+          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
         }),
       });
 
@@ -349,27 +347,16 @@ export default function QuoteForm({
       if (!json.ok) {
         const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
         const code = json?.error ? `\ncode: ${json.error}` : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         const issues = json?.issues
           ? `\nissues:\n${json.issues
               .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
               .join("\n")}`
           : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
       setResult(json);
-
-      // ✅ Step 2: auto-trigger rendering if tenant enabled + customer opted in
-      const ok = json as QuoteSubmitOk;
-      const shouldRender = Boolean(aiRenderingEnabled && renderOptIn);
-      const quoteLogId = ok?.quoteLogId;
-
-      if (shouldRender && quoteLogId) {
-        // fire-and-forget (don’t block the estimate)
-        setRenderStatus("rendering");
-        requestRender({ tenantSlug, quoteLogId });
-      }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -388,7 +375,9 @@ export default function QuoteForm({
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              {progressLabel}
+            </div>
           </div>
           <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
         </div>
@@ -400,7 +389,7 @@ export default function QuoteForm({
           />
         </div>
 
-        {/* tiny debug line so we can ALWAYS confirm tenantSlug on device */}
+        {/* small debug helper (optional) */}
         <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
           tenantSlug: {tenantSlug || "(missing)"}
         </div>
@@ -559,8 +548,8 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second
-                  step after your estimate.
+                  If selected, we may generate a visual “after” concept based on your photos.
+                  This happens as a second step after your estimate.
                 </div>
               </label>
             </div>
@@ -593,7 +582,7 @@ export default function QuoteForm({
               type="button"
               className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
               onClick={retake}
-              disabled={working || renderWorking}
+              disabled={working}
             >
               Start Over
             </button>
@@ -603,69 +592,65 @@ export default function QuoteForm({
             {JSON.stringify(out, null, 2)}
           </pre>
 
-          {/* ✅ Step-2 rendering panel */}
+          {/* ✅ Step 2 Rendering */}
           {aiRenderingEnabled && out?.render_opt_in ? (
             <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                    This is a second step after your estimate. It can take a moment.
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold disabled:opacity-50 dark:border-gray-800"
-                  disabled={!quoteLogId || renderWorking}
-                  onClick={() => {
-                    if (!quoteLogId) return;
-                    requestRender({ tenantSlug, quoteLogId });
-                  }}
-                  title={!quoteLogId ? "Missing quoteLogId" : "Generate rendering"}
-                >
-                  {renderWorking ? "Generating…" : "Generate"}
-                </button>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                AI Rendering
+              </div>
+              <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                This is a second step after your estimate. It can take a moment.
               </div>
 
               <div className="mt-3 text-xs text-gray-700 dark:text-gray-200">
                 Status:{" "}
-                {renderStatus === "idle"
-                  ? "Not started"
-                  : renderStatus === "queued"
-                    ? "Queued"
-                    : renderStatus === "rendering"
-                      ? "Rendering…"
-                      : renderStatus === "rendered"
-                        ? "Done"
-                        : "Failed"}
+                <span className="font-semibold">
+                  {rendering.status === "idle" && "Waiting"}
+                  {rendering.status === "working" && "Generating…"}
+                  {rendering.status === "rendered" && "Ready"}
+                  {rendering.status === "failed" && "Failed"}
+                </span>
               </div>
 
-              {renderErr ? (
-                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                  {renderErr}
+              {rendering.status === "failed" ? (
+                <div className="mt-2 rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                  {rendering.message}
                 </div>
               ) : null}
 
-              {renderImageUrl ? (
+              {rendering.status === "rendered" ? (
                 <div className="mt-3">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={renderImageUrl}
-                    alt="AI rendering preview"
-                    className="w-full max-w-2xl rounded-xl border border-gray-200 dark:border-gray-800"
+                    src={rendering.imageUrl}
+                    alt="AI rendering"
+                    className="w-full max-w-xl rounded-xl border border-gray-200 dark:border-gray-800"
                   />
                   <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 break-all">
-                    {renderImageUrl}
+                    {rendering.imageUrl}
                   </div>
                 </div>
               ) : null}
 
-              {!renderImageUrl && !renderErr && renderStatus === "idle" ? (
-                <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-                  No rendering available yet.
-                </div>
-              ) : null}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold disabled:opacity-50 dark:border-gray-800"
+                  disabled={
+                    rendering.status === "working" ||
+                    !quoteLogId ||
+                    !tenantSlug
+                  }
+                  onClick={() => {
+                    if (!quoteLogId) return;
+                    // allow retry for same quote id
+                    renderAttemptedForQuoteRef.current = null;
+                    triggerRendering({ tenantSlug, quoteLogId });
+                  }}
+                >
+                  {rendering.status === "working" ? "Working…" : "Retry rendering"}
+                </button>
+              </div>
             </div>
           ) : null}
         </section>
