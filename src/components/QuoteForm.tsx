@@ -79,12 +79,11 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-type Phase =
-  | "idle"
-  | "compressing"
-  | "uploading"
-  | "analyzing"
-  | "rendering"; // ✅ new
+type RenderState =
+  | { status: "idle" }
+  | { status: "working"; message?: string }
+  | { status: "done"; imageUrl: string }
+  | { status: "error"; error: string };
 
 export default function QuoteForm({
   tenantSlug,
@@ -104,14 +103,14 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // ✅ customer opt-in (tenant-enabled)
+  // customer opt-in (tenant-enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
+  const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
   const [result, setResult] = useState<any>(null);
-  const [renderResult, setRenderResult] = useState<any>(null); // ✅ new
   const [error, setError] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
@@ -139,7 +138,6 @@ export default function QuoteForm({
       if (phase === "compressing") p = 0.62;
       if (phase === "uploading") p = 0.72;
       if (phase === "analyzing") p = 0.82;
-      if (phase === "rendering") p = 0.92;
     }
 
     if (result?.output) p = 1.0;
@@ -153,7 +151,6 @@ export default function QuoteForm({
       if (phase === "compressing") return "Optimizing photos…";
       if (phase === "uploading") return "Uploading…";
       if (phase === "analyzing") return "Analyzing…";
-      if (phase === "rendering") return "Creating rendering…";
     }
     if (step === 1) return "Add photos";
     if (step === 2) return "Add details";
@@ -197,56 +194,57 @@ export default function QuoteForm({
   function retake() {
     setError(null);
     setResult(null);
-    setRenderResult(null);
     setNotes("");
     setRenderOptIn(false);
+    setRenderState({ status: "idle" });
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
-  async function callRenderStep(args: { tenantSlug: string; quoteLogId: string }) {
+  async function triggerRender(quoteLogId: string) {
+    if (!aiRenderingEnabled) return;
+    if (!renderOptIn) return;
+
+    setRenderState({ status: "working", message: "Generating preview…" });
+
     try {
-      setPhase("rendering");
-      const r = await fetch("/api/quote/render", {
+      const res = await fetch("/api/render/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(args),
+        body: JSON.stringify({ tenantSlug, quoteLogId }),
       });
 
-      const j = await r.json().catch(() => null);
+      const j = await res.json().catch(() => null);
 
-      // Rendering is optional — we never fail the whole flow just because render failed.
-      if (!r.ok || !j?.ok) {
-        setRenderResult({
-          ok: false,
-          httpStatus: r.status,
-          ...j,
-        });
+      if (!res.ok || !j?.ok) {
+        const msg =
+          j?.message ??
+          j?.error ??
+          `Render failed (HTTP ${res.status})`;
+        setRenderState({ status: "error", error: String(msg) });
         return;
       }
 
-      setRenderResult(j);
+      const imageUrl = j?.imageUrl ? String(j.imageUrl) : "";
+      if (!imageUrl) {
+        setRenderState({ status: "error", error: "Render completed but returned no imageUrl." });
+        return;
+      }
+
+      setRenderState({ status: "done", imageUrl });
     } catch (e: any) {
-      setRenderResult({
-        ok: false,
-        error: "RENDER_REQUEST_FAILED",
-        message: e?.message ?? "Render request failed.",
-      });
-    } finally {
-      // Don’t flip working=false here; caller controls it.
-      setPhase("idle");
+      setRenderState({ status: "error", error: e?.message ?? "Render failed." });
     }
   }
 
   async function onSubmit() {
     setError(null);
     setResult(null);
-    setRenderResult(null);
+    setRenderState({ status: "idle" });
 
-    // IMPORTANT: if this is empty, the page route isn't passing props correctly.
-    if (!tenantSlug || typeof tenantSlug !== "string" || !tenantSlug.trim()) {
+    if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
       return;
     }
@@ -290,13 +288,14 @@ export default function QuoteForm({
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
+
+      // ✅ IMPORTANT: send render_opt_in TOP-LEVEL to match server schema
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          tenantSlug: tenantSlug.trim(),
+          tenantSlug,
           images: urls,
-          // ✅ TOP LEVEL: server expects render_opt_in here
           render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
           customer_context: {
             name: customerName.trim(),
@@ -307,27 +306,27 @@ export default function QuoteForm({
         }),
       });
 
-      const j = await res.json();
+      const json = await res.json();
 
-      if (!j.ok) {
-        const dbg = j?.debugId ? `\ndebugId: ${j.debugId}` : "";
-        const code = j?.error ? `\ncode: ${j.error}` : "";
-        const issues = j?.issues
-          ? `\nissues:\n${j.issues.map((i: any) => `- ${i.path?.join(".")}: ${i.message}`).join("\n")}`
+      if (!json.ok) {
+        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
+        const code = json?.error ? `\ncode: ${json.error}` : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
+        const issues = json?.issues
+          ? `\nissues:\n${json.issues
+              .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
+              .join("\n")}`
           : "";
-        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${issues}`.trim());
+        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
-      setResult(j);
+      setResult(json);
 
-      // ✅ STEP 2: kick off rendering only when:
-      // - tenant has it enabled
-      // - customer opted in
-      // - we have quoteLogId
-      const shouldRender = Boolean(aiRenderingEnabled) && Boolean(renderOptIn) && Boolean(j?.quoteLogId);
-
-      if (shouldRender) {
-        await callRenderStep({ tenantSlug: tenantSlug.trim(), quoteLogId: String(j.quoteLogId) });
+      // ✅ AUTO TRIGGER step 2 if tenant enabled + customer opted in
+      const quoteLogId = json?.quoteLogId ? String(json.quoteLogId) : "";
+      if (quoteLogId && aiRenderingEnabled && renderOptIn) {
+        // fire-and-forget (still updates UI)
+        triggerRender(quoteLogId);
       }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
@@ -338,7 +337,6 @@ export default function QuoteForm({
   }
 
   const out = result?.output ?? null;
-  const renderImgUrl = renderResult?.imageUrl ?? renderResult?.render_image_url ?? null;
 
   return (
     <div className="space-y-6">
@@ -410,7 +408,10 @@ export default function QuoteForm({
         {previews.length > 0 && (
           <div className="grid grid-cols-3 gap-3">
             {previews.map((src, idx) => (
-              <div key={`${src}-${idx}`} className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+              <div
+                key={`${src}-${idx}`}
+                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+              >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
                 <button
@@ -553,39 +554,38 @@ export default function QuoteForm({
             {JSON.stringify(out, null, 2)}
           </pre>
 
-          {/* ✅ Rendering output (optional) */}
-          {(aiRenderingEnabled && renderOptIn) ? (
+          {/* AI Rendering (Step 2) */}
+          {aiRenderingEnabled && renderOptIn ? (
             <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">
-                  {renderResult
-                    ? (renderResult.ok ? "Ready" : "Failed (estimate still valid)")
-                    : "Pending / not started"}
-                </div>
-              </div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
 
-              {renderImgUrl ? (
-                <a
-                  href={renderImgUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-3 block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={renderImgUrl}
-                    alt="AI concept rendering"
-                    className="h-72 w-full object-contain bg-white dark:bg-black"
-                  />
-                </a>
-              ) : renderResult && !renderResult.ok ? (
-                <pre className="mt-3 overflow-auto rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                  {JSON.stringify(renderResult, null, 2)}
-                </pre>
+              {renderState.status === "idle" ? (
+                <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                  Waiting to start…
+                </div>
+              ) : renderState.status === "working" ? (
+                <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+                  {renderState.message ?? "Generating…"}
+                </div>
+              ) : renderState.status === "error" ? (
+                <div className="mt-2 text-sm text-red-700 dark:text-red-200 whitespace-pre-wrap">
+                  {renderState.error}
+                </div>
               ) : (
-                <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-                  No rendering available yet.
+                <div className="mt-3">
+                  <a
+                    href={renderState.imageUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={renderState.imageUrl}
+                      alt="AI concept rendering"
+                      className="h-72 w-full object-contain bg-white dark:bg-black"
+                    />
+                  </a>
                 </div>
               )}
             </div>
