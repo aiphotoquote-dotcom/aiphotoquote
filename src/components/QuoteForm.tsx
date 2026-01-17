@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type ShotType = "wide" | "closeup" | "extra";
 
@@ -9,15 +9,31 @@ type UploadedImage = {
   shotType: ShotType;
 };
 
-type RenderState =
-  | { status: "idle" }
-  | { status: "queued" }
-  | { status: "rendering" }
-  | { status: "rendered"; imageUrl: string }
-  | { status: "failed"; message: string };
+type QuoteApiOk = {
+  ok: true;
+  quoteLogId?: string;
+  id?: string;
+  output?: any;
+  assessment?: any;
+};
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
+type QuoteApiErr = {
+  ok?: false;
+  error?: any;
+  message?: string;
+  debugId?: string;
+};
+
+type RenderStartResp =
+  | { ok: true; quoteLogId: string; status: "queued" | "running" | "rendered" | "failed" | "idle"; imageUrl?: string | null; error?: string | null; skipped?: boolean }
+  | { ok?: false; error?: string; message?: string; debugId?: string };
+
+type RenderStatusResp =
+  | { ok: true; quoteLogId: string; status: "queued" | "running" | "rendered" | "failed" | "idle"; imageUrl?: string | null; error?: string | null }
+  | { ok?: false; error?: string; message?: string; debugId?: string };
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function digitsOnly(s: string) {
@@ -39,14 +55,11 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-async function compressImage(
-  file: File,
-  opts?: { maxDim?: number; quality?: number }
-): Promise<File> {
+async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
   const maxDim = opts?.maxDim ?? 1600;
   const quality = opts?.quality ?? 0.78;
 
@@ -91,63 +104,41 @@ async function compressImage(
   });
 
   const baseName = file.name.replace(/\.[^/.]+$/, "");
-  const outName = `${baseName}.jpg`;
-  return new File([blob], outName, { type: "image/jpeg" });
-}
-
-async function postJson<T>(url: string, body: any): Promise<{ ok: boolean; status: number; json: any }> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  const text = await res.text();
-  let j: any = null;
-  try {
-    j = text ? JSON.parse(text) : null;
-  } catch {
-    const snippet = text?.slice(0, 200) ?? "";
-    throw new Error(`Server returned non-JSON (HTTP ${res.status}). ${snippet}`.trim());
-  }
-
-  return { ok: res.ok, status: res.status, json: j };
+  return new File([blob], `${baseName}.jpg`, { type: "image/jpeg" });
 }
 
 function ProgressBar({
   labelLeft,
   labelRight,
+  value,
   active,
 }: {
   labelLeft: string;
   labelRight?: string;
+  value: number; // 0..1
   active: boolean;
 }) {
+  const pct = Math.max(0, Math.min(1, value));
   return (
     <div className="w-full rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="flex items-center justify-between gap-4">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{labelLeft}</div>
-        {labelRight ? <div className="text-xs text-gray-700 dark:text-gray-200">{labelRight}</div> : null}
+        <div>
+          <div className="text-xs text-gray-600 dark:text-gray-300">{labelLeft}</div>
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{labelRight ?? ""}</div>
+        </div>
+        <div className="text-xs text-gray-700 dark:text-gray-200">{Math.round(pct * 100)}%</div>
       </div>
 
       <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
         <div
           className={cn(
             "h-full rounded-full bg-black transition-all duration-500 dark:bg-white",
-            active ? "w-1/2 animate-pulse" : "w-full"
+            active ? "animate-pulse" : ""
           )}
+          style={{ width: `${Math.round(pct * 100)}%` }}
         />
       </div>
     </div>
-  );
-}
-
-function ShotBadge({ t }: { t: ShotType }) {
-  const label = t === "wide" ? "Wide shot" : t === "closeup" ? "Close-up" : "Extra";
-  return (
-    <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-      {label}
-    </span>
   );
 }
 
@@ -161,33 +152,43 @@ export default function QuoteForm({
   const MIN_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
-  const tenantAllowsRendering = Boolean(aiRenderingEnabled);
+  const tenantRenderEnabled = Boolean(aiRenderingEnabled);
 
-  // ----- form state -----
+  // Contact + notes
   const [customerName, setCustomerName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [notes, setNotes] = useState("");
 
+  // Uploaded photos (already in Blob)
   const [images, setImages] = useState<UploadedImage[]>([]);
+
+  // Opt-in (only meaningful if tenantRenderEnabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
-  // ----- submit + progress -----
+  useEffect(() => {
+    if (!tenantRenderEnabled) setRenderOptIn(false);
+  }, [tenantRenderEnabled]);
+
+  // Estimate lifecycle
   const [working, setWorking] = useState(false);
   const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
+  const [result, setResult] = useState<{ quoteLogId: string | null; output: any | null }>({
+    quoteLogId: null,
+    output: null,
+  });
+
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<any>(null); // holds /api/quote/submit response
-  const quoteLogId: string | null = (result?.quoteLogId ?? null) as string | null;
 
-  // ----- rendering -----
-  const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
+  // Rendering lifecycle
+  const [renderStatus, setRenderStatus] = useState<"idle" | "queued" | "running" | "rendered" | "failed">("idle");
+  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+
+  // Prevent multi-start / multi-poll loops
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
-
-  // If tenant disables rendering, force opt-in off
-  useEffect(() => {
-    if (!tenantAllowsRendering) setRenderOptIn(false);
-  }, [tenantAllowsRendering]);
+  const renderPollAbortRef = useRef<AbortController | null>(null);
 
   const contactOk = useMemo(() => {
     const nOk = customerName.trim().length > 0;
@@ -196,105 +197,161 @@ export default function QuoteForm({
     return nOk && eOk && pOk;
   }, [customerName, email, phone]);
 
-  const canSubmit = useMemo(() => {
-    return !working && images.length >= MIN_PHOTOS && contactOk;
-  }, [working, images.length, contactOk]);
+  const photoOk = images.length >= MIN_PHOTOS;
 
-  // ----- helpers: image list -----
-  function addUploadedUrl(url: string) {
+  const estimateReady = Boolean(result.output);
+
+  const estimateProgress = useMemo(() => {
+    // Smooth-ish progression:
+    // - baseline depends on how far the user is
+    let p = 0.1;
+    if (images.length > 0) p = 0.25;
+    if (photoOk) p = 0.35;
+    if (contactOk) p = 0.45;
+    if (working) {
+      if (phase === "compressing") p = 0.60;
+      if (phase === "uploading") p = 0.75;
+      if (phase === "analyzing") p = 0.88;
+    }
+    if (estimateReady) p = 1.0;
+    return Math.max(0, Math.min(1, p));
+  }, [images.length, photoOk, contactOk, working, phase, estimateReady]);
+
+  const estimateLabel = useMemo(() => {
+    if (estimateReady) return "Estimate ready";
+    if (working) {
+      if (phase === "compressing") return "Optimizing photos…";
+      if (phase === "uploading") return "Uploading…";
+      if (phase === "analyzing") return "Analyzing…";
+      return "Working…";
+    }
+    if (!photoOk) return `Add ${MIN_PHOTOS} photos`;
+    if (!contactOk) return "Add contact info";
+    return "Ready to submit";
+  }, [estimateReady, working, phase, photoOk, contactOk]);
+
+  const renderProgress = useMemo(() => {
+    if (!tenantRenderEnabled) return 0;
+    if (!renderOptIn) return estimateReady ? 0.35 : 0.1;
+    if (!estimateReady) return 0.15;
+
+    if (renderStatus === "queued") return 0.45;
+    if (renderStatus === "running") return 0.75;
+    if (renderStatus === "rendered") return 1.0;
+    if (renderStatus === "failed") return 1.0;
+
+    return 0.25;
+  }, [tenantRenderEnabled, renderOptIn, estimateReady, renderStatus]);
+
+  const renderLabel = useMemo(() => {
+    if (!tenantRenderEnabled) return "Disabled";
+    if (!renderOptIn) return "Off";
+    if (!estimateReady) return "Waiting for estimate…";
+    if (renderStatus === "queued") return "Queued…";
+    if (renderStatus === "running") return "Rendering…";
+    if (renderStatus === "rendered") return "Ready";
+    if (renderStatus === "failed") return "Failed";
+    return "Waiting…";
+  }, [tenantRenderEnabled, renderOptIn, estimateReady, renderStatus]);
+
+  const addImagesFromUrls = useCallback((urls: string[]) => {
     setImages((prev) => {
       const next = [...prev];
-      if (next.find((x) => x.url === url)) return next;
 
-      const idx = next.length;
-      const shotType: ShotType = idx === 0 ? "wide" : idx === 1 ? "closeup" : "extra";
-      next.push({ url, shotType });
+      for (const url of urls) {
+        if (!url) continue;
+        if (next.find((x) => x.url === url)) continue;
+
+        const idx = next.length;
+        const shotType: ShotType = idx === 0 ? "wide" : idx === 1 ? "closeup" : "extra";
+        next.push({ url, shotType });
+      }
+
       return next.slice(0, MAX_PHOTOS);
     });
-  }
+  }, []);
 
-  function removeImage(url: string) {
-    setImages((prev) => prev.filter((x) => x.url !== url));
-  }
-
-  function setShotType(url: string, shotType: ShotType) {
+  const setShotType = useCallback((url: string, shotType: ShotType) => {
     setImages((prev) => prev.map((x) => (x.url === url ? { ...x, shotType } : x)));
-  }
+  }, []);
 
-  // ----- upload (single photo at a time, compressed) -----
-  async function uploadOne(file: File): Promise<string> {
-    // compress client-side to avoid 413
-    const compressed = await compressImage(file);
+  const removeImage = useCallback((url: string) => {
+    setImages((prev) => prev.filter((x) => x.url !== url));
+  }, []);
 
-    const form = new FormData();
-    form.append("files", compressed);
+  async function uploadFiles(files: FileList) {
+    if (!files?.length) return;
 
-    const res = await fetch("/api/blob/upload", { method: "POST", body: form });
-    const text = await res.text();
+    // Respect max photos
+    const remaining = Math.max(0, MAX_PHOTOS - images.length);
+    const picked = Array.from(files).slice(0, remaining);
+    if (!picked.length) return;
 
-    let j: any = null;
-    try {
-      j = text ? JSON.parse(text) : null;
-    } catch {
-      throw new Error(`Blob upload returned non-JSON (HTTP ${res.status}). ${text?.slice(0, 200) ?? ""}`.trim());
-    }
-
-    if (!res.ok || !j?.ok) {
-      throw new Error(j?.error?.message || j?.message || "Blob upload failed");
-    }
-
-    const url: string | null =
-      Array.isArray(j?.urls) && j.urls[0] ? String(j.urls[0]) :
-      Array.isArray(j?.files) && j.files[0]?.url ? String(j.files[0].url) :
-      null;
-
-    if (!url) throw new Error("Blob upload returned no file url");
-    return url;
-  }
-
-  async function onAddPhoto(file: File) {
     setError(null);
-
-    if (images.length >= MAX_PHOTOS) {
-      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
-      return;
-    }
 
     setWorking(true);
+    setPhase("compressing");
+
     try {
-      setPhase("compressing");
-      await sleep(50);
+      const compressed = await Promise.all(picked.map((f) => compressImage(f)));
 
       setPhase("uploading");
-      const url = await uploadOne(file);
 
-      addUploadedUrl(url);
-      setPhase("idle");
-    } catch (e: any) {
-      setPhase("idle");
-      setError(e?.message ?? "Upload failed.");
+      const form = new FormData();
+      compressed.forEach((f) => form.append("files", f));
+
+      const res = await fetch("/api/blob/upload", { method: "POST", body: form });
+      const text = await res.text();
+
+      let j: any = null;
+      try {
+        j = text ? JSON.parse(text) : null;
+      } catch {
+        throw new Error(`Upload returned non-JSON (HTTP ${res.status}). ${text?.slice(0, 200) ?? ""}`.trim());
+      }
+
+      if (!res.ok || !j?.ok) {
+        throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
+      }
+
+      // Support either shape: {urls:[...]} or {files:[{url}]}
+      const urls: string[] = Array.isArray(j?.urls)
+        ? j.urls.map((x: any) => String(x)).filter(Boolean)
+        : Array.isArray(j?.files)
+          ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
+          : [];
+
+      if (!urls.length) throw new Error("Blob upload returned no file urls");
+
+      addImagesFromUrls(urls);
     } finally {
       setWorking(false);
+      setPhase("idle");
     }
   }
 
-  // ----- submit estimate -----
-  async function onSubmit() {
+  async function submitEstimate() {
     setError(null);
-    setResult(null);
+    setResult({ quoteLogId: null, output: null });
+
+    // Reset render UI
+    setRenderStatus("idle");
+    setRenderImageUrl(null);
+    setRenderError(null);
+    renderAttemptedForQuoteRef.current = null;
+    renderPollAbortRef.current?.abort();
+    renderPollAbortRef.current = null;
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
       return;
     }
-
-    if (images.length < MIN_PHOTOS) {
+    if (!photoOk) {
       setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
       return;
     }
-
     if (!contactOk) {
-      setError("Please complete name, email, and a valid 10-digit phone number.");
+      setError("Please complete name, email, and phone.");
       return;
     }
 
@@ -302,10 +359,13 @@ export default function QuoteForm({
     setPhase("analyzing");
 
     try {
+      // IMPORTANT: keep payload aligned with your server route schema:
+      // - render_opt_in must be TOP-LEVEL (not inside customer_context)
+      // - name/email/phone live under customer_context (your route expects that)
       const payload = {
         tenantSlug,
-        images: images.map((x) => ({ url: x.url })), // server expects {url}
-        render_opt_in: tenantAllowsRendering ? Boolean(renderOptIn) : false, // ✅ top-level
+        images: images.map((x) => ({ url: x.url })),
+        render_opt_in: tenantRenderEnabled ? Boolean(renderOptIn) : false,
         customer_context: {
           name: customerName.trim(),
           email: email.trim(),
@@ -316,232 +376,301 @@ export default function QuoteForm({
         },
       };
 
-      const { ok, status, json } = await postJson<any>("/api/quote/submit", payload);
+      const res = await fetch("/api/quote/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-      if (!ok || !json?.ok) {
-        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
-        const code = json?.error ? `\ncode: ${json.error}` : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
-        throw new Error(`Quote failed\nHTTP ${status}${dbg}${code}${msg}`.trim());
+      const text = await res.text();
+      let j: QuoteApiOk | QuoteApiErr | any = null;
+
+      try {
+        j = text ? JSON.parse(text) : null;
+      } catch {
+        throw new Error(`Server returned non-JSON (HTTP ${res.status}). ${text?.slice(0, 200) ?? ""}`.trim());
       }
 
-      setResult(json);
+      if (!res.ok || !j?.ok) {
+        const dbg = j?.debugId ? `\ndebugId: ${j.debugId}` : "";
+        const msg = j?.message ? `\nmessage: ${j.message}` : "";
+        const code = j?.error ? `\ncode: ${j.error}` : "";
+        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}`.trim());
+      }
 
-      // reset render guard for this new quote
-      renderAttemptedForQuoteRef.current = null;
+      const quoteLogId = (j.quoteLogId ?? j.id ?? null) as string | null;
+      const output = (j.output ?? j.assessment ?? null) as any | null;
 
-      setPhase("idle");
+      setResult({ quoteLogId, output });
     } catch (e: any) {
-      setPhase("idle");
       setError(e?.message ?? "Something went wrong.");
+      setRenderStatus("idle");
     } finally {
       setWorking(false);
+      setPhase("idle");
     }
   }
 
-  // ----- rendering: queue + poll -----
-  async function pollRenderStatus(args: { tenantSlug: string; quoteLogId: string }) {
-    const { tenantSlug: ts, quoteLogId: qid } = args;
-    const started = Date.now();
-    const timeoutMs = 3 * 60 * 1000; // 3 minutes
-    const intervalMs = 3000;
+  async function startRenderAndPoll(args: { tenantSlug: string; quoteLogId: string }) {
+    const { tenantSlug, quoteLogId } = args;
 
-    // We’ll show "rendering" while polling
-    setRenderState({ status: "rendering" });
+    // Idempotent start (doesn't do the expensive render itself)
+    setRenderStatus("queued");
+    setRenderImageUrl(null);
+    setRenderError(null);
 
-    while (Date.now() - started < timeoutMs) {
-      await sleep(intervalMs);
+    // Stop any previous poll
+    renderPollAbortRef.current?.abort();
+    const ac = new AbortController();
+    renderPollAbortRef.current = ac;
 
-      const { ok, status, json } = await postJson<any>("/api/render/status", { tenantSlug: ts, quoteLogId: qid });
+    try {
+      const startRes = await fetch("/api/render/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tenantSlug, quoteLogId }),
+        signal: ac.signal,
+      });
 
-      if (!ok) {
-        // non-fatal: keep polling unless it’s clearly terminal
-        const msg = json?.message || `Render status failed (HTTP ${status})`;
-        // keep polling quietly; don’t flip to failed on transient errors
-        continue;
+      const startText = await startRes.text();
+      let startJson: RenderStartResp | any = null;
+      try {
+        startJson = startText ? JSON.parse(startText) : null;
+      } catch {
+        throw new Error(`Render start returned non-JSON (HTTP ${startRes.status}).`);
       }
 
-      // Expect status route to return something like:
-      // { ok:true, status:"queued"|"running"|"rendered"|"failed", imageUrl?:string, error?:string }
-      const st = String(json?.status ?? "");
-      const imageUrl = (json?.imageUrl ?? json?.render_image_url ?? null) as string | null;
+      // Even if already started, it's OK.
+      if (!startRes.ok || !startJson?.ok) {
+        const msg = startJson?.message || startJson?.error || `Render start failed (HTTP ${startRes.status})`;
+        throw new Error(String(msg));
+      }
 
-      if (st === "rendered" && imageUrl) {
-        setRenderState({ status: "rendered", imageUrl });
+      // If it already has an image, stop here
+      if (startJson.status === "rendered" && startJson.imageUrl) {
+        setRenderStatus("rendered");
+        setRenderImageUrl(String(startJson.imageUrl));
+        setRenderError(null);
         return;
       }
 
-      if (st === "failed") {
-        const msg = json?.error || json?.message || "Render failed";
-        setRenderState({ status: "failed", message: String(msg) });
-        return;
+      // Poll status until done/fail
+      for (;;) {
+        if (ac.signal.aborted) return;
+
+        await sleep(2000);
+
+        const stRes = await fetch("/api/render/status", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tenantSlug, quoteLogId }),
+          signal: ac.signal,
+        });
+
+        const stText = await stRes.text();
+        let stJson: RenderStatusResp | any = null;
+        try {
+          stJson = stText ? JSON.parse(stText) : null;
+        } catch {
+          throw new Error(`Render status returned non-JSON (HTTP ${stRes.status}).`);
+        }
+
+        if (!stRes.ok || !stJson?.ok) {
+          const msg = stJson?.message || stJson?.error || `Render status failed (HTTP ${stRes.status})`;
+          throw new Error(String(msg));
+        }
+
+        const status = String(stJson.status || "idle") as any;
+
+        if (status === "queued") {
+          setRenderStatus("queued");
+          continue;
+        }
+
+        if (status === "running") {
+          setRenderStatus("running");
+          continue;
+        }
+
+        if (status === "rendered") {
+          const imageUrl = stJson.imageUrl ? String(stJson.imageUrl) : null;
+          if (!imageUrl) throw new Error("Render marked rendered, but no imageUrl returned.");
+          setRenderStatus("rendered");
+          setRenderImageUrl(imageUrl);
+          setRenderError(null);
+          return;
+        }
+
+        if (status === "failed") {
+          setRenderStatus("failed");
+          setRenderImageUrl(null);
+          setRenderError(stJson.error ? String(stJson.error) : "Render failed");
+          return;
+        }
+
+        // idle -> keep polling a short while
+        setRenderStatus("queued");
       }
-
-      // else keep looping (queued/running/etc)
+    } catch (e: any) {
+      if (ac.signal.aborted) return;
+      setRenderStatus("failed");
+      setRenderImageUrl(null);
+      setRenderError(e?.message ?? "Render failed");
     }
-
-    setRenderState({ status: "failed", message: "Render timed out. Please retry." });
   }
 
-  async function triggerRendering(args: { tenantSlug: string; quoteLogId: string }) {
-    setRenderState({ status: "queued" });
-
-    // enqueue
-    const { ok, status, json } = await postJson<any>("/api/render/start", {
-      tenantSlug: args.tenantSlug,
-      quoteLogId: args.quoteLogId,
-    });
-
-    if (!ok || !json?.ok) {
-      const msg = json?.message || json?.error || `Render start failed (HTTP ${status})`;
-      setRenderState({ status: "failed", message: String(msg) });
-      return;
-    }
-
-    // If start returns an imageUrl immediately (rare), use it; otherwise poll.
-    const immediateUrl = (json?.imageUrl ?? json?.url ?? null) as string | null;
-    if (immediateUrl) {
-      setRenderState({ status: "rendered", imageUrl: immediateUrl });
-      return;
-    }
-
-    await pollRenderStatus(args);
-  }
-
+  // Auto-start render exactly once per quoteLogId (no token waste)
   useEffect(() => {
-    const qid = quoteLogId;
-    if (!qid) return;
+    const quoteLogId = result.quoteLogId;
 
-    if (!tenantAllowsRendering || !renderOptIn) return;
-
-    if (renderAttemptedForQuoteRef.current === qid) return;
-    renderAttemptedForQuoteRef.current = qid;
-
-    triggerRendering({ tenantSlug, quoteLogId: qid });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quoteLogId, tenantAllowsRendering, renderOptIn, tenantSlug]);
-
-  async function retryRender() {
+    if (!tenantRenderEnabled) return;
+    if (!renderOptIn) return;
+    if (!estimateReady) return;
     if (!quoteLogId) return;
+
+    if (renderAttemptedForQuoteRef.current === quoteLogId) return;
     renderAttemptedForQuoteRef.current = quoteLogId;
-    await triggerRendering({ tenantSlug, quoteLogId });
-  }
+
+    startRenderAndPoll({ tenantSlug, quoteLogId });
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result.quoteLogId, estimateReady, tenantRenderEnabled, renderOptIn, tenantSlug]);
 
   function startOver() {
     setError(null);
-    setResult(null);
-    setNotes("");
-    setImages([]);
-    setPhase("idle");
-    setWorking(false);
-    setRenderState({ status: "idle" });
+    setResult({ quoteLogId: null, output: null });
+
+    renderPollAbortRef.current?.abort();
+    renderPollAbortRef.current = null;
     renderAttemptedForQuoteRef.current = null;
-    if (!tenantAllowsRendering) setRenderOptIn(false);
+
+    setRenderStatus("idle");
+    setRenderImageUrl(null);
+    setRenderError(null);
+
+    setNotes("");
+    setCustomerName("");
+    setEmail("");
+    setPhone("");
+    setImages([]);
+
+    setWorking(false);
+    setPhase("idle");
+
+    setRenderOptIn(false);
   }
 
-  // ----- labels -----
-  const estimateReady = Boolean(result?.ok && result?.output);
-
-  const progressRight = useMemo(() => {
-    if (estimateReady) return "Estimate ready";
-    if (working) {
-      if (phase === "compressing") return "Optimizing photo…";
-      if (phase === "uploading") return "Uploading…";
-      if (phase === "analyzing") return "Working…";
-      return "Working…";
-    }
-    return images.length >= MIN_PHOTOS ? "Ready to submit" : `Add ${MIN_PHOTOS} photos`;
-  }, [estimateReady, working, phase, images.length]);
-
-  const renderRight = useMemo(() => {
-    if (!tenantAllowsRendering) return "Disabled";
-    if (!renderOptIn) return "Off";
-    if (!estimateReady) return "Waiting";
-
-    if (renderState.status === "queued") return "Queued";
-    if (renderState.status === "rendering") return "Rendering…";
-    if (renderState.status === "rendered") return "Ready";
-    if (renderState.status === "failed") return "Failed";
-    return "Idle";
-  }, [tenantAllowsRendering, renderOptIn, estimateReady, renderState.status]);
+  const renderActive = renderStatus === "queued" || renderStatus === "running";
 
   return (
     <div className="space-y-6">
       {/* Progress */}
       <div className="space-y-3">
-        <ProgressBar labelLeft="Progress" labelRight={progressRight} active={working} />
+        <ProgressBar
+          labelLeft="Progress"
+          labelRight={estimateLabel}
+          value={estimateProgress}
+          active={working}
+        />
 
-        {tenantAllowsRendering ? (
+        {tenantRenderEnabled ? (
           <ProgressBar
             labelLeft="AI Rendering"
-            labelRight={renderRight}
-            active={renderState.status === "rendering" || renderState.status === "queued"}
+            labelRight={renderLabel}
+            value={renderProgress}
+            active={renderActive}
           />
         ) : null}
       </div>
 
-      {/* Photos (single add-photo button + wide/close selector) */}
+      {/* Photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Start with a wide shot and a close-up. After each upload, select whether it’s wide or close-up.
+            Wide shot + close-up gets the best accuracy. Add more if you want (max {MAX_PHOTOS}).
           </p>
         </div>
 
-        <label className="block">
-          <input
-            className="hidden"
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={async (e) => {
-              try {
-                const f = e.target.files?.[0];
-                if (f) await onAddPhoto(f);
-              } finally {
-                e.currentTarget.value = "";
-              }
-            }}
-            disabled={working}
-          />
-          <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
-            Take Photo
-          </div>
-        </label>
+        <div className="flex flex-col gap-2">
+          {/* Your preferred primary flow: one Take Photo button, then choose wide/close after upload */}
+          <label className="block">
+            <input
+              className="hidden"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={async (e) => {
+                try {
+                  if (e.target.files) await uploadFiles(e.target.files);
+                } catch (err: any) {
+                  setError(err?.message ?? "Upload failed");
+                } finally {
+                  e.currentTarget.value = "";
+                }
+              }}
+              disabled={working}
+            />
+            <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
+              Take Photo
+            </div>
+          </label>
+
+          {/* Keep Upload Photos as secondary (still needed for existing photos) */}
+          <label className="block">
+            <input
+              className="hidden"
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={async (e) => {
+                try {
+                  if (e.target.files) await uploadFiles(e.target.files);
+                } catch (err: any) {
+                  setError(err?.message ?? "Upload failed");
+                } finally {
+                  e.currentTarget.value = "";
+                }
+              }}
+              disabled={working}
+            />
+            <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
+              Upload Photos
+            </div>
+          </label>
+        </div>
 
         {images.length > 0 ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {images.map((img) => (
-              <div key={img.url} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
-                <div className="relative">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={img.url} alt="" className="h-40 w-full object-cover" />
+              <div
+                key={img.url}
+                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={img.url} alt="uploaded" className="h-44 w-full object-cover" />
 
-                  <div className="absolute left-2 top-2">
-                    <ShotBadge t={img.shotType} />
-                  </div>
-
-                  <button
-                    type="button"
-                    className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                    onClick={() => removeImage(img.url)}
-                    disabled={working}
-                  >
-                    Remove
-                  </button>
+                <div className="absolute left-2 top-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs font-semibold dark:bg-gray-900/90 dark:border-gray-800">
+                  {img.shotType === "wide" ? "Wide shot" : img.shotType === "closeup" ? "Close-up" : "Extra"}
                 </div>
 
-                <div className="p-3">
-                  <div className="text-xs text-gray-700 dark:text-gray-200 mb-2 font-semibold">
-                    What kind of shot is this?
-                  </div>
+                <button
+                  type="button"
+                  className="absolute right-2 top-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
+                  onClick={() => removeImage(img.url)}
+                  disabled={working}
+                >
+                  Remove
+                </button>
 
-                  <div className="flex flex-wrap gap-2">
+                <div className="p-3 bg-white dark:bg-gray-900">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="text-xs text-gray-600 dark:text-gray-300">Mark as</div>
+
                     <button
                       type="button"
                       className={cn(
-                        "rounded-lg px-3 py-2 text-xs font-semibold border",
+                        "rounded-md px-2 py-1 text-xs font-semibold border",
                         img.shotType === "wide"
                           ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
                           : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
@@ -555,7 +684,7 @@ export default function QuoteForm({
                     <button
                       type="button"
                       className={cn(
-                        "rounded-lg px-3 py-2 text-xs font-semibold border",
+                        "rounded-md px-2 py-1 text-xs font-semibold border",
                         img.shotType === "closeup"
                           ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
                           : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
@@ -569,7 +698,7 @@ export default function QuoteForm({
                     <button
                       type="button"
                       className={cn(
-                        "rounded-lg px-3 py-2 text-xs font-semibold border",
+                        "rounded-md px-2 py-1 text-xs font-semibold border",
                         img.shotType === "extra"
                           ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
                           : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
@@ -579,14 +708,6 @@ export default function QuoteForm({
                     >
                       Extra
                     </button>
-                  </div>
-
-                  <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-                    {images.length === 1
-                      ? "Next: take a close-up."
-                      : images.length === 2
-                        ? "Great — you can submit now, or add more photos."
-                        : "Optional: add more photos for accuracy."}
                   </div>
                 </div>
               </div>
@@ -666,7 +787,7 @@ export default function QuoteForm({
           />
         </label>
 
-        {tenantAllowsRendering ? (
+        {tenantRenderEnabled ? (
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex items-start gap-3">
               <input
@@ -682,7 +803,7 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens after your estimate.
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
                 </div>
               </label>
             </div>
@@ -691,26 +812,20 @@ export default function QuoteForm({
 
         <button
           className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
-          onClick={onSubmit}
-          disabled={!canSubmit}
+          onClick={submitEstimate}
+          disabled={working || !photoOk || !contactOk}
         >
-          {working && phase === "analyzing" ? "Working…" : "Get Estimate"}
+          {working ? "Working…" : "Get Estimate"}
         </button>
 
-        <div className="flex items-center justify-between">
-          <button
-            type="button"
-            className="text-xs font-semibold text-gray-700 underline underline-offset-4 dark:text-gray-200 disabled:opacity-50"
-            onClick={startOver}
-            disabled={working}
-          >
-            Start Over
-          </button>
-
-          <div className="text-xs text-gray-600 dark:text-gray-300">
-            {images.length}/{MAX_PHOTOS} photos
-          </div>
-        </div>
+        <button
+          type="button"
+          className="w-full rounded-xl border border-gray-200 py-3 text-sm font-semibold dark:border-gray-800"
+          onClick={startOver}
+          disabled={working}
+        >
+          Start Over
+        </button>
 
         {error && (
           <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
@@ -719,50 +834,54 @@ export default function QuoteForm({
         )}
       </section>
 
-      {/* Result + Render */}
+      {/* Result */}
       {estimateReady ? (
         <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
           <div className="flex items-center justify-between gap-4">
             <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
+            {result.quoteLogId ? (
+              <div className="text-xs text-gray-600 dark:text-gray-300">Quote ID: {result.quoteLogId}</div>
+            ) : null}
           </div>
 
           <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(result?.output ?? result, null, 2)}
+            {JSON.stringify(result.output, null, 2)}
           </pre>
 
-          {tenantAllowsRendering && renderOptIn ? (
-            <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900">
+          {tenantRenderEnabled && renderOptIn ? (
+            <div className="rounded-2xl border border-gray-200 bg-white p-4 space-y-3 dark:border-gray-800 dark:bg-gray-900">
               <div className="flex items-center justify-between">
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderState.status}</div>
+                <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
               </div>
 
-              {renderState.status === "rendered" ? (
+              {renderStatus === "failed" && renderError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                  {renderError}
+                </div>
+              ) : null}
+
+              {renderStatus === "rendered" && renderImageUrl ? (
                 <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={renderState.imageUrl} alt="AI render" className="w-full object-cover" />
+                  <img src={renderImageUrl} alt="AI render" className="w-full object-cover" />
                 </div>
               ) : null}
 
-              {renderState.status === "failed" ? (
-                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                  {renderState.message}
-                </div>
-              ) : null}
-
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800 disabled:opacity-50"
-                  onClick={retryRender}
-                  disabled={!quoteLogId || working || renderState.status === "rendering" || renderState.status === "queued"}
+                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
+                  disabled={!result.quoteLogId || renderActive}
+                  onClick={() => {
+                    if (!result.quoteLogId) return;
+                    // allow manual retry without duplicating starts
+                    renderAttemptedForQuoteRef.current = null;
+                    startRenderAndPoll({ tenantSlug, quoteLogId: result.quoteLogId });
+                  }}
                 >
                   Retry Render
                 </button>
-
-                <div className="text-[11px] text-gray-600 dark:text-gray-300">
-                  Rendering is a second step after estimate (no duplicate token burns).
-                </div>
               </div>
             </div>
           ) : null}
