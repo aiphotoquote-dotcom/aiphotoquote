@@ -1,19 +1,12 @@
 import QuoteForm from "@/components/QuoteForm";
-import { db } from "@/lib/db/client";
+import { db } from "../../../lib/db/client";
 import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function firstRow(res: any) {
-  // Works across drizzle adapters:
-  // - { rows: [...] }
-  // - [...]
-  // - RowList-ish objects
-  if (!res) return null;
-  if (Array.isArray(res)) return res[0] ?? null;
-  if (Array.isArray(res?.rows)) return res.rows[0] ?? null;
-  return null;
+function firstRow(r: any) {
+  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 }
 
 export default async function Page({
@@ -27,6 +20,9 @@ export default async function Page({
   let tenantName = "Get a Photo Quote";
   let industry = "service";
   let aiRenderingEnabled = false;
+
+  // Debug (safe to display)
+  let debugSettingsSource: "ai_rendering_enabled" | "fallback" | "missing" = "missing";
 
   try {
     // Tenant lookup (safe)
@@ -45,7 +41,7 @@ export default async function Page({
 
     // Settings lookup (safe)
     if (tenant?.id) {
-      // Try reading ai_rendering_enabled; fallback if column doesn't exist yet.
+      // Try the explicit column first (works when present)
       try {
         const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
@@ -60,7 +56,9 @@ export default async function Page({
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
+        debugSettingsSource = "ai_rendering_enabled";
       } catch {
+        // Fallback if the column doesn't exist yet (schema drift-safe)
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
@@ -74,10 +72,12 @@ export default async function Page({
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = false;
+        debugSettingsSource = "fallback";
       }
     }
   } catch {
-    // swallow errors so page still renders
+    // Intentionally swallow errors so the page still renders.
+    // QuoteForm can still submit using tenantSlug even if branding fails.
   }
 
   return (
@@ -121,15 +121,14 @@ export default async function Page({
                   quotes. We’ll follow up if anything needs clarification.
                 </p>
               </div>
-              <div className="flex gap-3">
-                <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
-                <p>
-                  AI render preview:{" "}
-                  <span className="font-semibold">
-                    {aiRenderingEnabled ? "enabled" : "disabled"}
-                  </span>
-                </p>
-              </div>
+            </div>
+
+            {/* tiny debug (remove later) */}
+            <div className="mt-6 text-[11px] text-gray-500 dark:text-gray-400">
+              aiRenderingEnabled:{" "}
+              <span className="font-mono">{aiRenderingEnabled ? "true" : "false"}</span>
+              {" · "}
+              source: <span className="font-mono">{debugSettingsSource}</span>
             </div>
           </div>
 
