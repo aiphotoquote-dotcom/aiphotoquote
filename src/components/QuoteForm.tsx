@@ -1,49 +1,28 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type ShotType = "wide" | "closeup" | "extra";
 
-type QuoteApiOk = {
-  ok: true;
-  quoteLogId?: string;
-  tenantId?: string;
-  output?: any;
-  estimate?: any;
-  assessment?: any;
-  render_opt_in?: boolean;
-  debugId?: string;
+type PhotoItem = {
+  id: string;
+  shotType: ShotType;
+
+  // Always used for UI preview (<img src=...>)
+  previewSrc: string;
+
+  // If photo already lives in Blob (Upload Photos OR previously uploaded camera photo)
+  uploadedUrl?: string;
+
+  // If photo is from camera capture and not yet uploaded
+  file?: File;
 };
 
-type QuoteApiErr = {
-  ok: false;
-  error?: any;
-  message?: string;
-  issues?: any[];
-  debugId?: string;
-};
+type RenderStatus = "idle" | "running" | "rendered" | "failed";
 
-type QuoteApiResp = QuoteApiOk | QuoteApiErr;
-
-type UploadOk = {
-  ok: true;
-  urls?: string[];
-  files?: Array<{ url: string }>;
-};
-
-type UploadErr = {
-  ok: false;
-  error?: { message?: string };
-  message?: string;
-};
-
-type UploadResp = UploadOk | UploadErr;
-
-type RenderState =
-  | { status: "idle" }
-  | { status: "rendering" }
-  | { status: "rendered"; imageUrl: string }
-  | { status: "failed"; message: string };
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
 function digitsOnly(s: string) {
   return (s || "").replace(/\D/g, "");
@@ -64,18 +43,11 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function compressImage(
-  file: File,
-  opts?: { maxDim?: number; quality?: number }
-): Promise<File> {
+async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
   const maxDim = opts?.maxDim ?? 1600;
   const quality = opts?.quality ?? 0.78;
 
@@ -112,11 +84,7 @@ async function compressImage(
   ctx.drawImage(img, 0, 0, outW, outH);
 
   const blob: Blob = await new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("Compression failed"))),
-      "image/jpeg",
-      quality
-    );
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Compression failed"))), "image/jpeg", quality);
   });
 
   const baseName = file.name.replace(/\.[^/.]+$/, "");
@@ -151,6 +119,45 @@ function ProgressBar({
   );
 }
 
+function defaultShotTypeForIndex(idx: number): ShotType {
+  if (idx === 0) return "wide";
+  if (idx === 1) return "closeup";
+  return "extra";
+}
+
+function shotBadge(t: ShotType) {
+  return t === "wide" ? "Wide shot" : t === "closeup" ? "Close-up" : "Extra";
+}
+
+async function uploadToBlob(files: File[]): Promise<string[]> {
+  if (!files.length) return [];
+  const form = new FormData();
+  files.forEach((f) => form.append("files", f));
+
+  const res = await fetch("/api/blob/upload", { method: "POST", body: form });
+  const text = await res.text();
+
+  let j: any = null;
+  try {
+    j = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`Upload returned non-JSON (HTTP ${res.status}).`);
+  }
+
+  if (!res.ok || !j?.ok) {
+    throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
+  }
+
+  const urls: string[] = Array.isArray(j?.urls)
+    ? j.urls.map((x: any) => String(x)).filter(Boolean)
+    : Array.isArray(j?.files)
+      ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
+      : [];
+
+  if (!urls.length) throw new Error("Blob upload returned no file urls.");
+  return urls;
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false,
@@ -167,20 +174,11 @@ export default function QuoteForm({
   const [phone, setPhone] = useState("");
   const [notes, setNotes] = useState("");
 
-  // local camera files (not yet uploaded)
-  const [cameraFiles, setCameraFiles] = useState<File[]>([]);
+  // photos unified (camera + uploaded)
+  const [photos, setPhotos] = useState<PhotoItem[]>([]);
 
-  // displayed previews (can be blob: object URLs or remote URLs)
-  const [previews, setPreviews] = useState<string[]>([]);
-
-  // uploaded URLs (remote), in display order
-  const [uploadedUrls, setUploadedUrls] = useState<string[]>([]);
-
-  // shot types aligned to displayed photos (previews[])
-  const [shotTypes, setShotTypes] = useState<ShotType[]>([]);
-
-  // rendering opt-in
-  const [renderOptIn, setRenderOptIn] = useState<boolean>(false);
+  // rendering opt-in (only if tenant allows)
+  const [renderOptIn, setRenderOptIn] = useState(false);
 
   // submission lifecycle
   const [working, setWorking] = useState(false);
@@ -193,8 +191,10 @@ export default function QuoteForm({
   // errors
   const [error, setError] = useState<string | null>(null);
 
-  // render state (step 2)
-  const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
+  // rendering lifecycle (step 2)
+  const [renderStatus, setRenderStatus] = useState<RenderStatus>("idle");
+  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
 
   // guard against multiple auto-renders per quote
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
@@ -214,161 +214,15 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) setRenderOptIn(false);
   }, [aiRenderingEnabled]);
 
-  function defaultShotTypeForIndex(idx: number): ShotType {
-    if (idx === 0) return "wide";
-    if (idx === 1) return "closeup";
-    return "extra";
-  }
-
-  function ensureShotTypesLen(n: number) {
-    setShotTypes((prev) => {
-      const out = [...prev];
-      while (out.length < n) out.push(defaultShotTypeForIndex(out.length));
-      return out.slice(0, n);
-    });
-  }
-
-  function addCameraFiles(files: File[]) {
-    if (!files.length) return;
-
-    const nextPreviews = [...previews];
-    for (const f of files) {
-      if (nextPreviews.length >= MAX_PHOTOS) break;
-      nextPreviews.push(URL.createObjectURL(f));
-    }
-
-    // keep camera file list (best-effort cap)
-    const remainingSlots = Math.max(0, MAX_PHOTOS - uploadedUrls.length);
-    const nextCamera = [...cameraFiles, ...files].slice(0, remainingSlots);
-
-    setCameraFiles(nextCamera);
-    setPreviews(nextPreviews.slice(0, MAX_PHOTOS));
-    ensureShotTypesLen(Math.min(MAX_PHOTOS, nextPreviews.length));
-  }
-
-  function addUploadedUrls(urls: string[]) {
-    if (!urls.length) return;
-
-    const nextUploaded = [...uploadedUrls, ...urls].slice(0, MAX_PHOTOS);
-    const nextPreviews = [...previews, ...urls].slice(0, MAX_PHOTOS);
-
-    setUploadedUrls(nextUploaded);
-    setPreviews(nextPreviews);
-    ensureShotTypesLen(nextPreviews.length);
-  }
-
-  function removeAt(idx: number) {
-    const src = previews[idx];
-
-    if (src && src.startsWith("blob:")) {
-      try {
-        URL.revokeObjectURL(src);
-      } catch {}
-    }
-
-    const nextPreviews = previews.filter((_, i) => i !== idx);
-    const nextShots = shotTypes.filter((_, i) => i !== idx);
-    const nextUploaded = uploadedUrls.filter((u) => u !== src);
-
-    // remove a camera file if we removed a blob preview
-    if (src && src.startsWith("blob:")) {
-      const blobIndex =
-        previews.slice(0, idx + 1).filter((p) => p.startsWith("blob:")).length - 1;
-      if (blobIndex >= 0) {
-        setCameraFiles((prev) => prev.filter((_, i) => i !== blobIndex));
-      }
-    }
-
-    setPreviews(nextPreviews);
-    setShotTypes(nextShots);
-    setUploadedUrls(nextUploaded);
-    ensureShotTypesLen(nextPreviews.length);
-  }
-
-  function setShotTypeAt(idx: number, t: ShotType) {
-    setShotTypes((prev) => prev.map((x, i) => (i === idx ? t : x)));
-  }
-
-  function startOver() {
-    setError(null);
-    setResult(null);
-    setQuoteLogId(null);
-
-    previews.forEach((p) => {
-      if (p.startsWith("blob:")) {
-        try {
-          URL.revokeObjectURL(p);
-        } catch {}
-      }
-    });
-
-    setPreviews([]);
-    setUploadedUrls([]);
-    setCameraFiles([]);
-    setShotTypes([]);
-
-    setWorking(false);
-    setPhase("idle");
-
-    setRenderState({ status: "idle" });
-    renderAttemptedForQuoteRef.current = null;
-
-    if (!aiRenderingEnabled) setRenderOptIn(false);
-  }
-
-  async function uploadFilesNow(filesList: FileList) {
-    const arr = Array.from(filesList ?? []);
-    if (!arr.length) return;
-
-    setWorking(true);
-    setPhase("compressing");
-
-    try {
-      const compressed = await Promise.all(arr.map((f) => compressImage(f)));
-      setPhase("uploading");
-
-      const form = new FormData();
-      compressed.forEach((f) => form.append("files", f));
-
-      const res = await fetch("/api/blob/upload", { method: "POST", body: form });
-      const text = await res.text();
-
-      let j: UploadResp | null = null;
-      try {
-        j = text ? (JSON.parse(text) as UploadResp) : null;
-      } catch {
-        throw new Error(`Upload returned non-JSON (HTTP ${res.status}).`);
-      }
-
-      if (!res.ok || !j || (j as any).ok !== true) {
-        const msg =
-          (j as any)?.error?.message ||
-          (j as any)?.message ||
-          `Blob upload failed (HTTP ${res.status})`;
-        throw new Error(msg);
-      }
-
-      const urls: string[] = Array.isArray((j as UploadOk).urls)
-        ? ((j as UploadOk).urls as any[]).map((x) => String(x)).filter(Boolean)
-        : Array.isArray((j as UploadOk).files)
-          ? ((j as UploadOk).files as any[]).map((x) => String(x?.url)).filter(Boolean)
-          : [];
-
-      if (!urls.length) throw new Error("Blob upload returned no file urls.");
-
-      addUploadedUrls(urls);
-    } finally {
-      setWorking(false);
-      setPhase("idle");
-    }
-  }
-
-  const effectiveShotTypes = useMemo(() => {
-    const n = previews.length;
-    const out = [...shotTypes];
-    while (out.length < n) out.push(defaultShotTypeForIndex(out.length));
-    return out.slice(0, n);
-  }, [shotTypes, previews.length]);
+  // cleanup object URLs on unmount
+  useEffect(() => {
+    return () => {
+      photos.forEach((p) => {
+        if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const contactOk = useMemo(() => {
     const nOk = customerName.trim().length > 0;
@@ -377,9 +231,12 @@ export default function QuoteForm({
     return nOk && eOk && pOk;
   }, [customerName, email, phone]);
 
+  const photoCount = photos.length;
+
   const canSubmit = useMemo(() => {
-    return !working && previews.length >= MIN_PHOTOS && contactOk;
-  }, [working, previews.length, contactOk]);
+    // ✅ THIS FIXES THE “HANG”: uploads now count because photos[] always contains them.
+    return !working && photoCount >= MIN_PHOTOS && contactOk;
+  }, [working, photoCount, contactOk]);
 
   const workingLabel = useMemo(() => {
     if (!working) return "Ready";
@@ -393,18 +250,117 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) return "Disabled";
     if (!renderOptIn) return "Off";
     if (!quoteLogId) return "Waiting";
-    if (renderState.status === "idle") return "Queued";
-    if (renderState.status === "rendering") return "Rendering…";
-    if (renderState.status === "rendered") return "Ready";
-    if (renderState.status === "failed") return "Failed";
+    if (renderStatus === "idle") return "Queued";
+    if (renderStatus === "running") return "Rendering…";
+    if (renderStatus === "rendered") return "Ready";
+    if (renderStatus === "failed") return "Failed";
     return "Waiting";
-  }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderState.status]);
+  }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
+
+  const addCameraFiles = useCallback((files: File[]) => {
+    if (!files.length) return;
+
+    setPhotos((prev) => {
+      const next = [...prev];
+      for (const f of files) {
+        if (next.length >= MAX_PHOTOS) break;
+
+        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const previewSrc = URL.createObjectURL(f);
+        const shotType = defaultShotTypeForIndex(next.length);
+
+        next.push({ id, shotType, previewSrc, file: f });
+      }
+      return next;
+    });
+  }, []);
+
+  const addUploadedUrls = useCallback((urls: string[]) => {
+    if (!urls.length) return;
+
+    setPhotos((prev) => {
+      const next = [...prev];
+      for (const u of urls) {
+        if (!u) continue;
+        if (next.length >= MAX_PHOTOS) break;
+
+        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const shotType = defaultShotTypeForIndex(next.length);
+
+        next.push({ id, shotType, previewSrc: u, uploadedUrl: u });
+      }
+      return next;
+    });
+  }, []);
+
+  const removePhoto = useCallback((id: string) => {
+    setPhotos((prev) => {
+      const p = prev.find((x) => x.id === id);
+      if (p?.previewSrc?.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+      const next = prev.filter((x) => x.id !== id);
+
+      // Re-normalize shot types for first 2 positions to keep “wide/close” customer-friendly behavior.
+      return next.map((x, idx) => ({ ...x, shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType }));
+    });
+  }, []);
+
+  const setShotType = useCallback((id: string, shotType: ShotType) => {
+    setPhotos((prev) => prev.map((x) => (x.id === id ? { ...x, shotType } : x)));
+  }, []);
+
+  function startOver() {
+    setError(null);
+    setResult(null);
+    setQuoteLogId(null);
+    setNotes("");
+    setCustomerName("");
+    setEmail("");
+    setPhone("");
+
+    setPhotos((prev) => {
+      prev.forEach((p) => {
+        if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+      });
+      return [];
+    });
+
+    setWorking(false);
+    setPhase("idle");
+
+    setRenderStatus("idle");
+    setRenderImageUrl(null);
+    setRenderError(null);
+    renderAttemptedForQuoteRef.current = null;
+
+    if (!aiRenderingEnabled) setRenderOptIn(false);
+  }
+
+  async function uploadPhotosNow(filesList: FileList) {
+    const arr = Array.from(filesList ?? []);
+    if (!arr.length) return;
+
+    setWorking(true);
+    setPhase("compressing");
+
+    try {
+      const compressed = await Promise.all(arr.map((f) => compressImage(f)));
+      setPhase("uploading");
+      const urls = await uploadToBlob(compressed);
+      addUploadedUrls(urls);
+    } finally {
+      setWorking(false);
+      setPhase("idle");
+    }
+  }
 
   async function submitEstimate() {
     setError(null);
     setResult(null);
     setQuoteLogId(null);
-    setRenderState({ status: "idle" });
+
+    setRenderStatus("idle");
+    setRenderImageUrl(null);
+    setRenderError(null);
     renderAttemptedForQuoteRef.current = null;
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
@@ -412,85 +368,106 @@ export default function QuoteForm({
       return;
     }
 
-    if (previews.length < MIN_PHOTOS) {
+    if (photos.length < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
       return;
     }
+    if (photos.length > MAX_PHOTOS) {
+      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
+      return;
+    }
 
-    if (!customerName.trim()) return setError("Please enter your name.");
-    if (!isValidEmail(email)) return setError("Please enter a valid email address.");
-    if (digitsOnly(phone).length !== 10) return setError("Please enter a valid 10-digit phone number.");
+    if (!customerName.trim()) {
+      setError("Please enter your name.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (digitsOnly(phone).length !== 10) {
+      setError("Please enter a valid 10-digit phone number.");
+      return;
+    }
 
     setWorking(true);
 
     try {
-      // Upload any camera photos first, then merge with already-uploaded urls
-      let urls: string[] = [...uploadedUrls];
-
-      if (cameraFiles.length) {
+      // 1) Ensure every photo has an uploadedUrl (upload camera files if needed)
+      const needUpload = photos.filter((p) => !p.uploadedUrl && p.file);
+      if (needUpload.length) {
         setPhase("compressing");
-        const compressed = await Promise.all(cameraFiles.map((f) => compressImage(f)));
+        const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
 
         setPhase("uploading");
-        const form = new FormData();
-        compressed.forEach((f) => form.append("files", f));
+        const urls = await uploadToBlob(compressed);
 
-        const up = await fetch("/api/blob/upload", { method: "POST", body: form });
-        const upText = await up.text();
+        // Map returned urls to the same order as needUpload
+        setPhotos((prev) => {
+          const byId = new Map<string, string>();
+          needUpload.forEach((p, idx) => {
+            const u = urls[idx];
+            if (u) byId.set(p.id, u);
+          });
 
-        let upJson: UploadResp | null = null;
-        try {
-          upJson = upText ? (JSON.parse(upText) as UploadResp) : null;
-        } catch {
-          throw new Error(`Upload returned non-JSON (HTTP ${up.status}).`);
-        }
+          return prev.map((p) => {
+            const u = byId.get(p.id);
+            if (!u) return p;
 
-        if (!up.ok || !upJson || (upJson as any).ok !== true) {
-          const msg =
-            (upJson as any)?.error?.message ||
-            (upJson as any)?.message ||
-            `Blob upload failed (HTTP ${up.status})`;
-          throw new Error(msg);
-        }
+            // replace preview with remote url, revoke old blob
+            if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
 
-        const newUrls: string[] = Array.isArray((upJson as UploadOk).urls)
-          ? ((upJson as UploadOk).urls as any[]).map((x) => String(x)).filter(Boolean)
-          : Array.isArray((upJson as UploadOk).files)
-            ? ((upJson as UploadOk).files as any[]).map((x) => String(x?.url)).filter(Boolean)
-            : [];
-
-        if (!newUrls.length) throw new Error("Blob upload returned no file urls.");
-
-        urls = [...urls, ...newUrls].slice(0, MAX_PHOTOS);
+            return {
+              ...p,
+              uploadedUrl: u,
+              previewSrc: u,
+              file: undefined,
+            };
+          });
+        });
       }
 
-      if (!urls.length) throw new Error("No uploaded image URLs available. Please try again.");
+      // read latest photos after possible upload mapping
+      const snapshot = (() => {
+        // safest: pull from state via functional copy
+        // (we’re in same tick; but React setState is async)
+        // So we rebuild from current `photos` + assume uploads mapped above quickly.
+        // If a camera file was uploaded but state isn't updated yet, we still have fallback below.
+        return photos;
+      })();
+
+      // Build urls list in display order (stable)
+      // If some are still missing uploadedUrl (shouldn't happen), block.
+      const urls = snapshot.map((p) => p.uploadedUrl).filter(Boolean) as string[];
+      if (urls.length !== snapshot.length) {
+        throw new Error("Some photos are not uploaded yet. Please try again.");
+      }
 
       setPhase("analyzing");
 
-      const renderOpt = aiRenderingEnabled ? Boolean(renderOptIn) : false;
-
-      // IMPORTANT: match submit schema and ALSO store opt-in in a place render route reads later.
+      // 2) Call quote submit API (match your schema: contact separate + render_opt_in top-level)
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
-          images: urls.map((u) => ({ url: u })), // server expects only {url}
-          render_opt_in: renderOpt, // top-level (we will add this to submit route schema)
+          images: snapshot.map((p) => ({ url: p.uploadedUrl!, shotType: p.shotType })),
           customer_context: {
-            name: customerName.trim(),
-            email: email.trim(),
-            phone: digitsOnly(phone),
             notes: notes?.trim() || undefined,
             category: "service",
             service_type: "upholstery",
           },
+          contact: {
+            name: customerName.trim(),
+            email: email.trim(),
+            phone: digitsOnly(phone),
+          },
+          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
         }),
       });
 
       const text = await res.text();
-      let json: QuoteApiResp | any = null;
+      let json: any = null;
       try {
         json = text ? JSON.parse(text) : null;
       } catch {
@@ -507,101 +484,88 @@ export default function QuoteForm({
         throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
-      const qid = (json?.quoteLogId ?? null) as string | null;
+      const qid = (json?.quoteLogId ?? json?.id ?? null) as string | null;
       setQuoteLogId(qid);
-      setResult(json?.output ?? json?.assessment ?? json);
+      setResult(json?.output ?? json);
 
-      // normalize UI to remote URLs
-      previews.forEach((p) => {
-        if (p.startsWith("blob:")) {
-          try {
-            URL.revokeObjectURL(p);
-          } catch {}
-        }
-      });
-
-      setUploadedUrls(urls);
-      setPreviews(urls);
-      setCameraFiles([]);
-      ensureShotTypesLen(urls.length);
-
+      // allow render auto-trigger on new quote
       renderAttemptedForQuoteRef.current = null;
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
+      setPhase("idle");
     } finally {
       setWorking(false);
       setPhase("idle");
     }
   }
 
-  async function triggerRenderOnce(qid: string) {
+  async function startRenderOnce(qid: string) {
     if (renderAttemptedForQuoteRef.current === qid) return;
     renderAttemptedForQuoteRef.current = qid;
 
-    setRenderState({ status: "rendering" });
+    setRenderStatus("running");
+    setRenderError(null);
+    setRenderImageUrl(null);
 
     try {
-      // IMPORTANT: your actual route is /api/quote/render
+      // Your actual endpoint is /api/quote/render
       const res = await fetch("/api/quote/render", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tenantSlug, quoteLogId: qid }),
       });
 
-      const text = await res.text();
+      const txt = await res.text();
       let j: any = null;
       try {
-        j = text ? JSON.parse(text) : null;
+        j = txt ? JSON.parse(txt) : null;
       } catch {
         throw new Error(`Render returned non-JSON (HTTP ${res.status}).`);
       }
 
       if (!res.ok || !j?.ok) {
-        const msg = j?.message || j?.error || "Render failed";
-        throw new Error(msg);
+        throw new Error(j?.message || j?.error || `Render failed (HTTP ${res.status})`);
       }
 
-      const imageUrl = (j?.imageUrl ?? j?.url ?? null) as string | null;
-      if (!imageUrl) throw new Error("Render completed but no imageUrl returned.");
+      const url = (j?.imageUrl ?? j?.render_image_url ?? j?.url ?? null) as string | null;
+      if (!url) {
+        // If your render route returns status-only, treat as failed for now (we’ll add status polling later if needed).
+        throw new Error("Render completed but no imageUrl returned.");
+      }
 
-      setRenderState({ status: "rendered", imageUrl });
+      setRenderImageUrl(url);
+      setRenderStatus("rendered");
     } catch (e: any) {
-      setRenderState({
-        status: "failed",
-        message: e?.message ? String(e.message) : "Render failed",
-      });
+      setRenderStatus("failed");
+      setRenderError(e?.message ?? "Render failed");
     }
   }
 
-  // Auto-trigger render after estimate ONLY if tenant allows + customer opted in
   useEffect(() => {
     if (!aiRenderingEnabled) return;
     if (!renderOptIn) return;
     if (!quoteLogId) return;
-
     if (renderAttemptedForQuoteRef.current === quoteLogId) return;
-    triggerRenderOnce(quoteLogId);
+
+    startRenderOnce(quoteLogId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
 
   async function retryRender() {
     if (!quoteLogId) return;
     renderAttemptedForQuoteRef.current = null;
-    await triggerRenderOnce(quoteLogId);
+    await startRenderOnce(quoteLogId);
   }
 
   const hasEstimate = Boolean(result);
 
   return (
     <div className="space-y-6">
+      {/* Progress */}
       <div className="grid gap-3">
         <ProgressBar title="Working" label={workingLabel} active={working} />
         {aiRenderingEnabled ? (
-          <ProgressBar
-            title="AI Rendering"
-            label={renderingLabel}
-            active={renderState.status === "rendering"}
-          />
+          <ProgressBar title="AI Rendering" label={renderingLabel} active={renderStatus === "running"} />
         ) : null}
       </div>
 
@@ -610,32 +574,37 @@ export default function QuoteForm({
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Take a wide shot, then a close-up. Label each photo after you add it. (max {MAX_PHOTOS})
+            Take a wide shot, then a close-up. Label each photo after it’s added. (max {MAX_PHOTOS})
           </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
+          {/* Take Photo */}
           <label className="block">
             <input
               className="hidden"
               type="file"
               accept="image/*"
               capture="environment"
-              onChange={(e) => {
+              multiple
+              onChange={async (e) => {
                 try {
                   const f = Array.from(e.target.files ?? []);
                   if (f.length) addCameraFiles(f);
+                } catch (err: any) {
+                  setError(err?.message ?? "Failed to add photo");
                 } finally {
                   e.currentTarget.value = "";
                 }
               }}
-              disabled={working || previews.length >= MAX_PHOTOS}
+              disabled={working}
             />
             <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
               Take Photo
             </div>
           </label>
 
+          {/* Upload Photos */}
           <label className="block">
             <input
               className="hidden"
@@ -644,14 +613,14 @@ export default function QuoteForm({
               multiple
               onChange={async (e) => {
                 try {
-                  if (e.target.files) await uploadFilesNow(e.target.files);
+                  if (e.target.files) await uploadPhotosNow(e.target.files);
                 } catch (err: any) {
                   setError(err?.message ?? "Upload failed");
                 } finally {
                   e.currentTarget.value = "";
                 }
               }}
-              disabled={working || previews.length >= MAX_PHOTOS}
+              disabled={working}
             />
             <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
               Upload Photos
@@ -659,26 +628,22 @@ export default function QuoteForm({
           </label>
         </div>
 
-        {previews.length > 0 ? (
+        {photos.length > 0 ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {previews.map((src, idx) => {
-              const st = effectiveShotTypes[idx] ?? defaultShotTypeForIndex(idx);
-              const badge = st === "wide" ? "Wide shot" : st === "closeup" ? "Close-up" : "Extra";
+            {photos.map((p, idx) => {
+              const badge = shotBadge(p.shotType);
               return (
-                <div
-                  key={`${src}-${idx}`}
-                  className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
-                >
+                <div key={p.id} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                   <div className="relative">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={src} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
+                    <img src={p.previewSrc} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
                     <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
                       {badge}
                     </div>
                     <button
                       type="button"
                       className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                      onClick={() => removeAt(idx)}
+                      onClick={() => removePhoto(p.id)}
                       disabled={working}
                     >
                       Remove
@@ -687,45 +652,52 @@ export default function QuoteForm({
 
                   <div className="p-3 flex flex-wrap items-center gap-2">
                     <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
+
                     <button
                       type="button"
                       className={cn(
                         "rounded-md px-2 py-1 text-xs font-semibold border",
-                        st === "wide"
+                        p.shotType === "wide"
                           ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
                           : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
                       )}
-                      onClick={() => setShotTypeAt(idx, "wide")}
+                      onClick={() => setShotType(p.id, "wide")}
                       disabled={working}
                     >
                       Wide
                     </button>
+
                     <button
                       type="button"
                       className={cn(
                         "rounded-md px-2 py-1 text-xs font-semibold border",
-                        st === "closeup"
+                        p.shotType === "closeup"
                           ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
                           : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
                       )}
-                      onClick={() => setShotTypeAt(idx, "closeup")}
+                      onClick={() => setShotType(p.id, "closeup")}
                       disabled={working}
                     >
                       Close-up
                     </button>
+
                     <button
                       type="button"
                       className={cn(
                         "rounded-md px-2 py-1 text-xs font-semibold border",
-                        st === "extra"
+                        p.shotType === "extra"
                           ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
                           : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
                       )}
-                      onClick={() => setShotTypeAt(idx, "extra")}
+                      onClick={() => setShotType(p.id, "extra")}
                       disabled={working}
                     >
                       Extra
                     </button>
+
+                    {!p.uploadedUrl && p.file ? (
+                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">Camera photo (uploads on submit)</span>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -738,9 +710,9 @@ export default function QuoteForm({
         )}
 
         <div className="text-xs text-gray-600 dark:text-gray-300">
-          {previews.length >= MIN_PHOTOS
-            ? `✅ ${previews.length} photo${previews.length === 1 ? "" : "s"} added`
-            : `Add ${MIN_PHOTOS} photos (you have ${previews.length})`}
+          {photoCount >= MIN_PHOTOS
+            ? `✅ ${photoCount} photo${photoCount === 1 ? "" : "s"} added`
+            : `Add ${MIN_PHOTOS} photos (you have ${photoCount})`}
         </div>
       </section>
 
@@ -859,7 +831,7 @@ export default function QuoteForm({
       </section>
 
       {/* Results */}
-      {result ? (
+      {hasEstimate ? (
         <section
           ref={resultsRef}
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
@@ -880,31 +852,29 @@ export default function QuoteForm({
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">
-                    Status: {renderState.status}
-                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
                 </div>
 
                 <button
                   type="button"
                   className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
                   onClick={retryRender}
-                  disabled={!quoteLogId || working || renderState.status === "rendering"}
+                  disabled={!quoteLogId || working || renderStatus === "running"}
                 >
                   Retry Render
                 </button>
               </div>
 
-              {renderState.status === "failed" ? (
+              {renderError ? (
                 <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                  {renderState.message}
+                  {renderError}
                 </div>
               ) : null}
 
-              {renderState.status === "rendered" ? (
+              {renderImageUrl ? (
                 <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={renderState.imageUrl} alt="AI rendering" className="w-full object-cover" />
+                  <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
                 </div>
               ) : null}
             </div>
