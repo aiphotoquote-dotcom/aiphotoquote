@@ -6,6 +6,10 @@ import { sql } from "drizzle-orm";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type PageProps = {
+  params: Promise<{ tenantSlug?: string }>;
+};
+
 function firstRow<T = any>(r: any): T | null {
   return (r?.rows?.[0] ?? (Array.isArray(r) ? r?.[0] : null)) as T | null;
 }
@@ -16,12 +20,14 @@ function rowCount(r: any): number {
   return 0;
 }
 
-export default async function Page({
-  params,
-}: {
-  params: { tenantSlug: string };
-}) {
-  const tenantSlug = params.tenantSlug;
+function normalizeTenantSlug(v: any): string {
+  const s = String(v ?? "").trim();
+  return s;
+}
+
+export default async function Page(props: PageProps) {
+  const p = await props.params;
+  const tenantSlug = normalizeTenantSlug(p?.tenantSlug);
 
   // Debug telemetry
   let fatalError: string | null = null;
@@ -43,7 +49,7 @@ export default async function Page({
   let aiRenderingEnabled = false;
 
   try {
-    // Prove what DB we’re connected to (helps catch “wrong env / wrong database” instantly)
+    // Prove what DB we’re connected to
     try {
       const dbInfoRes = await db.execute(sql`
         select
@@ -54,6 +60,10 @@ export default async function Page({
       dbInfo = firstRow(dbInfoRes);
     } catch (e: any) {
       dbInfo = { error: e?.message ?? String(e) };
+    }
+
+    if (!tenantSlug) {
+      throw new Error("tenantSlug param missing/empty at runtime");
     }
 
     // Tenant lookup
@@ -100,8 +110,7 @@ export default async function Page({
 
         settingsReadPath = "full";
         aiRenderingEnabledComputed = aiRenderingEnabled;
-      } catch (e: any) {
-        // Fallback if ai_rendering_enabled column isn't present yet
+      } catch {
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
@@ -115,14 +124,13 @@ export default async function Page({
         industry_key = settings?.industry_key ?? null;
 
         if (industry_key) displayIndustry = industry_key;
-        aiRenderingEnabled = false;
 
+        aiRenderingEnabled = false;
         settingsReadPath = "fallback";
         aiRenderingEnabledComputed = false;
       }
     }
   } catch (e: any) {
-    // DO NOT swallow — show it in debug
     fatalError = e?.message ?? String(e);
   }
 
@@ -165,30 +173,26 @@ export default async function Page({
             </h1>
 
             <p className="mt-3 text-base text-gray-700 dark:text-gray-200">
-              Get a fast estimate range by uploading a few clear photos. No phone
-              calls required.
+              Get a fast estimate range by uploading a few clear photos. No phone calls required.
             </p>
 
             <div className="mt-6 space-y-3 text-sm text-gray-800 dark:text-gray-200">
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">No obligation.</span> This is an
-                  estimate range — final pricing depends on inspection and scope.
+                  <span className="font-semibold">No obligation.</span> This is an estimate range — final pricing depends on inspection and scope.
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">Best results:</span> 2–6 photos,
-                  good lighting, include close-ups + a full view.
+                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include close-ups + a full view.
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  Tailored for <span className="font-semibold">{displayIndustry}</span>{" "}
-                  quotes. We’ll follow up if anything needs clarification.
+                  Tailored for <span className="font-semibold">{displayIndustry}</span> quotes. We’ll follow up if anything needs clarification.
                 </p>
               </div>
             </div>
@@ -205,11 +209,9 @@ export default async function Page({
                 </div>
 
                 <div className="hidden md:flex flex-col items-end text-xs text-gray-600 dark:text-gray-300">
-                  <span className="font-semibold text-gray-900 dark:text-gray-100">
-                    Tenant
-                  </span>
+                  <span className="font-semibold text-gray-900 dark:text-gray-100">Tenant</span>
                   <span className="rounded-md bg-gray-50 px-2 py-1 dark:bg-gray-950 dark:border dark:border-gray-800">
-                    /q/{tenantSlug}
+                    /q/{tenantSlug || "(missing)"}
                   </span>
                 </div>
               </div>
@@ -219,8 +221,7 @@ export default async function Page({
               </div>
 
               <p className="mt-6 text-xs text-gray-600 dark:text-gray-300">
-                By submitting, you agree we may contact you about this request.
-                Photos are used only to prepare your estimate.
+                By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
               </p>
             </div>
           </div>
