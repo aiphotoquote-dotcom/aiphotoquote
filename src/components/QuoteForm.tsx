@@ -4,6 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
 
+function formatMoney(n: number) {
+  return `$${Math.round(n).toLocaleString()}`;
+}
+
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -79,6 +83,19 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
+function deriveTenantSlugFromPath(): string | null {
+  try {
+    // Expected: /q/[tenantSlug]
+    const p = window.location.pathname || "";
+    const parts = p.split("/").filter(Boolean);
+    const qIdx = parts.indexOf("q");
+    if (qIdx >= 0 && parts[qIdx + 1]) return String(parts[qIdx + 1]).trim();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled,
@@ -108,16 +125,16 @@ export default function QuoteForm({
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // second-step rendering status (client-side)
-  const [renderKickoff, setRenderKickoff] = useState<{
-    attempted: boolean;
-    ok: boolean;
-    status: "idle" | "queued" | "rendered" | "failed";
-    imageUrl?: string | null;
-    error?: string | null;
-  }>({ attempted: false, ok: false, status: "idle" });
-
   const resultsRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ defensive: tenantSlug fallback from URL, so client never breaks even if prop is empty
+  const effectiveTenantSlug = useMemo(() => {
+    const fromProp = String(tenantSlug || "").trim();
+    if (fromProp) return fromProp;
+
+    const fromPath = deriveTenantSlugFromPath();
+    return fromPath ? fromPath : "";
+  }, [tenantSlug]);
 
   const contactOk = useMemo(() => {
     const nOk = customerName.trim().length > 0;
@@ -200,64 +217,20 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
-    setRenderKickoff({ attempted: false, ok: false, status: "idle" });
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
-  async function kickOffRendering(args: { tenantSlug: string; quoteLogId: string }) {
-    // We don't block the user. This is best-effort.
-    setRenderKickoff({ attempted: true, ok: false, status: "queued" });
-
-    try {
-      const rr = await fetch("/api/render/submit", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenantSlug: args.tenantSlug,
-          quoteLogId: args.quoteLogId,
-        }),
-      });
-
-      const rj = await rr.json().catch(() => null);
-
-      if (!rr.ok || !rj?.ok) {
-        const dbg = rj?.debugId ? ` (debugId: ${rj.debugId})` : "";
-        const msg = rj?.message || rj?.error || `HTTP ${rr.status}`;
-        setRenderKickoff({
-          attempted: true,
-          ok: false,
-          status: "failed",
-          error: `${msg}${dbg}`,
-        });
-        return;
-      }
-
-      setRenderKickoff({
-        attempted: true,
-        ok: true,
-        status: rj?.imageUrl ? "rendered" : "queued",
-        imageUrl: rj?.imageUrl ?? null,
-      });
-    } catch (e: any) {
-      setRenderKickoff({
-        attempted: true,
-        ok: false,
-        status: "failed",
-        error: e?.message ?? "Render kickoff failed",
-      });
-    }
-  }
-
   async function onSubmit() {
     setError(null);
     setResult(null);
-    setRenderKickoff({ attempted: false, ok: false, status: "idle" });
 
-    if (!tenantSlug || typeof tenantSlug !== "string") {
-      setError("Missing tenant slug. Please reload the page (invalid tenant link).");
+    if (!effectiveTenantSlug) {
+      setError(
+        "Missing tenant slug. Please reload the page (invalid tenant link)."
+      );
       return;
     }
 
@@ -300,18 +273,14 @@ export default function QuoteForm({
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
-      const wantsRender = aiRenderingEnabled ? Boolean(renderOptIn) : false;
-
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          tenantSlug,
+          tenantSlug: effectiveTenantSlug,
           images: urls,
-
-          // ✅ IMPORTANT: server expects render_opt_in at TOP LEVEL
-          render_opt_in: wantsRender,
-
+          // ✅ root-level render opt-in (server schema expects it here)
+          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
@@ -326,23 +295,16 @@ export default function QuoteForm({
       if (!json.ok) {
         const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
         const code = json?.error ? `\ncode: ${json.error}` : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         const issues = json?.issues
           ? `\nissues:\n${json.issues
               .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
               .join("\n")}`
           : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
-        throw new Error(
-          `Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim()
-        );
+        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
       setResult(json);
-
-      // ✅ fire-and-forget render step AFTER estimate succeeds
-      if (wantsRender && json?.quoteLogId) {
-        void kickOffRendering({ tenantSlug, quoteLogId: String(json.quoteLogId) });
-      }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -360,9 +322,7 @@ export default function QuoteForm({
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              {progressLabel}
-            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
           </div>
           <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
         </div>
@@ -372,6 +332,14 @@ export default function QuoteForm({
             className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
             style={{ width: `${Math.round(progress * 100)}%` }}
           />
+        </div>
+
+        {/* tiny debug helper so we can SEE the slug on mobile */}
+        <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+          tenantSlug:{" "}
+          <span className="font-mono">
+            {effectiveTenantSlug || "(missing)"}
+          </span>
         </div>
       </div>
 
@@ -566,53 +534,6 @@ export default function QuoteForm({
               Start Over
             </button>
           </div>
-
-          {/* Second-step rendering status */}
-          {aiRenderingEnabled ? (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
-              <div className="font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-              {!renderOptIn ? (
-                <div className="mt-1 text-gray-700 dark:text-gray-200">
-                  Not requested.
-                </div>
-              ) : renderKickoff.status === "idle" ? (
-                <div className="mt-1 text-gray-700 dark:text-gray-200">
-                  Requested — waiting to start…
-                </div>
-              ) : renderKickoff.status === "queued" ? (
-                <div className="mt-1 text-gray-700 dark:text-gray-200">
-                  Rendering requested — in progress…
-                </div>
-              ) : renderKickoff.status === "rendered" ? (
-                <div className="mt-2">
-                  <div className="text-gray-700 dark:text-gray-200">Rendering ready:</div>
-                  {renderKickoff.imageUrl ? (
-                    <a
-                      href={renderKickoff.imageUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={renderKickoff.imageUrl}
-                        alt="AI rendering"
-                        className="h-64 w-full object-contain bg-white dark:bg-gray-950"
-                      />
-                    </a>
-                  ) : (
-                    <div className="mt-1 text-gray-700 dark:text-gray-200">
-                      (No image url returned yet)
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="mt-2 text-red-700 dark:text-red-200">
-                  Rendering failed: {renderKickoff.error || "unknown error"}
-                </div>
-              )}
-            </div>
-          ) : null}
 
           <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
             {JSON.stringify(out, null, 2)}
