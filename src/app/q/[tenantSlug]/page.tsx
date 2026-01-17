@@ -5,20 +5,23 @@ import { sql } from "drizzle-orm";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type PageProps = {
-  params: Promise<{ tenantSlug: string }>;
-};
-
-function firstRow(r: any) {
-  // drizzle execute can return { rows } OR an array depending on driver/version
-  if (!r) return null;
-  if (Array.isArray(r)) return r[0] ?? null;
-  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
+function firstRow(res: any) {
+  // Works across drizzle adapters:
+  // - { rows: [...] }
+  // - [...]
+  // - RowList-ish objects
+  if (!res) return null;
+  if (Array.isArray(res)) return res[0] ?? null;
+  if (Array.isArray(res?.rows)) return res.rows[0] ?? null;
   return null;
 }
 
-export default async function Page(props: PageProps) {
-  const { tenantSlug } = await props.params;
+export default async function Page({
+  params,
+}: {
+  params: { tenantSlug: string };
+}) {
+  const tenantSlug = params.tenantSlug;
 
   // Default/fallback values so this page never hard-crashes.
   let tenantName = "Get a Photo Quote";
@@ -42,7 +45,7 @@ export default async function Page(props: PageProps) {
 
     // Settings lookup (safe)
     if (tenant?.id) {
-      // NOTE: keep as single SQL statement; handle schema drift for ai_rendering_enabled
+      // Try reading ai_rendering_enabled; fallback if column doesn't exist yet.
       try {
         const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
@@ -58,7 +61,6 @@ export default async function Page(props: PageProps) {
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
       } catch {
-        // Fallback if ai_rendering_enabled column isn't present yet
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
@@ -71,11 +73,11 @@ export default async function Page(props: PageProps) {
           | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
+        aiRenderingEnabled = false;
       }
     }
   } catch {
-    // Intentionally swallow errors so the page still renders.
-    // QuoteForm can still submit using tenantSlug even if branding fails.
+    // swallow errors so page still renders
   }
 
   return (
@@ -117,6 +119,15 @@ export default async function Page(props: PageProps) {
                 <p>
                   Tailored for <span className="font-semibold">{industry}</span>{" "}
                   quotes. We’ll follow up if anything needs clarification.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
+                <p>
+                  AI render preview:{" "}
+                  <span className="font-semibold">
+                    {aiRenderingEnabled ? "enabled" : "disabled"}
+                  </span>
                 </p>
               </div>
             </div>
