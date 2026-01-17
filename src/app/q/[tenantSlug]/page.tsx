@@ -1,9 +1,19 @@
 import QuoteForm from "@/components/QuoteForm";
-import { db } from "../../../lib/db/client";
+import { db } from "@/lib/db/client";
 import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+function firstRow(r: any): any | null {
+  // Supports both shapes:
+  // - { rows: [...] }
+  // - [...] (array)
+  if (!r) return null;
+  if (Array.isArray(r)) return r[0] ?? null;
+  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
+  return null;
+}
 
 export default async function Page({
   params,
@@ -19,77 +29,54 @@ export default async function Page({
 
   try {
     // Tenant lookup (safe)
-    const tenantRows = await db.execute(sql`
+    const tenantRes = await db.execute(sql`
       select "id", "name", "slug"
       from "tenants"
       where "slug" = ${tenantSlug}
       limit 1
     `);
 
-    const tenant = (tenantRows as any)?.[0] as
-      | { id: string; name: string; slug: string }
-      | undefined;
+    const tenant = firstRow(tenantRes) as
+      | { id: string; name: string | null; slug: string | null }
+      | null;
 
     if (tenant?.name) tenantName = tenant.name;
 
     // Settings lookup (safe)
     if (tenant?.id) {
-      // We support schema drift:
-      // - Some DBs use tenant_settings.ai_rendering_enabled
-      // - Some DBs use tenant_settings.rendering_enabled (your current DB)
-      // We try both safely.
-
-      // Try ai_rendering_enabled first
+      // Try to read ai_rendering_enabled, but don't hard fail if column isn't there yet.
       try {
-        const settingsRows = await db.execute(sql`
+        const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
           from "tenant_settings"
           where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = (settingsRows as any)?.[0] as
+        const settings = firstRow(settingsRes) as
           | { industry_key: string | null; ai_rendering_enabled: boolean | null }
-          | undefined;
+          | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
       } catch {
-        // Fallback: rendering_enabled (actual column in this environment)
-        try {
-          const settingsRows = await db.execute(sql`
-            select "industry_key", "rendering_enabled"
-            from "tenant_settings"
-            where "tenant_id" = ${tenant.id}::uuid
-            limit 1
-          `);
+        // Fallback if ai_rendering_enabled column isn't present yet
+        const settingsRes = await db.execute(sql`
+          select "industry_key"
+          from "tenant_settings"
+          where "tenant_id" = ${tenant.id}::uuid
+          limit 1
+        `);
 
-          const settings = (settingsRows as any)?.[0] as
-            | { industry_key: string | null; rendering_enabled: boolean | null }
-            | undefined;
+        const settings = firstRow(settingsRes) as
+          | { industry_key: string | null }
+          | null;
 
-          if (settings?.industry_key) industry = settings.industry_key;
-          aiRenderingEnabled = settings?.rendering_enabled === true;
-        } catch {
-          // Final fallback: just industry_key
-          const settingsRows = await db.execute(sql`
-            select "industry_key"
-            from "tenant_settings"
-            where "tenant_id" = ${tenant.id}::uuid
-            limit 1
-          `);
-
-          const settings = (settingsRows as any)?.[0] as
-            | { industry_key: string | null }
-            | undefined;
-
-          if (settings?.industry_key) industry = settings.industry_key;
-        }
+        if (settings?.industry_key) industry = settings.industry_key;
       }
     }
   } catch {
     // Intentionally swallow errors so the page still renders.
-    // QuoteForm can still submit using tenantSlug even if branding fails.
   }
 
   return (
@@ -132,6 +119,12 @@ export default async function Page({
                   Tailored for <span className="font-semibold">{industry}</span>{" "}
                   quotes. We’ll follow up if anything needs clarification.
                 </p>
+              </div>
+
+              {/* ✅ TEMP DEBUG: remove once confirmed */}
+              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                debug: tenantSlug=<span className="font-mono">{tenantSlug}</span>{" "}
+                aiRenderingEnabled=<span className="font-mono">{String(aiRenderingEnabled)}</span>
               </div>
             </div>
           </div>
