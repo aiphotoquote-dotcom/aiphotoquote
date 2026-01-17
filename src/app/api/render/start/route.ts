@@ -110,7 +110,6 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
 
 async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: string }) {
   const { quoteLogId, prompt } = args;
-
   try {
     await db.execute(sql`
       update quote_logs
@@ -125,12 +124,8 @@ async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: st
     const msg = e?.message ?? e?.cause?.message ?? "";
     const code = e?.code ?? e?.cause?.code;
     const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-
-    if (!isUndefinedColumn) {
-      return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
-    }
-
-    return { ok: true as const, columns: false as const };
+    if (isUndefinedColumn) return { ok: true as const, columns: false as const };
+    return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
   }
 }
 
@@ -139,11 +134,11 @@ async function storeRenderResultBestEffort(args: {
   imageUrl: string | null;
   error: string | null;
   prompt: string;
-  storage?: any;
 }) {
-  const { quoteLogId, imageUrl, error, prompt, storage } = args;
+  const { quoteLogId, imageUrl, error, prompt } = args;
   const renderedAtIso = new Date().toISOString();
 
+  // Try dedicated columns first
   try {
     await db.execute(sql`
       update quote_logs
@@ -155,16 +150,12 @@ async function storeRenderResultBestEffort(args: {
         rendered_at = now()
       where id = ${quoteLogId}::uuid
     `);
-
     return { ok: true as const, columns: true as const };
   } catch (e: any) {
     const msg = e?.message ?? e?.cause?.message ?? "";
     const code = e?.code ?? e?.cause?.code;
     const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-
-    if (!isUndefinedColumn) {
-      return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
-    }
+    if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
   }
 
   // Fallback: merge into output.rendering
@@ -187,7 +178,6 @@ async function storeRenderResultBestEffort(args: {
         prompt,
         error,
         renderedAt: renderedAtIso,
-        storage: storage ?? null,
       },
     };
 
@@ -198,39 +188,46 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
-function is413(e: any) {
-  const msg = String(e?.message ?? e ?? "");
-  return msg.includes("413") || msg.toLowerCase().includes("payload too large");
+function buildRenderPrompt(args: { category: string; serviceType: string; notes: string }) {
+  const { category, serviceType, notes } = args;
+
+  return [
+    "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
+    "This is a second-step visual preview. Do NOT provide pricing. Do NOT add text overlays.",
+    "Preserve the subject and original photo perspective as much as possible.",
+    "Output should look like a professional shop result, clean and plausible.",
+    category ? `Category: ${category}` : "",
+    serviceType ? `Service type: ${serviceType}` : "",
+    notes ? `Customer notes: ${notes}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
-/**
- * Upload rendered image to Vercel Blob directly from server.
- * NOTE: We pass Buffer (not Uint8Array) to satisfy put() typing.
- */
-async function blobPutBuffer(args: { buf: Buffer; filename: string; contentType: string }) {
-  const { buf, filename, contentType } = args;
-
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
+async function uploadToBlobFromBase64Jpeg(args: { b64: string; quoteLogId: string }) {
+  const token = process.env.BLOB_READ_WRITE_TOKEN || "";
   if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
+
+  // IMPORTANT: use Buffer (not Uint8Array) to satisfy put() types + runtime.
+  const buf = Buffer.from(args.b64, "base64");
+
+  // If still huge, fail fast with a clearer error before hitting Blob 413.
+  // (Blob limits can vary; this keeps errors obvious and debuggable.)
+  const maxBytes = 9_000_000; // ~9MB guardrail (conservative)
+  if (buf.byteLength > maxBytes) {
+    throw new Error(`Rendered image too large after compression (${buf.byteLength} bytes)`);
+  }
+
+  const filename = `render-${args.quoteLogId}.jpeg`;
 
   const res = await put(`renders/${filename}`, buf, {
     access: "public",
-    contentType,
+    contentType: "image/jpeg",
     token,
+    addRandomSuffix: false,
   });
 
   return res.url;
-}
-
-async function blobPutFromUrl(args: { imageUrl: string; filename: string }) {
-  const { imageUrl, filename } = args;
-
-  const imgRes = await fetch(imageUrl);
-  if (!imgRes.ok) throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
-
-  const arr = await imgRes.arrayBuffer();
-  const ct = imgRes.headers.get("content-type") || "image/png";
-  return blobPutBuffer({ buf: Buffer.from(arr), filename, contentType: ct });
 }
 
 export async function POST(req: Request) {
@@ -252,8 +249,10 @@ export async function POST(req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
+
     const tenantId = (tenant as any).id as string;
 
+    // Tenant gating (best-effort; unknown => disabled)
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
@@ -267,6 +266,7 @@ export async function POST(req: Request) {
       );
     }
 
+    // Load quote log (try render columns first)
     let quoteRow: any = null;
     let renderingCols = true;
 
@@ -300,11 +300,11 @@ export async function POST(req: Request) {
     }
 
     if (!quoteRow) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
-
     if (String(quoteRow.tenant_id) !== String(tenantId)) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
 
+    // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
       return json(
@@ -314,39 +314,27 @@ export async function POST(req: Request) {
       );
     }
 
+    // Pull images + context from stored input
     const input = safeJsonParse(quoteRow.input) ?? {};
     const images: string[] = Array.isArray(input?.images)
       ? input.images.map((x: any) => x?.url).filter(Boolean)
       : [];
 
     if (!images.length) {
-      return json(
-        { ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." },
-        400,
-        debugId
-      );
+      return json({ ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." }, 400, debugId);
     }
 
     const customerCtx = input?.customer_context ?? {};
-    const notes = (customerCtx?.notes ?? "").toString().trim();
-    const category = (customerCtx?.category ?? "").toString().trim();
-    const serviceType = (customerCtx?.service_type ?? "").toString().trim();
+    const notes = String(customerCtx?.notes ?? "").trim();
+    const category = String(customerCtx?.category ?? "").trim();
+    const serviceType = String(customerCtx?.service_type ?? "").trim();
 
     const openAiKey = await getTenantOpenAiKey(tenantId);
     if (!openAiKey) return json({ ok: false, error: "OPENAI_KEY_MISSING" }, 500, debugId);
 
-    const prompt = [
-      "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
-      "This is a second-step visual preview. Do NOT provide pricing. Do NOT provide text overlays.",
-      "Keep it realistic and plausible for a professional shop.",
-      "IMPORTANT: output must be compact (avoid huge files).",
-      category ? `Category: ${category}` : "",
-      serviceType ? `Service type: ${serviceType}` : "",
-      notes ? `Customer notes: ${notes}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const prompt = buildRenderPrompt({ category, serviceType, notes });
 
+    // mark queued (best-effort)
     const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
 
     const openai = new OpenAI({ apiKey: openAiKey });
@@ -354,62 +342,26 @@ export async function POST(req: Request) {
     let finalImageUrl: string | null = null;
     let renderError: string | null = null;
 
-    // Storage telemetry for debugging (no secrets)
-    const storage = {
-      attemptedBlob: false,
-      blobOk: false,
-      blobError: null as string | null,
-      blobFallbackToOpenAiUrl: false,
-      sizeRequested: "512x512",
-    };
-
     try {
-      // ✅ smaller render to avoid 413 payload limits
+      // Key fix for your 413:
+      // - force JPEG output
+      // - apply compression (OpenAI-side)
+      // This dramatically reduces base64 payload size before Blob upload.
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
-        size: "512x512",
+        size: "1024x1024",
+        output_format: "jpeg",
+        output_compression: 60,
       } as any);
 
       const first: any = (img as any)?.data?.[0] ?? null;
-      const openAiUrl = first?.url ? String(first.url) : null;
       const b64 = first?.b64_json ? String(first.b64_json) : null;
 
-      const filename = `render-${quoteLogId}.png`;
+      if (!b64) throw new Error("OpenAI image response missing b64_json");
 
-      // Try to store in Blob; if Blob rejects (413), store OpenAI URL instead.
-      storage.attemptedBlob = true;
-
-      try {
-        if (openAiUrl) {
-          finalImageUrl = await blobPutFromUrl({ imageUrl: openAiUrl, filename });
-          storage.blobOk = true;
-        } else if (b64) {
-          finalImageUrl = await blobPutBuffer({
-            buf: Buffer.from(b64, "base64"),
-            filename,
-            contentType: "image/png",
-          });
-          storage.blobOk = true;
-        } else {
-          throw new Error("OpenAI image response missing url/b64_json");
-        }
-      } catch (e: any) {
-        storage.blobError = e?.message ?? String(e);
-
-        if (is413(e)) {
-          // ✅ do not fail render if Blob rejects size; keep OpenAI-hosted URL
-          storage.blobFallbackToOpenAiUrl = true;
-
-          if (openAiUrl) {
-            finalImageUrl = openAiUrl;
-          } else {
-            throw e; // if we only had b64 and blob rejected, we can't store it anywhere stable
-          }
-        } else {
-          throw e;
-        }
-      }
+      // Upload compressed JPEG to Blob
+      finalImageUrl = await uploadToBlobFromBase64Jpeg({ b64, quoteLogId });
     } catch (e: any) {
       renderError = e?.message ?? "Render generation failed.";
     }
@@ -419,7 +371,6 @@ export async function POST(req: Request) {
       imageUrl: finalImageUrl,
       error: renderError,
       prompt,
-      storage,
     });
 
     if (renderError) {
@@ -431,7 +382,6 @@ export async function POST(req: Request) {
           quoteLogId,
           stored,
           queuedMark,
-          storage,
           durationMs: Date.now() - startedAt,
         },
         500,
@@ -446,7 +396,6 @@ export async function POST(req: Request) {
         imageUrl: finalImageUrl,
         stored,
         queuedMark,
-        storage,
         durationMs: Date.now() - startedAt,
       },
       200,
