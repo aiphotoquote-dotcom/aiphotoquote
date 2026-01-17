@@ -1,278 +1,212 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
+import crypto from "crypto";
 import OpenAI from "openai";
+import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants } from "@/lib/db/schema";
+import { tenants, quoteLogs } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// -----------------------------
-// Request schema (IMPORTANT)
-// -----------------------------
+/**
+ * IMPORTANT DESIGN NOTE
+ * - We accept render_opt_in at TOP LEVEL (so it can be saved into quote_logs.input.render_opt_in).
+ * - This matches what /api/quote/render checks later.
+ * - We do NOT force render_opt_in into customer_context anymore.
+ */
+
 const Req = z.object({
   tenantSlug: z.string().min(3),
-  images: z.array(z.object({ url: z.string().url(), shotType: z.string().optional() })).min(1).max(12),
+  images: z.array(z.object({ url: z.string().url() })).min(1).max(12),
+
+  // NEW: customer opt-in stored at the top-level of quote_logs.input
+  render_opt_in: z.boolean().optional().default(false),
+
+  // keep flexible (your earlier versions used this)
   customer_context: z
     .object({
+      name: z.string().optional(),
+      email: z.string().optional(),
+      phone: z.string().optional(),
       notes: z.string().optional(),
       service_type: z.string().optional(),
       category: z.string().optional(),
-
-      // ✅ this was getting stripped before; now it persists into quote_logs.input
-      render_opt_in: z.boolean().optional(),
-    })
-    .optional(),
-  contact: z
-    .object({
-      name: z.string().min(1),
-      email: z.string().min(3),
-      phone: z.string().min(7),
     })
     .optional(),
 });
 
-// -----------------------------
-// Output schema (what UI shows)
-// -----------------------------
-const QuoteOutputSchema = z.object({
-  confidence: z.enum(["high", "medium", "low"]),
-  inspection_required: z.boolean(),
-  summary: z.string(),
-  questions: z.array(z.string()).default([]),
-  estimate: z.object({
-    low: z.number(),
-    high: z.number(),
-  }),
-  // ✅ we always include this so UI and render step stay consistent
-  render_opt_in: z.boolean().default(false),
-});
-
-// -----------------------------
-// Helpers
-// -----------------------------
-function json(data: any, init?: ResponseInit) {
-  return NextResponse.json(data, init);
+function json(data: any, status = 200, debugId?: string) {
+  const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
+  if (debugId) res.headers.set("x-debug-id", debugId);
+  return res;
 }
 
-function safeJsonParse(v: any) {
-  try {
-    if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v === "string") return JSON.parse(v);
-    return v;
-  } catch {
-    return null;
-  }
-}
-
-async function getTenantBySlug(slug: string) {
-  const rows = await db.select().from(tenants).where(eq(tenants.slug, slug)).limit(1);
+async function getTenantBySlug(tenantSlug: string) {
+  const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
 }
 
-async function getTenantIndustryKey(tenantId: string): Promise<string | null> {
-  try {
-    const r = await db.execute(
-      sql`select industry_key from tenant_settings where tenant_id = ${tenantId}::uuid limit 1`
-    );
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    const v = row?.industry_key ?? null;
-    return v ? String(v) : null;
-  } catch {
-    return null;
-  }
-}
-
+// tenant_secrets: tenant_id, openai_key_enc
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
-  const r = await db.execute(
-    sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId}::uuid limit 1`
+  // use raw SQL so we don't require schema typing for tenant_secrets table
+  const r: any = await db.execute(
+    // eslint-disable-next-line drizzle/enforce-delete-with-where
+    // @ts-ignore
+    db.sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
   );
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+  const row = r?.rows?.[0] ?? (Array.isArray(r) ? r[0] : null);
   const enc = row?.openai_key_enc ?? null;
   if (!enc) return null;
   return decryptSecret(enc);
 }
 
-function buildPrompt(args: {
-  industryKey: string | null;
-  category: string;
-  serviceType: string;
-  notes: string;
-  imageUrls: string[];
-  renderOptIn: boolean;
-}) {
-  const { industryKey, category, serviceType, notes, imageUrls, renderOptIn } = args;
-
-  return [
-    "You are an expert service estimator. Return ONLY JSON matching this schema:",
-    JSON.stringify(
-      {
-        confidence: "high|medium|low",
-        inspection_required: true,
-        summary: "short customer-friendly summary",
-        questions: ["list", "of", "questions"],
-        estimate: { low: 0, high: 0 },
-        render_opt_in: false,
-      },
-      null,
-      2
-    ),
-    "",
-    "Rules:",
-    "- Keep summary customer-friendly and specific.",
-    "- Ask clarifying questions that affect scope/cost.",
-    "- estimate.low and estimate.high should be plausible for the described work.",
-    "- Set render_opt_in EXACTLY to the provided customer opt-in.",
-    "",
-    `Industry: ${industryKey ?? "unknown"}`,
-    `Category: ${category || "service"}`,
-    `Service type: ${serviceType || "general"}`,
-    `Customer notes: ${notes || "(none)"}`,
-    `Customer render opt-in: ${renderOptIn ? "true" : "false"}`,
-    "",
-    "Photos (URLs):",
-    ...imageUrls.map((u, i) => `${i + 1}. ${u}`),
-  ].join("\n");
-}
-
-async function insertQuoteLog(args: { tenantId: string; input: any; output: any }) {
-  // Uses raw SQL to avoid drift in Drizzle schema fields.
-  const inputStr = JSON.stringify(args.input ?? {});
-  const outputStr = JSON.stringify(args.output ?? {});
-
-  const r = await db.execute(sql`
-    insert into quote_logs (tenant_id, input, output)
-    values (${args.tenantId}::uuid, ${inputStr}::jsonb, ${outputStr}::jsonb)
-    returning id
-  `);
-
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const id = row?.id ? String(row.id) : null;
-  return id;
-}
-
-// -----------------------------
-// Route
-// -----------------------------
 export async function POST(req: Request) {
+  const debugId = crypto.randomBytes(6).toString("hex");
+
   try {
     const raw = await req.json().catch(() => null);
     const parsed = Req.safeParse(raw);
     if (!parsed.success) {
       return json(
-        { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues },
-        { status: 400 }
+        { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues, received: raw },
+        400,
+        debugId
       );
     }
 
-    const { tenantSlug, images, customer_context, contact } = parsed.data;
+    const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
     const tenant = await getTenantBySlug(tenantSlug);
-    if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
 
-    const tenantId = String((tenant as any).id);
+    const tenantId = (tenant as any).id as string;
 
+    // Store the inbound request (normalized) as quote_logs.input
+    // Key point: include render_opt_in at top-level for /api/quote/render to read later.
+    const input = {
+      tenantSlug,
+      images,
+      render_opt_in: Boolean(render_opt_in),
+      customer_context: customer_context ?? {},
+    };
+
+    // Create quote log row
+    // quoteLogs is in your schema; it should have id, tenantId, input, output, createdAt, etc.
+    const inserted: any = await db
+      .insert(quoteLogs)
+      // @ts-ignore
+      .values({
+        tenantId,
+        input,
+        output: null,
+      })
+      // @ts-ignore
+      .returning({ id: quoteLogs.id });
+
+    const quoteLogId = inserted?.[0]?.id ?? null;
+    if (!quoteLogId) {
+      return json({ ok: false, error: "QUOTE_CREATE_FAILED" }, 500, debugId);
+    }
+
+    // Generate assessment/estimate using tenant OpenAI key
     const openAiKey = await getTenantOpenAiKey(tenantId);
-    if (!openAiKey) return json({ ok: false, error: "OPENAI_KEY_MISSING" }, { status: 500 });
-
-    const industryKey = await getTenantIndustryKey(tenantId);
-
-    const notes = (customer_context?.notes ?? "").toString().trim();
-    const category = (customer_context?.category ?? "service").toString().trim();
-    const serviceType = (customer_context?.service_type ?? "general").toString().trim();
-
-    // ✅ THIS is the value that must persist end-to-end
-    const renderOptIn = !!customer_context?.render_opt_in;
-
-    const imageUrls = images.map((x) => x.url).filter(Boolean);
-
-    const prompt = buildPrompt({
-      industryKey,
-      category,
-      serviceType,
-      notes,
-      imageUrls,
-      renderOptIn,
-    });
+    if (!openAiKey) {
+      return json(
+        { ok: false, error: "OPENAI_KEY_MISSING", message: "Tenant OpenAI key is not configured." },
+        500,
+        debugId
+      );
+    }
 
     const openai = new OpenAI({ apiKey: openAiKey });
 
-    // Use a cheap default model for text assessment
-    const model = process.env.OPENAI_TEXT_MODEL || "gpt-4o-mini";
+    const notes = (customer_context?.notes ?? "").toString();
+    const category = (customer_context?.category ?? "service").toString();
+    const serviceType = (customer_context?.service_type ?? "upholstery").toString();
 
-    const completion = await openai.chat.completions.create({
-      model,
-      temperature: 0.3,
+    // Keep prompt simple/robust — you already have pricing logic elsewhere.
+    const prompt = [
+      "You are helping an upholstery (or service) shop produce an initial estimate range and questions from customer photos.",
+      "Return JSON only with keys: confidence, inspection_required, summary, questions, estimate.",
+      `Category: ${category}`,
+      `Service type: ${serviceType}`,
+      notes ? `Customer notes: ${notes}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    // Build a multi-image message (OpenAI Vision)
+    const visionInput = images.map((img) => ({
+      type: "image_url",
+      image_url: { url: img.url },
+    }));
+
+    const resp: any = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
       messages: [
-        { role: "system", content: "Return only valid JSON. Do not wrap in markdown." },
-        { role: "user", content: prompt },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            ...visionInput,
+          ],
+        },
       ],
+      response_format: { type: "json_object" },
     });
 
-    const text = completion.choices?.[0]?.message?.content ?? "";
-    const obj = safeJsonParse(text);
+    let output: any = null;
+    try {
+      const text = resp?.choices?.[0]?.message?.content ?? "";
+      output = text ? JSON.parse(text) : null;
+    } catch {
+      output = null;
+    }
 
-    // Validate/normalize output
-    const normalized = QuoteOutputSchema.safeParse(obj);
-    const output = normalized.success
-      ? {
-          ...normalized.data,
-          // ✅ force it to match the customer choice no matter what the model did
-          render_opt_in: renderOptIn,
-        }
-      : {
-          confidence: "low" as const,
-          inspection_required: true,
-          summary:
-            "We received your photos and notes. We’ll review and follow up with any clarifying questions needed.",
-          questions: ["Can you confirm the scope and material preferences?"],
-          estimate: { low: 0, high: 0 },
-          render_opt_in: renderOptIn,
-          _model_parse_error: true,
-          _raw: text?.slice(0, 2000) ?? "",
-        };
-
-    // Persist full input (including render_opt_in)
-    const input = {
-      tenantSlug,
-      images: images.map((x) => ({ url: x.url, shotType: x.shotType ?? undefined })),
-      customer_context: {
-        notes: notes || undefined,
-        category: category || undefined,
-        service_type: serviceType || undefined,
-        render_opt_in: renderOptIn,
+    // Always include render_opt_in in output so UI/debug is truthful
+    const finalOutput = {
+      ...(output ?? {}),
+      meta: {
+        ...(output?.meta ?? {}),
+        render_opt_in: Boolean(render_opt_in),
       },
-      contact: contact
-        ? {
-            name: contact.name,
-            email: contact.email,
-            phone: contact.phone,
-          }
-        : undefined,
+      render_opt_in: Boolean(render_opt_in),
     };
 
-    const quoteLogId = await insertQuoteLog({ tenantId, input, output });
+    // Update quote log output
+    await db
+      .update(quoteLogs)
+      // @ts-ignore
+      .set({ output: finalOutput })
+      // @ts-ignore
+      .where(eq(quoteLogs.id, quoteLogId));
+
+    // IMPORTANT: You said the long-term goal:
+    // - After submit: send lead email + persist
+    // - After render: send render email + persist
+    // We'll add the email sending in the next step once this flow is stable end-to-end.
 
     return json(
       {
         ok: true,
         quoteLogId,
-        output,
+        tenantId,
+        output: finalOutput,
+        render_opt_in: Boolean(render_opt_in),
       },
-      { status: 200 }
+      200,
+      debugId
     );
   } catch (err: any) {
     return json(
-      {
-        ok: false,
-        error: "INTERNAL",
-        message: err?.message ?? String(err),
-      },
-      { status: 500 }
+      { ok: false, error: "REQUEST_FAILED", message: err?.message ?? String(err) },
+      500,
+      debugId
     );
   }
 }
