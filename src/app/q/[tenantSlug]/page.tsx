@@ -5,12 +5,14 @@ import { sql } from "drizzle-orm";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type TenantRow = { id: string; name: string | null; slug: string };
+type SettingsRow = {
+  industry_key: string | null;
+  ai_rendering_enabled?: boolean | null;
+};
+
 function firstRow(r: any) {
-  // Drizzle adapters differ: sometimes { rows: [...] }, sometimes it's an array.
-  if (!r) return null;
-  if (Array.isArray(r)) return r[0] ?? null;
-  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
-  return null;
+  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? r[0] : null);
 }
 
 export default async function Page({
@@ -26,18 +28,18 @@ export default async function Page({
   let industry = "service";
   let aiRenderingEnabled = false;
 
-  // DEBUG (safe to leave while you’re validating; remove/guard later)
-  let debug = {
-    tenantId: null as string | null,
-    tenantName: null as string | null,
-    industry_key: null as string | null,
-    ai_rendering_enabled: null as boolean | null,
-    settingsReadPath: "none" as "none" | "full" | "fallback",
+  // Debug (helps verify reads without crashing)
+  const debug: any = {
+    tenantId: null,
+    tenantName: null,
+    industry_key: null,
+    ai_rendering_enabled: null,
+    settingsReadPath: "none",
     aiRenderingEnabledComputed: false,
   };
 
   try {
-    // Tenant lookup (safe)
+    // Tenant lookup
     const tenantRes = await db.execute(sql`
       select "id", "name", "slug"
       from "tenants"
@@ -45,30 +47,25 @@ export default async function Page({
       limit 1
     `);
 
-    const tenant = firstRow(tenantRes) as
-      | { id: string; name: string | null; slug: string }
-      | null;
+    const tenant = firstRow(tenantRes) as TenantRow | null;
 
-    tenantId = tenant?.id ?? null;
+    if (tenant?.id) tenantId = tenant.id;
     if (tenant?.name) tenantName = tenant.name;
 
-    debug.tenantId = tenantId;
+    debug.tenantId = tenant?.id ?? null;
     debug.tenantName = tenant?.name ?? null;
 
-    // Settings lookup (safe)
-    if (tenantId) {
-      // Try reading ai_rendering_enabled if the column exists
+    // Settings lookup (best-effort; column may not exist in some envs)
+    if (tenant?.id) {
       try {
         const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
           from "tenant_settings"
-          where "tenant_id" = ${tenantId}::uuid
+          where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = firstRow(settingsRes) as
-          | { industry_key: string | null; ai_rendering_enabled: boolean | null }
-          | null;
+        const settings = firstRow(settingsRes) as SettingsRow | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
@@ -78,40 +75,40 @@ export default async function Page({
           typeof settings?.ai_rendering_enabled === "boolean"
             ? settings.ai_rendering_enabled
             : null;
-        debug.settingsReadPath = "full";
+        debug.settingsReadPath = "industry_key + ai_rendering_enabled";
+        debug.aiRenderingEnabledComputed = aiRenderingEnabled;
       } catch {
-        // Fallback if ai_rendering_enabled column isn't present yet
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
-          where "tenant_id" = ${tenantId}::uuid
+          where "tenant_id" = ${tenant.id}::uuid
           limit 1
         `);
 
-        const settings = firstRow(settingsRes) as
-          | { industry_key: string | null }
-          | null;
+        const settings = firstRow(settingsRes) as { industry_key: string | null } | null;
 
         if (settings?.industry_key) industry = settings.industry_key;
 
         debug.industry_key = settings?.industry_key ?? null;
         debug.ai_rendering_enabled = null;
-        debug.settingsReadPath = "fallback";
+        debug.settingsReadPath = "industry_key only (ai_rendering_enabled missing)";
+        debug.aiRenderingEnabledComputed = false;
       }
     }
   } catch {
-    // swallow errors; page still renders
+    // Intentionally swallow errors so the page still renders.
+    // QuoteForm can still submit using tenantSlug even if branding fails.
   }
-
-  debug.aiRenderingEnabledComputed = aiRenderingEnabled;
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-12">
-        {/* DEBUG PANEL */}
-        <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+        {/* DEBUG BLOCK (remove later) */}
+        <div className="mb-8 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
           <div className="font-semibold mb-2">DEBUG /q/[tenantSlug]</div>
-          <pre className="whitespace-pre-wrap">{JSON.stringify(debug, null, 2)}</pre>
+          <pre className="overflow-auto whitespace-pre-wrap">
+            {JSON.stringify(debug, null, 2)}
+          </pre>
         </div>
 
         <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
