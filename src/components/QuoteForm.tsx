@@ -79,11 +79,23 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-type RenderState =
-  | { status: "idle" }
-  | { status: "working"; message?: string }
-  | { status: "done"; imageUrl: string }
-  | { status: "error"; error: string };
+type QuoteSubmitOk = {
+  ok: true;
+  debugId?: string;
+  quoteLogId: string;
+  tenantId?: string;
+  output?: any;
+  estimate?: any;
+  email?: any;
+  assessment?: any;
+};
+
+type RenderOk = {
+  ok: true;
+  debugId?: string;
+  quoteLogId: string;
+  imageUrl: string | null;
+};
 
 export default function QuoteForm({
   tenantSlug,
@@ -103,15 +115,24 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // customer opt-in (tenant-enabled)
+  // ✅ customer opt-in (tenant-enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
-  const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+  const [phase, setPhase] = useState<
+    "idle" | "compressing" | "uploading" | "analyzing"
+  >("idle");
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // ✅ step-2 rendering state
+  const [renderWorking, setRenderWorking] = useState(false);
+  const [renderStatus, setRenderStatus] = useState<
+    "idle" | "queued" | "rendering" | "rendered" | "failed"
+  >("idle");
+  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
+  const [renderErr, setRenderErr] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -196,20 +217,29 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
-    setRenderState({ status: "idle" });
+
+    // reset render state
+    setRenderWorking(false);
+    setRenderStatus("idle");
+    setRenderImageUrl(null);
+    setRenderErr(null);
+
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
-  async function triggerRender(quoteLogId: string) {
-    if (!aiRenderingEnabled) return;
-    if (!renderOptIn) return;
+  async function requestRender(args: { tenantSlug: string; quoteLogId: string }) {
+    const { tenantSlug, quoteLogId } = args;
 
-    setRenderState({ status: "working", message: "Generating preview…" });
+    setRenderWorking(true);
+    setRenderStatus("queued");
+    setRenderErr(null);
+    setRenderImageUrl(null);
 
     try {
+      // ✅ THIS IS THE FIX: MUST BE POST (otherwise you get HTTP 405)
       const res = await fetch("/api/render/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -219,30 +249,34 @@ export default function QuoteForm({
       const j = await res.json().catch(() => null);
 
       if (!res.ok || !j?.ok) {
+        const dbg = j?.debugId ? `\ndebugId: ${j.debugId}` : "";
         const msg =
           j?.message ??
           j?.error ??
-          `Render failed (HTTP ${res.status})`;
-        setRenderState({ status: "error", error: String(msg) });
-        return;
+          (res.status === 405 ? "Method not allowed (must be POST)" : "Render request failed");
+        throw new Error(`${msg} (HTTP ${res.status})${dbg}`.trim());
       }
 
-      const imageUrl = j?.imageUrl ? String(j.imageUrl) : "";
-      if (!imageUrl) {
-        setRenderState({ status: "error", error: "Render completed but returned no imageUrl." });
-        return;
-      }
-
-      setRenderState({ status: "done", imageUrl });
+      const ok = j as RenderOk;
+      setRenderImageUrl(ok.imageUrl ?? null);
+      setRenderStatus(ok.imageUrl ? "rendered" : "rendered");
     } catch (e: any) {
-      setRenderState({ status: "error", error: e?.message ?? "Render failed." });
+      setRenderStatus("failed");
+      setRenderErr(e?.message ?? "Render failed.");
+    } finally {
+      setRenderWorking(false);
     }
   }
 
   async function onSubmit() {
     setError(null);
     setResult(null);
-    setRenderState({ status: "idle" });
+
+    // reset render state each new submit
+    setRenderWorking(false);
+    setRenderStatus("idle");
+    setRenderImageUrl(null);
+    setRenderErr(null);
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
@@ -288,20 +322,24 @@ export default function QuoteForm({
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
-
-      // ✅ IMPORTANT: send render_opt_in TOP-LEVEL to match server schema
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
           images: urls,
+
+          // ✅ IMPORTANT: render_opt_in is TOP-LEVEL in your API schema
+          // (customer_context.render_opt_in is ignored by the server)
           render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
             phone: digitsOnly(phone),
             notes,
+            // keep these for future expansion if you want; harmless
+            // category/service_type can be wired later from UI selects
           },
         }),
       });
@@ -311,22 +349,26 @@ export default function QuoteForm({
       if (!json.ok) {
         const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
         const code = json?.error ? `\ncode: ${json.error}` : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         const issues = json?.issues
           ? `\nissues:\n${json.issues
               .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
               .join("\n")}`
           : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
       }
 
       setResult(json);
 
-      // ✅ AUTO TRIGGER step 2 if tenant enabled + customer opted in
-      const quoteLogId = json?.quoteLogId ? String(json.quoteLogId) : "";
-      if (quoteLogId && aiRenderingEnabled && renderOptIn) {
-        // fire-and-forget (still updates UI)
-        triggerRender(quoteLogId);
+      // ✅ Step 2: auto-trigger rendering if tenant enabled + customer opted in
+      const ok = json as QuoteSubmitOk;
+      const shouldRender = Boolean(aiRenderingEnabled && renderOptIn);
+      const quoteLogId = ok?.quoteLogId;
+
+      if (shouldRender && quoteLogId) {
+        // fire-and-forget (don’t block the estimate)
+        setRenderStatus("rendering");
+        requestRender({ tenantSlug, quoteLogId });
       }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
@@ -337,6 +379,7 @@ export default function QuoteForm({
   }
 
   const out = result?.output ?? null;
+  const quoteLogId = result?.quoteLogId ? String(result.quoteLogId) : null;
 
   return (
     <div className="space-y-6">
@@ -355,6 +398,11 @@ export default function QuoteForm({
             className="h-full rounded-full bg-black transition-all duration-500 dark:bg-white"
             style={{ width: `${Math.round(progress * 100)}%` }}
           />
+        </div>
+
+        {/* tiny debug line so we can ALWAYS confirm tenantSlug on device */}
+        <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+          tenantSlug: {tenantSlug || "(missing)"}
         </div>
       </div>
 
@@ -511,7 +559,8 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second
+                  step after your estimate.
                 </div>
               </label>
             </div>
@@ -544,7 +593,7 @@ export default function QuoteForm({
               type="button"
               className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
               onClick={retake}
-              disabled={working}
+              disabled={working || renderWorking}
             >
               Start Over
             </button>
@@ -554,40 +603,69 @@ export default function QuoteForm({
             {JSON.stringify(out, null, 2)}
           </pre>
 
-          {/* AI Rendering (Step 2) */}
-          {aiRenderingEnabled && renderOptIn ? (
-            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+          {/* ✅ Step-2 rendering panel */}
+          {aiRenderingEnabled && out?.render_opt_in ? (
+            <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                    This is a second step after your estimate. It can take a moment.
+                  </div>
+                </div>
 
-              {renderState.status === "idle" ? (
-                <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-                  Waiting to start…
+                <button
+                  type="button"
+                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold disabled:opacity-50 dark:border-gray-800"
+                  disabled={!quoteLogId || renderWorking}
+                  onClick={() => {
+                    if (!quoteLogId) return;
+                    requestRender({ tenantSlug, quoteLogId });
+                  }}
+                  title={!quoteLogId ? "Missing quoteLogId" : "Generate rendering"}
+                >
+                  {renderWorking ? "Generating…" : "Generate"}
+                </button>
+              </div>
+
+              <div className="mt-3 text-xs text-gray-700 dark:text-gray-200">
+                Status:{" "}
+                {renderStatus === "idle"
+                  ? "Not started"
+                  : renderStatus === "queued"
+                    ? "Queued"
+                    : renderStatus === "rendering"
+                      ? "Rendering…"
+                      : renderStatus === "rendered"
+                        ? "Done"
+                        : "Failed"}
+              </div>
+
+              {renderErr ? (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                  {renderErr}
                 </div>
-              ) : renderState.status === "working" ? (
-                <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                  {renderState.message ?? "Generating…"}
-                </div>
-              ) : renderState.status === "error" ? (
-                <div className="mt-2 text-sm text-red-700 dark:text-red-200 whitespace-pre-wrap">
-                  {renderState.error}
-                </div>
-              ) : (
+              ) : null}
+
+              {renderImageUrl ? (
                 <div className="mt-3">
-                  <a
-                    href={renderState.imageUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={renderState.imageUrl}
-                      alt="AI concept rendering"
-                      className="h-72 w-full object-contain bg-white dark:bg-black"
-                    />
-                  </a>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={renderImageUrl}
+                    alt="AI rendering preview"
+                    className="w-full max-w-2xl rounded-xl border border-gray-200 dark:border-gray-800"
+                  />
+                  <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 break-all">
+                    {renderImageUrl}
+                  </div>
                 </div>
-              )}
+              ) : null}
+
+              {!renderImageUrl && !renderErr && renderStatus === "idle" ? (
+                <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+                  No rendering available yet.
+                </div>
+              ) : null}
             </div>
           ) : null}
         </section>
