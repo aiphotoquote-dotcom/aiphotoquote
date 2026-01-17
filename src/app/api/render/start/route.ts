@@ -50,14 +50,6 @@ function safeJsonParse(v: any) {
   }
 }
 
-function firstRow(r: any): any | null {
-  // Supports:
-  // - { rows: [...] }
-  // - RowList / array-like
-  const row = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? r[0] : (r as any)?.[0]);
-  return row ?? null;
-}
-
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
@@ -68,7 +60,7 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
   );
-  const row = firstRow(r);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   const enc = row?.openai_key_enc ?? null;
   if (!enc) return null;
   return decryptSecret(enc);
@@ -83,7 +75,7 @@ async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | nul
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
-    const row = firstRow(r);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
     if (typeof row?.ai_rendering_enabled === "boolean") return row.ai_rendering_enabled;
     return null;
   } catch {
@@ -120,10 +112,14 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
-async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: string }) {
+async function markRenderQueuedBestEffort(args: {
+  quoteLogId: string;
+  tenantId: string;
+  prompt: string;
+}) {
   const { quoteLogId, prompt } = args;
 
-  // Try dedicated columns if present; if not, we’ll store it under output.rendering.
+  // Try to use dedicated columns if present; if not, we’ll store it under output.rendering.
   try {
     await db.execute(sql`
       update quote_logs
@@ -189,7 +185,7 @@ async function storeRenderResultBestEffort(args: {
       where id = ${quoteLogId}::uuid
       limit 1
     `);
-    const row = firstRow(r);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
     const out = safeJsonParse(row?.output) ?? {};
 
     const next = {
@@ -211,33 +207,15 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
-async function blobUploadFromUrl(args: { imageUrl: string; filename: string }) {
-  // IMPORTANT:
-  // - Relative fetch("/api/blob/upload") fails on server (no base URL) and causes:
-  //   "Failed to parse URL from /api/blob/upload"
-  // So we require an absolute base URL here.
+async function blobUploadFromUrl(args: { origin: string; imageUrl: string; filename: string }) {
+  const { origin, imageUrl, filename } = args;
 
-  const base =
-    process.env.NEXT_PUBLIC_APP_URL ||
-    process.env.APP_URL ||
-    process.env.VERCEL_URL?.startsWith("http")
-      ? process.env.VERCEL_URL
-      : process.env.VERCEL_URL
-        ? `https://${process.env.VERCEL_URL}`
-        : "";
-
-  if (!base) {
-    throw new Error(
-      "Missing base URL for blob upload. Set NEXT_PUBLIC_APP_URL (preferred) or APP_URL or VERCEL_URL."
-    );
-  }
-
-  const { imageUrl, filename } = args;
-
+  // Download image
   const imgRes = await fetch(imageUrl);
   if (!imgRes.ok) {
     throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
   }
+
   const arr = await imgRes.arrayBuffer();
   const contentType = imgRes.headers.get("content-type") || "image/png";
   const blob = new Blob([arr], { type: contentType });
@@ -245,14 +223,20 @@ async function blobUploadFromUrl(args: { imageUrl: string; filename: string }) {
   const fd = new FormData();
   fd.append("files", blob, filename);
 
-  const upRes = await fetch(`${base}/api/blob/upload`, {
+  // IMPORTANT: server-side fetch requires absolute URL
+  const uploadUrl = `${origin}/api/blob/upload`;
+
+  const upRes = await fetch(uploadUrl, {
     method: "POST",
     body: fd,
   });
 
   const j = await upRes.json().catch(() => null);
-  if (!j?.ok) {
-    throw new Error(j?.error?.message ?? "Blob upload failed");
+  if (!upRes.ok || !j?.ok) {
+    const msg =
+      j?.error?.message ??
+      `Blob upload failed (HTTP ${upRes.status})`;
+    throw new Error(msg);
   }
 
   const first = j?.files?.[0];
@@ -261,9 +245,37 @@ async function blobUploadFromUrl(args: { imageUrl: string; filename: string }) {
   return url;
 }
 
+async function blobUploadFromB64(args: { origin: string; b64: string; filename: string }) {
+  const { origin, b64, filename } = args;
+
+  const bin = Buffer.from(b64, "base64");
+  const blob = new Blob([bin], { type: "image/png" });
+
+  const fd = new FormData();
+  fd.append("files", blob, filename);
+
+  const uploadUrl = `${origin}/api/blob/upload`;
+  const upRes = await fetch(uploadUrl, { method: "POST", body: fd });
+
+  const j = await upRes.json().catch(() => null);
+  if (!upRes.ok || !j?.ok) {
+    const msg =
+      j?.error?.message ??
+      `Blob upload failed (HTTP ${upRes.status})`;
+    throw new Error(msg);
+  }
+
+  const url = j?.files?.[0]?.url ? String(j.files[0].url) : null;
+  if (!url) throw new Error("Blob upload did not return a file url");
+  return url;
+}
+
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
+
+  // Base origin for absolute internal calls
+  const origin = new URL(req.url).origin;
 
   try {
     const raw = await req.json().catch(() => null);
@@ -291,7 +303,10 @@ export async function POST(req: Request) {
         {
           ok: false,
           error: "RENDERING_DISABLED",
-          message: enabled === false ? "Tenant disabled AI rendering." : "Tenant rendering setting unknown.",
+          message:
+            enabled === false
+              ? "Tenant disabled AI rendering."
+              : "Tenant rendering setting unknown.",
         },
         400,
         debugId
@@ -319,7 +334,7 @@ export async function POST(req: Request) {
         where id = ${quoteLogId}::uuid
         limit 1
       `);
-      quoteRow = firstRow(rNew);
+      quoteRow = (rNew as any)?.rows?.[0] ?? (Array.isArray(rNew) ? (rNew as any)[0] : null);
     } catch {
       renderingCols = false;
       const rOld = await db.execute(sql`
@@ -328,7 +343,7 @@ export async function POST(req: Request) {
         where id = ${quoteLogId}::uuid
         limit 1
       `);
-      quoteRow = firstRow(rOld);
+      quoteRow = (rOld as any)?.rows?.[0] ?? (Array.isArray(rOld) ? (rOld as any)[0] : null);
     }
 
     if (!quoteRow) {
@@ -386,7 +401,7 @@ export async function POST(req: Request) {
       .join("\n");
 
     // mark queued (best-effort)
-    const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
+    const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, tenantId, prompt });
 
     const openai = new OpenAI({ apiKey: openAiKey });
 
@@ -394,7 +409,6 @@ export async function POST(req: Request) {
     let renderError: string | null = null;
 
     try {
-      // OpenAI Images generation
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
@@ -406,40 +420,24 @@ export async function POST(req: Request) {
       const b64 = first?.b64_json ? String(first.b64_json) : null;
 
       if (url) {
-        // Prefer storing in your blob system, but fall back to OpenAI URL if blob fails.
+        // Upload to Vercel Blob via internal route (absolute URL)
         try {
           finalImageUrl = await blobUploadFromUrl({
+            origin,
             imageUrl: url,
             filename: `render-${quoteLogId}.png`,
           });
         } catch (e: any) {
-          finalImageUrl = url;
+          // If blob upload fails, keep the original URL but still report upload failure in UI
+          // (You can decide later whether to treat this as fatal; for now it's fatal so it's visible.)
+          throw new Error(e?.message ?? "Blob upload failed");
         }
       } else if (b64) {
-        // If we only got base64, we must upload to get a URL. If upload fails, we fail.
-        const bin = Buffer.from(b64, "base64");
-        const blob = new Blob([bin], { type: "image/png" });
-        const fd = new FormData();
-        fd.append("files", blob, `render-${quoteLogId}.png`);
-
-        const base =
-          process.env.NEXT_PUBLIC_APP_URL ||
-          process.env.APP_URL ||
-          (process.env.VERCEL_URL
-            ? process.env.VERCEL_URL.startsWith("http")
-              ? process.env.VERCEL_URL
-              : `https://${process.env.VERCEL_URL}`
-            : "");
-
-        if (!base) throw new Error("Missing base URL for blob upload (NEXT_PUBLIC_APP_URL / APP_URL / VERCEL_URL).");
-
-        const upRes = await fetch(`${base}/api/blob/upload`, { method: "POST", body: fd });
-        const j = await upRes.json().catch(() => null);
-        if (j?.ok) {
-          finalImageUrl = j?.files?.[0]?.url ? String(j.files[0].url) : null;
-        } else {
-          throw new Error(j?.error?.message ?? "Blob upload failed");
-        }
+        finalImageUrl = await blobUploadFromB64({
+          origin,
+          b64,
+          filename: `render-${quoteLogId}.png`,
+        });
       } else {
         throw new Error("OpenAI image response missing url/b64_json");
       }
@@ -484,7 +482,7 @@ export async function POST(req: Request) {
     );
   } catch (err: any) {
     return json(
-      { ok: false, error: "REQUEST_FAILED", message: err?.message ?? String(err), dbErr: normalizeDbErr(err) },
+      { ok: false, error: "REQUEST_FAILED", message: err?.message ?? String(err) },
       500,
       crypto.randomBytes(6).toString("hex")
     );
