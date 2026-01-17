@@ -111,7 +111,9 @@ export default function QuoteForm({
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+  const [phase, setPhase] = useState<
+    "idle" | "compressing" | "uploading" | "analyzing"
+  >("idle");
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -181,7 +183,10 @@ export default function QuoteForm({
     if (!result?.output) return;
     (async () => {
       await sleep(50);
-      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      resultsRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     })();
   }, [result?.output]);
 
@@ -223,8 +228,9 @@ export default function QuoteForm({
     setRenderState({ status: "working", imageUrl: null, error: null });
 
     try {
-      // IMPORTANT: must be POST (fixes HTTP 405)
-      const res = await fetch("/api/render/trigger", {
+      // ✅ must call /api/render/start (not /api/render/trigger)
+      // ✅ must be POST
+      const res = await fetch("/api/render/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -388,7 +394,9 @@ export default function QuoteForm({
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              {progressLabel}
+            </div>
           </div>
           <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
         </div>
@@ -456,7 +464,10 @@ export default function QuoteForm({
         {previews.length > 0 && (
           <div className="grid grid-cols-3 gap-3">
             {previews.map((src, idx) => (
-              <div key={`${src}-${idx}`} className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+              <div
+                key={`${src}-${idx}`}
+                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+              >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
                 <button
@@ -646,10 +657,7 @@ export default function QuoteForm({
                     renderAttemptedForQuoteRef.current = quoteLogId; // lock to this quote
                     triggerRendering({ tenantSlug, quoteLogId });
                   }}
-                  disabled={
-                    renderState.status === "working" ||
-                    !result?.quoteLogId
-                  }
+                  disabled={renderState.status === "working" || !result?.quoteLogId}
                 >
                   Retry Render
                 </button>
