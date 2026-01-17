@@ -58,9 +58,9 @@ async function getTenantBySlug(tenantSlug: string) {
 
 // tenant_secrets: tenant_id, openai_key_enc
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
-  const r = await db.execute(
-    sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
-  );
+  const r = await db.execute(sql`
+    select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1
+  `);
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   const enc = row?.openai_key_enc ?? null;
   if (!enc) return null;
@@ -191,11 +191,12 @@ async function storeRenderResultBestEffort(args: {
 function buildRenderPrompt(args: { category: string; serviceType: string; notes: string }) {
   const { category, serviceType, notes } = args;
 
+  // Keep this intentionally “boring” so the model doesn’t over-generate detail (which inflates output size).
   return [
     "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
-    "This is a second-step visual preview. Do NOT provide pricing. Do NOT add text overlays.",
-    "Preserve the subject and original photo perspective as much as possible.",
-    "Output should look like a professional shop result, clean and plausible.",
+    "No pricing. No text overlays. No logos. No watermarks.",
+    "Keep composition similar to the provided photos. Clean and plausible professional shop result.",
+    "Avoid excessive tiny details and busy backgrounds.",
     category ? `Category: ${category}` : "",
     serviceType ? `Service type: ${serviceType}` : "",
     notes ? `Customer notes: ${notes}` : "",
@@ -204,18 +205,17 @@ function buildRenderPrompt(args: { category: string; serviceType: string; notes:
     .join("\n");
 }
 
-async function uploadToBlobFromBase64Jpeg(args: { b64: string; quoteLogId: string }) {
+async function uploadJpegToBlob(args: { quoteLogId: string; jpegB64: string }) {
   const token = process.env.BLOB_READ_WRITE_TOKEN || "";
   if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
 
-  // IMPORTANT: use Buffer (not Uint8Array) to satisfy put() types + runtime.
-  const buf = Buffer.from(args.b64, "base64");
+  // Hard cap to prevent 413. Adjust if your Blob plan allows more, but keep conservative.
+  const MAX_BYTES = 6 * 1024 * 1024; // 6MB
 
-  // If still huge, fail fast with a clearer error before hitting Blob 413.
-  // (Blob limits can vary; this keeps errors obvious and debuggable.)
-  const maxBytes = 9_000_000; // ~9MB guardrail (conservative)
-  if (buf.byteLength > maxBytes) {
-    throw new Error(`Rendered image too large after compression (${buf.byteLength} bytes)`);
+  const buf = Buffer.from(args.jpegB64, "base64");
+  if (buf.byteLength > MAX_BYTES) {
+    const mb = (buf.byteLength / (1024 * 1024)).toFixed(2);
+    throw new Error(`Rendered image too large (${mb} MB). Try again or reduce detail.`);
   }
 
   const filename = `render-${args.quoteLogId}.jpeg`;
@@ -249,10 +249,9 @@ export async function POST(req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
-
     const tenantId = (tenant as any).id as string;
 
-    // Tenant gating (best-effort; unknown => disabled)
+    // Tenant gating (best-effort)
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
@@ -304,7 +303,6 @@ export async function POST(req: Request) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
 
-    // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
       return json(
@@ -314,20 +312,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Pull images + context from stored input
     const input = safeJsonParse(quoteRow.input) ?? {};
-    const images: string[] = Array.isArray(input?.images)
-      ? input.images.map((x: any) => x?.url).filter(Boolean)
-      : [];
-
+    const images: string[] = Array.isArray(input?.images) ? input.images.map((x: any) => x?.url).filter(Boolean) : [];
     if (!images.length) {
       return json({ ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." }, 400, debugId);
     }
 
     const customerCtx = input?.customer_context ?? {};
-    const notes = String(customerCtx?.notes ?? "").trim();
-    const category = String(customerCtx?.category ?? "").trim();
-    const serviceType = String(customerCtx?.service_type ?? "").trim();
+    const notes = (customerCtx?.notes ?? "").toString().trim();
+    const category = (customerCtx?.category ?? "").toString().trim();
+    const serviceType = (customerCtx?.service_type ?? "").toString().trim();
 
     const openAiKey = await getTenantOpenAiKey(tenantId);
     if (!openAiKey) return json({ ok: false, error: "OPENAI_KEY_MISSING" }, 500, debugId);
@@ -343,25 +337,21 @@ export async function POST(req: Request) {
     let renderError: string | null = null;
 
     try {
-      // Key fix for your 413:
-      // - force JPEG output
-      // - apply compression (OpenAI-side)
-      // This dramatically reduces base64 payload size before Blob upload.
+      // Single conservative attempt (matches “don’t waste tokens”)
+      // If you want even smaller: switch to 384x384 (not always supported). 512 is safe + looks fine in UI.
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
-        size: "1024x1024",
+        size: "512x512",
         output_format: "jpeg",
-        output_compression: 60,
+        output_compression: 72, // stronger compression => smaller Blob payload
       } as any);
 
       const first: any = (img as any)?.data?.[0] ?? null;
       const b64 = first?.b64_json ? String(first.b64_json) : null;
-
       if (!b64) throw new Error("OpenAI image response missing b64_json");
 
-      // Upload compressed JPEG to Blob
-      finalImageUrl = await uploadToBlobFromBase64Jpeg({ b64, quoteLogId });
+      finalImageUrl = await uploadJpegToBlob({ quoteLogId, jpegB64: b64 });
     } catch (e: any) {
       renderError = e?.message ?? "Render generation failed.";
     }
