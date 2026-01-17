@@ -4,10 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type UploadedFile = { url: string };
 
-function formatMoney(n: number) {
-  return `$${Math.round(n).toLocaleString()}`;
-}
-
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -101,7 +97,7 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // ✅ customer opt-in (tenant-enabled)
+  // ✅ customer opt-in (only shown if tenant enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
@@ -216,7 +212,9 @@ export default function QuoteForm({
     }
 
     if (files.length < MIN_PHOTOS) {
-      setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
+      setError(
+        `Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`
+      );
       return;
     }
     if (files.length > MAX_PHOTOS) {
@@ -247,24 +245,26 @@ export default function QuoteForm({
       const form = new FormData();
       compressed.forEach((f) => form.append("files", f));
 
-      const up = await fetch("/api/blob/upload", { method: "POST", body: form });
+      const up = await fetch("/api/blob/upload", {
+        method: "POST",
+        body: form,
+      });
       const upJson = await up.json();
-      if (!upJson.ok) throw new Error(upJson.error?.message ?? "Upload failed");
+      if (!upJson.ok)
+        throw new Error(upJson.error?.message ?? "Upload failed");
 
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
 
-      // ✅ IMPORTANT: render_opt_in belongs at the TOP LEVEL for /api/quote/submit
-      const renderOptInTopLevel = aiRenderingEnabled ? Boolean(renderOptIn) : false;
-
+      // ✅ IMPORTANT: render_opt_in MUST be top-level (NOT inside customer_context)
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-          render_opt_in: renderOptInTopLevel,
+          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
@@ -285,7 +285,9 @@ export default function QuoteForm({
               .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
               .join("\n")}`
           : "";
-        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
+        throw new Error(
+          `Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim()
+        );
       }
 
       setResult(json);
@@ -305,10 +307,16 @@ export default function QuoteForm({
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{progressLabel}</div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">
+              Progress
+            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              {progressLabel}
+            </div>
           </div>
-          <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
+          <div className="text-xs text-gray-700 dark:text-gray-200">
+            {progressText}
+          </div>
         </div>
 
         <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
@@ -322,9 +330,12 @@ export default function QuoteForm({
       {/* Photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
+            Take 2 quick photos
+          </h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
+            These two shots give the best accuracy. Add more if you want (max{" "}
+            {MAX_PHOTOS}).
           </p>
         </div>
 
@@ -369,9 +380,16 @@ export default function QuoteForm({
         {previews.length > 0 && (
           <div className="grid grid-cols-3 gap-3">
             {previews.map((src, idx) => (
-              <div key={`${src}-${idx}`} className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+              <div
+                key={`${src}-${idx}`}
+                className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+              >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
+                <img
+                  src={src}
+                  alt={`photo ${idx + 1}`}
+                  className="h-28 w-full object-cover"
+                />
                 <button
                   type="button"
                   className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
@@ -389,7 +407,9 @@ export default function QuoteForm({
       {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
+            Your info
+          </h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
             Required so we can send your estimate and follow up if needed.
           </p>
@@ -469,7 +489,8 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
+                  If selected, we may generate a visual “after” concept based on
+                  your photos. This happens as a second step after your estimate.
                 </div>
               </label>
             </div>
@@ -497,7 +518,9 @@ export default function QuoteForm({
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
         >
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              Result
+            </h2>
             <button
               type="button"
               className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
