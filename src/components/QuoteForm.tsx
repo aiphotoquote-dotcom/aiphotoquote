@@ -97,7 +97,7 @@ export default function QuoteForm({
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
 
-  // ✅ customer opt-in (only shown if tenant enabled)
+  // ✅ customer opt-in (tenant-enabled)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
@@ -107,6 +107,15 @@ export default function QuoteForm({
 
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // second-step rendering status (client-side)
+  const [renderKickoff, setRenderKickoff] = useState<{
+    attempted: boolean;
+    ok: boolean;
+    status: "idle" | "queued" | "rendered" | "failed";
+    imageUrl?: string | null;
+    error?: string | null;
+  }>({ attempted: false, ok: false, status: "idle" });
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
@@ -164,10 +173,7 @@ export default function QuoteForm({
     if (!result?.output) return;
     (async () => {
       await sleep(50);
-      resultsRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     })();
   }, [result?.output]);
 
@@ -194,27 +200,69 @@ export default function QuoteForm({
     setResult(null);
     setNotes("");
     setRenderOptIn(false);
+    setRenderKickoff({ attempted: false, ok: false, status: "idle" });
     previews.forEach((p) => URL.revokeObjectURL(p));
     setPreviews([]);
     setFiles([]);
     setPhase("idle");
   }
 
+  async function kickOffRendering(args: { tenantSlug: string; quoteLogId: string }) {
+    // We don't block the user. This is best-effort.
+    setRenderKickoff({ attempted: true, ok: false, status: "queued" });
+
+    try {
+      const rr = await fetch("/api/render/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenantSlug: args.tenantSlug,
+          quoteLogId: args.quoteLogId,
+        }),
+      });
+
+      const rj = await rr.json().catch(() => null);
+
+      if (!rr.ok || !rj?.ok) {
+        const dbg = rj?.debugId ? ` (debugId: ${rj.debugId})` : "";
+        const msg = rj?.message || rj?.error || `HTTP ${rr.status}`;
+        setRenderKickoff({
+          attempted: true,
+          ok: false,
+          status: "failed",
+          error: `${msg}${dbg}`,
+        });
+        return;
+      }
+
+      setRenderKickoff({
+        attempted: true,
+        ok: true,
+        status: rj?.imageUrl ? "rendered" : "queued",
+        imageUrl: rj?.imageUrl ?? null,
+      });
+    } catch (e: any) {
+      setRenderKickoff({
+        attempted: true,
+        ok: false,
+        status: "failed",
+        error: e?.message ?? "Render kickoff failed",
+      });
+    }
+  }
+
   async function onSubmit() {
     setError(null);
     setResult(null);
+    setRenderKickoff({ attempted: false, ok: false, status: "idle" });
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
-      setError(
-        "Missing tenant slug. Please reload the page (invalid tenant link)."
-      );
+      setError("Missing tenant slug. Please reload the page (invalid tenant link).");
       return;
     }
 
     if (files.length < MIN_PHOTOS) {
-      setError(
-        `Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`
-      );
+      setError(`Please add at least ${MIN_PHOTOS} photos for an accurate estimate.`);
       return;
     }
     if (files.length > MAX_PHOTOS) {
@@ -245,26 +293,25 @@ export default function QuoteForm({
       const form = new FormData();
       compressed.forEach((f) => form.append("files", f));
 
-      const up = await fetch("/api/blob/upload", {
-        method: "POST",
-        body: form,
-      });
+      const up = await fetch("/api/blob/upload", { method: "POST", body: form });
       const upJson = await up.json();
-      if (!upJson.ok)
-        throw new Error(upJson.error?.message ?? "Upload failed");
+      if (!upJson.ok) throw new Error(upJson.error?.message ?? "Upload failed");
 
       const urls: UploadedFile[] = upJson.files.map((x: any) => ({ url: x.url }));
 
       setPhase("analyzing");
+      const wantsRender = aiRenderingEnabled ? Boolean(renderOptIn) : false;
 
-      // ✅ IMPORTANT: render_opt_in MUST be top-level (NOT inside customer_context)
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
           images: urls,
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+
+          // ✅ IMPORTANT: server expects render_opt_in at TOP LEVEL
+          render_opt_in: wantsRender,
+
           customer_context: {
             name: customerName.trim(),
             email: email.trim(),
@@ -279,18 +326,23 @@ export default function QuoteForm({
       if (!json.ok) {
         const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
         const code = json?.error ? `\ncode: ${json.error}` : "";
-        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         const issues = json?.issues
           ? `\nissues:\n${json.issues
               .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
               .join("\n")}`
           : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
         throw new Error(
           `Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim()
         );
       }
 
       setResult(json);
+
+      // ✅ fire-and-forget render step AFTER estimate succeeds
+      if (wantsRender && json?.quoteLogId) {
+        void kickOffRendering({ tenantSlug, quoteLogId: String(json.quoteLogId) });
+      }
     } catch (e: any) {
       setError(e.message ?? "Something went wrong.");
       setPhase("idle");
@@ -307,16 +359,12 @@ export default function QuoteForm({
       <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">
-              Progress
-            </div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
               {progressLabel}
             </div>
           </div>
-          <div className="text-xs text-gray-700 dark:text-gray-200">
-            {progressText}
-          </div>
+          <div className="text-xs text-gray-700 dark:text-gray-200">{progressText}</div>
         </div>
 
         <div className="mt-3 h-2 w-full rounded-full bg-gray-200 overflow-hidden dark:bg-gray-800">
@@ -330,12 +378,9 @@ export default function QuoteForm({
       {/* Photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
-            Take 2 quick photos
-          </h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            These two shots give the best accuracy. Add more if you want (max{" "}
-            {MAX_PHOTOS}).
+            These two shots give the best accuracy. Add more if you want (max {MAX_PHOTOS}).
           </p>
         </div>
 
@@ -385,11 +430,7 @@ export default function QuoteForm({
                 className="relative rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={src}
-                  alt={`photo ${idx + 1}`}
-                  className="h-28 w-full object-cover"
-                />
+                <img src={src} alt={`photo ${idx + 1}`} className="h-28 w-full object-cover" />
                 <button
                   type="button"
                   className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
@@ -407,9 +448,7 @@ export default function QuoteForm({
       {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
-            Your info
-          </h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
             Required so we can send your estimate and follow up if needed.
           </p>
@@ -489,8 +528,7 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on
-                  your photos. This happens as a second step after your estimate.
+                  If selected, we may generate a visual “after” concept based on your photos. This happens as a second step after your estimate.
                 </div>
               </label>
             </div>
@@ -518,9 +556,7 @@ export default function QuoteForm({
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
         >
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-              Result
-            </h2>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
             <button
               type="button"
               className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
@@ -530,6 +566,53 @@ export default function QuoteForm({
               Start Over
             </button>
           </div>
+
+          {/* Second-step rendering status */}
+          {aiRenderingEnabled ? (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
+              <div className="font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+              {!renderOptIn ? (
+                <div className="mt-1 text-gray-700 dark:text-gray-200">
+                  Not requested.
+                </div>
+              ) : renderKickoff.status === "idle" ? (
+                <div className="mt-1 text-gray-700 dark:text-gray-200">
+                  Requested — waiting to start…
+                </div>
+              ) : renderKickoff.status === "queued" ? (
+                <div className="mt-1 text-gray-700 dark:text-gray-200">
+                  Rendering requested — in progress…
+                </div>
+              ) : renderKickoff.status === "rendered" ? (
+                <div className="mt-2">
+                  <div className="text-gray-700 dark:text-gray-200">Rendering ready:</div>
+                  {renderKickoff.imageUrl ? (
+                    <a
+                      href={renderKickoff.imageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={renderKickoff.imageUrl}
+                        alt="AI rendering"
+                        className="h-64 w-full object-contain bg-white dark:bg-gray-950"
+                      />
+                    </a>
+                  ) : (
+                    <div className="mt-1 text-gray-700 dark:text-gray-200">
+                      (No image url returned yet)
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-2 text-red-700 dark:text-red-200">
+                  Rendering failed: {renderKickoff.error || "unknown error"}
+                </div>
+              )}
+            </div>
+          ) : null}
 
           <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
             {JSON.stringify(out, null, 2)}
