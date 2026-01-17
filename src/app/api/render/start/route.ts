@@ -4,7 +4,6 @@ import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import crypto from "crypto";
-import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
@@ -24,20 +23,14 @@ function json(data: any, status = 200, debugId?: string) {
   return res;
 }
 
-function normalizeDbErr(err: any) {
+function normalizeErr(err: any) {
   return {
     name: err?.name,
     message: err?.message ?? String(err),
     code: err?.code,
-    detail: err?.detail,
-    hint: err?.hint,
-    constraint: err?.constraint,
-    table: err?.table,
-    column: err?.column,
-    where: err?.where,
+    status: err?.status,
     causeMessage: err?.cause?.message,
     causeCode: err?.cause?.code,
-    causeDetail: err?.cause?.detail,
   };
 }
 
@@ -88,13 +81,18 @@ async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | nul
 function pickRenderOptInFromRecord(args: { row: any; renderingCols: boolean }) {
   const { row, renderingCols } = args;
 
+  // Prefer explicit column if it exists
   if (renderingCols && typeof row?.render_opt_in === "boolean") return row.render_opt_in;
 
+  // Fall back to input JSON stored in quote_logs.input
   const input = safeJsonParse(row?.input) ?? {};
   if (typeof input?.render_opt_in === "boolean") return input.render_opt_in;
 
+  // Fall back to output meta
   const output = safeJsonParse(row?.output) ?? {};
   if (typeof output?.meta?.render_opt_in === "boolean") return output.meta.render_opt_in;
+
+  // Fall back to normalized output shape
   if (typeof output?.output?.render_opt_in === "boolean") return output.output.render_opt_in;
 
   return false;
@@ -122,14 +120,8 @@ async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: st
       where id = ${quoteLogId}::uuid
     `);
     return { ok: true as const, columns: true as const };
-  } catch (e: any) {
-    const msg = e?.message ?? e?.cause?.message ?? "";
-    const code = e?.code ?? e?.cause?.code;
-    const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-
-    if (!isUndefinedColumn) {
-      return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
-    }
+  } catch {
+    // No dedicated columns; caller will use output.rendering fallback.
     return { ok: true as const, columns: false as const };
   }
 }
@@ -141,8 +133,9 @@ async function storeRenderResultBestEffort(args: {
   prompt: string;
 }) {
   const { quoteLogId, imageUrl, error, prompt } = args;
+  const renderedAt = new Date().toISOString();
 
-  // 1) Try dedicated columns
+  // Try dedicated columns first
   try {
     await db.execute(sql`
       update quote_logs
@@ -155,84 +148,85 @@ async function storeRenderResultBestEffort(args: {
       where id = ${quoteLogId}::uuid
     `);
     return { ok: true as const, columns: true as const };
-  } catch (e: any) {
-    const msg = e?.message ?? e?.cause?.message ?? "";
-    const code = e?.code ?? e?.cause?.code;
-    const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-
-    if (!isUndefinedColumn) {
-      return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
-    }
+  } catch {
+    // Fallback into output.rendering
   }
 
-  // 2) Fallback: merge into output.rendering
-  try {
-    const r = await db.execute(sql`
-      select output
-      from quote_logs
-      where id = ${quoteLogId}::uuid
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    const out = safeJsonParse(row?.output) ?? {};
+  const r = await db.execute(sql`
+    select output
+    from quote_logs
+    where id = ${quoteLogId}::uuid
+    limit 1
+  `);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const out = safeJsonParse(row?.output) ?? {};
 
-    const next = {
-      ...out,
-      rendering: {
-        requested: true,
-        status: error ? "failed" : "rendered",
-        imageUrl,
-        prompt,
-        error,
-        renderedAt: new Date().toISOString(),
-      },
-    };
+  const next = {
+    ...out,
+    rendering: {
+      requested: true,
+      status: error ? "failed" : "rendered",
+      imageUrl,
+      prompt,
+      error,
+      renderedAt,
+    },
+  };
 
-    await updateQuoteLogOutput(quoteLogId, next);
-    return { ok: true as const, columns: false as const, merged: true as const };
-  } catch (e: any) {
-    return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
-  }
+  await updateQuoteLogOutput(quoteLogId, next);
+  return { ok: true as const, columns: false as const, merged: true as const };
 }
 
-/**
- * IMPORTANT: clamp size to a supported OpenAI image size.
- * This is the exact issue from your screenshot (400 invalid value).
- * We hard-lock to 1024x1024 to match the stable behavior from maggioupholstery.com.
- */
-const OPENAI_IMAGE_SIZE = "1024x1024" as const;
+function getBlobToken(): string | null {
+  // Support both env names people commonly use
+  return (
+    process.env.BLOB_READ_WRITE_TOKEN ??
+    process.env.VERCEL_BLOB_READ_WRITE_TOKEN ??
+    process.env.VERCEL_BLOB_TOKEN ??
+    null
+  );
+}
 
-async function uploadToBlobFromBytes(args: {
+function looksLikeHtml(s: string) {
+  const t = s.trim().slice(0, 500).toLowerCase();
+  return t.startsWith("<!doctype html") || t.startsWith("<html") || t.includes("<head");
+}
+
+function looksLikeCloudflare(s: string) {
+  const t = s.toLowerCase();
+  return t.includes("cloudflare") || t.includes("attention required") || t.includes("cf-ray");
+}
+
+async function uploadToVercelBlob(args: {
   filename: string;
   bytes: Buffer;
   contentType: string;
 }) {
-  const { filename, bytes, contentType } = args;
+  const token = getBlobToken();
+  if (!token) {
+    throw new Error("Missing BLOB_READ_WRITE_TOKEN (or VERCEL_BLOB_READ_WRITE_TOKEN) env var");
+  }
 
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN (Vercel Blob) env var");
+  // Lazy import so build doesn’t fail if not installed locally yet.
+  const mod: any = await import("@vercel/blob");
+  const put: any = mod.put;
 
-  // put() accepts Buffer directly (do NOT pass Uint8Array)
-  const res = await put(`renders/${filename}`, bytes, {
+  const res = await put(`renders/${args.filename}`, args.bytes, {
     access: "public",
-    contentType,
+    contentType: args.contentType,
     token,
   });
 
-  return res.url;
+  const url = res?.url ? String(res.url) : null;
+  if (!url) throw new Error("Blob put did not return a url");
+  return url;
 }
 
-async function uploadToBlobFromUrl(args: { filename: string; imageUrl: string }) {
-  const { filename, imageUrl } = args;
-
-  const r = await fetch(imageUrl);
-  if (!r.ok) throw new Error(`Failed to download rendered image (HTTP ${r.status})`);
-
-  const contentType = r.headers.get("content-type") || "image/png";
-  const arr = await r.arrayBuffer();
-  const bytes = Buffer.from(arr);
-
-  return uploadToBlobFromBytes({ filename, bytes, contentType });
+export async function GET() {
+  return json(
+    { ok: false, error: "METHOD_NOT_ALLOWED", message: "Use POST for /api/render/start" },
+    405
+  );
 }
 
 export async function POST(req: Request) {
@@ -254,10 +248,9 @@ export async function POST(req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
-
     const tenantId = (tenant as any).id as string;
 
-    // Tenant-level gating (best effort)
+    // Tenant gating
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
@@ -265,16 +258,14 @@ export async function POST(req: Request) {
           ok: false,
           error: "RENDERING_DISABLED",
           message:
-            enabled === false
-              ? "Tenant disabled AI rendering."
-              : "Tenant rendering setting unknown.",
+            enabled === false ? "Tenant disabled AI rendering." : "Tenant rendering setting unknown.",
         },
         400,
         debugId
       );
     }
 
-    // Load quote log (try render columns first)
+    // Load quote log (new columns first; fall back)
     let quoteRow: any = null;
     let renderingCols = true;
 
@@ -308,7 +299,6 @@ export async function POST(req: Request) {
     }
 
     if (!quoteRow) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
-
     if (String(quoteRow.tenant_id) !== String(tenantId)) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
@@ -319,6 +309,49 @@ export async function POST(req: Request) {
       return json(
         { ok: false, error: "NOT_OPTED_IN", message: "Customer did not opt in to AI rendering." },
         400,
+        debugId
+      );
+    }
+
+    // Single-attempt rule:
+    // If already rendered OR already attempted (failed/queued), do not auto-burn tokens.
+    const existingOut = safeJsonParse(quoteRow.output) ?? {};
+    const existingRendering = existingOut?.rendering ?? null;
+
+    const alreadyRendered =
+      (renderingCols && typeof quoteRow.render_image_url === "string" && quoteRow.render_image_url) ||
+      (typeof existingRendering?.imageUrl === "string" && existingRendering.imageUrl);
+
+    if (alreadyRendered) {
+      return json(
+        {
+          ok: true,
+          already: true,
+          quoteLogId,
+          imageUrl: renderingCols ? quoteRow.render_image_url : existingRendering.imageUrl,
+          durationMs: Date.now() - startedAt,
+        },
+        200,
+        debugId
+      );
+    }
+
+    const alreadyAttemptedStatus =
+      (renderingCols && typeof quoteRow.render_status === "string" && quoteRow.render_status) ||
+      (typeof existingRendering?.status === "string" && existingRendering.status) ||
+      null;
+
+    if (alreadyAttemptedStatus && alreadyAttemptedStatus !== "rendered") {
+      return json(
+        {
+          ok: false,
+          error: "ALREADY_ATTEMPTED",
+          message:
+            "Rendering was already attempted for this quote. Use the Retry button to try again later.",
+          status: alreadyAttemptedStatus,
+          durationMs: Date.now() - startedAt,
+        },
+        409,
         debugId
       );
     }
@@ -347,11 +380,10 @@ export async function POST(req: Request) {
 
     const prompt = [
       "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
-      "This is a second-step visual preview. Do NOT provide pricing. Do NOT provide text overlays.",
+      "This is a second-step visual preview.",
+      "Do NOT provide pricing. Do NOT provide text overlays. Do NOT add watermarks or logos.",
       "Preserve the subject and original photo perspective as much as possible.",
       "Output should look like a professional shop result, clean and plausible.",
-      "",
-      "IMPORTANT: output must be a single realistic image.",
       category ? `Category: ${category}` : "",
       serviceType ? `Service type: ${serviceType}` : "",
       notes ? `Customer notes: ${notes}` : "",
@@ -359,13 +391,24 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join("\n");
 
+    // mark queued (best-effort)
     const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
-    if (queuedMark.ok === false) {
-      return json(
-        { ok: false, error: "DB_WRITE_FAILED", stage: "mark_queued", queuedMark },
-        500,
-        debugId
-      );
+
+    // Also set fallback output.rendering to queued so UI can show progress even without columns
+    if (!queuedMark.columns) {
+      const out = safeJsonParse(quoteRow.output) ?? {};
+      const next = {
+        ...out,
+        rendering: {
+          requested: true,
+          status: "queued",
+          imageUrl: null,
+          prompt,
+          error: null,
+          queuedAt: new Date().toISOString(),
+        },
+      };
+      await updateQuoteLogOutput(quoteLogId, next);
     }
 
     const openai = new OpenAI({ apiKey: openAiKey });
@@ -374,37 +417,66 @@ export async function POST(req: Request) {
     let renderError: string | null = null;
 
     try {
-      const img = await openai.images.generate({
+      // IMPORTANT:
+      // - Use b64 to avoid extra fetch() of an OpenAI-hosted URL
+      // - Keep size modest to reduce payloads
+      const img: any = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
-        // 🔒 Clamp to supported size to avoid the 400 you screenshotted
-        size: OPENAI_IMAGE_SIZE,
+        size: "1024x1024",
+        response_format: "b64_json",
       } as any);
 
-      const first: any = (img as any)?.data?.[0] ?? null;
-      const url = first?.url ? String(first.url) : null;
+      const first: any = img?.data?.[0] ?? null;
       const b64 = first?.b64_json ? String(first.b64_json) : null;
-
-      const filename = `render-${quoteLogId}.png`;
+      const url = first?.url ? String(first.url) : null;
 
       if (b64) {
+        // Guard: sometimes upstream failures surface as HTML-ish strings (rare but real)
+        if (looksLikeHtml(b64) || looksLikeCloudflare(b64)) {
+          throw new Error("Upstream blocked rendering (Cloudflare/HTML response). Try again later.");
+        }
+
         const bytes = Buffer.from(b64, "base64");
-        finalImageUrl = await uploadToBlobFromBytes({
-          filename,
-          bytes,
-          contentType: "image/png",
-        });
+
+        // Guard: must look like a PNG/JPEG (very cheap signature checks)
+        const isPng = bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e;
+        const isJpg = bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+        if (!isPng && !isJpg) {
+          throw new Error("Render returned non-image payload. Try again later.");
+        }
+
+        const contentType = isJpg ? "image/jpeg" : "image/png";
+        const filename = `render-${quoteLogId}.${isJpg ? "jpg" : "png"}`;
+
+        // Upload directly to Vercel Blob (server-side, no relative URL parsing)
+        finalImageUrl = await uploadToVercelBlob({ filename, bytes, contentType });
       } else if (url) {
-        // If OpenAI returns a URL, download -> upload to Blob (stable URL)
-        finalImageUrl = await uploadToBlobFromUrl({ filename, imageUrl: url });
+        // Fallback: if the API returns a URL, keep it (no blob upload attempt here)
+        // This avoids the “Failed to parse URL from /api/blob/upload” issue entirely.
+        if (looksLikeHtml(url) || looksLikeCloudflare(url)) {
+          throw new Error("Upstream blocked rendering (Cloudflare). Try again later.");
+        }
+        finalImageUrl = url;
       } else {
-        throw new Error("OpenAI image response missing url/b64_json");
+        throw new Error("OpenAI image response missing b64_json/url");
       }
     } catch (e: any) {
-      renderError = e?.message ?? "Render generation failed.";
+      // Never leak raw HTML to the UI
+      const msg = e?.message ?? "Render generation failed.";
+
+      if (typeof msg === "string" && looksLikeHtml(msg)) {
+        renderError = "Upstream blocked rendering (HTML/Cloudflare). Try again later.";
+      } else if (typeof msg === "string" && looksLikeCloudflare(msg)) {
+        renderError = "Upstream blocked rendering (Cloudflare). Try again later.";
+      } else {
+        // Keep it short + user-safe
+        renderError = msg.length > 220 ? msg.slice(0, 220) + "…" : msg;
+      }
     }
 
-    const stored = await storeRenderResultBestEffort({
+    // Store result
+    await storeRenderResultBestEffort({
       quoteLogId,
       imageUrl: finalImageUrl,
       error: renderError,
@@ -418,10 +490,9 @@ export async function POST(req: Request) {
           error: "RENDER_FAILED",
           message: renderError,
           quoteLogId,
-          stored,
           durationMs: Date.now() - startedAt,
         },
-        500,
+        502,
         debugId
       );
     }
@@ -431,7 +502,6 @@ export async function POST(req: Request) {
         ok: true,
         quoteLogId,
         imageUrl: finalImageUrl,
-        stored,
         durationMs: Date.now() - startedAt,
       },
       200,
@@ -439,7 +509,12 @@ export async function POST(req: Request) {
     );
   } catch (err: any) {
     return json(
-      { ok: false, error: "REQUEST_FAILED", message: err?.message ?? String(err) },
+      {
+        ok: false,
+        error: "REQUEST_FAILED",
+        message: err?.message ?? String(err),
+        server_debug: normalizeErr(err),
+      },
       500,
       crypto.randomBytes(6).toString("hex")
     );
