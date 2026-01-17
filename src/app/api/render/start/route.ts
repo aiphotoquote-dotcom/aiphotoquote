@@ -11,7 +11,6 @@ import { decryptSecret } from "@/lib/crypto";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Accept both POST JSON body and GET query params.
 const Req = z.object({
   tenantSlug: z.string().min(3),
   quoteLogId: z.string().uuid(),
@@ -56,6 +55,7 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
+// tenant_secrets: tenant_id, openai_key_enc
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const r = await db.execute(
     sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`
@@ -66,6 +66,7 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   return decryptSecret(enc);
 }
 
+// best-effort: tenant_settings.ai_rendering_enabled
 async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | null> {
   try {
     const r = await db.execute(sql`
@@ -111,10 +112,7 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   `);
 }
 
-async function markRenderQueuedBestEffort(args: {
-  quoteLogId: string;
-  prompt: string;
-}) {
+async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: string }) {
   const { quoteLogId, prompt } = args;
 
   try {
@@ -131,7 +129,10 @@ async function markRenderQueuedBestEffort(args: {
     const msg = e?.message ?? e?.cause?.message ?? "";
     const code = e?.code ?? e?.cause?.code;
     const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-    if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+
+    if (!isUndefinedColumn) {
+      return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+    }
     return { ok: true as const, columns: false as const };
   }
 }
@@ -143,6 +144,7 @@ async function storeRenderResultBestEffort(args: {
   prompt: string;
 }) {
   const { quoteLogId, imageUrl, error, prompt } = args;
+  const renderedAt = new Date().toISOString();
 
   // First try dedicated columns if present
   try {
@@ -156,12 +158,16 @@ async function storeRenderResultBestEffort(args: {
         rendered_at = now()
       where id = ${quoteLogId}::uuid
     `);
+
     return { ok: true as const, columns: true as const };
   } catch (e: any) {
     const msg = e?.message ?? e?.cause?.message ?? "";
     const code = e?.code ?? e?.cause?.code;
     const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-    if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+
+    if (!isUndefinedColumn) {
+      return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+    }
   }
 
   // Fallback: merge into output.rendering
@@ -183,7 +189,7 @@ async function storeRenderResultBestEffort(args: {
         imageUrl,
         prompt,
         error,
-        renderedAt: new Date().toISOString(),
+        renderedAt,
       },
     };
 
@@ -194,11 +200,31 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
-async function blobUploadFromUrl(args: { imageUrl: string; filename: string }) {
-  const { imageUrl, filename } = args;
+function getBaseUrlFromRequest(req: Request) {
+  // Prefer explicit app url if provided
+  const envAppUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+  if (envAppUrl) return envAppUrl.replace(/\/+$/, "");
+
+  // Vercel sets VERCEL_URL like "aiphotoquote.vercel.app"
+  const vercelUrl = process.env.VERCEL_URL?.trim();
+  if (vercelUrl) return `https://${vercelUrl.replace(/\/+$/, "")}`;
+
+  // Fall back to request headers (works behind Vercel proxy too)
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host");
+  if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  // Absolute last resort
+  return "http://localhost:3000";
+}
+
+async function blobUploadFromUrl(args: { baseUrl: string; imageUrl: string; filename: string }) {
+  const { baseUrl, imageUrl, filename } = args;
 
   const imgRes = await fetch(imageUrl);
-  if (!imgRes.ok) throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
+  if (!imgRes.ok) {
+    throw new Error(`Failed to download rendered image (HTTP ${imgRes.status})`);
+  }
 
   const arr = await imgRes.arrayBuffer();
   const contentType = imgRes.headers.get("content-type") || "image/png";
@@ -207,41 +233,26 @@ async function blobUploadFromUrl(args: { imageUrl: string; filename: string }) {
   const fd = new FormData();
   fd.append("files", blob, filename);
 
-  const base = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") || "";
-  const uploadUrl = base ? `${base}/api/blob/upload` : "/api/blob/upload";
-
+  const uploadUrl = new URL("/api/blob/upload", baseUrl).toString();
   const upRes = await fetch(uploadUrl, { method: "POST", body: fd });
-  const j = await upRes.json().catch(() => null);
 
+  const j = await upRes.json().catch(() => null);
   if (!j?.ok) throw new Error(j?.error?.message ?? "Blob upload failed");
+
   const first = j?.files?.[0];
   const url = first?.url ? String(first.url) : null;
   if (!url) throw new Error("Blob upload did not return a file url");
+
   return url;
 }
 
-async function readReq(method: "GET" | "POST", req: Request) {
-  if (method === "POST") {
-    const raw = await req.json().catch(() => null);
-    return raw;
-  }
-
-  // GET
-  const url = new URL(req.url);
-  return {
-    tenantSlug: url.searchParams.get("tenantSlug"),
-    quoteLogId: url.searchParams.get("quoteLogId"),
-  };
-}
-
-async function handler(method: "GET" | "POST", req: Request) {
+export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
   try {
-    const raw = await readReq(method, req);
+    const raw = await req.json().catch(() => null);
     const parsed = Req.safeParse(raw);
-
     if (!parsed.success) {
       return json(
         { ok: false, error: "BAD_REQUEST_VALIDATION", issues: parsed.error.issues, received: raw },
@@ -254,6 +265,7 @@ async function handler(method: "GET" | "POST", req: Request) {
 
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
+
     const tenantId = (tenant as any).id as string;
 
     // Tenant gating (best-effort; if unknown treat as disabled)
@@ -304,7 +316,9 @@ async function handler(method: "GET" | "POST", req: Request) {
     }
 
     if (!quoteRow) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
-    if (String(quoteRow.tenant_id) !== String(tenantId)) return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
+    if (String(quoteRow.tenant_id) !== String(tenantId)) {
+      return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
+    }
 
     // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
@@ -323,11 +337,7 @@ async function handler(method: "GET" | "POST", req: Request) {
       : [];
 
     if (!images.length) {
-      return json(
-        { ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." },
-        400,
-        debugId
-      );
+      return json({ ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." }, 400, debugId);
     }
 
     const customerCtx = input?.customer_context ?? {};
@@ -350,13 +360,14 @@ async function handler(method: "GET" | "POST", req: Request) {
       .filter(Boolean)
       .join("\n");
 
-    // mark queued (best-effort)
     const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
 
     const openai = new OpenAI({ apiKey: openAiKey });
 
     let finalImageUrl: string | null = null;
     let renderError: string | null = null;
+
+    const baseUrl = getBaseUrlFromRequest(req);
 
     try {
       const img = await openai.images.generate({
@@ -372,10 +383,12 @@ async function handler(method: "GET" | "POST", req: Request) {
       if (url) {
         try {
           finalImageUrl = await blobUploadFromUrl({
+            baseUrl,
             imageUrl: url,
             filename: `render-${quoteLogId}.png`,
           });
         } catch {
+          // If blob upload fails, still keep the original URL
           finalImageUrl = url;
         }
       } else if (b64) {
@@ -384,9 +397,7 @@ async function handler(method: "GET" | "POST", req: Request) {
         const fd = new FormData();
         fd.append("files", blob, `render-${quoteLogId}.png`);
 
-        const base = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, "") || "";
-        const uploadUrl = base ? `${base}/api/blob/upload` : "/api/blob/upload";
-
+        const uploadUrl = new URL("/api/blob/upload", baseUrl).toString();
         const upRes = await fetch(uploadUrl, { method: "POST", body: fd });
         const j = await upRes.json().catch(() => null);
 
@@ -418,6 +429,7 @@ async function handler(method: "GET" | "POST", req: Request) {
           quoteLogId,
           stored,
           queuedMark,
+          baseUrl,
           durationMs: Date.now() - startedAt,
         },
         500,
@@ -432,6 +444,7 @@ async function handler(method: "GET" | "POST", req: Request) {
         imageUrl: finalImageUrl,
         stored,
         queuedMark,
+        baseUrl,
         durationMs: Date.now() - startedAt,
       },
       200,
@@ -444,20 +457,4 @@ async function handler(method: "GET" | "POST", req: Request) {
       crypto.randomBytes(6).toString("hex")
     );
   }
-}
-
-// ✅ Support BOTH methods so client can never 405 here.
-export async function POST(req: Request) {
-  return handler("POST", req);
-}
-
-export async function GET(req: Request) {
-  return handler("GET", req);
-}
-
-export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: { Allow: "GET, POST, OPTIONS" },
-  });
 }
