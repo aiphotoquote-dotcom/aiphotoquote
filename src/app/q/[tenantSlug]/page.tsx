@@ -6,9 +6,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function firstRow(r: any): any | null {
-  // Supports both shapes:
-  // - { rows: [...] }
-  // - [...] (array)
   if (!r) return null;
   if (Array.isArray(r)) return r[0] ?? null;
   if (Array.isArray(r.rows)) return r.rows[0] ?? null;
@@ -22,13 +19,20 @@ export default async function Page({
 }) {
   const tenantSlug = params.tenantSlug;
 
-  // Default/fallback values so this page never hard-crashes.
   let tenantName = "Get a Photo Quote";
   let industry = "service";
   let aiRenderingEnabled = false;
 
+  let debug = {
+    tenantSlug,
+    tenantId: null as string | null,
+    tenantName: null as string | null,
+    industry_key: null as string | null,
+    ai_rendering_enabled: null as boolean | null,
+    settingsReadPath: "none" as "with_flag" | "fallback" | "none",
+  };
+
   try {
-    // Tenant lookup (safe)
     const tenantRes = await db.execute(sql`
       select "id", "name", "slug"
       from "tenants"
@@ -41,10 +45,10 @@ export default async function Page({
       | null;
 
     if (tenant?.name) tenantName = tenant.name;
+    debug.tenantId = tenant?.id ?? null;
+    debug.tenantName = tenant?.name ?? null;
 
-    // Settings lookup (safe)
     if (tenant?.id) {
-      // Try to read ai_rendering_enabled, but don't hard fail if column isn't there yet.
       try {
         const settingsRes = await db.execute(sql`
           select "industry_key", "ai_rendering_enabled"
@@ -57,10 +61,16 @@ export default async function Page({
           | { industry_key: string | null; ai_rendering_enabled: boolean | null }
           | null;
 
+        debug.settingsReadPath = "with_flag";
+        debug.industry_key = settings?.industry_key ?? null;
+        debug.ai_rendering_enabled =
+          typeof settings?.ai_rendering_enabled === "boolean"
+            ? settings.ai_rendering_enabled
+            : null;
+
         if (settings?.industry_key) industry = settings.industry_key;
         aiRenderingEnabled = settings?.ai_rendering_enabled === true;
       } catch {
-        // Fallback if ai_rendering_enabled column isn't present yet
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
@@ -72,16 +82,31 @@ export default async function Page({
           | { industry_key: string | null }
           | null;
 
+        debug.settingsReadPath = "fallback";
+        debug.industry_key = settings?.industry_key ?? null;
+
         if (settings?.industry_key) industry = settings.industry_key;
       }
     }
   } catch {
-    // Intentionally swallow errors so the page still renders.
+    // swallow
   }
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-12">
+        {/* 🔥 BIG DEBUG BANNER (remove later) */}
+        <div className="mb-6 rounded-2xl border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+          <div className="font-semibold">DEBUG /q/[tenantSlug]</div>
+          <pre className="mt-2 overflow-auto text-xs">
+            {JSON.stringify(
+              { ...debug, aiRenderingEnabledComputed: aiRenderingEnabled },
+              null,
+              2
+            )}
+          </pre>
+        </div>
+
         <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
           <div className="lg:col-span-2">
             <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
@@ -119,12 +144,6 @@ export default async function Page({
                   Tailored for <span className="font-semibold">{industry}</span>{" "}
                   quotes. We’ll follow up if anything needs clarification.
                 </p>
-              </div>
-
-              {/* ✅ TEMP DEBUG: remove once confirmed */}
-              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                debug: tenantSlug=<span className="font-mono">{tenantSlug}</span>{" "}
-                aiRenderingEnabled=<span className="font-mono">{String(aiRenderingEnabled)}</span>
               </div>
             </div>
           </div>
