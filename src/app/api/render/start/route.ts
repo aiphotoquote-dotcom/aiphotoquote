@@ -139,9 +139,10 @@ async function storeRenderResultBestEffort(args: {
   imageUrl: string | null;
   error: string | null;
   prompt: string;
+  storage?: any;
 }) {
-  const { quoteLogId, imageUrl, error, prompt } = args;
-  const renderedAt = new Date().toISOString();
+  const { quoteLogId, imageUrl, error, prompt, storage } = args;
+  const renderedAtIso = new Date().toISOString();
 
   try {
     await db.execute(sql`
@@ -185,7 +186,8 @@ async function storeRenderResultBestEffort(args: {
         imageUrl,
         prompt,
         error,
-        renderedAt,
+        renderedAt: renderedAtIso,
+        storage: storage ?? null,
       },
     };
 
@@ -196,9 +198,14 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
+function is413(e: any) {
+  const msg = String(e?.message ?? e ?? "");
+  return msg.includes("413") || msg.toLowerCase().includes("payload too large");
+}
+
 /**
  * Upload rendered image to Vercel Blob directly from server.
- * IMPORTANT: put() expects Blob | Buffer | ReadableStream | File, not Uint8Array.
+ * NOTE: We pass Buffer (not Uint8Array) to satisfy put() typing.
  */
 async function blobPutBuffer(args: { buf: Buffer; filename: string; contentType: string }) {
   const { buf, filename, contentType } = args;
@@ -247,24 +254,19 @@ export async function POST(req: Request) {
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
     const tenantId = (tenant as any).id as string;
 
-    // Tenant gating (best-effort; if unknown treat as disabled)
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
         {
           ok: false,
           error: "RENDERING_DISABLED",
-          message:
-            enabled === false
-              ? "Tenant disabled AI rendering."
-              : "Tenant rendering setting unknown.",
+          message: enabled === false ? "Tenant disabled AI rendering." : "Tenant rendering setting unknown.",
         },
         400,
         debugId
       );
     }
 
-    // Load quote log (try render columns first)
     let quoteRow: any = null;
     let renderingCols = true;
 
@@ -303,7 +305,6 @@ export async function POST(req: Request) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
 
-    // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
       return json(
@@ -313,7 +314,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Pull images + context from stored input
     const input = safeJsonParse(quoteRow.input) ?? {};
     const images: string[] = Array.isArray(input?.images)
       ? input.images.map((x: any) => x?.url).filter(Boolean)
@@ -338,8 +338,8 @@ export async function POST(req: Request) {
     const prompt = [
       "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
       "This is a second-step visual preview. Do NOT provide pricing. Do NOT provide text overlays.",
-      "Preserve the subject and original photo perspective as much as possible.",
-      "Output should look like a professional shop result, clean and plausible.",
+      "Keep it realistic and plausible for a professional shop.",
+      "IMPORTANT: output must be compact (avoid huge files).",
       category ? `Category: ${category}` : "",
       serviceType ? `Service type: ${serviceType}` : "",
       notes ? `Customer notes: ${notes}` : "",
@@ -354,29 +354,61 @@ export async function POST(req: Request) {
     let finalImageUrl: string | null = null;
     let renderError: string | null = null;
 
+    // Storage telemetry for debugging (no secrets)
+    const storage = {
+      attemptedBlob: false,
+      blobOk: false,
+      blobError: null as string | null,
+      blobFallbackToOpenAiUrl: false,
+      sizeRequested: "512x512",
+    };
+
     try {
+      // ✅ smaller render to avoid 413 payload limits
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
-        size: "1024x1024",
+        size: "512x512",
       } as any);
 
       const first: any = (img as any)?.data?.[0] ?? null;
-      const url = first?.url ? String(first.url) : null;
+      const openAiUrl = first?.url ? String(first.url) : null;
       const b64 = first?.b64_json ? String(first.b64_json) : null;
 
       const filename = `render-${quoteLogId}.png`;
 
-      if (url) {
-        finalImageUrl = await blobPutFromUrl({ imageUrl: url, filename });
-      } else if (b64) {
-        finalImageUrl = await blobPutBuffer({
-          buf: Buffer.from(b64, "base64"),
-          filename,
-          contentType: "image/png",
-        });
-      } else {
-        throw new Error("OpenAI image response missing url/b64_json");
+      // Try to store in Blob; if Blob rejects (413), store OpenAI URL instead.
+      storage.attemptedBlob = true;
+
+      try {
+        if (openAiUrl) {
+          finalImageUrl = await blobPutFromUrl({ imageUrl: openAiUrl, filename });
+          storage.blobOk = true;
+        } else if (b64) {
+          finalImageUrl = await blobPutBuffer({
+            buf: Buffer.from(b64, "base64"),
+            filename,
+            contentType: "image/png",
+          });
+          storage.blobOk = true;
+        } else {
+          throw new Error("OpenAI image response missing url/b64_json");
+        }
+      } catch (e: any) {
+        storage.blobError = e?.message ?? String(e);
+
+        if (is413(e)) {
+          // ✅ do not fail render if Blob rejects size; keep OpenAI-hosted URL
+          storage.blobFallbackToOpenAiUrl = true;
+
+          if (openAiUrl) {
+            finalImageUrl = openAiUrl;
+          } else {
+            throw e; // if we only had b64 and blob rejected, we can't store it anywhere stable
+          }
+        } else {
+          throw e;
+        }
       }
     } catch (e: any) {
       renderError = e?.message ?? "Render generation failed.";
@@ -387,6 +419,7 @@ export async function POST(req: Request) {
       imageUrl: finalImageUrl,
       error: renderError,
       prompt,
+      storage,
     });
 
     if (renderError) {
@@ -398,6 +431,7 @@ export async function POST(req: Request) {
           quoteLogId,
           stored,
           queuedMark,
+          storage,
           durationMs: Date.now() - startedAt,
         },
         500,
@@ -412,6 +446,7 @@ export async function POST(req: Request) {
         imageUrl: finalImageUrl,
         stored,
         queuedMark,
+        storage,
         durationMs: Date.now() - startedAt,
       },
       200,
