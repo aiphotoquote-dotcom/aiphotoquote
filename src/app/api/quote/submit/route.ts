@@ -1,29 +1,31 @@
+// src/app/api/quote/submit/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import OpenAI from "openai";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, quoteLogs } from "@/lib/db/schema";
-import { decryptSecret } from "@/lib/crypto";
+import { tenants, quoteLogs } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * IMPORTANT CONTRACT:
- * - quote_logs.output is NOT NULL in DB
- * - Drizzle omits undefined fields from INSERT
- * - Therefore we MUST ALWAYS insert an `output` value.
+ * - We accept render_opt_in at TOP LEVEL (so it can be saved into quote_logs.input.render_opt_in).
+ * - We DO NOT force render_opt_in into customer_context (keep customer_context purely customer-facing).
+ * - On submit, we ONLY insert what we actually know now:
+ *     tenant_id, input, output, confidence, estimate_low/high, inspection_required, render_opt_in
+ *   Everything else (render_status, timestamps, render_* fields) should default in DB and be updated later.
  */
 
 const Req = z.object({
-  tenantSlug: z.string().min(3),
+  tenantSlug: z.string().min(2),
   images: z
     .array(
       z.object({
         url: z.string().url(),
-        shotType: z.enum(["wide", "closeup", "extra"]).optional().default("extra"),
+        shotType: z.enum(["wide", "closeup", "extra"]).optional(),
       })
     )
     .min(1)
@@ -40,38 +42,84 @@ const Req = z.object({
   contact: z
     .object({
       name: z.string().min(1),
-      email: z.string().min(3),
-      phone: z.string().min(3),
+      email: z.string().email(),
+      phone: z.string().min(7),
     })
     .optional(),
 
-  // Accept render opt-in at TOP LEVEL
+  // ✅ top-level render opt in
   render_opt_in: z.boolean().optional().default(false),
 });
 
-function json(data: any, init?: ResponseInit) {
-  return NextResponse.json(data, init);
+function jsonErr(message: string, init?: { status?: number; debugId?: string; code?: string; extra?: any }) {
+  return NextResponse.json(
+    {
+      ok: false,
+      error: init?.code || "REQUEST_FAILED",
+      message,
+      debugId: init?.debugId,
+      ...((init?.extra ?? null) ? { extra: init!.extra } : {}),
+    },
+    { status: init?.status ?? 500 }
+  );
 }
 
-function safeStr(x: unknown) {
-  return String(x ?? "");
+function safeAnyJson(x: unknown) {
+  try {
+    return JSON.parse(JSON.stringify(x ?? null));
+  } catch {
+    return null;
+  }
+}
+
+function buildPrompt(args: {
+  tenantSlug: string;
+  images: Array<{ url: string; shotType?: string }>;
+  customer_context?: any;
+  contact?: any;
+}) {
+  const { tenantSlug, images, customer_context, contact } = args;
+
+  return `
+You are an expert estimator for upholstery/service work. Given the photos and the customer's note, return a JSON object with:
+
+{
+  "confidence": "high" | "medium" | "low",
+  "inspection_required": boolean,
+  "summary": string,
+  "questions": string[],
+  "estimate": { "low": number, "high": number }
+}
+
+Rules:
+- Be conservative; if unsure, set inspection_required true.
+- Questions should be short and actionable.
+- estimate.low/high must be integers (USD).
+- Do not include markdown. Output JSON only.
+
+Context:
+tenantSlug: ${tenantSlug}
+customer_context: ${JSON.stringify(customer_context ?? {}, null, 2)}
+contact: ${JSON.stringify(contact ?? {}, null, 2)}
+images: ${JSON.stringify(images, null, 2)}
+`.trim();
 }
 
 export async function POST(req: Request) {
-  const debugId = `dbg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const debugId = `dbg_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 
   try {
-    const raw = await req.json().catch(() => null);
-    const parsed = Req.safeParse(raw);
+    const body = await req.json().catch(() => null);
+    const parsed = Req.safeParse(body);
 
     if (!parsed.success) {
-      return json(
+      return NextResponse.json(
         {
           ok: false,
           error: "BAD_REQUEST",
-          message: "Invalid request body",
-          issues: parsed.error.issues,
+          message: "Invalid request payload",
           debugId,
+          issues: parsed.error.issues,
         },
         { status: 400 }
       );
@@ -79,154 +127,115 @@ export async function POST(req: Request) {
 
     const { tenantSlug, images, customer_context, contact, render_opt_in } = parsed.data;
 
-    // ---- Tenant lookup (NO db.query.*; works without schema generic) ----
-    const tenantRows = await db
-      .select({ id: tenants.id, slug: tenants.slug })
+    // ---- tenant lookup (avoid db.query.* so you don't need drizzle schema generics)
+    const t = await db
+      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
       .limit(1);
 
-    const tenant = tenantRows[0] ?? null;
-
-    if (!tenant) {
-      return json(
-        { ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link", debugId },
-        { status: 404 }
-      );
+    const tenant = t?.[0];
+    if (!tenant?.id) {
+      return jsonErr(`Unknown tenant slug: ${tenantSlug}`, {
+        status: 404,
+        debugId,
+        code: "TENANT_NOT_FOUND",
+      });
     }
 
-    // ---- Tenant secret lookup ----
-    const secretRows = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenant.id))
-      .limit(1);
+    // ---- OpenAI vision input
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const secret = secretRows[0] ?? null;
+    const prompt = buildPrompt({ tenantSlug, images, customer_context, contact });
 
-    if (!secret?.openaiKeyEnc) {
-      return json(
-        {
-          ok: false,
-          error: "TENANT_OPENAI_KEY_MISSING",
-          message: "Tenant OpenAI key not configured",
-          debugId,
-        },
-        { status: 400 }
-      );
-    }
-
-    const openaiKey = decryptSecret(secret.openaiKeyEnc);
-    const openai = new OpenAI({ apiKey: openaiKey });
-
-    // ---- Prompt ----
-    const prompt = [
-      `You are an expert upholstery estimator.`,
-      `Return JSON only.`,
-      ``,
-      `Need fields: confidence ("high"|"medium"|"low"), inspection_required (boolean), summary (string), questions (string[]), estimate {low:number, high:number}.`,
-      `Echo render_opt_in boolean.`,
-      ``,
-      `Customer notes: ${safeStr(customer_context?.notes || "")}`,
-      `Category: ${safeStr(customer_context?.category || "service")}`,
-      `Service type: ${safeStr(customer_context?.service_type || "upholstery")}`,
-      `Render opt-in: ${render_opt_in ? "true" : "false"}`,
-    ].join("\n");
-
-    // Vision parts (cast as any to avoid SDK typing mismatches)
-    const visionInput: any[] = images.map((img) => ({
+    // OpenAI chat content parts typing can be strict; cast to any to keep TS happy.
+    const visionInput = images.map((img) => ({
       type: "image_url",
       image_url: { url: img.url },
-    }));
+    })) as any[];
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: process.env.OPENAI_VISION_MODEL || "gpt-4o-mini",
       temperature: 0.2,
-      response_format: { type: "json_object" },
       messages: [
         {
           role: "user",
-          content: [{ type: "text", text: prompt }, ...visionInput] as any,
+          content: [
+            { type: "text", text: prompt } as any,
+            ...visionInput,
+          ] as any,
         },
       ],
     });
 
-    const text = completion.choices?.[0]?.message?.content ?? "";
-    let outputJson: any;
+    const raw = completion.choices?.[0]?.message?.content ?? "";
+    let output: any = null;
 
     try {
-      outputJson = text ? JSON.parse(text) : null;
+      // try parse JSON directly
+      output = raw ? JSON.parse(raw) : null;
     } catch {
-      // Never allow undefined output to reach DB
-      outputJson = {
-        confidence: "low",
-        inspection_required: true,
-        summary: "We could not parse the AI response. Please review manually.",
-        questions: ["Can you provide clearer photos and confirm scope/material preference?"],
-        estimate: { low: 0, high: 0 },
-        render_opt_in: Boolean(render_opt_in),
-        _raw: text?.slice(0, 2000),
-      };
+      // fallback: best-effort wrap
+      output = { confidence: "low", inspection_required: true, summary: String(raw).slice(0, 2000), questions: [], estimate: { low: 0, high: 0 } };
     }
 
-    // Normalize key fields (defensive)
-    const confidence = safeStr(outputJson?.confidence || "medium");
-    const inspectionRequired = Boolean(outputJson?.inspection_required ?? true);
-    const estLow = Number(outputJson?.estimate?.low ?? outputJson?.low ?? 0) || 0;
-    const estHigh = Number(outputJson?.estimate?.high ?? outputJson?.high ?? 0) || 0;
+    const confidence = String(output?.confidence ?? "low");
+    const inspection_required = Boolean(output?.inspection_required ?? true);
+    const estimateLow = Number.isFinite(Number(output?.estimate?.low)) ? Math.round(Number(output.estimate.low)) : null;
+    const estimateHigh = Number.isFinite(Number(output?.estimate?.high)) ? Math.round(Number(output.estimate.high)) : null;
 
-    // Input payload for auditing
-    const inputPayload = {
+    // ---- Build input JSON saved to DB
+    const input = safeAnyJson({
       tenantSlug,
       images,
       customer_context: customer_context ?? null,
       contact: contact ?? null,
       render_opt_in: Boolean(render_opt_in),
       createdAt: new Date().toISOString(),
-    };
+    });
 
-    // ✅ CRITICAL: ALWAYS insert output (never undefined)
+    const outputJson = safeAnyJson(output);
+
+    // ✅ THE FIX: ONLY insert the fields we know now. Let DB defaults handle the rest.
     const inserted = await db
       .insert(quoteLogs)
       .values({
         tenantId: tenant.id,
-        input: inputPayload as any,
-        output: (outputJson ?? {}) as any,
-
+        input,
+        output: outputJson,
         confidence,
-        estimateLow: estLow || null,
-        estimateHigh: estHigh || null,
-        inspectionRequired,
-
+        estimateLow: estimateLow ?? undefined,
+        estimateHigh: estimateHigh ?? undefined,
+        inspectionRequired: inspection_required,
         renderOptIn: Boolean(render_opt_in),
-        renderStatus: Boolean(render_opt_in) ? "queued" : "not_requested",
       })
       .returning({ id: quoteLogs.id });
 
     const quoteLogId = inserted?.[0]?.id ?? null;
 
-    return json(
+    return NextResponse.json(
       {
         ok: true,
         quoteLogId,
         tenantId: tenant.id,
-        output: {
-          ...outputJson,
-          render_opt_in: Boolean(render_opt_in),
-        },
+        output: outputJson,
         render_opt_in: Boolean(render_opt_in),
       },
       { status: 200 }
     );
   } catch (err: any) {
-    console.error("QUOTE_SUBMIT_ERROR", { debugId, err });
-
-    return json(
+    // make sure we return useful debug data like your UI shows
+    const message = err?.message ? String(err.message) : String(err);
+    return NextResponse.json(
       {
         ok: false,
         error: "REQUEST_FAILED",
-        message: err?.message ?? String(err),
+        message: `Failed query: ${message}`,
         debugId,
+        // keep a small hint, never dump giant stacks to client
+        hint: message.includes("insert into quote_logs")
+          ? "Insert mismatch. Ensure quote_logs columns match drizzle schema and do not force defaults."
+          : undefined,
       },
       { status: 500 }
     );
