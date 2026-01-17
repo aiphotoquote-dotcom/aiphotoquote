@@ -2,268 +2,156 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type Props = {
+type UploadImage = { url: string; kind?: "wide" | "close" | "other" };
+
+type QuoteResult = {
+  ok: boolean;
+  quoteLogId?: string;
+  output?: any;
+  error?: any;
+  debugId?: string;
+};
+
+type RenderResult =
+  | { ok: true; quoteLogId: string; imageUrl: string | null }
+  | { ok: false; error: string; message?: string };
+
+export default function QuoteForm(props: {
   tenantSlug: string;
-  aiRenderingEnabled: boolean;
-};
+  aiRenderingEnabled?: boolean;
+}) {
+  const tenantSlug = props.tenantSlug;
+  const aiRenderingEnabled = props.aiRenderingEnabled === true;
 
-type QuoteOutput = {
-  confidence: "high" | "medium" | "low";
-  inspection_required: boolean;
-  summary: string;
-  questions: string[];
-  estimate: { low: number; high: number } | null;
-  render_opt_in?: boolean;
-};
-
-type QuoteSubmitResponse = {
-  ok: boolean;
-  debugId?: string;
-
-  quoteLogId?: string;
-
-  output?: QuoteOutput | null;
-
-  error?: string;
-  message?: string;
-};
-
-type RenderStartResponse = {
-  ok: boolean;
-  debugId?: string;
-
-  quoteLogId?: string;
-  imageUrl?: string | null;
-
-  error?: string;
-  message?: string;
-};
-
-function formatMoney(n: number) {
-  try {
-    return `$${Math.round(n).toLocaleString()}`;
-  } catch {
-    return `$${n}`;
-  }
-}
-
-function toErrMessage(e: unknown) {
-  if (!e) return "Unknown error";
-  if (typeof e === "string") return e;
-  const anyE = e as any;
-  return anyE?.message ?? String(e);
-}
-
-type ShotType = "wide" | "close";
-
-type ImageItem = {
-  id: string;
-  url: string;
-  shot: ShotType;
-};
-
-function uid() {
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
-}
-
-export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: Props) {
-  // ---- customer fields ----
+  // ---- form state ----
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [notes, setNotes] = useState("");
 
-  // ---- images ----
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [images, setImages] = useState<ImageItem[]>([]);
-  const [shotHint, setShotHint] = useState<ShotType>("wide"); // first prompt is wide
+  // Keep the customer-friendly wide/close intent
+  const [images, setImages] = useState<UploadImage[]>([]);
+  const wideShot = images.find((x) => x.kind === "wide")?.url ?? null;
+  const closeUp = images.find((x) => x.kind === "close")?.url ?? null;
+  const otherImages = images.filter((x) => x.kind !== "wide" && x.kind !== "close").map((x) => x.url);
 
-  // Tracks which files we've already uploaded (by fingerprint) -> URL
-  const uploadedRef = useRef<Map<string, string>>(new Map());
-
-  // ---- optional rendering opt-in ----
   const [renderOptIn, setRenderOptIn] = useState(false);
 
-  // ---- submit + result ----
+  // ---- submit / result ----
   const [submitting, setSubmitting] = useState(false);
   const [submitErr, setSubmitErr] = useState<string | null>(null);
-  const [result, setResult] = useState<QuoteSubmitResponse | null>(null);
+  const [result, setResult] = useState<QuoteResult | null>(null);
 
   // ---- rendering step ----
-  const [renderStatus, setRenderStatus] = useState<
-    "idle" | "queued" | "rendering" | "rendered" | "failed"
+  const [renderingStatus, setRenderingStatus] = useState<
+    "idle" | "queued" | "running" | "rendered" | "failed"
   >("idle");
-  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
-  const [renderErr, setRenderErr] = useState<string | null>(null);
+  const [renderingErr, setRenderingErr] = useState<string | null>(null);
+  const [renderedImageUrl, setRenderedImageUrl] = useState<string | null>(null);
+
+  // avoid double-trigger
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
-  const wideDone = useMemo(() => images.some((x) => x.shot === "wide"), [images]);
-  const closeDone = useMemo(() => images.some((x) => x.shot === "close"), [images]);
+  // ---- derived progress ----
+  const estimateProgressLabel = useMemo(() => {
+    if (!submitting) return "Estimate ready";
+    return "Working…";
+  }, [submitting]);
 
-  // Friendly progress: wide + close are the two “best accuracy” shots
-  const progressPct = useMemo(() => {
-    const done = (wideDone ? 1 : 0) + (closeDone ? 1 : 0);
-    return Math.min(100, (done / 2) * 100);
-  }, [wideDone, closeDone]);
+  const showEstimateProgressBar = submitting;
 
-  const canSubmit = useMemo(() => {
-    return (
-      tenantSlug &&
-      name.trim().length > 0 &&
-      email.trim().length > 0 &&
-      phone.trim().length > 0 &&
-      images.length >= 1 &&
-      !submitting
-    );
-  }, [tenantSlug, name, email, phone, images.length, submitting]);
+  const showRenderingSection = aiRenderingEnabled && (renderOptIn || (result?.output?.render_opt_in === true));
 
-  async function uploadFilesToBlob(files: File[]) {
+  const renderingProgressLabel = useMemo(() => {
+    switch (renderingStatus) {
+      case "idle":
+        return "Waiting";
+      case "queued":
+        return "Queued…";
+      case "running":
+        return "Rendering…";
+      case "rendered":
+        return "Complete";
+      case "failed":
+        return "Failed";
+      default:
+        return "Waiting";
+    }
+  }, [renderingStatus]);
+
+  const showRenderingProgressBar =
+    renderingStatus === "queued" || renderingStatus === "running";
+
+  // ---- helpers ----
+  function normalizePhone(v: string) {
+    const digits = v.replace(/\D/g, "").slice(0, 10);
+    if (digits.length <= 3) return digits;
+    if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+
+  async function uploadToBlob(files: File[]) {
     const fd = new FormData();
-    for (const f of files) fd.append("files", f);
+    for (const f of files) fd.append("files", f, f.name);
 
     const res = await fetch("/api/blob/upload", { method: "POST", body: fd });
     const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(j?.error?.message ?? `Upload failed (HTTP ${res.status})`);
 
-    if (!res.ok || !j?.ok) {
-      const msg = j?.error?.message ?? `Upload failed (HTTP ${res.status})`;
-      throw new Error(msg);
-    }
-
-    const urls: string[] = Array.isArray(j?.files)
-      ? j.files.map((x: any) => x?.url).filter(Boolean)
-      : [];
-
-    if (!urls.length) throw new Error("Upload succeeded but returned no file URLs.");
+    const urls: string[] = (j.files ?? []).map((x: any) => String(x.url)).filter(Boolean);
     return urls;
   }
 
-  function fingerprintFile(f: File) {
-    // good-enough client-side fingerprint (not cryptographic)
-    return `${f.name}|${f.size}|${f.lastModified}|${f.type}`;
-  }
-
-  async function addFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
-
-    // Limit total images to 12 like before
-    const remaining = Math.max(0, 12 - images.length);
-    const picked = Array.from(files).slice(0, remaining);
-    if (!picked.length) return;
-
-    setSubmitErr(null);
-    setSubmitting(true);
-
-    try {
-      // Upload only files we haven't uploaded yet
-      const newFilesToUpload: File[] = [];
-      const newFilesFingerprints: string[] = [];
-
-      for (const f of picked) {
-        const fp = fingerprintFile(f);
-        if (!uploadedRef.current.has(fp)) {
-          newFilesToUpload.push(f);
-          newFilesFingerprints.push(fp);
-        }
-      }
-
-      let uploadedUrls: string[] = [];
-      if (newFilesToUpload.length) {
-        uploadedUrls = await uploadFilesToBlob(newFilesToUpload);
-        // map returned URLs to fingerprints in the same order
-        uploadedUrls.forEach((url, i) => {
-          const fp = newFilesFingerprints[i];
-          if (fp) uploadedRef.current.set(fp, url);
-        });
-      }
-
-      // Build ImageItems for ALL picked files using mapped URLs (old + new)
-      const newItems: ImageItem[] = picked
-        .map((f) => {
-          const fp = fingerprintFile(f);
-          const url = uploadedRef.current.get(fp);
-          if (!url) return null;
-
-          // Use current hint for the first image, then bias to "close" after wide done
-          const suggested: ShotType =
-            shotHint === "wide"
-              ? "wide"
-              : "close";
-
-          return { id: uid(), url, shot: suggested } as ImageItem;
-        })
-        .filter(Boolean) as ImageItem[];
-
-      // Append, don't replace
-      setImages((prev) => {
-        const next = [...prev, ...newItems];
-        return next.slice(0, 12);
-      });
-
-      // Update next hint: if wide is still missing, keep prompting wide, else prompt close
-      // (use current derived flags + what we just added)
-      const willHaveWide = wideDone || newItems.some((x) => x.shot === "wide");
-      setShotHint(willHaveWide ? "close" : "wide");
-    } catch (e) {
-      setSubmitErr(toErrMessage(e));
-    } finally {
-      setSubmitting(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+  function assignShotKinds(urls: string[]) {
+    // Preserve the original customer-friendly intent:
+    // first image = wide shot, second = close-up, rest = other
+    const next: UploadImage[] = [];
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      if (i === 0) next.push({ url, kind: "wide" });
+      else if (i === 1) next.push({ url, kind: "close" });
+      else next.push({ url, kind: "other" });
     }
-  }
-
-  function removeImage(id: string) {
-    setImages((prev) => prev.filter((x) => x.id !== id));
-  }
-
-  function setShot(id: string, shot: ShotType) {
-    setImages((prev) => prev.map((x) => (x.id === id ? { ...x, shot } : x)));
-  }
-
-  function resetAll() {
-    setName("");
-    setEmail("");
-    setPhone("");
-    setNotes("");
-
-    setImages([]);
-    uploadedRef.current = new Map();
-
-    setSubmitErr(null);
-    setResult(null);
-
-    setRenderOptIn(false);
-    setRenderStatus("idle");
-    setRenderImageUrl(null);
-    setRenderErr(null);
-    renderAttemptedForQuoteRef.current = null;
-
-    setShotHint("wide");
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    return next;
   }
 
   async function submitQuote() {
     setSubmitErr(null);
     setResult(null);
 
-    setRenderStatus("idle");
-    setRenderImageUrl(null);
-    setRenderErr(null);
+    // reset rendering state each new submit
+    setRenderingStatus("idle");
+    setRenderingErr(null);
+    setRenderedImageUrl(null);
     renderAttemptedForQuoteRef.current = null;
+
+    if (!tenantSlug) {
+      setSubmitErr("Missing tenant slug. Please reload the page (invalid tenant link).");
+      return;
+    }
+    if (!name.trim() || !email.trim() || !phone.trim()) {
+      setSubmitErr("Please fill out Name, Email, and Phone.");
+      return;
+    }
+    if (images.length < 1) {
+      setSubmitErr("Please add at least 1 photo.");
+      return;
+    }
 
     setSubmitting(true);
     try {
       const payload = {
         tenantSlug,
         images: images.map((x) => ({ url: x.url })),
-        render_opt_in: Boolean(aiRenderingEnabled && renderOptIn),
         customer_context: {
-          name: name.trim(),
-          email: email.trim(),
-          phone: phone.trim(),
           notes: notes.trim() || undefined,
-          category: "upholstery",
-          service_type: "quote",
+          category: "service",
+          service_type: "photo_quote",
+          // This is used by the render route fallbacks if columns don't exist
+          render_opt_in: aiRenderingEnabled ? renderOptIn : false,
         },
+        // ALSO store render opt-in on the root, in case your submit route stores input directly
+        render_opt_in: aiRenderingEnabled ? renderOptIn : false,
       };
 
       const res = await fetch("/api/quote/submit", {
@@ -272,430 +160,534 @@ export default function QuoteForm({ tenantSlug, aiRenderingEnabled }: Props) {
         body: JSON.stringify(payload),
       });
 
-      const j: QuoteSubmitResponse = await res.json().catch(() => ({
-        ok: false,
-        error: "BAD_RESPONSE",
-        message: "Server did not return JSON.",
-      }));
-
+      const j = (await res.json().catch(() => null)) as QuoteResult | null;
       if (!res.ok || !j?.ok) {
-        setSubmitErr(j?.message ?? j?.error ?? `Quote failed (HTTP ${res.status})`);
-        setResult(j ?? null);
+        const msg =
+          (j as any)?.message ??
+          (j as any)?.error?.message ??
+          (j as any)?.error ??
+          `Quote failed (HTTP ${res.status})`;
+        setSubmitErr(String(msg));
+        setResult(j ?? { ok: false });
         return;
       }
 
       setResult(j);
-
-      // auto trigger render
-      const qid = j?.quoteLogId ?? null;
-      const opted = Boolean(j?.output?.render_opt_in);
-      if (aiRenderingEnabled && opted && qid) {
-        triggerRendering({ tenantSlug, quoteLogId: qid });
-      }
-    } catch (e) {
-      setSubmitErr(toErrMessage(e));
+    } catch (e: any) {
+      setSubmitErr(e?.message ?? "Quote request failed.");
     } finally {
       setSubmitting(false);
     }
   }
 
   async function triggerRendering(args: { tenantSlug: string; quoteLogId: string }) {
-    const { quoteLogId } = args;
-
-    if (renderAttemptedForQuoteRef.current === quoteLogId) return;
-    renderAttemptedForQuoteRef.current = quoteLogId;
-
-    setRenderStatus("rendering");
-    setRenderErr(null);
-    setRenderImageUrl(null);
+    setRenderingErr(null);
+    setRenderedImageUrl(null);
+    setRenderingStatus("queued");
 
     try {
+      // small delay makes the UI feel “intentional” vs flicker
+      await new Promise((r) => setTimeout(r, 250));
+      setRenderingStatus("running");
+
       const res = await fetch("/api/render/start", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(args),
       });
 
-      const j: RenderStartResponse = await res.json().catch(() => ({
-        ok: false,
-        error: "BAD_RESPONSE",
-        message: "Render endpoint did not return JSON.",
-      }));
+      const j = (await res.json().catch(() => null)) as any;
 
       if (!res.ok || !j?.ok) {
-        setRenderStatus("failed");
-        setRenderErr(j?.message ?? j?.error ?? `Render failed (HTTP ${res.status})`);
+        const msg = j?.message ?? j?.error ?? `Render failed (HTTP ${res.status})`;
+        setRenderingStatus("failed");
+        setRenderingErr(String(msg));
         return;
       }
 
-      if (j?.imageUrl) {
-        setRenderStatus("rendered");
-        setRenderImageUrl(String(j.imageUrl));
-        setRenderErr(null);
-      } else {
-        setRenderStatus("queued");
-        setRenderErr("Render started, but no image URL returned yet.");
-      }
-    } catch (e) {
-      setRenderStatus("failed");
-      setRenderErr(toErrMessage(e));
+      setRenderedImageUrl(j?.imageUrl ? String(j.imageUrl) : null);
+      setRenderingStatus("rendered");
+    } catch (e: any) {
+      setRenderingStatus("failed");
+      setRenderingErr(e?.message ?? "Render failed.");
     }
   }
 
+  // Auto-trigger rendering after estimate, if opted-in + tenant enabled
   useEffect(() => {
-    const qid = result?.quoteLogId ?? null;
-    if (!qid) return;
+    const quoteLogId = result?.quoteLogId ?? null;
+    const outputOptIn = result?.output?.render_opt_in === true;
 
-    const opted = Boolean(result?.output?.render_opt_in);
-    if (!aiRenderingEnabled || !opted) return;
+    const shouldRender =
+      aiRenderingEnabled && (renderOptIn || outputOptIn) && typeof quoteLogId === "string";
 
-    if (renderStatus === "rendered" && renderImageUrl) return;
-    if (renderAttemptedForQuoteRef.current === qid) return;
+    if (!shouldRender) return;
 
-    triggerRendering({ tenantSlug, quoteLogId: qid });
+    if (renderAttemptedForQuoteRef.current === quoteLogId) return;
+    renderAttemptedForQuoteRef.current = quoteLogId;
+
+    triggerRendering({ tenantSlug, quoteLogId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result?.quoteLogId, result?.output?.render_opt_in, aiRenderingEnabled, tenantSlug]);
+  }, [result?.quoteLogId, result?.output, aiRenderingEnabled, tenantSlug, renderOptIn]);
+
+  // ---- UI: image chooser ----
+  async function onPickFiles(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return;
+
+    setSubmitErr(null);
+
+    const files = Array.from(fileList).slice(0, 12);
+    try {
+      const urls = await uploadToBlob(files);
+
+      // merge: keep existing, add new, then re-assign kinds by order
+      const mergedUrls = [...images.map((x) => x.url), ...urls].slice(0, 12);
+      setImages(assignShotKinds(mergedUrls));
+    } catch (e: any) {
+      setSubmitErr(e?.message ?? "Upload failed.");
+    }
+  }
+
+  function removeImage(url: string) {
+    const next = images.filter((x) => x.url !== url).map((x) => x.url);
+    setImages(assignShotKinds(next));
+  }
+
+  // ---- UI: big image modal ----
+  const [modalUrl, setModalUrl] = useState<string | null>(null);
 
   return (
     <div className="space-y-6">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        className="sr-only"
-        onChange={(e) => addFiles(e.target.files)}
-      />
-
-      {/* Progress / shot checklist */}
-      <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">Progress</div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              {wideDone && closeDone ? "Estimate ready" : "Add photos"}
-            </div>
+      {/* PROGRESS: Estimate */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+            Progress
           </div>
           <div className="text-xs text-gray-600 dark:text-gray-300">
-            Add 2 photos (you have {images.length})
+            {estimateProgressLabel}
           </div>
         </div>
 
-        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-          <div
-            className="h-full bg-black dark:bg-white"
-            style={{ width: `${progressPct}%` }}
-          />
-        </div>
-
-        <div className="mt-3 grid gap-2 md:grid-cols-2">
-          <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-gray-900">
-            <div className="font-semibold">Wide shot</div>
-            <div className={wideDone ? "text-green-600 font-semibold" : "text-gray-500"}>
-              {wideDone ? "Captured" : "Needed"}
+        <div className="mt-3">
+          {showEstimateProgressBar ? (
+            <IndeterminateBar />
+          ) : (
+            <div className="h-2 w-full rounded-full bg-gray-200 dark:bg-gray-800">
+              <div className="h-2 w-full rounded-full bg-gray-900 dark:bg-gray-100" />
             </div>
-          </div>
-
-          <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-gray-900">
-            <div className="font-semibold">Close-up</div>
-            <div className={closeDone ? "text-green-600 font-semibold" : "text-gray-500"}>
-              {closeDone ? "Captured" : "Needed"}
-            </div>
-          </div>
+          )}
         </div>
 
         <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          tenantSlug: <span className="font-mono">{tenantSlug}</span>
+          tenantSlug: {tenantSlug}
         </div>
       </div>
 
-      {/* Photo picker */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-base font-semibold text-gray-900 dark:text-gray-100">
-              Take 2 quick photos
-            </div>
-            <div className="text-sm text-gray-600 dark:text-gray-300">
-              {shotHint === "wide"
-                ? "Start with a wide shot that shows the whole item."
-                : "Now take a close-up of the material / damage area."}
-              {" "}Add more if you want (max 12).
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <button
-              type="button"
-              className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={submitting || images.length >= 12}
-            >
-              Take Photo (Camera)
-            </button>
-
-            <button
-              type="button"
-              className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={submitting || images.length >= 12}
-            >
-              Upload Photos
-            </button>
-          </div>
+      {/* PHOTO INTAKE: Wide + Close up */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          Take 2 quick photos
+        </div>
+        <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+          Wide shot + close-up gets the best accuracy. Add more if you want (max 12).
         </div>
 
-        {/* Previews */}
-        {images.length > 0 && (
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-            {images.map((img) => (
-              <div
-                key={img.id}
-                className="overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950"
-              >
-                <div className="relative">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={img.url} alt="upload" className="h-44 w-full object-cover" />
-                  <button
-                    type="button"
-                    className="absolute right-2 top-2 rounded-md bg-white/90 px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-white dark:bg-black/70 dark:text-gray-100"
-                    onClick={() => removeImage(img.id)}
-                  >
-                    Remove
-                  </button>
-                </div>
+        <div className="mt-4 grid gap-4">
+          <ShotRow
+            label="Wide shot"
+            url={wideShot}
+            onPickFiles={onPickFiles}
+            onRemove={() => wideShot && removeImage(wideShot)}
+          />
 
-                <div className="flex items-center justify-between gap-2 border-t border-gray-200 bg-white px-3 py-2 text-xs dark:border-gray-800 dark:bg-gray-900">
-                  <div className="font-semibold text-gray-900 dark:text-gray-100">
-                    Shot type
-                  </div>
+          <ShotRow
+            label="Close-up"
+            url={closeUp}
+            onPickFiles={onPickFiles}
+            onRemove={() => closeUp && removeImage(closeUp)}
+          />
 
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      className={
-                        img.shot === "wide"
-                          ? "rounded-md bg-black px-2 py-1 text-white"
-                          : "rounded-md border border-gray-300 px-2 py-1 text-gray-900 dark:border-gray-700 dark:text-gray-100"
-                      }
-                      onClick={() => setShot(img.id, "wide")}
-                    >
-                      Wide
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        img.shot === "close"
-                          ? "rounded-md bg-black px-2 py-1 text-white"
-                          : "rounded-md border border-gray-300 px-2 py-1 text-gray-900 dark:border-gray-700 dark:text-gray-100"
-                      }
-                      onClick={() => setShot(img.id, "close")}
-                    >
-                      Close-up
-                    </button>
-                  </div>
-                </div>
+          {otherImages.length > 0 && (
+            <div className="mt-2">
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+                Additional photos
               </div>
-            ))}
-          </div>
-        )}
 
-        {submitErr && (
-          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-            {submitErr}
+              <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                {otherImages.map((u) => (
+                  <div key={u} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setModalUrl(u)}
+                      className="block w-full overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={u}
+                        alt="Additional photo"
+                        className="h-24 w-full object-cover"
+                      />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => removeImage(u)}
+                      className="absolute right-2 top-2 rounded-md bg-white/90 px-2 py-1 text-xs font-semibold text-gray-800 shadow-sm dark:bg-black/70 dark:text-gray-100"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="pt-2">
+            <label className="inline-flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 shadow-sm dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => onPickFiles(e.target.files)}
+              />
+              <span className="font-semibold">Upload Photos</span>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                (add up to 12)
+              </span>
+            </label>
           </div>
-        )}
+        </div>
       </div>
 
-      {/* Customer info */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-        <div className="text-base font-semibold text-gray-900 dark:text-gray-100">Your info</div>
-        <div className="text-sm text-gray-600 dark:text-gray-300">
+      {/* USER INFO */}
+      <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          Your info
+        </div>
+        <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
           Required so we can send your estimate and follow up if needed.
         </div>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <label className="block">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Name <span className="text-red-600">*</span>
-            </div>
+        <div className="mt-4 grid gap-3">
+          <Field label="Name *">
             <input
-              className="mt-2 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:ring-2 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-white"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Your name"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-gray-100"
               autoComplete="name"
             />
-          </label>
+          </Field>
 
-          <label className="block">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Email <span className="text-red-600">*</span>
-            </div>
+          <Field label="Email *">
             <input
-              className="mt-2 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:ring-2 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-white"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@email.com"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-gray-100"
               autoComplete="email"
               inputMode="email"
             />
-          </label>
+          </Field>
 
-          <label className="block">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Phone <span className="text-red-600">*</span>
-            </div>
+          <Field label="Phone *">
             <input
-              className="mt-2 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:ring-2 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-white"
               value={phone}
-              onChange={(e) => setPhone(e.target.value)}
+              onChange={(e) => setPhone(normalizePhone(e.target.value))}
               placeholder="(555) 555-5555"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-gray-100"
               autoComplete="tel"
               inputMode="tel"
             />
-          </label>
+          </Field>
 
-          <label className="block md:col-span-2">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Notes</div>
+          <Field label="Notes">
             <textarea
-              className="mt-2 min-h-[90px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:ring-2 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-white"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="What are you looking to do? Material preference, timeline, constraints?"
+              rows={4}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:focus:ring-gray-100"
             />
-          </label>
-        </div>
+          </Field>
 
-        {aiRenderingEnabled && (
-          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-950">
-            <label className="flex items-start gap-3">
-              <input
-                type="checkbox"
-                className="mt-1"
-                checked={renderOptIn}
-                onChange={(e) => setRenderOptIn(e.target.checked)}
-              />
-              <div>
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  Optional: AI rendering preview
+          {aiRenderingEnabled && (
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={renderOptIn}
+                  onChange={(e) => setRenderOptIn(e.target.checked)}
+                  className="mt-1 h-4 w-4"
+                />
+                <div>
+                  <div className="font-semibold">Optional: AI rendering preview</div>
+                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                    If selected, we may generate a visual “after” concept based on your photos.
+                    This happens as a second step after your estimate.
+                  </div>
                 </div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we may generate a visual “after” concept based on your photos.
-                  This happens as a second step after your estimate.
-                </div>
-              </div>
-            </label>
-          </div>
-        )}
-      </div>
-
-      {/* Actions */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <button
-          type="button"
-          className="w-full rounded-xl bg-black px-4 py-3 text-base font-semibold text-white hover:opacity-90 disabled:opacity-50 sm:w-auto"
-          disabled={!canSubmit}
-          onClick={submitQuote}
-        >
-          {submitting ? "Working..." : "Get Estimate"}
-        </button>
-
-        <button
-          type="button"
-          className="w-full rounded-xl border border-gray-300 bg-white px-4 py-3 text-base font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 sm:w-auto dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
-          onClick={resetAll}
-          disabled={submitting}
-        >
-          Reset
-        </button>
-
-        {submitErr && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-            {submitErr}
-            {result?.debugId ? (
-              <div className="mt-1 text-xs opacity-80">debugId: {result.debugId}</div>
-            ) : null}
-          </div>
-        )}
-      </div>
-
-      {/* Result */}
-      {result?.ok && result?.output && (
-        <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-          <div className="text-base font-semibold text-gray-900 dark:text-gray-100">Result</div>
-
-          {result.output.estimate && (
-            <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-950">
-              <div className="font-semibold text-gray-900 dark:text-gray-100">Estimate</div>
-              <div className="text-gray-700 dark:text-gray-200">
-                {formatMoney(result.output.estimate.low)} – {formatMoney(result.output.estimate.high)}
-              </div>
+              </label>
             </div>
           )}
+        </div>
+      </div>
 
-          <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(result.output, null, 2)}
-          </pre>
+      {/* ACTION */}
+      <button
+        type="button"
+        onClick={submitQuote}
+        disabled={submitting}
+        className="w-full rounded-2xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm disabled:opacity-60"
+      >
+        {submitting ? "Working…" : "Get Estimate"}
+      </button>
+
+      {/* ERROR */}
+      {submitErr && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          {submitErr}
         </div>
       )}
 
-      {/* AI Rendering */}
-      {result?.ok && Boolean(result?.output?.render_opt_in) && aiRenderingEnabled && (
-        <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-          <div className="text-base font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-          <div className="text-sm text-gray-600 dark:text-gray-300">
+      {/* RESULT */}
+      {result?.ok && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Result</div>
+
+          <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs dark:border-gray-800 dark:bg-gray-900">
+            <pre className="whitespace-pre-wrap break-words">
+              {JSON.stringify(result.output ?? {}, null, 2)}
+            </pre>
+          </div>
+        </div>
+      )}
+
+      {/* RENDERING SECTION */}
+      {result?.ok && showRenderingSection && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+            AI Rendering
+          </div>
+          <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
             This is a second step after your estimate. It can take a moment.
           </div>
 
-          <div className="mt-3 text-sm text-gray-900 dark:text-gray-100">
-            Status:{" "}
-            <span className="font-semibold">
-              {renderStatus === "idle"
-                ? "Idle"
-                : renderStatus === "queued"
-                  ? "Queued"
-                  : renderStatus === "rendering"
-                    ? "Rendering"
-                    : renderStatus === "rendered"
-                      ? "Rendered"
-                      : "Failed"}
-            </span>
+          <div className="mt-3 flex items-center justify-between">
+            <div className="text-xs text-gray-600 dark:text-gray-300">
+              Status: <span className="font-semibold">{renderingProgressLabel}</span>
+            </div>
+            {renderingStatus === "rendered" && renderedImageUrl && (
+              <button
+                type="button"
+                onClick={() => setModalUrl(renderedImageUrl)}
+                className="text-xs font-semibold text-gray-900 underline dark:text-gray-100"
+              >
+                Open full size
+              </button>
+            )}
           </div>
 
-          {renderStatus === "rendered" && renderImageUrl && (
-            <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={renderImageUrl} alt="AI render" className="w-full object-cover" />
-              <div className="border-t border-gray-200 bg-gray-50 p-2 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                Render image URL stored.
+          <div className="mt-3">
+            {showRenderingProgressBar ? (
+              <IndeterminateBar />
+            ) : (
+              <div className="h-2 w-full rounded-full bg-gray-200 dark:bg-gray-800">
+                <div
+                  className={`h-2 rounded-full ${
+                    renderingStatus === "rendered"
+                      ? "w-full bg-gray-900 dark:bg-gray-100"
+                      : renderingStatus === "failed"
+                      ? "w-full bg-red-600"
+                      : "w-1/4 bg-gray-400"
+                  }`}
+                />
+              </div>
+            )}
+          </div>
+
+          {renderingStatus === "failed" && (
+            <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+              {renderingErr ?? "Render failed."}
+            </div>
+          )}
+
+          {/* Rendered image (constrained, not huge) */}
+          {renderingStatus === "rendered" && renderedImageUrl && (
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => setModalUrl(renderedImageUrl)}
+                className="block w-full overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                aria-label="Open rendered image full size"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={renderedImageUrl}
+                  alt="AI rendering preview"
+                  className="
+                    w-full
+                    max-h-[420px]
+                    object-contain
+                    bg-gray-50
+                    dark:bg-gray-900
+                  "
+                />
+              </button>
+
+              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                Tap image to view full size.
               </div>
             </div>
           )}
 
-          {(renderStatus === "failed" || renderErr) && (
-            <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-              {renderErr ?? "Render failed."}
-            </div>
-          )}
-
-          <div className="mt-3 flex gap-2">
+          {/* Retry */}
+          {(renderingStatus === "failed" || renderingStatus === "idle") && (
             <button
               type="button"
-              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
-              disabled={!result?.quoteLogId || renderStatus === "rendering"}
               onClick={() => {
-                const qid = result?.quoteLogId ?? null;
-                if (!qid) return;
-                renderAttemptedForQuoteRef.current = null;
-                triggerRendering({ tenantSlug, quoteLogId: qid });
+                const quoteLogId = result?.quoteLogId;
+                if (typeof quoteLogId !== "string") return;
+                triggerRendering({ tenantSlug, quoteLogId });
               }}
+              className="mt-4 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
             >
               Retry Render
             </button>
+          )}
+        </div>
+      )}
+
+      {/* Full-size modal */}
+      {modalUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setModalUrl(null)}
+        >
+          <div
+            className="w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-lg dark:bg-gray-950"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-800">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Preview
+              </div>
+              <button
+                type="button"
+                onClick={() => setModalUrl(null)}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                Close
+              </button>
+            </div>
+            <div className="bg-gray-50 p-3 dark:bg-gray-900">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={modalUrl}
+                alt="Full size preview"
+                className="mx-auto max-h-[80vh] w-auto object-contain"
+              />
+            </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ---------- small UI components ---------- */
+
+function Field(props: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+        {props.label}
+      </div>
+      <div className="mt-1">{props.children}</div>
+    </div>
+  );
+}
+
+function ShotRow(props: {
+  label: string;
+  url: string | null;
+  onPickFiles: (files: FileList | null) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-900">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold text-gray-800 dark:text-gray-100">
+          {props.label}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="cursor-pointer rounded-lg bg-black px-3 py-2 text-xs font-semibold text-white">
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => props.onPickFiles(e.target.files)}
+            />
+            {props.url ? "Replace" : "Take Photo (Camera)"}
+          </label>
+
+          {props.url && (
+            <button
+              type="button"
+              onClick={props.onRemove}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3">
+        {props.url ? (
+          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={props.url}
+              alt={props.label}
+              className="h-36 w-full object-cover"
+            />
+          </div>
+        ) : (
+          <div className="rounded-lg border border-dashed border-gray-300 bg-white p-4 text-xs text-gray-500 dark:border-gray-700 dark:bg-gray-950 dark:text-gray-400">
+            No photo yet.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IndeterminateBar() {
+  return (
+    <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+      <div className="indeterminate-bar h-2 rounded-full bg-gray-900 dark:bg-gray-100" />
+      <style jsx>{`
+        .indeterminate-bar {
+          width: 35%;
+          transform: translateX(-120%);
+          animation: indeterminate 1.1s ease-in-out infinite;
+        }
+        @keyframes indeterminate {
+          0% {
+            transform: translateX(-120%);
+          }
+          50% {
+            transform: translateX(60%);
+          }
+          100% {
+            transform: translateX(220%);
+          }
+        }
+      `}</style>
     </div>
   );
 }
