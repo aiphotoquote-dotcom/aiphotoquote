@@ -2,7 +2,7 @@
 
 import TopNav from "@/components/TopNav";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type MeSettingsResponse =
   | {
@@ -16,7 +16,7 @@ type MeSettingsResponse =
         updated_at: string | null;
       } | null;
     }
-  | { ok: false; error: any };
+  | { ok: false; error: any; message?: string };
 
 type RecentQuotesResp =
   | {
@@ -24,7 +24,6 @@ type RecentQuotesResp =
       quotes: Array<{
         id: string;
         createdAt: string;
-        // optional fields (endpoint may or may not include)
         estimateLow?: number | null;
         estimateHigh?: number | null;
         inspectionRequired?: boolean | null;
@@ -39,7 +38,10 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
+function pill(
+  label: string,
+  tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray"
+) {
   const cls =
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800"
@@ -67,59 +69,80 @@ function fmtDate(iso: string) {
 function money(n: unknown) {
   const x = typeof n === "number" ? n : n == null ? null : Number(n);
   if (x == null || Number.isNaN(x)) return "";
-  return x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  return x.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+function renderTone(statusRaw: string) {
+  const s = (statusRaw || "").toLowerCase();
+  if (s === "rendered") return "green";
+  if (s === "failed") return "red";
+  if (s === "queued" || s === "running") return "blue";
+  return "gray";
+}
+
+function renderLabel(statusRaw: string) {
+  const s = (statusRaw || "").toLowerCase();
+  if (s === "rendered") return "Rendered";
+  if (s === "failed") return "Render failed";
+  if (s === "queued" || s === "running") return "Rendering";
+  return "Estimate";
 }
 
 export default function Dashboard() {
-  const [loading, setLoading] = useState(true);
+  const [loadingMe, setLoadingMe] = useState(true);
   const [me, setMe] = useState<MeSettingsResponse | null>(null);
 
-  const [quotesLoading, setQuotesLoading] = useState(true);
+  const [loadingQuotes, setLoadingQuotes] = useState(true);
   const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
 
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
-        const json: MeSettingsResponse = await res.json();
-        if (!cancelled) setMe(json);
-      } catch {
-        if (!cancelled) setMe({ ok: false, error: "FETCH_FAILED" });
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+  // ---- Load tenant settings ----
+  const loadMe = useCallback(async () => {
+    setLoadingMe(true);
+    try {
+      const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+      const json: MeSettingsResponse = await res.json();
+      setMe(json);
+    } catch {
+      setMe({ ok: false, error: "FETCH_FAILED" });
+    } finally {
+      setLoadingMe(false);
     }
+  }, []);
 
-    load();
-    return () => {
-      cancelled = true;
-    };
+  // ---- Load recent quotes ----
+  const loadQuotes = useCallback(async () => {
+    setLoadingQuotes(true);
+    try {
+      const res = await fetch("/api/tenant/recent-quotes", { cache: "no-store" });
+      const json: RecentQuotesResp = await res.json();
+      setQuotesResp(json);
+    } catch {
+      setQuotesResp({ ok: false, error: "FETCH_FAILED" });
+    } finally {
+      setLoadingQuotes(false);
+    }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function loadQuotes() {
-      try {
-        const res = await fetch("/api/tenant/recent-quotes", { cache: "no-store" });
-        const json: RecentQuotesResp = await res.json();
-        if (!cancelled) setQuotesResp(json);
-      } catch {
-        if (!cancelled) setQuotesResp({ ok: false, error: "FETCH_FAILED" });
-      } finally {
-        if (!cancelled) setQuotesLoading(false);
-      }
-    }
+    (async () => {
+      await loadMe();
+      if (cancelled) return;
+      await loadQuotes();
+    })();
 
-    loadQuotes();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadMe, loadQuotes]);
 
   const computed = useMemo(() => {
     const ok = Boolean(me && "ok" in me && me.ok);
@@ -135,10 +158,8 @@ export default function Dashboard() {
 
     const hasSlug = Boolean(tenantSlug);
     const hasIndustry = Boolean(industryKey);
-    const hasRedirect = Boolean(redirectUrl);
-    const hasThankYou = Boolean(thankYouUrl);
 
-    // Minimal “ready” for now
+    // Minimal ready state: slug + industry
     const isReady = hasSlug && hasIndustry;
 
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
@@ -152,14 +173,14 @@ export default function Dashboard() {
       thankYouUrl,
       hasSlug,
       hasIndustry,
-      hasRedirect,
-      hasThankYou,
       isReady,
       publicPath,
     };
   }, [me]);
 
   async function copyPublicLink() {
+    setCopyError(null);
+
     if (!computed.tenantSlug) return;
 
     const origin =
@@ -173,13 +194,17 @@ export default function Dashboard() {
       await navigator.clipboard.writeText(full);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    } catch {
+    } catch (e: any) {
       setCopied(false);
+      setCopyError("Clipboard blocked. You can manually copy the link.");
     }
   }
 
-  const setupTone = loading ? "gray" : computed.isReady ? "green" : "yellow";
-  const setupLabel = loading ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
+  const setupTone = loadingMe ? "gray" : computed.isReady ? "green" : "yellow";
+  const setupLabel = loadingMe ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
+
+  const quotesOk = Boolean(quotesResp && "ok" in quotesResp && quotesResp.ok);
+  const quotes = quotesOk ? (quotesResp as any).quotes : [];
 
   return (
     <main className="min-h-screen bg-white">
@@ -220,49 +245,43 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Main grid */}
+        {/* Grid */}
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Setup card */}
-          <section className="rounded-2xl border p-6 lg:col-span-1">
+          {/* Tenant card */}
+          <section className="rounded-2xl border p-6 lg:col-span-1 space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold">Setup checklist</h2>
+              <h2 className="font-semibold">Tenant</h2>
               {pill(setupLabel, setupTone as any)}
             </div>
 
-            {!loading && computed.ok ? (
-              <ul className="mt-4 space-y-2 text-sm text-gray-800">
-                <li>
-                  <span className="mr-2">{computed.hasSlug ? "✅" : "⬜️"}</span>
-                  Tenant slug{" "}
-                  <span className="ml-2 font-mono text-xs text-gray-600">
-                    {computed.tenantSlug || "—"}
-                  </span>
-                </li>
-                <li>
-                  <span className="mr-2">{computed.hasIndustry ? "✅" : "⬜️"}</span>
-                  Industry{" "}
-                  <span className="ml-2 font-mono text-xs text-gray-600">
-                    {computed.industryKey || "—"}
-                  </span>
-                </li>
-                <li>
-                  <span className="mr-2">{computed.hasRedirect ? "✅" : "⬜️"}</span>
-                  Redirect URL (optional)
-                </li>
-                <li>
-                  <span className="mr-2">{computed.hasThankYou ? "✅" : "⬜️"}</span>
-                  Thank-you URL (optional)
-                </li>
-              </ul>
+            {!loadingMe && computed.ok ? (
+              <div className="space-y-2 text-sm text-gray-800">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-gray-600">Slug</div>
+                  <div className="font-mono text-xs">{computed.tenantSlug || "—"}</div>
+                </div>
+
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-gray-600">Industry</div>
+                  <div className="font-mono text-xs">{computed.industryKey || "—"}</div>
+                </div>
+
+                <div className="pt-2 space-y-1">
+                  <div className="text-xs text-gray-600">
+                    {computed.hasSlug ? "✅" : "⬜️"} Slug
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    {computed.hasIndustry ? "✅" : "⬜️"} Industry
+                  </div>
+                </div>
+              </div>
             ) : (
-              <p className="mt-4 text-sm text-gray-600">
-                {loading
-                  ? "Loading your tenant…"
-                  : "Couldn’t load tenant settings. Refresh and try again."}
-              </p>
+              <div className="text-sm text-gray-600">
+                {loadingMe ? "Loading your tenant…" : "Couldn’t load tenant settings."}
+              </div>
             )}
 
-            <div className="mt-5 flex flex-wrap gap-3">
+            <div className="flex flex-wrap gap-3 pt-2">
               <Link
                 href="/onboarding"
                 className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
@@ -270,21 +289,24 @@ export default function Dashboard() {
                 Open onboarding
               </Link>
               <Link
-                href="/admin/setup/openai"
+                href="/admin"
                 className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
               >
-                OpenAI setup
-              </Link>
-              <Link
-                href="/admin/setup/ai-policy"
-                className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-              >
-                AI policy
+                Admin
               </Link>
             </div>
+
+            <button
+              type="button"
+              onClick={loadMe}
+              className="w-full rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+              disabled={loadingMe}
+            >
+              {loadingMe ? "Refreshing…" : "Refresh tenant"}
+            </button>
           </section>
 
-          {/* Public link + Recent quotes */}
+          {/* Right column */}
           <div className="grid gap-6 lg:col-span-2">
             {/* Public quote page */}
             <section className="rounded-2xl border p-6">
@@ -292,7 +314,7 @@ export default function Dashboard() {
                 <div>
                   <h2 className="font-semibold">Public quote page</h2>
                   <p className="mt-1 text-sm text-gray-600">
-                    This is what customers use. Share it after setup.
+                    Share this with customers after setup.
                   </p>
                 </div>
 
@@ -327,20 +349,44 @@ export default function Dashboard() {
                 <div className="mt-1 font-mono text-sm">{computed.publicPath}</div>
               </div>
 
+              {copyError ? (
+                <div className="mt-3 text-xs text-red-700">{copyError}</div>
+              ) : null}
+
               <div className="mt-4 text-xs text-gray-600">
                 Tip: run one complete test quote (estimate + optional rendering) after setup.
               </div>
             </section>
 
-            {/* Recent Quotes */}
+            {/* Recent quotes */}
             <section className="rounded-2xl border p-6">
-              <div className="flex items-center justify-between">
-                <h2 className="font-semibold">Recent quotes</h2>
-                {quotesLoading ? pill("Loading…", "gray") : null}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <h2 className="font-semibold">Recent quotes</h2>
+                  {loadingQuotes ? pill("Loading…", "gray") : null}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={loadQuotes}
+                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                    disabled={loadingQuotes}
+                  >
+                    {loadingQuotes ? "Refreshing…" : "Refresh"}
+                  </button>
+
+                  <Link
+                    href="/admin/quotes"
+                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                  >
+                    View all
+                  </Link>
+                </div>
               </div>
 
-              {!quotesLoading && quotesResp && "ok" in quotesResp && quotesResp.ok ? (
-                quotesResp.quotes.length ? (
+              {!loadingQuotes && quotesOk ? (
+                quotes.length ? (
                   <div className="mt-4 overflow-hidden rounded-xl border">
                     <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600">
                       <div className="col-span-4">Created</div>
@@ -349,78 +395,96 @@ export default function Dashboard() {
                     </div>
 
                     <ul className="divide-y">
-                      {quotesResp.quotes.map((q) => {
-                        const statusRaw = (q.renderStatus || "").toString().toLowerCase();
-                        const statusPill =
-                          statusRaw === "rendered"
-                            ? pill("Rendered", "green")
-                            : statusRaw === "failed"
-                              ? pill("Render failed", "red")
-                              : statusRaw === "queued" || statusRaw === "running"
-                                ? pill("Rendering", "blue")
-                                : pill("Estimate", "gray");
+                      {quotes.map((q: any) => {
+                        const statusRaw = (q.renderStatus || "").toString();
+                        const status = pill(renderLabel(statusRaw), renderTone(statusRaw) as any);
+
+                        const range =
+                          typeof q.estimateLow === "number" || typeof q.estimateHigh === "number"
+                            ? `${money(q.estimateLow)}${
+                                q.estimateHigh != null ? ` – ${money(q.estimateHigh)}` : ""
+                              }`
+                            : "";
 
                         return (
-                          <li key={q.id} className="grid grid-cols-12 items-center px-4 py-3">
-                            <div className="col-span-4 text-sm text-gray-800">
-                              {fmtDate(q.createdAt)}
-                            </div>
+                          <li key={q.id}>
+                            <Link
+                              href={`/admin/quotes/${q.id}`}
+                              className="grid grid-cols-12 items-center px-4 py-3 hover:bg-gray-50 transition"
+                            >
+                              <div className="col-span-4 text-sm text-gray-800">
+                                {fmtDate(q.createdAt)}
+                              </div>
 
-                            <div className="col-span-4 font-mono text-xs text-gray-700">
-                              {q.id}
-                            </div>
+                              <div className="col-span-4 font-mono text-xs text-gray-700 truncate">
+                                {q.id}
+                              </div>
 
-                            <div className="col-span-4 flex items-center justify-end gap-3">
-                              {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
-                                <div className="text-xs text-gray-700">
-                                  {money(q.estimateLow)}{" "}
-                                  {q.estimateHigh != null ? `– ${money(q.estimateHigh)}` : ""}
-                                </div>
-                              ) : null}
-
-                              {statusPill}
-                            </div>
+                              <div className="col-span-4 flex items-center justify-end gap-3">
+                                {range ? (
+                                  <div className="text-xs text-gray-700">{range}</div>
+                                ) : null}
+                                {status}
+                              </div>
+                            </Link>
                           </li>
                         );
                       })}
                     </ul>
                   </div>
                 ) : (
-                  <p className="mt-4 text-sm text-gray-600">No quotes yet. Run a test quote.</p>
+                  <div className="mt-4 rounded-xl border bg-gray-50 p-4">
+                    <div className="text-sm font-semibold text-gray-900">No quotes yet</div>
+                    <div className="mt-1 text-sm text-gray-700">
+                      Run a test quote from your public page to validate the full flow.
+                    </div>
+                    {computed.tenantSlug ? (
+                      <div className="mt-3">
+                        <Link
+                          href={computed.publicPath}
+                          className="inline-flex rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+                        >
+                          Open public quote page
+                        </Link>
+                      </div>
+                    ) : null}
+                  </div>
                 )
               ) : (
-                <p className="mt-4 text-sm text-gray-600">
-                  {quotesLoading ? "Loading…" : "Couldn’t load recent quotes yet."}
-                </p>
+                <div className="mt-4 rounded-xl border bg-gray-50 p-4">
+                  <div className="text-sm font-semibold text-gray-900">Couldn’t load recent quotes</div>
+                  <div className="mt-1 text-sm text-gray-700">
+                    {loadingQuotes ? "Loading…" : "Try Refresh, or check your tenant session."}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={loadQuotes}
+                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                      disabled={loadingQuotes}
+                    >
+                      {loadingQuotes ? "Refreshing…" : "Retry"}
+                    </button>
+                    <Link
+                      href="/admin/quotes"
+                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                    >
+                      Open Admin quotes
+                    </Link>
+                  </div>
+                </div>
               )}
-
-              <div className="mt-5 flex flex-wrap gap-3">
-                <Link
-                  href="/admin/quotes"
-                  className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-                >
-                  View in Admin
-                </Link>
-                {computed.tenantSlug ? (
-                  <Link
-                    href={computed.publicPath}
-                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-                  >
-                    Open public quote page
-                  </Link>
-                ) : null}
-              </div>
             </section>
           </div>
         </div>
 
-        {/* Next */}
+        {/* Flow polish */}
         <section className="rounded-2xl border p-6">
           <h2 className="font-semibold">Next (flow polish)</h2>
           <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 space-y-1">
-            <li>Make /dashboard the “home” after sign-in/onboarding.</li>
-            <li>Ensure TopNav label/links feel consistent (Configure → Settings).</li>
-            <li>Add a lightweight “tenant share link” affordance everywhere it matters.</li>
+            <li>Make onboarding always redirect here when setup is complete.</li>
+            <li>Add “share link” affordance on onboarding + admin pages.</li>
+            <li>Add a tenant quotes page (not admin) later for clean SaaS separation.</li>
           </ul>
         </section>
       </div>
