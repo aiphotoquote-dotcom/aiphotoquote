@@ -11,11 +11,11 @@ export const dynamic = "force-dynamic";
 
 /**
  * Save tenant settings (industry, URLs, etc.)
- * This route is called from TenantOnboardingForm.
+ * Called from TenantOnboardingForm.
  *
  * IMPORTANT:
- * - Do NOT use db.query.* because the db instance is not typed with schema generics in this repo.
- * - Use db.select/from/where instead (works everywhere + is more portable).
+ * - Clerk auth() is async in this repo setup -> must await.
+ * - Do NOT use db.query.* (db isn't typed with schema generics). Use select/from/where.
  */
 
 const Body = z.object({
@@ -37,14 +37,14 @@ function normalizeUrl(u: string | null | undefined) {
   const s = String(u ?? "").trim();
   if (!s) return null;
 
-  // allow people to paste "example.com" without scheme
+  // allow "example.com" without scheme
   if (!/^https?:\/\//i.test(s)) return `https://${s}`;
   return s;
 }
 
 export async function POST(req: Request) {
   try {
-    const { userId } = auth();
+    const { userId } = await auth();
     if (!userId) {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
@@ -59,13 +59,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const {
-      tenantSlug,
-      industryKey,
-      redirectUrl,
-      thankYouUrl,
-      // pricing fields ignored here unless you add tenant_pricing_rules write below
-    } = parsed.data;
+    const { tenantSlug, industryKey, redirectUrl, thankYouUrl } = parsed.data;
 
     // Resolve tenant owned by this user (slug is unique)
     const tenantRows = await db
@@ -109,7 +103,7 @@ export async function POST(req: Request) {
         },
       });
 
-    // Return the saved settings (fresh)
+    // Return saved settings (fresh)
     const settingsRows = await db
       .select({
         tenant_id: tenantSettings.tenantId,
