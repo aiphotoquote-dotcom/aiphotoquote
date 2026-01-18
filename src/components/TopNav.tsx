@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
 import { useEffect, useMemo, useState } from "react";
-import { usePathname } from "next/navigation";
 
 type MeSettingsResponse =
   | {
@@ -17,26 +16,16 @@ type MeSettingsResponse =
         updated_at: string | null;
       } | null;
     }
-  | { ok: false; error: any };
+  | { ok: false; error: any; message?: string };
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function navLinkClass(active: boolean) {
-  return cn(
-    "rounded-md px-3 py-1.5 text-sm font-medium",
-    active ? "bg-black text-white" : "text-gray-800 hover:bg-gray-100"
-  );
-}
-
 export default function TopNav() {
-  const pathname = usePathname();
-
-  // null = unknown/loading, false = incomplete, true = complete
+  // null = loading/unknown, false = incomplete, true = complete
   const [complete, setComplete] = useState<boolean | null>(null);
-  const [tenantSlug, setTenantSlug] = useState<string | null>(null);
-  const [tenantName, setTenantName] = useState<string | null>(null);
+  const [tenantSlug, setTenantSlug] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -48,26 +37,25 @@ export default function TopNav() {
 
         if (cancelled) return;
 
-        if (!("ok" in json) || !json.ok) {
+        if (!json || !("ok" in json) || !json.ok) {
           setComplete(false);
-          setTenantSlug(null);
-          setTenantName(null);
+          setTenantSlug("");
           return;
         }
 
-        const t = json.tenant;
+        const slug = json.tenant?.slug ? String(json.tenant.slug) : "";
+        setTenantSlug(slug);
+
         const s = json.settings;
-
-        setTenantSlug(t?.slug ? String(t.slug) : null);
-        setTenantName(t?.name ? String(t.name) : null);
-
         const industry = s?.industry_key ?? "";
+
+        // Minimal “complete” right now: Industry must be set.
+        // You can tighten later to require redirect_url, key verification, etc.
         setComplete(Boolean(industry));
       } catch {
         if (!cancelled) {
           setComplete(false);
-          setTenantSlug(null);
-          setTenantName(null);
+          setTenantSlug("");
         }
       }
     }
@@ -80,66 +68,66 @@ export default function TopNav() {
 
   const settingsLabel = complete === true ? "Settings" : "Configure";
 
-  const publicQuoteHref = useMemo(() => {
-    return tenantSlug ? `/q/${tenantSlug}` : null;
-  }, [tenantSlug]);
+  const setupBadge = useMemo(() => {
+    if (complete === null) return null;
+    if (complete === true) return null;
+    return (
+      <span className="ml-2 rounded-full border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs font-semibold text-yellow-900">
+        Setup
+      </span>
+    );
+  }, [complete]);
 
-  const isDash = pathname?.startsWith("/dashboard");
-  const isOnboarding = pathname?.startsWith("/onboarding");
-  const isAdmin = pathname?.startsWith("/admin");
+  const brand = (
+    <div className="flex items-center gap-3">
+      <span className="font-semibold text-lg">AIPhotoQuote</span>
+      {tenantSlug ? (
+        <span className="hidden sm:inline rounded-full border px-2 py-0.5 text-xs font-mono text-gray-600">
+          {tenantSlug}
+        </span>
+      ) : null}
+    </div>
+  );
 
   return (
     <header className="border-b bg-white">
-      <div className="mx-auto max-w-5xl px-6 py-4 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <Link href="/" className="font-semibold text-lg">
-            AIPhotoQuote
+      <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+        <SignedOut>
+          <Link href="/" className="hover:opacity-90">
+            {brand}
           </Link>
+        </SignedOut>
 
-          {tenantSlug ? (
-            <span className="hidden sm:inline-flex items-center rounded-full border px-2 py-0.5 text-xs text-gray-700">
-              {tenantName ? tenantName : "Tenant"} · <span className="ml-1 font-mono">{tenantSlug}</span>
-            </span>
-          ) : null}
-        </div>
+        <SignedIn>
+          <Link href="/dashboard" className="hover:opacity-90">
+            {brand}
+          </Link>
+        </SignedIn>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 text-sm">
           <SignedOut>
-            <Link className="underline text-sm" href="/sign-in">
+            <Link className="underline" href="/sign-in">
               Sign in
             </Link>
-            <Link className="underline text-sm" href="/sign-up">
+            <Link className="underline" href="/sign-up">
               Sign up
             </Link>
           </SignedOut>
 
           <SignedIn>
-            <nav className="flex items-center gap-2">
-              <Link className={navLinkClass(!!isDash)} href="/dashboard">
+            <nav className="flex items-center gap-4">
+              <Link className="underline" href="/dashboard">
                 Dashboard
               </Link>
 
-              <Link className={navLinkClass(!!isOnboarding)} href="/onboarding">
+              <Link className="underline flex items-center" href="/onboarding">
                 {settingsLabel}
-                {complete === false ? (
-                  <span className="ml-2 rounded-full border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs text-yellow-900">
-                    Setup
-                  </span>
-                ) : null}
+                {setupBadge}
               </Link>
 
-              <Link className={navLinkClass(!!isAdmin)} href="/admin">
+              <Link className="underline" href="/admin">
                 Admin
               </Link>
-
-              {publicQuoteHref ? (
-                <Link
-                  className="hidden sm:inline-flex rounded-md border px-3 py-1.5 text-sm font-medium text-gray-800 hover:bg-gray-50"
-                  href={publicQuoteHref}
-                >
-                  Public Quote
-                </Link>
-              ) : null}
             </nav>
 
             <UserButton />
