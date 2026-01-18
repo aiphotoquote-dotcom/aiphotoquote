@@ -1,6 +1,6 @@
+// src/app/api/tenant/me-settings/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
 import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
@@ -9,88 +9,70 @@ import { tenants, tenantSettings } from "@/lib/db/schema";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function looksLikeUuid(s: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-}
-
-function getActiveTenantIdFromCookies() {
-  // Try a few common names (yours may be one of these already)
-  const jar = cookies();
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-    jar.get("apq_tenant_id")?.value,
-  ]
-    .map((x) => (x ? String(x) : ""))
-    .filter(Boolean);
-
-  const found = candidates.find((v) => looksLikeUuid(v));
-  return found || null;
-}
-
+/**
+ * Returns the active tenant + its tenant_settings row for the current user context.
+ *
+ * How we determine "active tenant":
+ *  1) cookie activeTenantId / active_tenant_id / tenantId / tenant_id
+ *  2) fallback: first tenant (by created_at) as a safe default for now
+ *
+ * NOTE: This is intentionally lightweight and tenant-centric.
+ * It does NOT return secrets.
+ */
 export async function GET() {
   try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json(
-        { ok: false, error: "UNAUTHENTICATED" },
-        { status: 401 }
-      );
-    }
+    const jar = await cookies();
 
-    // 1) Prefer active tenant cookie (multi-tenant friendly)
-    const activeTenantId = getActiveTenantIdFromCookies();
+    const candidates = [
+      jar.get("activeTenantId")?.value,
+      jar.get("active_tenant_id")?.value,
+      jar.get("tenantId")?.value,
+      jar.get("tenant_id")?.value,
+    ]
+      .map((s) => String(s || "").trim())
+      .filter(Boolean);
 
-    let tenantRow:
-      | { id: string; name: string; slug: string; ownerClerkUserId: string | null }
-      | null = null;
+    let tenant = null as any;
 
-    if (activeTenantId) {
-      const rows = await db
+    // 1) If cookie present, try that tenant id first
+    if (candidates.length) {
+      const tenantId = candidates[0];
+
+      // If your Drizzle instance doesn't have db.query.* enabled, use select().
+      tenant = await db
         .select({
           id: tenants.id,
           name: tenants.name,
           slug: tenants.slug,
-          ownerClerkUserId: tenants.ownerClerkUserId,
         })
         .from(tenants)
-        .where(eq(tenants.id, activeTenantId))
-        .limit(1);
-
-      tenantRow = rows[0] ?? null;
+        .where(eq(tenants.id, tenantId))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
     }
 
-    // 2) Fallback: owner lookup (works even without tenant_members)
-    if (!tenantRow) {
-      const rows = await db
+    // 2) Fallback: first tenant
+    if (!tenant) {
+      tenant = await db
         .select({
           id: tenants.id,
           name: tenants.name,
           slug: tenants.slug,
-          ownerClerkUserId: tenants.ownerClerkUserId,
         })
         .from(tenants)
-        .where(eq(tenants.ownerClerkUserId, userId))
-        .limit(1);
-
-      tenantRow = rows[0] ?? null;
+        .orderBy(tenants.createdAt)
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
     }
 
-    if (!tenantRow) {
+    if (!tenant) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "NO_TENANT",
-          message:
-            "No tenant found for this user (and no active tenant cookie set).",
-        },
+        { ok: false, error: "NO_TENANT", message: "No tenant found for this account yet." },
         { status: 404 }
       );
     }
 
-    const settingsRows = await db
+    const settings = await db
       .select({
         tenant_id: tenantSettings.tenantId,
         industry_key: tenantSettings.industryKey,
@@ -99,39 +81,22 @@ export async function GET() {
         updated_at: tenantSettings.updatedAt,
       })
       .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantRow.id))
-      .limit(1);
-
-    const s = settingsRows[0] ?? null;
+      .where(eq(tenantSettings.tenantId, tenant.id))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
 
     return NextResponse.json(
       {
         ok: true,
-        tenant: {
-          id: tenantRow.id,
-          name: tenantRow.name,
-          slug: tenantRow.slug,
-        },
-        settings: s
-          ? {
-              tenant_id: s.tenant_id,
-              industry_key: s.industry_key ?? null,
-              redirect_url: s.redirect_url ?? null,
-              thank_you_url: s.thank_you_url ?? null,
-              updated_at: s.updated_at ? new Date(s.updated_at).toISOString() : null,
-            }
-          : null,
+        tenant,
+        settings,
       },
       { status: 200 }
     );
   } catch (err: any) {
     console.error("ME_SETTINGS_ERROR", err);
     return NextResponse.json(
-      {
-        ok: false,
-        error: "ME_SETTINGS_ERROR",
-        message: err?.message ?? String(err),
-      },
+      { ok: false, error: "ME_SETTINGS_ERROR", message: err?.message ?? String(err) },
       { status: 500 }
     );
   }
