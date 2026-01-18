@@ -75,7 +75,6 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       const s: any = json.settings;
       setIndustryKey(s?.industry_key ?? "");
 
-      // ✅ robust mapping (snake OR camel)
       setRedirectUrl(pickUrl(s, "redirect_url", "redirectUrl"));
       setThankYouUrl(pickUrl(s, "thank_you_url", "thankYouUrl"));
     } catch (e: any) {
@@ -97,7 +96,6 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
     const payload = {
       tenantSlug: tenantSlug.trim(),
       industry_key: industryKey.trim(),
-      // save snake_case (your API expects this)
       redirect_url: redirectUrl.trim() || null,
       thank_you_url: thankYouUrl.trim() || null,
     };
@@ -137,11 +135,13 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
 
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border bg-white p-5">
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="text-sm font-semibold text-gray-900">Tenant settings</div>
-            <div className="mt-1 text-xs text-gray-600">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Tenant settings
+            </div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
               Configure your slug, industry, and redirect URLs.
             </div>
           </div>
@@ -150,45 +150,45 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
             type="button"
             onClick={load}
             disabled={loading || saving}
-            className="rounded-lg border px-3 py-2 text-xs font-semibold hover:bg-gray-50 disabled:opacity-50"
+            className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:hover:bg-gray-900"
           >
             Retry
           </button>
         </div>
 
         {loadErr ? (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
             {loadErr}
           </div>
         ) : null}
 
         {loading ? (
-          <div className="mt-4 text-sm text-gray-600">Loading…</div>
+          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading…</div>
         ) : (
           <div className="mt-5 grid gap-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <div className="text-xs text-gray-700">Tenant name</div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">Tenant name</div>
                 <input
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={tenantName}
                   readOnly
                 />
               </div>
 
               <div>
-                <div className="text-xs text-gray-700">
+                <div className="text-xs text-gray-700 dark:text-gray-200">
                   Tenant slug <span className="text-red-600">*</span>
                 </div>
                 <input
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={tenantSlug}
                   onChange={(e) => setTenantSlug(e.target.value)}
                   placeholder="my-shop"
                   disabled={saving}
                   autoComplete="off"
                 />
-                <div className="mt-1 text-[11px] text-gray-500">
+                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                   Customers will use:{" "}
                   <span className="font-mono">/q/{tenantSlug || "<tenant-slug>"}</span>
                 </div>
@@ -196,11 +196,11 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
             </div>
 
             <div>
-              <div className="text-xs text-gray-700">
+              <div className="text-xs text-gray-700 dark:text-gray-200">
                 Industry key <span className="text-red-600">*</span>
               </div>
               <input
-                className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+                className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                 value={industryKey}
                 onChange={(e) => setIndustryKey(e.target.value)}
                 placeholder="marine | auto | hvac | etc"
@@ -211,38 +211,38 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <div className="text-xs text-gray-700">Redirect URL (optional)</div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">Redirect URL (optional)</div>
                 <input
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={redirectUrl}
                   onChange={(e) => setRedirectUrl(e.target.value)}
                   placeholder="https://your-site.com/thank-you"
                   disabled={saving}
                   autoComplete="off"
                 />
-                <div className="mt-1 text-[11px] text-gray-500">
+                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                   Where to send customer after submit.
                 </div>
               </div>
 
               <div>
-                <div className="text-xs text-gray-700">Thank-you URL (optional)</div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">Thank-you URL (optional)</div>
                 <input
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={thankYouUrl}
                   onChange={(e) => setThankYouUrl(e.target.value)}
                   placeholder="https://your-site.com/thanks"
                   disabled={saving}
                   autoComplete="off"
                 />
-                <div className="mt-1 text-[11px] text-gray-500">
+                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                   Alternate final destination (if used by your flow).
                 </div>
               </div>
             </div>
 
             {saveErr ? (
-              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 whitespace-pre-wrap">
+              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
                 {saveErr}
               </div>
             ) : null}
@@ -252,13 +252,18 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                 type="button"
                 onClick={save}
                 disabled={!canSave || saving}
-                className={cn("rounded-xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50")}
+                className={cn(
+                  "rounded-xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50 hover:opacity-90",
+                  "dark:bg-white dark:text-black"
+                )}
               >
                 {saving ? "Saving…" : "Save settings"}
               </button>
 
               {saved ? (
-                <span className="text-sm font-semibold text-green-700">Saved ✅</span>
+                <span className="text-sm font-semibold text-green-700 dark:text-green-300">
+                  Saved ✅
+                </span>
               ) : null}
             </div>
           </div>
