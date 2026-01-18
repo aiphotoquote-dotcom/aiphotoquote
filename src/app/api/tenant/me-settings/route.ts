@@ -1,111 +1,138 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { sql } from "drizzle-orm";
+import { auth } from "@clerk/nextjs/server";
+import { eq } from "drizzle-orm";
+
 import { db } from "@/lib/db/client";
+import { tenants, tenantSettings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+function looksLikeUuid(s: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
-/**
- * We don't want to "hunt" for the exact cookie name.
- * This supports the common variants used in the app so far.
- */
-async function getActiveTenantIdFromCookies(): Promise<string | null> {
-  const c = await cookies();
-
+function getActiveTenantIdFromCookies() {
+  // Try a few common names (yours may be one of these already)
+  const jar = cookies();
   const candidates = [
-    "active_tenant_id",
-    "activeTenantId",
-    "tenant_id",
-    "tenantId",
-    "apq_active_tenant_id",
-  ];
+    jar.get("activeTenantId")?.value,
+    jar.get("active_tenant_id")?.value,
+    jar.get("tenantId")?.value,
+    jar.get("tenant_id")?.value,
+    jar.get("apq_tenant_id")?.value,
+  ]
+    .map((x) => (x ? String(x) : ""))
+    .filter(Boolean);
 
-  for (const name of candidates) {
-    const v = c.get(name)?.value?.trim();
-    if (v) return v;
-  }
-
-  return null;
+  const found = candidates.find((v) => looksLikeUuid(v));
+  return found || null;
 }
 
 export async function GET() {
   try {
-    const tenantId = await getActiveTenantIdFromCookies();
-
-    if (!tenantId) {
-      return json(
-        {
-          ok: false,
-          error: { code: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
-        },
-        401
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json(
+        { ok: false, error: "UNAUTHENTICATED" },
+        { status: 401 }
       );
     }
 
-    // Try "new" schema first (includes ai_rendering_enabled)
-    try {
-      const r = await db.execute(sql`
-        select
-          tenant_id,
-          industry_key,
-          redirect_url,
-          thank_you_url,
-          ai_rendering_enabled,
-          ai_rendering_copy,
-          ai_rendering_disclaimer,
-          updated_at
-        from tenant_settings
-        where tenant_id = ${tenantId}::uuid
-        limit 1
-      `);
+    // 1) Prefer active tenant cookie (multi-tenant friendly)
+    const activeTenantId = getActiveTenantIdFromCookies();
 
-      const row: any =
-        (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    let tenantRow:
+      | { id: string; name: string; slug: string; ownerClerkUserId: string | null }
+      | null = null;
 
-      return json({
-        ok: true,
-        tenantId,
-        settings: row ?? null,
-        meta: { schema: "new" },
-      });
-    } catch {
-      // Fallback for prod DBs missing new columns
-      const r = await db.execute(sql`
-        select
-          tenant_id,
-          industry_key,
-          redirect_url,
-          thank_you_url,
-          updated_at
-        from tenant_settings
-        where tenant_id = ${tenantId}::uuid
-        limit 1
-      `);
+    if (activeTenantId) {
+      const rows = await db
+        .select({
+          id: tenants.id,
+          name: tenants.name,
+          slug: tenants.slug,
+          ownerClerkUserId: tenants.ownerClerkUserId,
+        })
+        .from(tenants)
+        .where(eq(tenants.id, activeTenantId))
+        .limit(1);
 
-      const row: any =
-        (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-
-      return json({
-        ok: true,
-        tenantId,
-        settings: row ? { ...row, ai_rendering_enabled: false } : null,
-        meta: { schema: "fallback" },
-      });
+      tenantRow = rows[0] ?? null;
     }
+
+    // 2) Fallback: owner lookup (works even without tenant_members)
+    if (!tenantRow) {
+      const rows = await db
+        .select({
+          id: tenants.id,
+          name: tenants.name,
+          slug: tenants.slug,
+          ownerClerkUserId: tenants.ownerClerkUserId,
+        })
+        .from(tenants)
+        .where(eq(tenants.ownerClerkUserId, userId))
+        .limit(1);
+
+      tenantRow = rows[0] ?? null;
+    }
+
+    if (!tenantRow) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "NO_TENANT",
+          message:
+            "No tenant found for this user (and no active tenant cookie set).",
+        },
+        { status: 404 }
+      );
+    }
+
+    const settingsRows = await db
+      .select({
+        tenant_id: tenantSettings.tenantId,
+        industry_key: tenantSettings.industryKey,
+        redirect_url: tenantSettings.redirectUrl,
+        thank_you_url: tenantSettings.thankYouUrl,
+        updated_at: tenantSettings.updatedAt,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenantRow.id))
+      .limit(1);
+
+    const s = settingsRows[0] ?? null;
+
+    return NextResponse.json(
+      {
+        ok: true,
+        tenant: {
+          id: tenantRow.id,
+          name: tenantRow.name,
+          slug: tenantRow.slug,
+        },
+        settings: s
+          ? {
+              tenant_id: s.tenant_id,
+              industry_key: s.industry_key ?? null,
+              redirect_url: s.redirect_url ?? null,
+              thank_you_url: s.thank_you_url ?? null,
+              updated_at: s.updated_at ? new Date(s.updated_at).toISOString() : null,
+            }
+          : null,
+      },
+      { status: 200 }
+    );
   } catch (err: any) {
-    return json(
+    console.error("ME_SETTINGS_ERROR", err);
+    return NextResponse.json(
       {
         ok: false,
-        error: {
-          code: "INTERNAL",
-          message: err?.message ?? String(err),
-        },
+        error: "ME_SETTINGS_ERROR",
+        message: err?.message ?? String(err),
       },
-      500
+      { status: 500 }
     );
   }
 }
