@@ -86,7 +86,9 @@ export const tenantPricingRules = pgTable("tenant_pricing_rules", {
  * Encrypted tenant secrets (never returned raw)
  */
 export const tenantSecrets = pgTable("tenant_secrets", {
+  // NOTE: If your prod DB "id" is not uuid, we DO NOT rely on it for lookups.
   id: uuid("id").defaultRandom().primaryKey(),
+
   tenantId: uuid("tenant_id")
     .notNull()
     .references(() => tenants.id),
@@ -100,7 +102,7 @@ export const tenantSecrets = pgTable("tenant_secrets", {
 
 /**
  * Quote logs (admin + auditing)
- * Store input/output JSON to match route inserts.
+ * IMPORTANT: in prod DB, input/output are NOT NULL.
  */
 export const quoteLogs = pgTable("quote_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -108,8 +110,8 @@ export const quoteLogs = pgTable("quote_logs", {
     .notNull()
     .references(() => tenants.id),
 
-  input: jsonb("input").$type<any>(),
-  output: jsonb("output").$type<any>(),
+  input: jsonb("input").$type<any>().notNull(),
+  output: jsonb("output").$type<any>().notNull(),
 
   confidence: text("confidence"),
   estimateLow: integer("estimate_low"),
