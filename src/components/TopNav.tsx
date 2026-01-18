@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 type MeSettingsResponse =
   | {
@@ -18,14 +18,9 @@ type MeSettingsResponse =
     }
   | { ok: false; error: any; message?: string };
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
 export default function TopNav() {
-  // null = loading/unknown, false = incomplete, true = complete
+  // null = unknown/loading, false = incomplete, true = complete
   const [complete, setComplete] = useState<boolean | null>(null);
-  const [tenantSlug, setTenantSlug] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -39,24 +34,16 @@ export default function TopNav() {
 
         if (!json || !("ok" in json) || !json.ok) {
           setComplete(false);
-          setTenantSlug("");
           return;
         }
 
-        const slug = json.tenant?.slug ? String(json.tenant.slug) : "";
-        setTenantSlug(slug);
+        const industry = json.settings?.industry_key ?? "";
+        const slug = json.tenant?.slug ?? "";
 
-        const s = json.settings;
-        const industry = s?.industry_key ?? "";
-
-        // Minimal “complete” right now: Industry must be set.
-        // You can tighten later to require redirect_url, key verification, etc.
-        setComplete(Boolean(industry));
+        // Minimal “complete”
+        setComplete(Boolean(industry && slug));
       } catch {
-        if (!cancelled) {
-          setComplete(false);
-          setTenantSlug("");
-        }
+        if (!cancelled) setComplete(false);
       }
     }
 
@@ -68,41 +55,12 @@ export default function TopNav() {
 
   const settingsLabel = complete === true ? "Settings" : "Configure";
 
-  const setupBadge = useMemo(() => {
-    if (complete === null) return null;
-    if (complete === true) return null;
-    return (
-      <span className="ml-2 rounded-full border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs font-semibold text-yellow-900">
-        Setup
-      </span>
-    );
-  }, [complete]);
-
-  const brand = (
-    <div className="flex items-center gap-3">
-      <span className="font-semibold text-lg">AIPhotoQuote</span>
-      {tenantSlug ? (
-        <span className="hidden sm:inline rounded-full border px-2 py-0.5 text-xs font-mono text-gray-600">
-          {tenantSlug}
-        </span>
-      ) : null}
-    </div>
-  );
-
   return (
-    <header className="border-b bg-white">
+    <header className="border-b">
       <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
-        <SignedOut>
-          <Link href="/" className="hover:opacity-90">
-            {brand}
-          </Link>
-        </SignedOut>
-
-        <SignedIn>
-          <Link href="/dashboard" className="hover:opacity-90">
-            {brand}
-          </Link>
-        </SignedIn>
+        <Link href="/" className="font-semibold text-lg">
+          AIPhotoQuote
+        </Link>
 
         <div className="flex items-center gap-4 text-sm">
           <SignedOut>
@@ -120,16 +78,19 @@ export default function TopNav() {
                 Dashboard
               </Link>
 
-              <Link className="underline flex items-center" href="/onboarding">
+              <Link className="underline" href="/onboarding">
                 {settingsLabel}
-                {setupBadge}
+                {complete === false && (
+                  <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
+                    Setup
+                  </span>
+                )}
               </Link>
 
               <Link className="underline" href="/admin">
                 Admin
               </Link>
             </nav>
-
             <UserButton />
           </SignedIn>
         </div>
