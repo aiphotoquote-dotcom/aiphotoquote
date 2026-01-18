@@ -1,5 +1,8 @@
-import Link from "next/link";
 import TopNav from "@/components/TopNav";
+import Link from "next/link";
+import { headers } from "next/headers";
+
+export const dynamic = "force-dynamic";
 
 type MeSettingsResponse =
   | {
@@ -15,213 +18,247 @@ type MeSettingsResponse =
     }
   | { ok: false; error: any };
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
+function baseUrlFromHeaders() {
+  const h = headers();
+  const proto = h.get("x-forwarded-proto") || "https";
+  const host = h.get("x-forwarded-host") || h.get("host") || "";
+  if (!host) return "";
+  return `${proto}://${host}`;
+}
+
+async function getMeSettings(): Promise<MeSettingsResponse | null> {
+  try {
+    const baseUrl = baseUrlFromHeaders();
+    if (!baseUrl) return null;
+
+    const res = await fetch(`${baseUrl}/api/tenant/me-settings`, {
+      cache: "no-store",
+      // Important: include cookies so the API sees the signed-in session
+      headers: { cookie: headers().get("cookie") || "" },
+    });
+
+    const json = (await res.json()) as MeSettingsResponse;
+    return json;
+  } catch {
+    return null;
+  }
 }
 
 function Card({
   title,
-  desc,
-  href,
-  tone = "default",
-  right,
+  children,
 }: {
   title: string;
-  desc: string;
-  href: string;
-  tone?: "default" | "primary" | "warn";
-  right?: React.ReactNode;
+  children: React.ReactNode;
 }) {
-  const base =
-    "group rounded-2xl border p-5 transition hover:shadow-sm flex items-start justify-between gap-4";
-  const toneCls =
-    tone === "primary"
-      ? "border-gray-900 bg-gray-900 text-white"
-      : tone === "warn"
-        ? "border-amber-200 bg-amber-50 text-amber-950"
-        : "border-gray-200 bg-white text-gray-900";
-
-  const titleCls =
-    tone === "primary" ? "text-white" : tone === "warn" ? "text-amber-950" : "text-gray-900";
-  const descCls =
-    tone === "primary" ? "text-gray-100/90" : tone === "warn" ? "text-amber-900" : "text-gray-600";
-
-  const linkCls =
-    tone === "primary"
-      ? "text-white underline decoration-white/40 group-hover:decoration-white"
-      : "text-gray-900 underline decoration-gray-300 group-hover:decoration-gray-500";
-
   return (
-    <Link href={href} className={cn(base, toneCls)}>
-      <div className="min-w-0">
-        <div className={cn("text-sm font-semibold", titleCls)}>{title}</div>
-        <div className={cn("mt-1 text-xs", descCls)}>{desc}</div>
-        <div className={cn("mt-3 text-xs font-semibold", linkCls)}>Open →</div>
-      </div>
-      {right ? <div className="shrink-0">{right}</div> : null}
-    </Link>
-  );
-}
-
-function Pill({ label, tone }: { label: string; tone: "ok" | "warn" | "idle" }) {
-  const cls =
-    tone === "ok"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-      : tone === "warn"
-        ? "border-amber-200 bg-amber-50 text-amber-900"
-        : "border-gray-200 bg-white text-gray-700";
-
-  return (
-    <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
-      {label}
-    </span>
+    <div className="rounded-2xl border border-gray-200 bg-white p-6">
+      <h2 className="font-semibold text-gray-900">{title}</h2>
+      <div className="mt-3">{children}</div>
+    </div>
   );
 }
 
 export default async function DashboardPage() {
-  // Server-side read of tenant/settings (works fine even if it returns ok:false; we handle it).
-  let me: MeSettingsResponse | null = null;
-
-  try {
-    // Relative fetch is OK in Next server components.
-    const res = await fetch(`${process.env.NEXT_PUBLIC_APP_URL ?? ""}/api/tenant/me-settings`, {
-      cache: "no-store",
-      // If NEXT_PUBLIC_APP_URL isn't set, Next will still try relative in production,
-      // but local dev can be weird. So we fall back below if needed.
-    } as any);
-
-    if (res.ok) {
-      me = (await res.json()) as MeSettingsResponse;
-    }
-  } catch {
-    // ignore
-  }
-
-  // Fallback: if absolute fetch failed (common locally), try relative.
-  if (!me) {
-    try {
-      const res2 = await fetch(`/api/tenant/me-settings`, { cache: "no-store" } as any);
-      if (res2.ok) me = (await res2.json()) as MeSettingsResponse;
-    } catch {
-      // ignore
-    }
-  }
+  const me = await getMeSettings();
 
   const ok = Boolean(me && "ok" in me && (me as any).ok === true);
+  const tenant = ok ? (me as any).tenant : null;
+  const settings = ok ? (me as any).settings : null;
 
-  const tenantName = ok ? (me as any).tenant?.name ?? "" : "";
-  const tenantSlug = ok ? (me as any).tenant?.slug ?? "" : "";
-  const industryKey = ok ? (me as any).settings?.industry_key ?? null : null;
-  const redirectUrl = ok ? (me as any).settings?.redirect_url ?? null : null;
-  const thankYouUrl = ok ? (me as any).settings?.thank_you_url ?? null : null;
+  const tenantName = tenant?.name || "";
+  const tenantSlug = tenant?.slug || "";
 
-  const setupComplete = Boolean((industryKey ?? "").trim());
-  const hasPublicPage = Boolean((tenantSlug ?? "").trim());
+  const industryKey = settings?.industry_key ?? null;
+  const redirectUrl = settings?.redirect_url ?? null;
+  const thankYouUrl = settings?.thank_you_url ?? null;
+
+  // Setup completeness (simple + deterministic)
+  const hasIndustry = Boolean((industryKey ?? "").trim());
+  const hasRedirects = Boolean(((redirectUrl ?? "").trim() && (thankYouUrl ?? "").trim()));
+  const setupComplete = hasIndustry; // keep minimal for now, per your earlier preference
+
+  const publicQuotePath = tenantSlug ? `/q/${tenantSlug}` : null;
 
   return (
-    <main className="min-h-screen bg-white">
+    <main className="min-h-screen bg-gray-50">
       <TopNav />
 
-      <div className="mx-auto max-w-5xl px-6 py-10 space-y-8">
-        {/* Header */}
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-3">
+      <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
             <h1 className="text-2xl font-semibold text-gray-900">Dashboard</h1>
-            {ok ? (
-              setupComplete ? <Pill label="Setup complete" tone="ok" /> : <Pill label="Setup needed" tone="warn" />
-            ) : (
-              <Pill label="Not signed in / no tenant" tone="idle" />
-            )}
+            <p className="mt-1 text-sm text-gray-700">
+              Tenant:{" "}
+              <span className="font-semibold">
+                {tenantName || (ok ? "Unnamed tenant" : "Not resolved")}
+              </span>
+              {tenantSlug ? (
+                <span className="ml-2 font-mono text-xs text-gray-600">/{tenantSlug}</span>
+              ) : null}
+            </p>
           </div>
 
-          {ok ? (
-            <div className="text-sm text-gray-600">
-              Tenant: <span className="font-semibold text-gray-900">{tenantName || "Untitled"}</span>{" "}
-              {tenantSlug ? (
-                <>
-                  · Public slug: <span className="font-mono text-gray-900">{tenantSlug}</span>
-                </>
-              ) : null}
-            </div>
+          {publicQuotePath ? (
+            <Link
+              href={publicQuotePath}
+              className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white"
+            >
+              Open Public Quote →
+            </Link>
           ) : (
-            <div className="text-sm text-gray-600">
-              Sign in to manage your tenant, settings, and quotes.
-            </div>
+            <Link
+              href="/onboarding"
+              className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white"
+            >
+              Configure →
+            </Link>
           )}
         </div>
 
-        {/* Quick actions */}
-        <section className="space-y-3">
-          <div className="text-sm font-semibold text-gray-900">Quick actions</div>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            <Card
-              title={setupComplete ? "Review Settings" : "Finish Setup"}
-              desc={
-                setupComplete
-                  ? "Industry + redirect settings. OpenAI key + AI policy live under Admin."
-                  : "Pick your industry, redirect + thank-you URLs, and confirm your tenant is ready."
-              }
-              href="/onboarding"
-              tone={setupComplete ? "default" : "warn"}
-              right={setupComplete ? <Pill label="Ready" tone="ok" /> : <Pill label="Do this first" tone="warn" />}
-            />
-
-            <Card
-              title="Admin"
-              desc="Tenant OpenAI key, pricing rules, AI policy, and quote logs."
-              href="/admin"
-              tone="default"
-            />
-
-            <Card
-              title="Public Quote Page"
-              desc={
-                hasPublicPage
-                  ? `Customer intake page: /q/${tenantSlug}`
-                  : "No tenant slug found yet. Finish setup first."
-              }
-              href={hasPublicPage ? `/q/${tenantSlug}` : "/onboarding"}
-              tone={hasPublicPage ? "primary" : "warn"}
-              right={hasPublicPage ? <Pill label="Live link" tone="ok" /> : <Pill label="Missing slug" tone="warn" />}
-            />
-
-            <Card
-              title="Polish Navigation"
-              desc="We’ll refine flow: Dashboard → Configure → Admin setup pages, with completion badges."
-              href="/dashboard"
-              tone="default"
-            />
-          </div>
-        </section>
-
-        {/* Setup summary */}
-        {ok ? (
-          <section className="rounded-2xl border border-gray-200 bg-white p-6 space-y-3">
-            <div className="text-sm font-semibold text-gray-900">Setup summary</div>
-
-            <div className="grid gap-2 text-sm">
-              <div className="flex items-center justify-between gap-4">
-                <div className="text-gray-700">Industry</div>
-                <div className="font-mono text-gray-900">{industryKey ? industryKey : "—"}</div>
-              </div>
-
-              <div className="flex items-center justify-between gap-4">
-                <div className="text-gray-700">Redirect URL</div>
-                <div className="font-mono text-gray-900">{redirectUrl ? redirectUrl : "—"}</div>
-              </div>
-
-              <div className="flex items-center justify-between gap-4">
-                <div className="text-gray-700">Thank-you URL</div>
-                <div className="font-mono text-gray-900">{thankYouUrl ? thankYouUrl : "—"}</div>
-              </div>
+        {!ok ? (
+          <Card title="Tenant not resolved">
+            <p className="text-sm text-gray-700">
+              We couldn’t load your tenant context. If you just signed in, try refreshing.
+              Otherwise go to Configure and complete onboarding.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Link className="underline text-sm" href="/onboarding">
+                Go to Configure
+              </Link>
+              <Link className="underline text-sm" href="/admin">
+                Go to Admin
+              </Link>
             </div>
+          </Card>
+        ) : (
+          <>
+            <Card title="Setup status">
+              <div className="text-sm text-gray-800 space-y-2">
+                <div>
+                  Industry:{" "}
+                  {hasIndustry ? (
+                    <span className="font-semibold text-green-700">Set</span>
+                  ) : (
+                    <span className="font-semibold text-amber-800">Missing</span>
+                  )}
+                  {industryKey ? (
+                    <span className="ml-2 font-mono text-xs text-gray-600">
+                      {industryKey}
+                    </span>
+                  ) : null}
+                </div>
 
-            <div className="pt-2 text-xs text-gray-600">
-              Note: OpenAI key + AI policy are in <span className="font-semibold text-gray-900">Admin</span>. This keeps the “customer uses tenant key” model intact.
-            </div>
-          </section>
-        ) : null}
+                <div>
+                  Redirect URLs:{" "}
+                  {hasRedirects ? (
+                    <span className="font-semibold text-green-700">Set</span>
+                  ) : (
+                    <span className="font-semibold text-gray-600">Optional / not complete</span>
+                  )}
+                </div>
+
+                <div>
+                  Overall:{" "}
+                  {setupComplete ? (
+                    <span className="font-semibold text-green-700">Ready</span>
+                  ) : (
+                    <span className="font-semibold text-amber-800">
+                      Needs configuration
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-3">
+                <Link
+                  href="/onboarding"
+                  className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold"
+                >
+                  {setupComplete ? "Review settings" : "Finish Configure"}
+                </Link>
+
+                <Link
+                  href="/admin/setup/openai"
+                  className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold"
+                >
+                  OpenAI Key
+                </Link>
+
+                <Link
+                  href="/admin/setup/ai-policy"
+                  className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold"
+                >
+                  AI Policy
+                </Link>
+
+                <Link
+                  href="/admin"
+                  className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold"
+                >
+                  Admin
+                </Link>
+              </div>
+
+              {!hasIndustry ? (
+                <p className="mt-4 text-xs text-gray-600">
+                  Tip: industry is what drives pricing and prompt defaults. Set that first.
+                </p>
+              ) : null}
+            </Card>
+
+            <Card title="Quick actions">
+              <ul className="list-disc pl-5 text-sm text-gray-700 space-y-2">
+                <li>
+                  Test public quote flow{" "}
+                  {publicQuotePath ? (
+                    <>
+                      at{" "}
+                      <Link className="underline font-mono" href={publicQuotePath}>
+                        {publicQuotePath}
+                      </Link>
+                    </>
+                  ) : (
+                    <>
+                      after you set your tenant slug in{" "}
+                      <Link className="underline" href="/onboarding">
+                        Configure
+                      </Link>
+                    </>
+                  )}
+                </li>
+                <li>
+                  Review leads & quote logs in{" "}
+                  <Link className="underline" href="/admin/quotes">
+                    Admin → Quotes
+                  </Link>
+                </li>
+                <li>
+                  Adjust redirects in{" "}
+                  <Link className="underline" href="/onboarding">
+                    Configure
+                  </Link>{" "}
+                  (optional)
+                </li>
+              </ul>
+            </Card>
+
+            <Card title="What’s next">
+              <p className="text-sm text-gray-700">
+                Next we’ll refine the tenant dashboard into real modules:
+                <span className="block mt-2">
+                  • Setup checklist (OpenAI key, AI policy, pricing guardrails)
+                </span>
+                <span className="block">
+                  • Usage + cost (per-tenant token/image counters)
+                </span>
+                <span className="block">
+                  • Recent activity (latest leads + render status)
+                </span>
+              </p>
+            </Card>
+          </>
+        )}
       </div>
     </main>
   );
