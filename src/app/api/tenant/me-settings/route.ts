@@ -18,7 +18,7 @@ export async function GET() {
     const { userId } = await auth();
     if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
 
-    // Next.js 16: cookies() is async
+    // Next 16: cookies() is async
     const jar = await cookies();
 
     const candidates = [
@@ -45,9 +45,8 @@ export async function GET() {
       }
     }
 
-    // 2) Fallback: first tenant owned by this user
+    // 2) Fallback: most recent tenant owned by this user
     if (!tenant) {
-      // If ownerClerkUserId is nullable in schema, we must query carefully.
       const rows = await db.execute(sql`
         select id, name, slug, owner_clerk_user_id
         from tenants
@@ -56,7 +55,9 @@ export async function GET() {
         limit 1
       `);
 
-      const row: any = (rows as any)?.rows?.[0] ?? (Array.isArray(rows) ? (rows as any)[0] : null);
+      const row: any =
+        (rows as any)?.rows?.[0] ?? (Array.isArray(rows) ? (rows as any)[0] : null);
+
       if (row) {
         tenant = {
           id: row.id,
@@ -75,16 +76,23 @@ export async function GET() {
       .where(eq(tenantSettings.tenantId, tenant.id))
       .limit(1);
 
-    const s = sRows[0] ?? null;
+    const s: any = sRows[0] ?? null;
 
-    // Return snake_case fields because your UI + other routes already expect these names.
+    // Return BOTH snake_case and camelCase for URL fields to avoid UI drift.
     const settings = s
       ? {
           tenant_id: s.tenantId,
           industry_key: s.industryKey ?? null,
-          redirect_url: (s as any).redirectUrl ?? null,
-          thank_you_url: (s as any).thankYouUrl ?? null,
-          updated_at: (s as any).updatedAt ? String((s as any).updatedAt) : null,
+
+          // snake_case (what your UI expects)
+          redirect_url: s.redirectUrl ?? null,
+          thank_you_url: s.thankYouUrl ?? null,
+
+          // camelCase (what some older UI variants used)
+          redirectUrl: s.redirectUrl ?? null,
+          thankYouUrl: s.thankYouUrl ?? null,
+
+          updated_at: s.updatedAt ? String(s.updatedAt) : null,
         }
       : null;
 
@@ -95,11 +103,7 @@ export async function GET() {
     });
   } catch (e: any) {
     return json(
-      {
-        ok: false,
-        error: "ME_SETTINGS_FAILED",
-        message: e?.message ?? String(e),
-      },
+      { ok: false, error: "ME_SETTINGS_FAILED", message: e?.message ?? String(e) },
       500
     );
   }

@@ -10,8 +10,13 @@ type MeSettingsResponse =
       settings: {
         tenant_id: string;
         industry_key: string | null;
-        redirect_url: string | null;
-        thank_you_url: string | null;
+
+        // support both
+        redirect_url?: string | null;
+        thank_you_url?: string | null;
+        redirectUrl?: string | null;
+        thankYouUrl?: string | null;
+
         updated_at: string | null;
       } | null;
     }
@@ -42,6 +47,14 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
     return Boolean(tenantSlug.trim().length >= 3 && industryKey.trim().length >= 1);
   }, [tenantSlug, industryKey]);
 
+  function pickUrl(s: any, snake: string, camel: string) {
+    const a = s?.[snake];
+    if (typeof a === "string") return a;
+    const b = s?.[camel];
+    if (typeof b === "string") return b;
+    return "";
+  }
+
   async function load() {
     setLoading(true);
     setLoadErr(null);
@@ -59,10 +72,12 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       setTenantName(json.tenant?.name ?? "");
       setTenantSlug(json.tenant?.slug ?? "");
 
-      const s = json.settings;
+      const s: any = json.settings;
       setIndustryKey(s?.industry_key ?? "");
-      setRedirectUrl(s?.redirect_url ?? "");
-      setThankYouUrl(s?.thank_you_url ?? "");
+
+      // ✅ robust mapping (snake OR camel)
+      setRedirectUrl(pickUrl(s, "redirect_url", "redirectUrl"));
+      setThankYouUrl(pickUrl(s, "thank_you_url", "thankYouUrl"));
     } catch (e: any) {
       setLoadErr(e?.message ?? "Failed to load tenant settings.");
     } finally {
@@ -82,6 +97,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
     const payload = {
       tenantSlug: tenantSlug.trim(),
       industry_key: industryKey.trim(),
+      // save snake_case (your API expects this)
       redirect_url: redirectUrl.trim() || null,
       thank_you_url: thankYouUrl.trim() || null,
     };
@@ -95,21 +111,20 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       });
 
       const text = await res.text();
-      let json: any = null;
+      let j: any = null;
       try {
-        json = text ? JSON.parse(text) : null;
+        j = text ? JSON.parse(text) : null;
       } catch {
         throw new Error(`Save returned non-JSON (HTTP ${res.status}).`);
       }
 
-      if (!res.ok || !json?.ok) {
-        throw new Error(json?.message || json?.error || `Save failed (HTTP ${res.status}).`);
+      if (!res.ok || !j?.ok) {
+        throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status}).`);
       }
 
       setSaved(true);
       setTimeout(() => setSaved(false), 1200);
 
-      // reload so UI always reflects DB truth
       await load();
 
       if (redirectToDashboard) router.push("/dashboard");
@@ -125,9 +140,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       <div className="rounded-2xl border bg-white p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <div className="text-sm font-semibold text-gray-900">
-              Tenant settings
-            </div>
+            <div className="text-sm font-semibold text-gray-900">Tenant settings</div>
             <div className="mt-1 text-xs text-gray-600">
               Configure your slug, industry, and redirect URLs.
             </div>
@@ -176,7 +189,8 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                   autoComplete="off"
                 />
                 <div className="mt-1 text-[11px] text-gray-500">
-                  Customers will use: <span className="font-mono">/q/{tenantSlug || "<tenant-slug>"}</span>
+                  Customers will use:{" "}
+                  <span className="font-mono">/q/{tenantSlug || "<tenant-slug>"}</span>
                 </div>
               </div>
             </div>
@@ -238,9 +252,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                 type="button"
                 onClick={save}
                 disabled={!canSave || saving}
-                className={cn(
-                  "rounded-xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50"
-                )}
+                className={cn("rounded-xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50")}
               >
                 {saving ? "Saving…" : "Save settings"}
               </button>
