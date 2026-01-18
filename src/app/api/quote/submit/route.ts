@@ -20,14 +20,22 @@ const Req = z.object({
       shotType: z.enum(["wide", "closeup", "extra"]),
     })
   ),
-  customer_context: z.object({
-    name: z.string().optional(),
-    email: z.string().optional(),
-    phone: z.string().optional(),
-    notes: z.string().optional(),
-  }),
+  customer_context: z
+    .object({
+      name: z.string().optional(),
+      email: z.string().optional(),
+      phone: z.string().optional(),
+      notes: z.string().optional(),
+      category: z.string().optional(),
+      service_type: z.string().optional(),
+    })
+    .optional(),
   render_opt_in: z.boolean().optional().default(false),
 });
+
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
+}
 
 export async function POST(req: Request) {
   try {
@@ -35,53 +43,55 @@ export async function POST(req: Request) {
     const parsed = Req.safeParse(body);
 
     if (!parsed.success) {
-      return NextResponse.json(
+      return json(
         { ok: false, error: "BAD_REQUEST", issues: parsed.error.issues },
-        { status: 400 }
+        400
       );
     }
 
     const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
-    /* -------------------------------------------------
-     * 1. Resolve tenant
-     * ------------------------------------------------- */
-    const tenant = await db.query.tenants.findFirst({
-      where: eq(tenants.slug, tenantSlug),
-    });
+    // ------------------------------------------------------------
+    // 1) Tenant lookup (NO db.query usage — avoids schema-generic TS errors)
+    // ------------------------------------------------------------
+    const tenant = await db
+      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
+      .from(tenants)
+      .where(eq(tenants.slug, tenantSlug))
+      .limit(1)
+      .then((rows) => rows[0]);
 
     if (!tenant) {
-      return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND" },
-        { status: 404 }
-      );
+      return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
     }
 
-    /* -------------------------------------------------
-     * 2. Load tenant OpenAI key (NOT platform key)
-     * ------------------------------------------------- */
-    const secret = await db.query.tenantSecrets.findFirst({
-      where: eq(tenantSecrets.tenantId, tenant.id),
-    });
+    // ------------------------------------------------------------
+    // 2) Tenant OpenAI key lookup (NO db.query usage)
+    // ------------------------------------------------------------
+    const secretRow = await db
+      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+      .from(tenantSecrets)
+      .where(eq(tenantSecrets.tenantId, tenant.id))
+      .limit(1)
+      .then((rows) => rows[0]);
 
-    if (!secret) {
-      return NextResponse.json(
+    if (!secretRow?.openaiKeyEnc) {
+      return json(
         {
           ok: false,
           error: "TENANT_OPENAI_KEY_MISSING",
-          message:
-            "Tenant has not configured an OpenAI API key yet.",
+          message: "Tenant has not configured an OpenAI API key yet.",
         },
-        { status: 400 }
+        400
       );
     }
 
-    const openaiKey = decryptSecret(secret.openaiKeyEnc);
+    const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
     const openai = new OpenAI({ apiKey: openaiKey });
 
-    /* -------------------------------------------------
-     * 3. Build AI prompt
-     * ------------------------------------------------- */
+    // ------------------------------------------------------------
+    // 3) Prompt (keep stable for sellable SaaS)
+    // ------------------------------------------------------------
     const prompt = `
 You are an expert upholstery estimator.
 
@@ -93,71 +103,80 @@ Return a JSON object with:
 - questions (array of strings)
 - estimate { low: number, high: number }
 
-Be conservative and professional.
-`;
+Be conservative, professional, and avoid overpromising.
+`.trim();
 
-    const visionInput = images.map((img) => ({
-      type: "image_url",
+    // Fix OpenAI content-part typing with `as const`
+    const visionParts = images.map((img) => ({
+      type: "image_url" as const,
       image_url: { url: img.url },
     }));
 
-    /* -------------------------------------------------
-     * 4. Call OpenAI
-     * ------------------------------------------------- */
+    // ------------------------------------------------------------
+    // 4) OpenAI call
+    // ------------------------------------------------------------
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
         {
           role: "user",
-          content: [
-            { type: "text", text: prompt },
-            ...visionInput,
-          ],
+          content: [{ type: "text" as const, text: prompt }, ...visionParts],
         },
       ],
       response_format: { type: "json_object" },
     });
 
-    const aiOutput = JSON.parse(
-      completion.choices[0].message.content || "{}"
-    );
+    const content = completion.choices?.[0]?.message?.content ?? "{}";
+    let aiOutput: any = {};
+    try {
+      aiOutput = JSON.parse(content);
+    } catch {
+      aiOutput = { raw: content };
+    }
 
-    /* -------------------------------------------------
-     * 5. Persist quote (JSON-only schema)
-     * ------------------------------------------------- */
+    // ------------------------------------------------------------
+    // 5) Persist quote_logs (MATCHES YOUR ACTUAL DB: jsonb input/output)
+    // ------------------------------------------------------------
+    const inputPayload = {
+      tenantSlug,
+      images,
+      customer_context: customer_context ?? {},
+      render_opt_in: Boolean(render_opt_in),
+      createdAt: new Date().toISOString(),
+    };
+
+    const renderOptIn = Boolean(render_opt_in);
+
     const [row] = await db
       .insert(quoteLogs)
       .values({
         tenantId: tenant.id,
-        input: {
-          images,
-          customer_context,
-        },
+        input: inputPayload,
         output: aiOutput,
-        renderOptIn: Boolean(render_opt_in),
-        renderStatus: render_opt_in ? "queued" : "not_requested",
+        renderOptIn,
+        renderStatus: renderOptIn ? "queued" : "not_requested",
       })
       .returning({ id: quoteLogs.id });
 
-    /* -------------------------------------------------
-     * 6. Return response
-     * ------------------------------------------------- */
-    return NextResponse.json({
+    // ------------------------------------------------------------
+    // 6) Response
+    // ------------------------------------------------------------
+    return json({
       ok: true,
-      quoteLogId: row.id,
+      quoteLogId: row?.id,
+      tenantId: tenant.id,
       output: aiOutput,
-      render_opt_in: Boolean(render_opt_in),
+      render_opt_in: renderOptIn,
     });
   } catch (err: any) {
     console.error("QUOTE_SUBMIT_ERROR", err);
-
-    return NextResponse.json(
+    return json(
       {
         ok: false,
         error: "REQUEST_FAILED",
         message: err?.message ?? "Unknown error",
       },
-      { status: 500 }
+      500
     );
   }
 }
