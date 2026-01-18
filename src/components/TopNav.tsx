@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
 import { useEffect, useMemo, useState } from "react";
+import { usePathname } from "next/navigation";
 
 type MeSettingsResponse =
   | {
@@ -22,25 +23,52 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function navLinkClass(active: boolean) {
+  return cn(
+    "rounded-md px-3 py-1.5 text-sm font-medium",
+    active ? "bg-black text-white" : "text-gray-800 hover:bg-gray-100"
+  );
+}
+
 export default function TopNav() {
-  const [me, setMe] = useState<MeSettingsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const pathname = usePathname();
+
+  // null = unknown/loading, false = incomplete, true = complete
+  const [complete, setComplete] = useState<boolean | null>(null);
+  const [tenantSlug, setTenantSlug] = useState<string | null>(null);
+  const [tenantName, setTenantName] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      setLoading(true);
       try {
         const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const json: MeSettingsResponse = await res.json();
 
         if (cancelled) return;
-        setMe(json);
+
+        if (!("ok" in json) || !json.ok) {
+          setComplete(false);
+          setTenantSlug(null);
+          setTenantName(null);
+          return;
+        }
+
+        const t = json.tenant;
+        const s = json.settings;
+
+        setTenantSlug(t?.slug ? String(t.slug) : null);
+        setTenantName(t?.name ? String(t.name) : null);
+
+        const industry = s?.industry_key ?? "";
+        setComplete(Boolean(industry));
       } catch {
-        if (!cancelled) setMe({ ok: false, error: "FETCH_FAILED" } as any);
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setComplete(false);
+          setTenantSlug(null);
+          setTenantName(null);
+        }
       }
     }
 
@@ -50,84 +78,66 @@ export default function TopNav() {
     };
   }, []);
 
-  const ok = Boolean(me && "ok" in me && (me as any).ok === true);
+  const settingsLabel = complete === true ? "Settings" : "Configure";
 
-  const tenantName = ok ? (me as any).tenant?.name ?? "" : "";
-  const tenantSlug = ok ? (me as any).tenant?.slug ?? "" : "";
-  const industryKey = ok ? (me as any).settings?.industry_key ?? null : null;
+  const publicQuoteHref = useMemo(() => {
+    return tenantSlug ? `/q/${tenantSlug}` : null;
+  }, [tenantSlug]);
 
-  const setupComplete = Boolean((industryKey ?? "").trim());
-  const settingsLabel = setupComplete ? "Settings" : "Configure";
-  const hasPublicPage = Boolean((tenantSlug ?? "").trim());
-
-  const subtitle = useMemo(() => {
-    if (loading) return "Loading tenant…";
-    if (!ok) return "";
-    const parts: string[] = [];
-    if (tenantName) parts.push(tenantName);
-    if (tenantSlug) parts.push(`/${tenantSlug}`);
-    return parts.join(" · ");
-  }, [loading, ok, tenantName, tenantSlug]);
+  const isDash = pathname?.startsWith("/dashboard");
+  const isOnboarding = pathname?.startsWith("/onboarding");
+  const isAdmin = pathname?.startsWith("/admin");
 
   return (
     <header className="border-b bg-white">
       <div className="mx-auto max-w-5xl px-6 py-4 flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <Link href="/" className="font-semibold text-lg text-gray-900">
+        <div className="flex items-center gap-3">
+          <Link href="/" className="font-semibold text-lg">
             AIPhotoQuote
           </Link>
-          {subtitle ? (
-            <div className="truncate text-xs text-gray-600 mt-0.5">{subtitle}</div>
+
+          {tenantSlug ? (
+            <span className="hidden sm:inline-flex items-center rounded-full border px-2 py-0.5 text-xs text-gray-700">
+              {tenantName ? tenantName : "Tenant"} · <span className="ml-1 font-mono">{tenantSlug}</span>
+            </span>
           ) : null}
         </div>
 
-        <div className="flex items-center gap-4 text-sm">
+        <div className="flex items-center gap-4">
           <SignedOut>
-            <Link className="underline" href="/sign-in">
+            <Link className="underline text-sm" href="/sign-in">
               Sign in
             </Link>
-            <Link className="underline" href="/sign-up">
+            <Link className="underline text-sm" href="/sign-up">
               Sign up
             </Link>
           </SignedOut>
 
           <SignedIn>
-            <nav className="hidden sm:flex items-center gap-4">
-              <Link className="underline" href="/dashboard">
+            <nav className="flex items-center gap-2">
+              <Link className={navLinkClass(!!isDash)} href="/dashboard">
                 Dashboard
               </Link>
 
-              <Link className="underline" href="/onboarding">
+              <Link className={navLinkClass(!!isOnboarding)} href="/onboarding">
                 {settingsLabel}
-                {!loading && ok && !setupComplete ? (
-                  <span className="ml-2 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900">
+                {complete === false ? (
+                  <span className="ml-2 rounded-full border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs text-yellow-900">
                     Setup
                   </span>
                 ) : null}
               </Link>
 
-              <Link className="underline" href="/admin">
+              <Link className={navLinkClass(!!isAdmin)} href="/admin">
                 Admin
               </Link>
 
-              {hasPublicPage ? (
-                <Link className="underline" href={`/q/${tenantSlug}`}>
+              {publicQuoteHref ? (
+                <Link
+                  className="hidden sm:inline-flex rounded-md border px-3 py-1.5 text-sm font-medium text-gray-800 hover:bg-gray-50"
+                  href={publicQuoteHref}
+                >
                   Public Quote
-                </Link>
-              ) : null}
-            </nav>
-
-            {/* Mobile: keep it simple */}
-            <nav className="sm:hidden flex items-center gap-3">
-              <Link className="underline" href="/dashboard">
-                Dashboard
-              </Link>
-              <Link className="underline" href="/onboarding">
-                {settingsLabel}
-              </Link>
-              {hasPublicPage ? (
-                <Link className="underline" href={`/q/${tenantSlug}`}>
-                  Quote
                 </Link>
               ) : null}
             </nav>
@@ -136,36 +146,6 @@ export default function TopNav() {
           </SignedIn>
         </div>
       </div>
-
-      {/* thin status strip (optional but helpful for flow) */}
-      <SignedIn>
-        <div className="border-t bg-gray-50">
-          <div className="mx-auto max-w-5xl px-6 py-2 text-xs text-gray-700 flex items-center justify-between">
-            <div className="truncate">
-              {loading ? (
-                "Checking tenant setup…"
-              ) : ok ? (
-                setupComplete ? (
-                  "Tenant setup looks good."
-                ) : (
-                  "Tenant setup incomplete — finish Configure."
-                )
-              ) : (
-                "Tenant not resolved — complete onboarding or sign in again."
-              )}
-            </div>
-
-            {ok && !setupComplete ? (
-              <Link
-                href="/onboarding"
-                className="font-semibold underline decoration-gray-300 hover:decoration-gray-500"
-              >
-                Fix now →
-              </Link>
-            ) : null}
-          </div>
-        </div>
-      </SignedIn>
     </header>
   );
 }
