@@ -2,6 +2,7 @@
 
 import TopNav from "@/components/TopNav";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 type MeSettingsResponse =
@@ -44,14 +45,14 @@ function pill(
 ) {
   const cls =
     tone === "green"
-      ? "border-green-200 bg-green-50 text-green-800"
+      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-        ? "border-yellow-200 bg-yellow-50 text-yellow-900"
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
         : tone === "red"
-          ? "border-red-200 bg-red-50 text-red-800"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
           : tone === "blue"
-            ? "border-blue-200 bg-blue-50 text-blue-800"
-            : "border-gray-200 bg-gray-50 text-gray-800";
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-neutral-200 bg-neutral-50 text-neutral-800 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-200";
 
   return (
     <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
@@ -77,6 +78,8 @@ function money(n: unknown) {
 }
 
 export default function Dashboard() {
+  const router = useRouter();
+
   const [loading, setLoading] = useState(true);
   const [me, setMe] = useState<MeSettingsResponse | null>(null);
 
@@ -144,7 +147,6 @@ export default function Dashboard() {
     const hasRedirect = Boolean(redirectUrl);
     const hasThankYou = Boolean(thankYouUrl);
 
-    // Minimal “ready” for now
     const isReady = hasSlug && hasIndustry;
 
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
@@ -187,14 +189,8 @@ export default function Dashboard() {
   const setupTone = loading ? "gray" : computed.isReady ? "green" : "yellow";
   const setupLabel = loading ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
 
-  const quotesOk = Boolean(quotesResp && "ok" in quotesResp && (quotesResp as any).ok);
-  const quotes =
-    quotesOk && quotesResp && "quotes" in quotesResp ? (quotesResp as any).quotes : [];
-
-  const firstTimeEmpty = !quotesLoading && quotesOk && Array.isArray(quotes) && quotes.length === 0;
-
   return (
-    <main className="min-h-screen bg-white">
+    <main className="min-h-screen bg-background text-foreground">
       <TopNav />
 
       <div className="mx-auto max-w-6xl px-6 py-10 space-y-8">
@@ -202,15 +198,15 @@ export default function Dashboard() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Dashboard</h1>
-            <p className="mt-1 text-sm text-gray-600">
+            <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-300">
               Tenant status, public link, and recent activity.
             </p>
 
             {computed.tenantName ? (
-              <div className="mt-3 text-sm text-gray-800">
+              <div className="mt-3 text-sm text-neutral-800 dark:text-neutral-100">
                 Tenant: <span className="font-semibold">{computed.tenantName}</span>
                 {computed.tenantSlug ? (
-                  <span className="ml-2 font-mono text-xs text-gray-600">
+                  <span className="ml-2 font-mono text-xs text-neutral-600 dark:text-neutral-300">
                     ({computed.tenantSlug})
                   </span>
                 ) : null}
@@ -220,77 +216,53 @@ export default function Dashboard() {
 
           <div className="flex flex-wrap items-center gap-3">
             {pill(setupLabel, setupTone as any)}
-            <Link
-              href="/onboarding"
+
+            {/* Primary CTA: BUTTON + router.push to avoid Link click issues */}
+            <button
+              type="button"
+              onClick={() => router.push("/onboarding")}
               className={cn(
                 "rounded-lg px-4 py-2 text-sm font-semibold",
                 computed.isReady
-                  ? "border border-gray-200 hover:bg-gray-50"
-                  : "bg-black text-white"
+                  ? "border border-neutral-200 hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
+                  : "bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
               )}
             >
               {computed.isReady ? "Settings" : "Finish setup"}
+            </button>
+
+            {/* Secondary: keep a plain Link for accessibility */}
+            <Link
+              href="/onboarding"
+              className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
+            >
+              Open onboarding
             </Link>
           </div>
         </div>
 
-        {/* NEW: Start-here card (only shows when setup isn't complete) */}
-        {!loading && computed.ok && !computed.isReady ? (
-          <section className="rounded-2xl border border-yellow-200 bg-yellow-50 p-6">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="font-semibold text-yellow-900">Start here</h2>
-                <p className="mt-1 text-sm text-yellow-900/80">
-                  Finish the minimum setup so your public quote page works and your tenant can run test quotes.
-                </p>
-
-                <ul className="mt-3 list-disc pl-5 text-sm text-yellow-900/80 space-y-1">
-                  <li>Set a tenant slug</li>
-                  <li>Select an industry</li>
-                  <li>Save (OpenAI key + URLs are optional but recommended)</li>
-                </ul>
-              </div>
-
-              <div className="flex flex-wrap gap-3">
-                <Link
-                  href="/onboarding"
-                  className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
-                >
-                  Open settings
-                </Link>
-                <Link
-                  href="/admin/setup/openai"
-                  className="rounded-lg border border-yellow-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-yellow-100/50"
-                >
-                  OpenAI setup
-                </Link>
-              </div>
-            </div>
-          </section>
-        ) : null}
-
         {/* Main grid */}
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Setup card */}
-          <section className="rounded-2xl border p-6 lg:col-span-1">
+          <section className="rounded-2xl border border-neutral-200 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-950">
             <div className="flex items-center justify-between">
               <h2 className="font-semibold">Setup checklist</h2>
               {pill(setupLabel, setupTone as any)}
             </div>
 
             {!loading && computed.ok ? (
-              <ul className="mt-4 space-y-2 text-sm text-gray-800">
+              <ul className="mt-4 space-y-2 text-sm text-neutral-800 dark:text-neutral-100">
                 <li>
                   <span className="mr-2">{computed.hasSlug ? "✅" : "⬜️"}</span>
                   Tenant slug{" "}
-                  <span className="ml-2 font-mono text-xs text-gray-600">
+                  <span className="ml-2 font-mono text-xs text-neutral-600 dark:text-neutral-300">
                     {computed.tenantSlug || "—"}
                   </span>
                 </li>
                 <li>
                   <span className="mr-2">{computed.hasIndustry ? "✅" : "⬜️"}</span>
                   Industry{" "}
-                  <span className="ml-2 font-mono text-xs text-gray-600">
+                  <span className="ml-2 font-mono text-xs text-neutral-600 dark:text-neutral-300">
                     {computed.industryKey || "—"}
                   </span>
                 </li>
@@ -304,7 +276,7 @@ export default function Dashboard() {
                 </li>
               </ul>
             ) : (
-              <p className="mt-4 text-sm text-gray-600">
+              <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">
                 {loading
                   ? "Loading your tenant…"
                   : "Couldn’t load tenant settings. Refresh and try again."}
@@ -313,20 +285,14 @@ export default function Dashboard() {
 
             <div className="mt-5 flex flex-wrap gap-3">
               <Link
-                href="/onboarding"
-                className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-              >
-                Open onboarding
-              </Link>
-              <Link
                 href="/admin/setup/openai"
-                className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
               >
                 OpenAI setup
               </Link>
               <Link
                 href="/admin/setup/ai-policy"
-                className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                className="rounded-lg border border-neutral-200 px-3 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
               >
                 AI policy
               </Link>
@@ -336,11 +302,11 @@ export default function Dashboard() {
           {/* Public link + Recent quotes */}
           <div className="grid gap-6 lg:col-span-2">
             {/* Public quote page */}
-            <section className="rounded-2xl border p-6">
+            <section className="rounded-2xl border border-neutral-200 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-950">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="font-semibold">Public quote page</h2>
-                  <p className="mt-1 text-sm text-gray-600">
+                  <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-300">
                     This is what customers use. Share it after setup.
                   </p>
                 </div>
@@ -349,101 +315,58 @@ export default function Dashboard() {
                   <div className="flex flex-wrap gap-3">
                     <Link
                       href={computed.publicPath}
-                      className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+                      className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
                     >
                       Open
                     </Link>
                     <button
                       type="button"
                       onClick={copyPublicLink}
-                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                      className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
                     >
                       {copied ? "Copied!" : "Copy link"}
                     </button>
                   </div>
                 ) : (
-                  <Link
-                    href="/onboarding"
-                    className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                  <button
+                    type="button"
+                    onClick={() => router.push("/onboarding")}
+                    className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
                   >
                     Set tenant slug first
-                  </Link>
+                  </button>
                 )}
               </div>
 
-              <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-                <div className="text-xs text-gray-500">Path</div>
+              <div className="mt-4 rounded-xl border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900/40">
+                <div className="text-xs text-neutral-500">Path</div>
                 <div className="mt-1 font-mono text-sm">{computed.publicPath}</div>
               </div>
 
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                {computed.tenantSlug ? (
-                  <Link
-                    href={computed.publicPath}
-                    className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                  >
-                    Run a test quote
-                  </Link>
-                ) : (
-                  <span className="text-xs text-gray-600">
-                    Tip: Set slug + industry, then run a test quote end-to-end.
-                  </span>
-                )}
+              <div className="mt-4 text-xs text-neutral-600 dark:text-neutral-300">
+                Tip: run one complete test quote (estimate + optional rendering) after setup.
               </div>
             </section>
 
             {/* Recent Quotes */}
-            <section className="rounded-2xl border p-6">
+            <section className="rounded-2xl border border-neutral-200 bg-white p-6 dark:border-neutral-800 dark:bg-neutral-950">
               <div className="flex items-center justify-between">
                 <h2 className="font-semibold">Recent quotes</h2>
                 {quotesLoading ? pill("Loading…", "gray") : null}
               </div>
 
-              {firstTimeEmpty ? (
-                <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">No quotes yet</div>
-                  <p className="mt-1 text-sm text-gray-600">
-                    Run a test quote to confirm: photos → estimate → (optional) render → emails + DB logs.
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-3">
-                    {computed.tenantSlug ? (
-                      <Link
-                        href={computed.publicPath}
-                        className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
-                      >
-                        Run test quote
-                      </Link>
-                    ) : (
-                      <Link
-                        href="/onboarding"
-                        className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                      >
-                        Set tenant slug first
-                      </Link>
-                    )}
-                    <Link
-                      href="/admin/quotes"
-                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                    >
-                      View admin quotes
-                    </Link>
-                  </div>
-                </div>
-              ) : !quotesLoading && quotesOk ? (
-                Array.isArray(quotes) && quotes.length ? (
-                  <div className="mt-4 overflow-hidden rounded-xl border">
-                    <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600">
+              {!quotesLoading && quotesResp && "ok" in quotesResp && quotesResp.ok ? (
+                quotesResp.quotes.length ? (
+                  <div className="mt-4 overflow-hidden rounded-xl border border-neutral-200 dark:border-neutral-800">
+                    <div className="grid grid-cols-12 bg-neutral-50 px-4 py-2 text-xs font-semibold text-neutral-600 dark:bg-neutral-900/40 dark:text-neutral-300">
                       <div className="col-span-4">Created</div>
                       <div className="col-span-4">Quote ID</div>
                       <div className="col-span-4 text-right">Status</div>
                     </div>
 
-                    <ul className="divide-y">
-                      {quotes.map((q: any) => {
-                        const statusRaw = (q.renderStatus || "")
-                          .toString()
-                          .toLowerCase();
-
+                    <ul className="divide-y divide-neutral-200 dark:divide-neutral-800">
+                      {quotesResp.quotes.map((q) => {
+                        const statusRaw = (q.renderStatus || "").toString().toLowerCase();
                         const statusPill =
                           statusRaw === "rendered"
                             ? pill("Rendered", "green")
@@ -455,22 +378,19 @@ export default function Dashboard() {
 
                         return (
                           <li key={q.id} className="grid grid-cols-12 items-center px-4 py-3">
-                            <div className="col-span-4 text-sm text-gray-800">
+                            <div className="col-span-4 text-sm text-neutral-800 dark:text-neutral-100">
                               {fmtDate(q.createdAt)}
                             </div>
 
-                            <div className="col-span-4 font-mono text-xs text-gray-700">
+                            <div className="col-span-4 font-mono text-xs text-neutral-700 dark:text-neutral-200">
                               {q.id}
                             </div>
 
                             <div className="col-span-4 flex items-center justify-end gap-3">
-                              {typeof q.estimateLow === "number" ||
-                              typeof q.estimateHigh === "number" ? (
-                                <div className="text-xs text-gray-700">
-                                  {money(q.estimateLow)}{" "}
-                                  {q.estimateHigh != null
-                                    ? `– ${money(q.estimateHigh)}`
-                                    : ""}
+                              {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
+                                <div className="text-xs text-neutral-700 dark:text-neutral-200">
+                                  {money(q.estimateLow)}
+                                  {q.estimateHigh != null ? ` – ${money(q.estimateHigh)}` : ""}
                                 </div>
                               ) : null}
 
@@ -482,12 +402,12 @@ export default function Dashboard() {
                     </ul>
                   </div>
                 ) : (
-                  <p className="mt-4 text-sm text-gray-600">
+                  <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">
                     No quotes yet. Run a test quote.
                   </p>
                 )
               ) : (
-                <p className="mt-4 text-sm text-gray-600">
+                <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">
                   {quotesLoading ? "Loading…" : "Couldn’t load recent quotes yet."}
                 </p>
               )}
@@ -495,14 +415,14 @@ export default function Dashboard() {
               <div className="mt-5 flex flex-wrap gap-3">
                 <Link
                   href="/admin/quotes"
-                  className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                  className="rounded-lg border border-neutral-200 px-3 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
                 >
                   View in Admin
                 </Link>
                 {computed.tenantSlug ? (
                   <Link
                     href={computed.publicPath}
-                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                    className="rounded-lg border border-neutral-200 px-3 py-2 text-sm font-semibold hover:bg-neutral-50 dark:border-neutral-800 dark:hover:bg-neutral-900/40"
                   >
                     Open public quote page
                   </Link>
@@ -511,16 +431,6 @@ export default function Dashboard() {
             </section>
           </div>
         </div>
-
-        {/* Next */}
-        <section className="rounded-2xl border p-6">
-          <h2 className="font-semibold">Next (flow polish)</h2>
-          <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 space-y-1">
-            <li>Make TopNav “Admin” optional for non-admin tenants later.</li>
-            <li>Add “Quotes” page for tenant (not Admin) once ready.</li>
-            <li>Add a small “Share link” button in TopNav when setup is ready.</li>
-          </ul>
-        </section>
       </div>
     </main>
   );
