@@ -1,531 +1,309 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
-const INDUSTRIES = [
-  { key: "upholstery", name: "Upholstery" },
-  { key: "pressure_washing", name: "Pressure Washing" },
-  { key: "flooring", name: "Flooring" },
-  { key: "roofing_repairs", name: "Roofing (Repairs)" },
-  { key: "auto_body", name: "Auto Body / Paint" },
-  { key: "other", name: "Other" },
-];
+type MeSettingsResponse =
+  | {
+      ok: true;
+      tenant: { id: string; name: string; slug: string };
+      settings: {
+        tenant_id: string;
+        industry_key: string | null;
+        redirect_url: string | null;
+        thank_you_url: string | null;
+        updated_at: string | null;
+      } | null;
+    }
+  | { ok: false; error: any };
 
-function slugify(s: string) {
-  return s
-    .toLowerCase()
-    .trim()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)+/g, "");
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-/** Ensures URLs pass Zod .url() validation */
-function normalizeUrl(u: string) {
-  const s = (u ?? "").trim();
-  if (!s) return "";
-  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
-  return s;
-}
-
-function pick<T = any>(obj: any, keys: string[], fallback: T): T {
-  for (const k of keys) {
-    const v = obj?.[k];
-    if (v !== undefined && v !== null) return v as T;
+function isValidUrlOrEmpty(s: string) {
+  const v = (s || "").trim();
+  if (!v) return true;
+  try {
+    // allow https://example.com
+    new URL(v);
+    return true;
+  } catch {
+    return false;
   }
-  return fallback;
 }
 
-function toNumOrBlank(v: any): number | "" {
-  if (v === null || v === undefined || v === "") return "";
-  const n = Number(v);
-  return Number.isFinite(n) ? n : "";
-}
-
-function Chip({
-  tone = "neutral",
-  children,
+export default function TenantOnboardingForm({
+  redirectToDashboard = false,
 }: {
-  tone?: "neutral" | "good" | "warn";
-  children: React.ReactNode;
+  redirectToDashboard?: boolean;
 }) {
-  const cls =
-    tone === "good"
-      ? "border-green-300 bg-green-50 text-green-800"
-      : tone === "warn"
-      ? "border-amber-300 bg-amber-50 text-amber-900"
-      : "border-gray-200 bg-white text-gray-700";
+  const router = useRouter();
 
-  return (
-    <span
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${cls}`}
-    >
-      <span className="inline-block h-2 w-2 rounded-full bg-current opacity-60" />
-      {children}
-    </span>
-  );
-}
-
-export default function TenantOnboardingForm() {
-  const [name, setName] = useState("");
-  const [slug, setSlug] = useState("");
-  const [industryKey, setIndustryKey] = useState("upholstery");
-
-  // OpenAI
-  const [openaiKey, setOpenaiKey] = useState("");
-  const [hasOpenaiKey, setHasOpenaiKey] = useState<boolean>(false);
-  const [keyVerified, setKeyVerified] = useState<boolean>(false);
-
-  // Redirects
-  const [redirectUrl, setRedirectUrl] = useState("");
-  const [thankYouUrl, setThankYouUrl] = useState("");
-
-  // Pricing
-  const [minJob, setMinJob] = useState<number | "">("");
-  const [typLow, setTypLow] = useState<number | "">("");
-  const [typHigh, setTypHigh] = useState<number | "">("");
-  const [maxWOI, setMaxWOI] = useState<number | "">("");
-
-  // UI state
   const [loading, setLoading] = useState(true);
-  const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
 
-  // Dirty tracking
-  const baselineRef = useRef<string>("");
-  const baselineReadyRef = useRef<boolean>(false);
-  const [dirty, setDirty] = useState(false);
+  const [tenantSlug, setTenantSlug] = useState<string>("");
+  const [tenantName, setTenantName] = useState<string>("");
 
-  // Saved toast
-  const [showSaved, setShowSaved] = useState(false);
-  const savedTimerRef = useRef<any>(null);
+  const [industryKey, setIndustryKey] = useState<string>("");
+  const [redirectUrl, setRedirectUrl] = useState<string>("");
+  const [thankYouUrl, setThankYouUrl] = useState<string>("");
 
-  const suggestedSlug = useMemo(() => slugify(name), [name]);
-  const effectiveSlug = slug || suggestedSlug || "your-slug";
-  const publicQuoteHref = `/q/${effectiveSlug}`;
+  const [openAiKey, setOpenAiKey] = useState<string>("");
 
-  function currentSnapshot() {
-    // Track page-level settings (not openaiKey input itself).
-    return JSON.stringify({
-      name,
-      slug,
-      industryKey,
-      redirectUrl: normalizeUrl(redirectUrl),
-      thankYouUrl: normalizeUrl(thankYouUrl),
-      minJob,
-      typLow,
-      typHigh,
-      maxWOI,
-    });
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<boolean>(false);
+
+  async function loadMe() {
+    const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+    const json: MeSettingsResponse = await res.json();
+
+    if (!("ok" in json) || !json.ok) {
+      throw new Error("Failed to load tenant settings");
+    }
+
+    const t = json.tenant;
+    const s = json.settings;
+
+    setTenantSlug(t?.slug ? String(t.slug) : "");
+    setTenantName(t?.name ? String(t.name) : "");
+
+    setIndustryKey(s?.industry_key ? String(s.industry_key) : "");
+    setRedirectUrl(s?.redirect_url ? String(s.redirect_url) : "");
+    setThankYouUrl(s?.thank_you_url ? String(s.thank_you_url) : "");
+
+    return json;
   }
 
-  // Load current settings once
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
-      setMsg(null);
+    (async () => {
       setLoading(true);
-
+      setError(null);
       try {
-        const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
-        const json = await res.json();
-
-        if (cancelled) return;
-
-        if (!json.ok) {
-          setMsg(json.error?.message ? `❌ ${json.error.message}` : null);
-          return;
-        }
-
-        const t = json.tenant ?? {};
-        const s = json.settings ?? {};
-        const sec = json.secrets ?? {};
-        const p = json.pricing ?? {};
-
-        setName(pick<string>(t, ["name"], ""));
-        setSlug(pick<string>(t, ["slug"], ""));
-
-        setIndustryKey(pick<string>(s, ["industryKey", "industry_key"], "upholstery"));
-        setRedirectUrl(pick<string>(s, ["redirectUrl", "redirect_url"], ""));
-        setThankYouUrl(pick<string>(s, ["thankYouUrl", "thank_you_url"], ""));
-
-        // ✅ Populate pricing (coerce strings -> numbers)
-        setMinJob(toNumOrBlank(pick<any>(p, ["minJob", "min_job"], "")));
-        setTypLow(toNumOrBlank(pick<any>(p, ["typicalLow", "typical_low"], "")));
-        setTypHigh(toNumOrBlank(pick<any>(p, ["typicalHigh", "typical_high"], "")));
-        setMaxWOI(toNumOrBlank(pick<any>(p, ["maxWithoutInspection", "max_without_inspection"], "")));
-
-        setHasOpenaiKey(Boolean(sec?.hasOpenaiKey));
-        setKeyVerified(false);
+        await loadMe();
       } catch (e: any) {
-        if (!cancelled) setMsg(`❌ ${e?.message || "Failed to load settings"}`);
+        if (!cancelled) setError(e?.message ?? "Failed to load settings");
       } finally {
         if (!cancelled) setLoading(false);
       }
-    }
+    })();
 
-    load();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Establish baseline AFTER load & state populated (runs once)
-  useEffect(() => {
-    if (loading) return;
-    if (baselineReadyRef.current) return;
+  const canSave = useMemo(() => {
+    if (saving) return false;
+    if (!industryKey.trim()) return false;
+    if (!isValidUrlOrEmpty(redirectUrl)) return false;
+    if (!isValidUrlOrEmpty(thankYouUrl)) return false;
+    return true;
+  }, [saving, industryKey, redirectUrl, thankYouUrl]);
 
-    baselineRef.current = currentSnapshot();
-    baselineReadyRef.current = true;
-    setDirty(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading]);
+  async function saveSettingsOnly() {
+    const res = await fetch("/api/tenant/save-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        industry_key: industryKey.trim(),
+        redirect_url: redirectUrl.trim() || null,
+        thank_you_url: thankYouUrl.trim() || null,
+      }),
+    });
 
-  // Update dirty status when fields change (but only after baseline ready)
-  useEffect(() => {
-    if (loading) return;
-    if (!baselineReadyRef.current) return;
-
-    setDirty(baselineRef.current !== currentSnapshot());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, slug, industryKey, redirectUrl, thankYouUrl, minJob, typLow, typHigh, maxWOI, loading]);
-
-  // Cleanup toast timer
-  useEffect(() => {
-    return () => {
-      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-    };
-  }, []);
-
-  function flashSaved() {
-    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-    setShowSaved(true);
-    savedTimerRef.current = setTimeout(() => setShowSaved(false), 2000);
-  }
-
-  async function testKey() {
-    setMsg(null);
-    setTesting(true);
+    const text = await res.text();
+    let json: any = null;
     try {
-      const res = await fetch("/api/tenant/test-openai", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ openaiKey }),
-      });
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`Server returned non-JSON (HTTP ${res.status})`);
+    }
 
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error?.message ?? "Key test failed");
-
-      setKeyVerified(true);
-      setMsg("✅ OpenAI key looks valid");
-    } catch (e: any) {
-      setKeyVerified(false);
-      setMsg(`❌ ${e.message}`);
-    } finally {
-      setTesting(false);
+    if (!res.ok || !json?.ok) {
+      const msg = json?.message || json?.error?.message || "Failed to save settings";
+      throw new Error(msg);
     }
   }
 
-  async function saveAll() {
-    setMsg(null);
+  async function saveOpenAiKeyIfProvided() {
+    const key = openAiKey.trim();
+    if (!key) return;
+
+    // This endpoint already exists in your tree.
+    const res = await fetch("/api/admin/openai-key", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ openaiKey: key }),
+    });
+
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`OpenAI key route returned non-JSON (HTTP ${res.status})`);
+    }
+
+    if (!res.ok || !json?.ok) {
+      const msg = json?.message || json?.error?.message || "Failed to save OpenAI key";
+      throw new Error(msg);
+    }
+  }
+
+  async function onSave() {
+    setError(null);
+    setSaved(false);
     setSaving(true);
 
     try {
-      const payload = {
-        tenant: {
-          name,
-          slug: slug || suggestedSlug,
-        },
-        industryKey,
-        openaiKey: openaiKey || undefined,
-        redirects: {
-          redirectUrl: normalizeUrl(redirectUrl) || undefined,
-          thankYouUrl: normalizeUrl(thankYouUrl) || undefined,
-        },
-        pricing: {
-          minJob: minJob === "" ? undefined : Number(minJob),
-          typicalLow: typLow === "" ? undefined : Number(typLow),
-          typicalHigh: typHigh === "" ? undefined : Number(typHigh),
-          maxWithoutInspection: maxWOI === "" ? undefined : Number(maxWOI),
-          tone: "value",
-          riskPosture: "conservative",
-          alwaysEstimateLanguage: true,
-        },
-      };
+      await saveSettingsOnly();
+      await saveOpenAiKeyIfProvided();
 
-      const res = await fetch("/api/tenant/save-settings", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      // Re-load to confirm what the server considers "complete"
+      const me = await loadMe();
+      setSaved(true);
 
-      const json = await res.json();
-      if (!json.ok) {
-        const detail =
-          json.error?.details
-            ? JSON.stringify(json.error.details, null, 2)
-            : json.error?.message ?? "Save failed";
-        throw new Error(detail);
+      const isComplete = Boolean(me?.ok && (me as any)?.settings?.industry_key);
+
+      if (redirectToDashboard && isComplete) {
+        router.push("/dashboard");
+        router.refresh();
       }
-
-      if (openaiKey) setHasOpenaiKey(true);
-
-      baselineRef.current = currentSnapshot();
-      setDirty(false);
-
-      setOpenaiKey("");
-      setMsg(null);
-      flashSaved();
     } catch (e: any) {
-      setMsg(`❌ ${e.message}`);
+      setError(e?.message ?? "Save failed");
     } finally {
       setSaving(false);
     }
   }
 
-  const keyStatusTone = hasOpenaiKey ? "good" : "warn";
-  const keyStatusText = hasOpenaiKey ? "Key stored" : "Key not set";
-
   return (
-    <div className="space-y-6 pb-24">
-      {loading && (
-        <div className="rounded-2xl border bg-white p-4 text-sm text-gray-700">
-          Loading your current settings…
-        </div>
-      )}
-
-      {/* Saved toast */}
-      {showSaved && (
-        <div className="fixed left-1/2 top-6 z-50 -translate-x-1/2 rounded-full border border-green-300 bg-green-50 px-4 py-2 text-sm font-semibold text-green-800 shadow-sm">
-          ✅ Saved
-        </div>
-      )}
-
-      {/* Business */}
-      <section className="rounded-2xl border bg-white p-6">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900">Business</h2>
-          <p className="mt-1 text-sm text-gray-700">
-            Name, slug, and industry drive your public quote page behavior.
-          </p>
-        </div>
-
-        <div className="mt-5 grid gap-4">
-          <label className="grid gap-1">
-            <span className="text-sm font-medium text-gray-900">Business name</span>
-            <input
-              className="border rounded-xl p-3 text-gray-900"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Maggio Upholstery"
-            />
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm font-medium text-gray-900">Tenant slug</span>
-            <input
-              className="border rounded-xl p-3 text-gray-900"
-              value={slug}
-              onChange={(e) => setSlug(e.target.value)}
-              placeholder={suggestedSlug || "your-slug"}
-            />
-
-            <div className="text-xs text-gray-700">
-              Public quote page:{" "}
-              <a
-                href={publicQuoteHref}
-                target="_blank"
-                rel="noreferrer"
-                className="underline font-medium"
-                title="Open public quote page"
-              >
-                {publicQuoteHref}
-              </a>
-            </div>
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm font-medium text-gray-900">Industry</span>
-            <select
-              className="border rounded-xl p-3 text-gray-900"
-              value={industryKey}
-              onChange={(e) => setIndustryKey(e.target.value)}
-            >
-              {INDUSTRIES.map((i) => (
-                <option key={i.key} value={i.key}>
-                  {i.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      </section>
-
-      {/* OpenAI */}
-      <section className="rounded-2xl border bg-white p-6">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="space-y-6">
+      <div className="rounded-2xl border bg-white p-5">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">OpenAI</h2>
-            <p className="mt-1 text-sm text-gray-700">Store a key once. We never display it back.</p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Chip tone={keyStatusTone as any}>{keyStatusText}</Chip>
-            {keyVerified && <Chip tone="good">Verified</Chip>}
-          </div>
-        </div>
-
-        <div className="mt-5 grid gap-3">
-          <label className="grid gap-1">
-            <span className="text-sm font-medium text-gray-900">API key</span>
-            <input
-              className="border rounded-xl p-3 text-gray-900"
-              value={openaiKey}
-              onChange={(e) => {
-                setOpenaiKey(e.target.value);
-                setKeyVerified(false);
-              }}
-              placeholder={hasOpenaiKey ? "•••••••••••••••• (stored)" : "sk-..."}
-            />
-            <span className="text-xs text-gray-700">
-              Paste a new key to replace the stored one.
-            </span>
-          </label>
-
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <button
-              className="rounded-xl border px-4 py-2 text-sm font-semibold disabled:opacity-50"
-              onClick={testKey}
-              disabled={testing || !openaiKey}
-            >
-              {testing ? "Testing..." : "Test key"}
-            </button>
-
-            <p className="text-xs text-gray-600">
-              Tip: Test verifies the key you entered. Save stores it for future requests.
-            </p>
-          </div>
-
-          {msg && <p className="text-sm whitespace-pre-wrap text-gray-900">{msg}</p>}
-        </div>
-      </section>
-
-      {/* Pricing */}
-      <section className="rounded-2xl border bg-white p-6">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900">Pricing guardrails</h2>
-          <p className="mt-1 text-sm text-gray-700">
-            Keep AI output aligned with how your shop actually prices work.
-          </p>
-        </div>
-
-        <div className="mt-5 grid gap-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="grid gap-1">
-              <span className="text-sm font-medium text-gray-900">Minimum job ($)</span>
-              <input
-                className="border rounded-xl p-3 text-gray-900"
-                inputMode="numeric"
-                value={minJob}
-                onChange={(e) => setMinJob(e.target.value === "" ? "" : Number(e.target.value))}
-              />
-            </label>
-
-            <label className="grid gap-1">
-              <span className="text-sm font-medium text-gray-900">Max w/o inspection ($)</span>
-              <input
-                className="border rounded-xl p-3 text-gray-900"
-                inputMode="numeric"
-                value={maxWOI}
-                onChange={(e) => setMaxWOI(e.target.value === "" ? "" : Number(e.target.value))}
-              />
-            </label>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="grid gap-1">
-              <span className="text-sm font-medium text-gray-900">Typical low ($)</span>
-              <input
-                className="border rounded-xl p-3 text-gray-900"
-                inputMode="numeric"
-                value={typLow}
-                onChange={(e) => setTypLow(e.target.value === "" ? "" : Number(e.target.value))}
-              />
-            </label>
-
-            <label className="grid gap-1">
-              <span className="text-sm font-medium text-gray-900">Typical high ($)</span>
-              <input
-                className="border rounded-xl p-3 text-gray-900"
-                inputMode="numeric"
-                value={typHigh}
-                onChange={(e) => setTypHigh(e.target.value === "" ? "" : Number(e.target.value))}
-              />
-            </label>
-          </div>
-        </div>
-      </section>
-
-      {/* Redirects */}
-      <section className="rounded-2xl border bg-white p-6">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900">Redirects</h2>
-          <p className="mt-1 text-sm text-gray-700">
-            Send customers where you want after submitting a quote request.
-          </p>
-        </div>
-
-        <div className="mt-5 grid gap-4">
-          <label className="grid gap-1">
-            <span className="text-sm font-medium text-gray-900">Redirect after quote</span>
-            <input
-              className="border rounded-xl p-3 text-gray-900"
-              value={redirectUrl}
-              onChange={(e) => setRedirectUrl(e.target.value)}
-              onBlur={() => setRedirectUrl(normalizeUrl(redirectUrl))}
-              placeholder="https://maggioupholstery.com"
-            />
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm font-medium text-gray-900">Thank you page (optional)</span>
-            <input
-              className="border rounded-xl p-3 text-gray-900"
-              value={thankYouUrl}
-              onChange={(e) => setThankYouUrl(e.target.value)}
-              onBlur={() => setThankYouUrl(normalizeUrl(thankYouUrl))}
-              placeholder="https://your-site.com/quote-received"
-            />
-          </label>
-        </div>
-      </section>
-
-      {/* Sticky Save Bar — ONLY when dirty or saving */}
-      {(dirty || saving) && (
-        <div className="fixed inset-x-0 bottom-0 z-50 border-t bg-white/90 backdrop-blur">
-          <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-4">
-            <div className="text-sm">
-              <span className="font-semibold text-gray-900">
-                {saving ? "Saving…" : "Unsaved changes"}
-              </span>
-              <span className="ml-3 text-xs text-gray-600">
-                {hasOpenaiKey ? "OpenAI key stored" : "No OpenAI key stored"}
-                {keyVerified ? " • Key verified" : ""}
-              </span>
+            <div className="text-sm font-semibold">Tenant</div>
+            <div className="mt-1 text-sm text-gray-700">
+              {loading ? "Loading…" : tenantName || "—"}
+              {tenantSlug ? (
+                <span className="ml-2 rounded-full border px-2 py-0.5 text-xs text-gray-700">
+                  <span className="font-mono">{tenantSlug}</span>
+                </span>
+              ) : null}
             </div>
-
-            <button
-              className="rounded-2xl bg-black px-5 py-3 text-sm font-semibold text-white disabled:opacity-50"
-              onClick={saveAll}
-              disabled={saving || !name || !dirty}
-            >
-              {saving ? "Saving..." : "Save changes"}
-            </button>
           </div>
+
+          <button
+            type="button"
+            onClick={() => router.push("/dashboard")}
+            className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+          >
+            Back to dashboard
+          </button>
         </div>
-      )}
+      </div>
+
+      <div className="rounded-2xl border bg-white p-5 space-y-4">
+        <div>
+          <div className="text-sm font-semibold">Core settings</div>
+          <p className="mt-1 text-xs text-gray-600">
+            Industry is required. Redirect URLs are optional.
+          </p>
+        </div>
+
+        <label className="block">
+          <div className="text-xs text-gray-700">
+            Industry key <span className="text-red-600">*</span>
+          </div>
+          <input
+            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+            value={industryKey}
+            onChange={(e) => setIndustryKey(e.target.value)}
+            placeholder="e.g. marine, auto, powersports"
+            disabled={loading || saving}
+          />
+        </label>
+
+        <label className="block">
+          <div className="text-xs text-gray-700">Redirect URL (optional)</div>
+          <input
+            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+            value={redirectUrl}
+            onChange={(e) => setRedirectUrl(e.target.value)}
+            placeholder="https://your-site.com/after-submit"
+            disabled={loading || saving}
+          />
+          {!isValidUrlOrEmpty(redirectUrl) ? (
+            <div className="mt-2 text-xs text-red-600">Enter a valid URL or leave blank.</div>
+          ) : null}
+        </label>
+
+        <label className="block">
+          <div className="text-xs text-gray-700">Thank-you URL (optional)</div>
+          <input
+            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+            value={thankYouUrl}
+            onChange={(e) => setThankYouUrl(e.target.value)}
+            placeholder="https://your-site.com/thank-you"
+            disabled={loading || saving}
+          />
+          {!isValidUrlOrEmpty(thankYouUrl) ? (
+            <div className="mt-2 text-xs text-red-600">Enter a valid URL or leave blank.</div>
+          ) : null}
+        </label>
+      </div>
+
+      <div className="rounded-2xl border bg-white p-5 space-y-4">
+        <div>
+          <div className="text-sm font-semibold">Tenant OpenAI key (optional)</div>
+          <p className="mt-1 text-xs text-gray-600">
+            This is stored encrypted server-side. Leave blank to keep existing.
+          </p>
+        </div>
+
+        <label className="block">
+          <div className="text-xs text-gray-700">OpenAI API key</div>
+          <input
+            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm font-mono"
+            value={openAiKey}
+            onChange={(e) => setOpenAiKey(e.target.value)}
+            placeholder="sk-..."
+            disabled={loading || saving}
+          />
+        </label>
+      </div>
+
+      <button
+        type="button"
+        className={cn(
+          "w-full rounded-xl bg-black py-4 font-semibold text-white disabled:opacity-50",
+          saving ? "opacity-80" : ""
+        )}
+        onClick={onSave}
+        disabled={!canSave}
+      >
+        {saving ? "Saving…" : "Save settings"}
+      </button>
+
+      {saved ? (
+        <div className="rounded-xl border border-green-200 bg-green-50 p-3 text-sm text-green-900">
+          Saved!
+          {redirectToDashboard ? " Redirecting if setup is complete…" : null}
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
+          {error}
+        </div>
+      ) : null}
+
+      <div className="text-xs text-gray-600">
+        Tip: once your industry is set, Dashboard will show “Ready” and the public quote link.
+      </div>
     </div>
   );
 }

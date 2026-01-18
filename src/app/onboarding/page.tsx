@@ -17,7 +17,7 @@ export default function Onboarding() {
         </div>
 
         <div className="mt-8 max-w-2xl">
-          <TenantOnboardingForm />
+          <TenantOnboardingForm redirectToDashboard />
         </div>
       </div>
     </main>
