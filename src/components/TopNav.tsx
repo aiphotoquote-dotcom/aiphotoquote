@@ -22,15 +22,41 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function Badge({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "ok" | "warn" | "idle" | "loading";
+}) {
+  const cls =
+    tone === "ok"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+      : tone === "warn"
+        ? "border-amber-200 bg-amber-50 text-amber-900"
+        : tone === "loading"
+          ? "border-gray-200 bg-gray-50 text-gray-700"
+          : "border-gray-200 bg-white text-gray-700";
+
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
+      {label}
+    </span>
+  );
+}
+
 export default function TopNav() {
-  // null = unknown/loading, false = incomplete, true = complete
-  const [complete, setComplete] = useState<boolean | null>(null);
-  const [tenant, setTenant] = useState<{ id: string; name: string; slug: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [tenantSlug, setTenantSlug] = useState<string | null>(null);
+
+  // “Complete” here should match your earlier intent: industry chosen => setup complete
+  const [industryKey, setIndustryKey] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
+      setLoading(true);
       try {
         const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const json: MeSettingsResponse = await res.json();
@@ -38,21 +64,20 @@ export default function TopNav() {
         if (cancelled) return;
 
         if (!("ok" in json) || !json.ok) {
-          setComplete(false);
-          setTenant(null);
+          setTenantSlug(null);
+          setIndustryKey(null);
+          setLoading(false);
           return;
         }
 
-        setTenant(json.tenant ?? null);
-
-        const s = json.settings;
-        const industry = (s?.industry_key ?? "").trim();
-        // NOTE: keep your current definition of "complete"
-        setComplete(Boolean(industry));
+        setTenantSlug(json.tenant?.slug ?? null);
+        setIndustryKey(json.settings?.industry_key ?? null);
+        setLoading(false);
       } catch {
         if (!cancelled) {
-          setComplete(false);
-          setTenant(null);
+          setTenantSlug(null);
+          setIndustryKey(null);
+          setLoading(false);
         }
       }
     }
@@ -63,122 +88,89 @@ export default function TopNav() {
     };
   }, []);
 
-  const settingsLabel = complete === true ? "Settings" : "Configure";
+  const setupComplete = useMemo(() => {
+    return Boolean((industryKey ?? "").trim());
+  }, [industryKey]);
 
-  const publicQuoteHref = useMemo(() => {
-    const slug = tenant?.slug?.trim();
-    return slug ? `/q/${slug}` : null;
-  }, [tenant?.slug]);
+  const quoteHref = useMemo(() => {
+    return tenantSlug ? `/q/${tenantSlug}` : null;
+  }, [tenantSlug]);
+
+  const settingsLabel = useMemo(() => {
+    if (loading) return "Settings";
+    return setupComplete ? "Settings" : "Configure";
+  }, [loading, setupComplete]);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/60">
+    <header className="border-b bg-white">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-4">
-        {/* Brand */}
-        <div className="flex items-center gap-3">
-          <Link href="/" className="text-lg font-semibold tracking-tight">
-            AIPhotoQuote
-          </Link>
+        <Link href="/" className="flex items-center gap-2 font-semibold text-lg text-gray-900">
+          AIPhotoQuote
+        </Link>
 
-          {/* Tenant chip (signed in) */}
-          <SignedIn>
-            <div className="hidden sm:flex items-center gap-2">
-              <span className="h-1.5 w-1.5 rounded-full bg-gray-400 dark:bg-gray-600" />
-              <div className="text-xs text-gray-600 dark:text-gray-300">
-                {tenant ? (
-                  <>
-                    <span className="font-medium text-gray-900 dark:text-gray-100">
-                      {tenant.name}
-                    </span>
-                    <span className="ml-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">
-                      /{tenant.slug}
-                    </span>
-                  </>
-                ) : (
-                  <span className="text-gray-500">Loading tenant…</span>
-                )}
-              </div>
-            </div>
-          </SignedIn>
-        </div>
-
-        {/* Right side */}
         <div className="flex items-center gap-3 text-sm">
           <SignedOut>
-            <Link
-              className="rounded-md border border-gray-200 px-3 py-2 font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-100 dark:hover:bg-gray-900"
-              href="/sign-in"
-            >
+            <Link className="rounded-lg border border-gray-200 bg-white px-3 py-2 font-semibold text-gray-900" href="/sign-in">
               Sign in
             </Link>
-            <Link
-              className="rounded-md bg-black px-3 py-2 font-medium text-white hover:opacity-90 dark:bg-white dark:text-black"
-              href="/sign-up"
-            >
+            <Link className="rounded-lg bg-gray-900 px-3 py-2 font-semibold text-white" href="/sign-up">
               Sign up
             </Link>
           </SignedOut>
 
           <SignedIn>
-            <nav className="hidden items-center gap-2 md:flex">
+            <nav className="hidden items-center gap-2 sm:flex">
               <Link
-                className="rounded-md px-3 py-2 font-medium text-gray-900 hover:bg-gray-50 dark:text-gray-100 dark:hover:bg-gray-900"
+                className="rounded-lg px-3 py-2 font-semibold text-gray-700 hover:bg-gray-50 hover:text-gray-900"
                 href="/dashboard"
               >
                 Dashboard
               </Link>
 
               <Link
-                className={cn(
-                  "rounded-md px-3 py-2 font-medium hover:bg-gray-50 dark:hover:bg-gray-900",
-                  complete === false
-                    ? "text-gray-900 dark:text-gray-100"
-                    : "text-gray-900 dark:text-gray-100"
-                )}
+                className="rounded-lg px-3 py-2 font-semibold text-gray-700 hover:bg-gray-50 hover:text-gray-900"
                 href="/onboarding"
               >
-                <span className="inline-flex items-center gap-2">
-                  {settingsLabel}
-                  {complete === false ? (
-                    <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/40 dark:text-amber-200">
-                      Setup
-                    </span>
-                  ) : null}
-                </span>
+                {settingsLabel}
               </Link>
 
+              {/* Optional: public quote link if tenantSlug exists */}
+              {quoteHref ? (
+                <Link
+                  className="rounded-lg px-3 py-2 font-semibold text-gray-700 hover:bg-gray-50 hover:text-gray-900"
+                  href={quoteHref}
+                >
+                  Public page
+                </Link>
+              ) : null}
+
               <Link
-                className="rounded-md px-3 py-2 font-medium text-gray-900 hover:bg-gray-50 dark:text-gray-100 dark:hover:bg-gray-900"
+                className="rounded-lg px-3 py-2 font-semibold text-gray-700 hover:bg-gray-50 hover:text-gray-900"
                 href="/admin"
               >
                 Admin
               </Link>
 
-              {/* Public quote link */}
-              {publicQuoteHref ? (
-                <Link
-                  className="rounded-md border border-gray-200 px-3 py-2 font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-100 dark:hover:bg-gray-900"
-                  href={publicQuoteHref}
-                  target="_blank"
-                >
-                  Public Quote
-                </Link>
+              {/* Setup badge */}
+              {loading ? (
+                <Badge label="Checking…" tone="loading" />
+              ) : setupComplete ? (
+                <Badge label="Setup complete" tone="ok" />
               ) : (
-                <span className="rounded-md border border-gray-200 px-3 py-2 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                  Set tenant slug to enable Public Quote
-                </span>
+                <Badge label="Setup needed" tone="warn" />
               )}
             </nav>
 
-            {/* Mobile: only show Public Quote if available */}
-            {publicQuoteHref ? (
-              <Link
-                className="md:hidden rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:text-gray-100"
-                href={publicQuoteHref}
-                target="_blank"
-              >
-                Public Quote
-              </Link>
-            ) : null}
+            {/* Mobile condensed: show only badge + user button */}
+            <div className="flex items-center gap-2 sm:hidden">
+              {loading ? (
+                <Badge label="…" tone="loading" />
+              ) : setupComplete ? (
+                <Badge label="Setup OK" tone="ok" />
+              ) : (
+                <Badge label="Setup" tone="warn" />
+              )}
+            </div>
 
             <UserButton />
           </SignedIn>
