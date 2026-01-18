@@ -22,9 +22,18 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function pill(label: string) {
+  return (
+    <span className="ml-2 rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-semibold text-gray-700">
+      {label}
+    </span>
+  );
+}
+
 export default function TopNav() {
-  // null = unknown/loading, false = incomplete, true = complete
-  const [complete, setComplete] = useState<boolean | null>(null);
+  const [me, setMe] = useState<MeSettingsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,21 +42,11 @@ export default function TopNav() {
       try {
         const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const json: MeSettingsResponse = await res.json();
-
-        if (cancelled) return;
-
-        if (!json || !("ok" in json) || !json.ok) {
-          setComplete(false);
-          return;
-        }
-
-        const slug = json.tenant?.slug ? String(json.tenant.slug) : "";
-        const industry = json.settings?.industry_key ? String(json.settings.industry_key) : "";
-
-        // Minimal completion: slug + industry
-        setComplete(Boolean(slug && industry));
+        if (!cancelled) setMe(json);
       } catch {
-        if (!cancelled) setComplete(false);
+        if (!cancelled) setMe({ ok: false, error: "FETCH_FAILED" });
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -57,16 +56,57 @@ export default function TopNav() {
     };
   }, []);
 
-  const settingsLabel = useMemo(() => {
-    if (complete === null) return "Settings";
-    return complete ? "Settings" : "Configure";
-  }, [complete]);
+  const computed = useMemo(() => {
+    const ok = Boolean(me && "ok" in me && me.ok);
+    const tenant = ok ? (me as any).tenant : null;
+    const settings = ok ? (me as any).settings : null;
 
-  const showSetupBadge = complete === false;
+    const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
+    const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
+
+    const hasSlug = Boolean(tenantSlug);
+    const hasIndustry = Boolean(industryKey);
+
+    // minimal ready = slug + industry
+    const isReady = hasSlug && hasIndustry;
+
+    const publicPath = tenantSlug ? `/q/${tenantSlug}` : "";
+
+    return {
+      ok,
+      tenantSlug,
+      industryKey,
+      hasSlug,
+      hasIndustry,
+      isReady,
+      publicPath,
+    };
+  }, [me]);
+
+  const settingsLabel = loading ? "Configure" : computed.isReady ? "Settings" : "Configure";
+
+  async function copyPublicLink() {
+    if (!computed.publicPath) return;
+
+    const origin =
+      typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "";
+
+    const full = origin ? `${origin}${computed.publicPath}` : computed.publicPath;
+
+    try {
+      await navigator.clipboard.writeText(full);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }
 
   return (
     <header className="border-b bg-white">
-      <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+      <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between gap-4">
         <Link href="/" className="font-semibold text-lg">
           AIPhotoQuote
         </Link>
@@ -85,21 +125,27 @@ export default function TopNav() {
             <nav className="flex items-center gap-4">
               <Link className="underline" href="/dashboard">
                 Dashboard
-                {showSetupBadge ? (
-                  <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
-                    Setup
-                  </span>
-                ) : null}
               </Link>
 
               <Link className="underline" href="/onboarding">
                 {settingsLabel}
-                {showSetupBadge ? (
-                  <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
-                    Setup
-                  </span>
-                ) : null}
+                {!loading && computed.ok && !computed.isReady && pill("Setup")}
               </Link>
+
+              {/* Share link shows only when ready (slug exists) */}
+              {!loading && computed.ok && computed.isReady && computed.publicPath ? (
+                <button
+                  type="button"
+                  onClick={copyPublicLink}
+                  className={cn(
+                    "rounded-lg border px-3 py-1.5 text-xs font-semibold",
+                    copied ? "border-green-200 bg-green-50 text-green-800" : "border-gray-200 hover:bg-gray-50"
+                  )}
+                  title="Copy public quote page link"
+                >
+                  {copied ? "Copied!" : "Copy quote link"}
+                </button>
+              ) : null}
 
               <Link className="underline" href="/admin">
                 Admin
