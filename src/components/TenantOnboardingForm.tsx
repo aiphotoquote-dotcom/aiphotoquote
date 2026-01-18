@@ -1,308 +1,422 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type MeSettingsResponse =
   | {
       ok: true;
       tenant: { id: string; name: string; slug: string };
-      settings: {
-        tenant_id: string;
-        industry_key: string | null;
-        redirect_url: string | null;
-        thank_you_url: string | null;
-        updated_at: string | null;
-      } | null;
+      settings:
+        | {
+            tenant_id: string;
+            industry_key: string | null;
+            redirect_url: string | null;
+            thank_you_url: string | null;
+            updated_at: string | null;
+          }
+        | null;
     }
-  | { ok: false; error: any };
+  | { ok: false; error: any; message?: string };
+
+type SaveResp =
+  | { ok: true }
+  | { ok: false; error?: any; message?: string };
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function isValidUrlOrEmpty(s: string) {
-  const v = (s || "").trim();
-  if (!v) return true;
-  try {
-    // allow https://example.com
-    new URL(v);
-    return true;
-  } catch {
-    return false;
-  }
+function cleanSlug(s: string) {
+  return (s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
-export default function TenantOnboardingForm({
-  redirectToDashboard = false,
-}: {
-  redirectToDashboard?: boolean;
-}) {
+function normalizeUrl(s: string) {
+  const v = (s || "").trim();
+  if (!v) return "";
+  // allow relative redirects if you want; otherwise force https
+  if (v.startsWith("/")) return v;
+  if (/^https?:\/\//i.test(v)) return v;
+  return `https://${v}`;
+}
+
+export default function TenantOnboardingForm() {
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const [tenantSlug, setTenantSlug] = useState<string>("");
-  const [tenantName, setTenantName] = useState<string>("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [industryKey, setIndustryKey] = useState<string>("");
-  const [redirectUrl, setRedirectUrl] = useState<string>("");
-  const [thankYouUrl, setThankYouUrl] = useState<string>("");
+  const [savedToast, setSavedToast] = useState(false);
 
-  const [openAiKey, setOpenAiKey] = useState<string>("");
+  // original data (to detect dirty)
+  const [orig, setOrig] = useState<{
+    tenantName: string;
+    tenantSlug: string;
+    industryKey: string;
+    redirectUrl: string;
+    thankYouUrl: string;
+  } | null>(null);
 
-  const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<boolean>(false);
+  // editable fields
+  const [tenantName, setTenantName] = useState("");
+  const [tenantSlug, setTenantSlug] = useState("");
+  const [industryKey, setIndustryKey] = useState("");
+  const [redirectUrl, setRedirectUrl] = useState("");
+  const [thankYouUrl, setThankYouUrl] = useState("");
 
-  async function loadMe() {
-    const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
-    const json: MeSettingsResponse = await res.json();
+  const publicQuotePath = useMemo(() => {
+    const slug = cleanSlug(tenantSlug);
+    return slug ? `/q/${slug}` : "/q/<tenant-slug>";
+  }, [tenantSlug]);
 
-    if (!("ok" in json) || !json.ok) {
-      throw new Error("Failed to load tenant settings");
+  const isComplete = useMemo(() => {
+    return Boolean((industryKey || "").trim());
+  }, [industryKey]);
+
+  const dirty = useMemo(() => {
+    if (!orig) return false;
+    return (
+      tenantName !== orig.tenantName ||
+      tenantSlug !== orig.tenantSlug ||
+      industryKey !== orig.industryKey ||
+      redirectUrl !== orig.redirectUrl ||
+      thankYouUrl !== orig.thankYouUrl
+    );
+  }, [orig, tenantName, tenantSlug, industryKey, redirectUrl, thankYouUrl]);
+
+  async function load() {
+    setLoading(true);
+    setLoadError(null);
+
+    try {
+      const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+      const json: MeSettingsResponse = await res.json();
+
+      if (!("ok" in json) || !json.ok) {
+        setLoadError(json?.message || "Failed to load tenant settings.");
+        setLoading(false);
+        return;
+      }
+
+      const t = json.tenant;
+      const s = json.settings;
+
+      const next = {
+        tenantName: t?.name ?? "",
+        tenantSlug: t?.slug ?? "",
+        industryKey: (s?.industry_key ?? "") || "",
+        redirectUrl: (s?.redirect_url ?? "") || "",
+        thankYouUrl: (s?.thank_you_url ?? "") || "",
+      };
+
+      setTenantName(next.tenantName);
+      setTenantSlug(next.tenantSlug);
+      setIndustryKey(next.industryKey);
+      setRedirectUrl(next.redirectUrl);
+      setThankYouUrl(next.thankYouUrl);
+
+      setOrig(next);
+      setLoading(false);
+    } catch (e: any) {
+      setLoadError(e?.message ?? "Failed to load tenant settings.");
+      setLoading(false);
     }
-
-    const t = json.tenant;
-    const s = json.settings;
-
-    setTenantSlug(t?.slug ? String(t.slug) : "");
-    setTenantName(t?.name ? String(t.name) : "");
-
-    setIndustryKey(s?.industry_key ? String(s.industry_key) : "");
-    setRedirectUrl(s?.redirect_url ? String(s.redirect_url) : "");
-    setThankYouUrl(s?.thank_you_url ? String(s.thank_you_url) : "");
-
-    return json;
   }
 
   useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        await loadMe();
-      } catch (e: any) {
-        if (!cancelled) setError(e?.message ?? "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const canSave = useMemo(() => {
-    if (saving) return false;
-    if (!industryKey.trim()) return false;
-    if (!isValidUrlOrEmpty(redirectUrl)) return false;
-    if (!isValidUrlOrEmpty(thankYouUrl)) return false;
-    return true;
-  }, [saving, industryKey, redirectUrl, thankYouUrl]);
+  async function save() {
+    setSaveError(null);
+    setSavedToast(false);
 
-  async function saveSettingsOnly() {
-    const res = await fetch("/api/tenant/save-settings", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        industry_key: industryKey.trim(),
-        redirect_url: redirectUrl.trim() || null,
-        thank_you_url: thankYouUrl.trim() || null,
-      }),
-    });
-
-    const text = await res.text();
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      throw new Error(`Server returned non-JSON (HTTP ${res.status})`);
+    const slug = cleanSlug(tenantSlug);
+    if (!slug || slug.length < 3) {
+      setSaveError("Tenant slug must be at least 3 characters (letters/numbers/dashes).");
+      return;
+    }
+    if (!industryKey.trim()) {
+      setSaveError("Industry is required.");
+      return;
     }
 
-    if (!res.ok || !json?.ok) {
-      const msg = json?.message || json?.error?.message || "Failed to save settings";
-      throw new Error(msg);
-    }
-  }
-
-  async function saveOpenAiKeyIfProvided() {
-    const key = openAiKey.trim();
-    if (!key) return;
-
-    // This endpoint already exists in your tree.
-    const res = await fetch("/api/admin/openai-key", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ openaiKey: key }),
-    });
-
-    const text = await res.text();
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      throw new Error(`OpenAI key route returned non-JSON (HTTP ${res.status})`);
-    }
-
-    if (!res.ok || !json?.ok) {
-      const msg = json?.message || json?.error?.message || "Failed to save OpenAI key";
-      throw new Error(msg);
-    }
-  }
-
-  async function onSave() {
-    setError(null);
-    setSaved(false);
     setSaving(true);
 
     try {
-      await saveSettingsOnly();
-      await saveOpenAiKeyIfProvided();
+      const payload = {
+        // Keep payload aligned to the routes we already have in this repo:
+        // api/tenant/save-settings/route.ts should accept these
+        name: tenantName.trim() || null,
+        slug,
+        industry_key: industryKey.trim(),
+        redirect_url: normalizeUrl(redirectUrl) || null,
+        thank_you_url: normalizeUrl(thankYouUrl) || null,
+      };
 
-      // Re-load to confirm what the server considers "complete"
-      const me = await loadMe();
-      setSaved(true);
+      const res = await fetch("/api/tenant/save-settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-      const isComplete = Boolean(me?.ok && (me as any)?.settings?.industry_key);
+      const text = await res.text();
+      let j: SaveResp | any = null;
+      try {
+        j = text ? JSON.parse(text) : null;
+      } catch {
+        throw new Error(`Save returned non-JSON (HTTP ${res.status}).`);
+      }
 
-      if (redirectToDashboard && isComplete) {
-        router.push("/dashboard");
-        router.refresh();
+      if (!res.ok || !j?.ok) {
+        const msg = j?.message || j?.error?.message || "Save failed.";
+        throw new Error(msg);
+      }
+
+      // mark saved
+      const nextOrig = {
+        tenantName: tenantName,
+        tenantSlug: slug,
+        industryKey: industryKey.trim(),
+        redirectUrl: normalizeUrl(redirectUrl) || "",
+        thankYouUrl: normalizeUrl(thankYouUrl) || "",
+      };
+      setOrig(nextOrig);
+      setTenantSlug(slug);
+      setRedirectUrl(nextOrig.redirectUrl);
+      setThankYouUrl(nextOrig.thankYouUrl);
+
+      setSavedToast(true);
+      setTimeout(() => setSavedToast(false), 2200);
+
+      // Best-effort: redirect to dashboard once setup is complete (industry_key present)
+      try {
+        const r2 = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+        const j2: any = await r2.json();
+        const industry = j2?.settings?.industry_key ?? "";
+        if (industry) router.push("/dashboard");
+      } catch {
+        // ignore redirect failures; save already succeeded
       }
     } catch (e: any) {
-      setError(e?.message ?? "Save failed");
+      setSaveError(e?.message ?? "Save failed.");
     } finally {
       setSaving(false);
     }
   }
 
+  if (loading) {
+    return (
+      <div className="rounded-2xl border bg-white p-6">
+        <div className="text-sm text-gray-700">Loading settings…</div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="rounded-2xl border border-red-200 bg-red-50 p-6">
+        <div className="font-semibold text-red-900">Couldn’t load settings</div>
+        <div className="mt-2 text-sm text-red-800 whitespace-pre-wrap">{loadError}</div>
+        <button
+          type="button"
+          onClick={load}
+          className="mt-4 rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border bg-white p-5">
-        <div className="flex items-start justify-between gap-4">
+      {/* Sticky save bar */}
+      <div
+        className={cn(
+          "sticky top-3 z-10 rounded-2xl border bg-white p-4 shadow-sm transition-opacity",
+          dirty ? "opacity-100" : "opacity-60"
+        )}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold">Tenant</div>
-            <div className="mt-1 text-sm text-gray-700">
-              {loading ? "Loading…" : tenantName || "—"}
-              {tenantSlug ? (
-                <span className="ml-2 rounded-full border px-2 py-0.5 text-xs text-gray-700">
-                  <span className="font-mono">{tenantSlug}</span>
+            <div className="text-sm font-semibold">Tenant settings</div>
+            <div className="text-xs text-gray-600">
+              {isComplete ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
+                  Setup looks complete
                 </span>
-              ) : null}
+              ) : (
+                <span className="inline-flex items-center gap-2">
+                  <span className="inline-block h-2 w-2 rounded-full bg-amber-500" />
+                  Setup required
+                </span>
+              )}
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => router.push("/dashboard")}
-            className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-          >
-            Back to dashboard
-          </button>
+          <div className="flex items-center gap-3">
+            {savedToast ? (
+              <div className="rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-semibold text-green-900">
+                Saved
+              </div>
+            ) : null}
+
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || !dirty}
+              className={cn(
+                "rounded-xl px-4 py-2 text-sm font-semibold",
+                saving || !dirty ? "bg-gray-200 text-gray-600" : "bg-black text-white"
+              )}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="rounded-2xl border bg-white p-5 space-y-4">
-        <div>
-          <div className="text-sm font-semibold">Core settings</div>
-          <p className="mt-1 text-xs text-gray-600">
-            Industry is required. Redirect URLs are optional.
-          </p>
+      {/* Public quote page */}
+      <div className="rounded-2xl border bg-white p-6">
+        <div className="text-sm font-semibold">Public quote page</div>
+        <div className="mt-2 text-sm text-gray-700">
+          Customers will submit photos here:
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <code className="rounded-lg border bg-gray-50 px-3 py-2 text-sm">
+            {publicQuotePath}
+          </code>
+          <a
+            className="text-sm font-semibold underline"
+            href={cleanSlug(tenantSlug) ? publicQuotePath : undefined}
+            onClick={(e) => {
+              if (!cleanSlug(tenantSlug)) e.preventDefault();
+            }}
+          >
+            Open
+          </a>
+        </div>
+        <div className="mt-2 text-xs text-gray-500">
+          Tip: keep your slug short and brand-safe (letters/numbers/dashes).
+        </div>
+      </div>
+
+      {/* Form */}
+      <div className="rounded-2xl border bg-white p-6 space-y-5">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="text-sm font-semibold">Business name</label>
+            <input
+              className="mt-2 w-full rounded-xl border px-3 py-2 text-sm"
+              value={tenantName}
+              onChange={(e) => setTenantName(e.target.value)}
+              placeholder="Maggio Upholstery"
+            />
+          </div>
+
+          <div>
+            <label className="text-sm font-semibold">Tenant slug *</label>
+            <input
+              className="mt-2 w-full rounded-xl border px-3 py-2 text-sm font-mono"
+              value={tenantSlug}
+              onChange={(e) => setTenantSlug(cleanSlug(e.target.value))}
+              placeholder="maggio-upholstery"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <div className="mt-1 text-xs text-gray-500">
+              Used for your public URL: <span className="font-mono">{publicQuotePath}</span>
+            </div>
+          </div>
         </div>
 
-        <label className="block">
-          <div className="text-xs text-gray-700">
-            Industry key <span className="text-red-600">*</span>
-          </div>
+        <div>
+          <label className="text-sm font-semibold">Industry *</label>
           <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
+            className="mt-2 w-full rounded-xl border px-3 py-2 text-sm"
             value={industryKey}
             onChange={(e) => setIndustryKey(e.target.value)}
-            placeholder="e.g. marine, auto, powersports"
-            disabled={loading || saving}
+            placeholder="marine"
           />
-        </label>
-
-        <label className="block">
-          <div className="text-xs text-gray-700">Redirect URL (optional)</div>
-          <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
-            value={redirectUrl}
-            onChange={(e) => setRedirectUrl(e.target.value)}
-            placeholder="https://your-site.com/after-submit"
-            disabled={loading || saving}
-          />
-          {!isValidUrlOrEmpty(redirectUrl) ? (
-            <div className="mt-2 text-xs text-red-600">Enter a valid URL or leave blank.</div>
-          ) : null}
-        </label>
-
-        <label className="block">
-          <div className="text-xs text-gray-700">Thank-you URL (optional)</div>
-          <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm"
-            value={thankYouUrl}
-            onChange={(e) => setThankYouUrl(e.target.value)}
-            placeholder="https://your-site.com/thank-you"
-            disabled={loading || saving}
-          />
-          {!isValidUrlOrEmpty(thankYouUrl) ? (
-            <div className="mt-2 text-xs text-red-600">Enter a valid URL or leave blank.</div>
-          ) : null}
-        </label>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-5 space-y-4">
-        <div>
-          <div className="text-sm font-semibold">Tenant OpenAI key (optional)</div>
-          <p className="mt-1 text-xs text-gray-600">
-            This is stored encrypted server-side. Leave blank to keep existing.
-          </p>
+          <div className="mt-1 text-xs text-gray-500">
+            Keep it simple (ex: marine, auto, motorcycle, hvac, etc.).
+          </div>
         </div>
 
-        <label className="block">
-          <div className="text-xs text-gray-700">OpenAI API key</div>
-          <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm font-mono"
-            value={openAiKey}
-            onChange={(e) => setOpenAiKey(e.target.value)}
-            placeholder="sk-..."
-            disabled={loading || saving}
-          />
-        </label>
-      </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="text-sm font-semibold">Redirect URL (optional)</label>
+            <input
+              className="mt-2 w-full rounded-xl border px-3 py-2 text-sm font-mono"
+              value={redirectUrl}
+              onChange={(e) => setRedirectUrl(e.target.value)}
+              placeholder="https://yourwebsite.com/thank-you"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <div className="mt-1 text-xs text-gray-500">
+              If set, we can redirect after submit (future polish).
+            </div>
+          </div>
 
-      <button
-        type="button"
-        className={cn(
-          "w-full rounded-xl bg-black py-4 font-semibold text-white disabled:opacity-50",
-          saving ? "opacity-80" : ""
-        )}
-        onClick={onSave}
-        disabled={!canSave}
-      >
-        {saving ? "Saving…" : "Save settings"}
-      </button>
-
-      {saved ? (
-        <div className="rounded-xl border border-green-200 bg-green-50 p-3 text-sm text-green-900">
-          Saved!
-          {redirectToDashboard ? " Redirecting if setup is complete…" : null}
+          <div>
+            <label className="text-sm font-semibold">Thank-you URL (optional)</label>
+            <input
+              className="mt-2 w-full rounded-xl border px-3 py-2 text-sm font-mono"
+              value={thankYouUrl}
+              onChange={(e) => setThankYouUrl(e.target.value)}
+              placeholder="https://yourwebsite.com/thank-you"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <div className="mt-1 text-xs text-gray-500">
+              Used by hosted flow if/when we enable it.
+            </div>
+          </div>
         </div>
-      ) : null}
 
-      {error ? (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
-          {error}
+        {saveError ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 whitespace-pre-wrap">
+            {saveError}
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={save}
+            disabled={saving || !dirty}
+            className={cn(
+              "rounded-xl px-4 py-2 text-sm font-semibold",
+              saving || !dirty ? "bg-gray-200 text-gray-600" : "bg-black text-white"
+            )}
+          >
+            {saving ? "Saving…" : "Save settings"}
+          </button>
+
+          <button
+            type="button"
+            onClick={load}
+            disabled={saving}
+            className="rounded-xl border px-4 py-2 text-sm font-semibold"
+          >
+            Reload
+          </button>
         </div>
-      ) : null}
-
-      <div className="text-xs text-gray-600">
-        Tip: once your industry is set, Dashboard will show “Ready” and the public quote link.
       </div>
     </div>
   );
