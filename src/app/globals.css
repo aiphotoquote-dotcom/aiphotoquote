@@ -1,17 +1,20 @@
 @import "tailwindcss";
 
 :root {
+  /* Light */
   --background: #ffffff;
   --foreground: #171717;
 }
 
 @theme inline {
+  /* Tailwind tokens backed by CSS vars */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
+/* System dark mode */
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
@@ -19,8 +22,12 @@
   }
 }
 
+/* Make native UI (inputs/scrollbars) match theme */
+:root {
+  color-scheme: light dark;
+}
+
+/* DO NOT set body bg/text here — let Tailwind classes control it */
 body {
-  background: var(--background);
-  color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
