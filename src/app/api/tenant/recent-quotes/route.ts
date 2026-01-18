@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { and, desc, eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
@@ -22,7 +22,6 @@ export async function GET() {
     }
 
     // Resolve tenant owned by this user (single-tenant owner model for now)
-    // IMPORTANT: this matches your current approach used elsewhere.
     const tenantRows = await db
       .select({
         id: tenants.id,
@@ -43,20 +42,18 @@ export async function GET() {
       );
     }
 
+    // IMPORTANT: QuoteLogs table (per your DB) is JSON-centric + render columns.
     const rows = await db
       .select({
         id: quoteLogs.id,
         createdAt: quoteLogs.createdAt,
-        confidence: quoteLogs.confidence,
-        estimateLow: quoteLogs.estimateLow,
-        estimateHigh: quoteLogs.estimateHigh,
-        inspectionRequired: quoteLogs.inspectionRequired,
+        input: quoteLogs.input,
+        output: quoteLogs.output,
 
         renderOptIn: quoteLogs.renderOptIn,
         renderStatus: quoteLogs.renderStatus,
         renderImageUrl: quoteLogs.renderImageUrl,
-
-        // keep input/output optional for later drill-in (not needed on dashboard)
+        renderError: quoteLogs.renderError,
       })
       .from(quoteLogs)
       .where(eq(quoteLogs.tenantId, tenant.id))

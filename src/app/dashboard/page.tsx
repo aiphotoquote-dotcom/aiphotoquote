@@ -25,14 +25,13 @@ type RecentQuotesResp =
       quotes: Array<{
         id: string;
         createdAt: string;
-        confidence: string | null;
-        estimateLow: number | null;
-        estimateHigh: number | null;
-        inspectionRequired: boolean | null;
+        input: any;
+        output: any;
 
         renderOptIn: boolean;
         renderStatus: string;
         renderImageUrl: string | null;
+        renderError: string | null;
       }>;
     }
   | { ok: false; error: any; message?: string };
@@ -97,12 +96,39 @@ function renderBadge(status: string) {
     );
   }
 
-  // default covers not_requested / unknown
   return (
     <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-semibold text-gray-700">
       Not requested
     </span>
   );
+}
+
+function pickEstimateFromOutput(output: any): { low?: number; high?: number; confidence?: string } {
+  const o = output ?? {};
+
+  // Common shapes we’ve used across routes:
+  // 1) { estimate: { low, high }, confidence }
+  // 2) { estimateLow, estimateHigh, confidence }
+  // 3) { output: { estimate: ... } } (nested)
+  const directLow =
+    typeof o?.estimateLow === "number" ? o.estimateLow : undefined;
+  const directHigh =
+    typeof o?.estimateHigh === "number" ? o.estimateHigh : undefined;
+
+  const estObj = o?.estimate && typeof o.estimate === "object" ? o.estimate : null;
+  const objLow =
+    typeof estObj?.low === "number" ? estObj.low : undefined;
+  const objHigh =
+    typeof estObj?.high === "number" ? estObj.high : undefined;
+
+  const conf =
+    typeof o?.confidence === "string" ? o.confidence : undefined;
+
+  // prefer nested estimate object if present
+  const low = objLow ?? directLow;
+  const high = objHigh ?? directHigh;
+
+  return { low, high, confidence: conf };
 }
 
 export default function Dashboard() {
@@ -173,7 +199,6 @@ export default function Dashboard() {
     const hasRedirect = Boolean(redirectUrl);
     const hasThankYou = Boolean(thankYouUrl);
 
-    // minimal “ready” for now
     const isReady = hasIndustry;
 
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
@@ -195,7 +220,7 @@ export default function Dashboard() {
 
   const quotes = useMemo(() => {
     if (!quotesResp || !(quotesResp as any).ok) return [];
-    return (quotesResp as any).quotes as RecentQuotesResp extends { ok: true } ? any[] : any[];
+    return (quotesResp as any).quotes as any[];
   }, [quotesResp]);
 
   async function copyPublicLink() {
@@ -380,31 +405,33 @@ export default function Dashboard() {
                     <th className="py-2 pr-3">Created</th>
                     <th className="py-2 pr-3">Estimate</th>
                     <th className="py-2 pr-3">Confidence</th>
-                    <th className="py-2 pr-3">Inspection</th>
                     <th className="py-2 pr-3">Render</th>
                     <th className="py-2 pr-0 text-right">Open</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {quotes.map((q) => {
+                  {quotes.map((q: any) => {
+                    const picked = pickEstimateFromOutput(q.output);
                     const est =
-                      q.estimateLow != null || q.estimateHigh != null
-                        ? `${fmtMoney(q.estimateLow)} – ${fmtMoney(q.estimateHigh)}`
+                      picked.low != null || picked.high != null
+                        ? `${fmtMoney(picked.low)} – ${fmtMoney(picked.high)}`
                         : "—";
+
+                    const conf = picked.confidence ?? "—";
 
                     return (
                       <tr key={q.id} className="border-b last:border-b-0">
                         <td className="py-3 pr-3 whitespace-nowrap">{fmtDate(q.createdAt)}</td>
                         <td className="py-3 pr-3 whitespace-nowrap">{est}</td>
-                        <td className="py-3 pr-3">{q.confidence ?? "—"}</td>
-                        <td className="py-3 pr-3">
-                          {q.inspectionRequired ? "Yes" : q.inspectionRequired === false ? "No" : "—"}
-                        </td>
+                        <td className="py-3 pr-3">{conf}</td>
                         <td className="py-3 pr-3">
                           <div className="flex items-center gap-2">
                             {renderBadge(q.renderStatus)}
                             {q.renderImageUrl ? (
                               <span className="text-xs text-gray-500">(image)</span>
+                            ) : null}
+                            {q.renderError ? (
+                              <span className="text-xs text-red-600">(error)</span>
                             ) : null}
                           </div>
                         </td>
@@ -429,8 +456,8 @@ export default function Dashboard() {
         <div className="rounded-2xl border p-6">
           <h2 className="font-semibold">Next improvements (today)</h2>
           <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 space-y-1">
-            <li>Dashboard: show “Setup complete” banner + link to public quote page.</li>
-            <li>Admin: improve quote detail page (render panel + email status).</li>
+            <li>Show a “Setup complete” banner once industry is set.</li>
+            <li>Dashboard: add a mini “Test quote” CTA (opens /q/&lt;slug&gt;).</li>
             <li>Navigation: unify Admin ↔ Dashboard ↔ Onboarding flow.</li>
           </ul>
         </div>
