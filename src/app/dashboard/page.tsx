@@ -2,7 +2,7 @@
 
 import TopNav from "@/components/TopNav";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type MeSettingsResponse =
   | {
@@ -16,7 +16,7 @@ type MeSettingsResponse =
         updated_at: string | null;
       } | null;
     }
-  | { ok: false; error: any; message?: string };
+  | { ok: false; error: any };
 
 type RecentQuotesResp =
   | {
@@ -76,73 +76,56 @@ function money(n: unknown) {
   });
 }
 
-function renderTone(statusRaw: string) {
-  const s = (statusRaw || "").toLowerCase();
-  if (s === "rendered") return "green";
-  if (s === "failed") return "red";
-  if (s === "queued" || s === "running") return "blue";
-  return "gray";
-}
-
-function renderLabel(statusRaw: string) {
-  const s = (statusRaw || "").toLowerCase();
-  if (s === "rendered") return "Rendered";
-  if (s === "failed") return "Render failed";
-  if (s === "queued" || s === "running") return "Rendering";
-  return "Estimate";
-}
-
 export default function Dashboard() {
-  const [loadingMe, setLoadingMe] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [me, setMe] = useState<MeSettingsResponse | null>(null);
 
-  const [loadingQuotes, setLoadingQuotes] = useState(true);
+  const [quotesLoading, setQuotesLoading] = useState(true);
   const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
 
   const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
 
-  // ---- Load tenant settings ----
-  const loadMe = useCallback(async () => {
-    setLoadingMe(true);
-    try {
-      const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
-      const json: MeSettingsResponse = await res.json();
-      setMe(json);
-    } catch {
-      setMe({ ok: false, error: "FETCH_FAILED" });
-    } finally {
-      setLoadingMe(false);
-    }
-  }, []);
+  useEffect(() => {
+    let cancelled = false;
 
-  // ---- Load recent quotes ----
-  const loadQuotes = useCallback(async () => {
-    setLoadingQuotes(true);
-    try {
-      const res = await fetch("/api/tenant/recent-quotes", { cache: "no-store" });
-      const json: RecentQuotesResp = await res.json();
-      setQuotesResp(json);
-    } catch {
-      setQuotesResp({ ok: false, error: "FETCH_FAILED" });
-    } finally {
-      setLoadingQuotes(false);
+    async function load() {
+      try {
+        const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+        const json: MeSettingsResponse = await res.json();
+        if (!cancelled) setMe(json);
+      } catch {
+        if (!cancelled) setMe({ ok: false, error: "FETCH_FAILED" });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     let cancelled = false;
 
-    (async () => {
-      await loadMe();
-      if (cancelled) return;
-      await loadQuotes();
-    })();
+    async function loadQuotes() {
+      try {
+        const res = await fetch("/api/tenant/recent-quotes", { cache: "no-store" });
+        const json: RecentQuotesResp = await res.json();
+        if (!cancelled) setQuotesResp(json);
+      } catch {
+        if (!cancelled) setQuotesResp({ ok: false, error: "FETCH_FAILED" });
+      } finally {
+        if (!cancelled) setQuotesLoading(false);
+      }
+    }
 
+    loadQuotes();
     return () => {
       cancelled = true;
     };
-  }, [loadMe, loadQuotes]);
+  }, []);
 
   const computed = useMemo(() => {
     const ok = Boolean(me && "ok" in me && me.ok);
@@ -158,8 +141,10 @@ export default function Dashboard() {
 
     const hasSlug = Boolean(tenantSlug);
     const hasIndustry = Boolean(industryKey);
+    const hasRedirect = Boolean(redirectUrl);
+    const hasThankYou = Boolean(thankYouUrl);
 
-    // Minimal ready state: slug + industry
+    // Minimal “ready” for now
     const isReady = hasSlug && hasIndustry;
 
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
@@ -173,14 +158,14 @@ export default function Dashboard() {
       thankYouUrl,
       hasSlug,
       hasIndustry,
+      hasRedirect,
+      hasThankYou,
       isReady,
       publicPath,
     };
   }, [me]);
 
   async function copyPublicLink() {
-    setCopyError(null);
-
     if (!computed.tenantSlug) return;
 
     const origin =
@@ -194,17 +179,19 @@ export default function Dashboard() {
       await navigator.clipboard.writeText(full);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    } catch (e: any) {
+    } catch {
       setCopied(false);
-      setCopyError("Clipboard blocked. You can manually copy the link.");
     }
   }
 
-  const setupTone = loadingMe ? "gray" : computed.isReady ? "green" : "yellow";
-  const setupLabel = loadingMe ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
+  const setupTone = loading ? "gray" : computed.isReady ? "green" : "yellow";
+  const setupLabel = loading ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
 
-  const quotesOk = Boolean(quotesResp && "ok" in quotesResp && quotesResp.ok);
-  const quotes = quotesOk ? (quotesResp as any).quotes : [];
+  const quotesOk = Boolean(quotesResp && "ok" in quotesResp && (quotesResp as any).ok);
+  const quotes =
+    quotesOk && quotesResp && "quotes" in quotesResp ? (quotesResp as any).quotes : [];
+
+  const firstTimeEmpty = !quotesLoading && quotesOk && Array.isArray(quotes) && quotes.length === 0;
 
   return (
     <main className="min-h-screen bg-white">
@@ -237,7 +224,9 @@ export default function Dashboard() {
               href="/onboarding"
               className={cn(
                 "rounded-lg px-4 py-2 text-sm font-semibold",
-                computed.isReady ? "border border-gray-200 hover:bg-gray-50" : "bg-black text-white"
+                computed.isReady
+                  ? "border border-gray-200 hover:bg-gray-50"
+                  : "bg-black text-white"
               )}
             >
               {computed.isReady ? "Settings" : "Finish setup"}
@@ -245,43 +234,84 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Grid */}
+        {/* NEW: Start-here card (only shows when setup isn't complete) */}
+        {!loading && computed.ok && !computed.isReady ? (
+          <section className="rounded-2xl border border-yellow-200 bg-yellow-50 p-6">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="font-semibold text-yellow-900">Start here</h2>
+                <p className="mt-1 text-sm text-yellow-900/80">
+                  Finish the minimum setup so your public quote page works and your tenant can run test quotes.
+                </p>
+
+                <ul className="mt-3 list-disc pl-5 text-sm text-yellow-900/80 space-y-1">
+                  <li>Set a tenant slug</li>
+                  <li>Select an industry</li>
+                  <li>Save (OpenAI key + URLs are optional but recommended)</li>
+                </ul>
+              </div>
+
+              <div className="flex flex-wrap gap-3">
+                <Link
+                  href="/onboarding"
+                  className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+                >
+                  Open settings
+                </Link>
+                <Link
+                  href="/admin/setup/openai"
+                  className="rounded-lg border border-yellow-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-yellow-100/50"
+                >
+                  OpenAI setup
+                </Link>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {/* Main grid */}
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Tenant card */}
-          <section className="rounded-2xl border p-6 lg:col-span-1 space-y-4">
+          {/* Setup card */}
+          <section className="rounded-2xl border p-6 lg:col-span-1">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold">Tenant</h2>
+              <h2 className="font-semibold">Setup checklist</h2>
               {pill(setupLabel, setupTone as any)}
             </div>
 
-            {!loadingMe && computed.ok ? (
-              <div className="space-y-2 text-sm text-gray-800">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-gray-600">Slug</div>
-                  <div className="font-mono text-xs">{computed.tenantSlug || "—"}</div>
-                </div>
-
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-gray-600">Industry</div>
-                  <div className="font-mono text-xs">{computed.industryKey || "—"}</div>
-                </div>
-
-                <div className="pt-2 space-y-1">
-                  <div className="text-xs text-gray-600">
-                    {computed.hasSlug ? "✅" : "⬜️"} Slug
-                  </div>
-                  <div className="text-xs text-gray-600">
-                    {computed.hasIndustry ? "✅" : "⬜️"} Industry
-                  </div>
-                </div>
-              </div>
+            {!loading && computed.ok ? (
+              <ul className="mt-4 space-y-2 text-sm text-gray-800">
+                <li>
+                  <span className="mr-2">{computed.hasSlug ? "✅" : "⬜️"}</span>
+                  Tenant slug{" "}
+                  <span className="ml-2 font-mono text-xs text-gray-600">
+                    {computed.tenantSlug || "—"}
+                  </span>
+                </li>
+                <li>
+                  <span className="mr-2">{computed.hasIndustry ? "✅" : "⬜️"}</span>
+                  Industry{" "}
+                  <span className="ml-2 font-mono text-xs text-gray-600">
+                    {computed.industryKey || "—"}
+                  </span>
+                </li>
+                <li>
+                  <span className="mr-2">{computed.hasRedirect ? "✅" : "⬜️"}</span>
+                  Redirect URL (optional)
+                </li>
+                <li>
+                  <span className="mr-2">{computed.hasThankYou ? "✅" : "⬜️"}</span>
+                  Thank-you URL (optional)
+                </li>
+              </ul>
             ) : (
-              <div className="text-sm text-gray-600">
-                {loadingMe ? "Loading your tenant…" : "Couldn’t load tenant settings."}
-              </div>
+              <p className="mt-4 text-sm text-gray-600">
+                {loading
+                  ? "Loading your tenant…"
+                  : "Couldn’t load tenant settings. Refresh and try again."}
+              </p>
             )}
 
-            <div className="flex flex-wrap gap-3 pt-2">
+            <div className="mt-5 flex flex-wrap gap-3">
               <Link
                 href="/onboarding"
                 className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
@@ -289,24 +319,21 @@ export default function Dashboard() {
                 Open onboarding
               </Link>
               <Link
-                href="/admin"
+                href="/admin/setup/openai"
                 className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
               >
-                Admin
+                OpenAI setup
+              </Link>
+              <Link
+                href="/admin/setup/ai-policy"
+                className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+              >
+                AI policy
               </Link>
             </div>
-
-            <button
-              type="button"
-              onClick={loadMe}
-              className="w-full rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-              disabled={loadingMe}
-            >
-              {loadingMe ? "Refreshing…" : "Refresh tenant"}
-            </button>
           </section>
 
-          {/* Right column */}
+          {/* Public link + Recent quotes */}
           <div className="grid gap-6 lg:col-span-2">
             {/* Public quote page */}
             <section className="rounded-2xl border p-6">
@@ -314,7 +341,7 @@ export default function Dashboard() {
                 <div>
                   <h2 className="font-semibold">Public quote page</h2>
                   <p className="mt-1 text-sm text-gray-600">
-                    Share this with customers after setup.
+                    This is what customers use. Share it after setup.
                   </p>
                 </div>
 
@@ -349,44 +376,61 @@ export default function Dashboard() {
                 <div className="mt-1 font-mono text-sm">{computed.publicPath}</div>
               </div>
 
-              {copyError ? (
-                <div className="mt-3 text-xs text-red-700">{copyError}</div>
-              ) : null}
-
-              <div className="mt-4 text-xs text-gray-600">
-                Tip: run one complete test quote (estimate + optional rendering) after setup.
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                {computed.tenantSlug ? (
+                  <Link
+                    href={computed.publicPath}
+                    className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                  >
+                    Run a test quote
+                  </Link>
+                ) : (
+                  <span className="text-xs text-gray-600">
+                    Tip: Set slug + industry, then run a test quote end-to-end.
+                  </span>
+                )}
               </div>
             </section>
 
-            {/* Recent quotes */}
+            {/* Recent Quotes */}
             <section className="rounded-2xl border p-6">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <h2 className="font-semibold">Recent quotes</h2>
-                  {loadingQuotes ? pill("Loading…", "gray") : null}
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={loadQuotes}
-                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-                    disabled={loadingQuotes}
-                  >
-                    {loadingQuotes ? "Refreshing…" : "Refresh"}
-                  </button>
-
-                  <Link
-                    href="/admin/quotes"
-                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-                  >
-                    View all
-                  </Link>
-                </div>
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold">Recent quotes</h2>
+                {quotesLoading ? pill("Loading…", "gray") : null}
               </div>
 
-              {!loadingQuotes && quotesOk ? (
-                quotes.length ? (
+              {firstTimeEmpty ? (
+                <div className="mt-4 rounded-xl border bg-gray-50 p-4">
+                  <div className="text-sm font-semibold text-gray-900">No quotes yet</div>
+                  <p className="mt-1 text-sm text-gray-600">
+                    Run a test quote to confirm: photos → estimate → (optional) render → emails + DB logs.
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-3">
+                    {computed.tenantSlug ? (
+                      <Link
+                        href={computed.publicPath}
+                        className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+                      >
+                        Run test quote
+                      </Link>
+                    ) : (
+                      <Link
+                        href="/onboarding"
+                        className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                      >
+                        Set tenant slug first
+                      </Link>
+                    )}
+                    <Link
+                      href="/admin/quotes"
+                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
+                    >
+                      View admin quotes
+                    </Link>
+                  </div>
+                </div>
+              ) : !quotesLoading && quotesOk ? (
+                Array.isArray(quotes) && quotes.length ? (
                   <div className="mt-4 overflow-hidden rounded-xl border">
                     <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600">
                       <div className="col-span-4">Created</div>
@@ -396,95 +440,85 @@ export default function Dashboard() {
 
                     <ul className="divide-y">
                       {quotes.map((q: any) => {
-                        const statusRaw = (q.renderStatus || "").toString();
-                        const status = pill(renderLabel(statusRaw), renderTone(statusRaw) as any);
+                        const statusRaw = (q.renderStatus || "")
+                          .toString()
+                          .toLowerCase();
 
-                        const range =
-                          typeof q.estimateLow === "number" || typeof q.estimateHigh === "number"
-                            ? `${money(q.estimateLow)}${
-                                q.estimateHigh != null ? ` – ${money(q.estimateHigh)}` : ""
-                              }`
-                            : "";
+                        const statusPill =
+                          statusRaw === "rendered"
+                            ? pill("Rendered", "green")
+                            : statusRaw === "failed"
+                              ? pill("Render failed", "red")
+                              : statusRaw === "queued" || statusRaw === "running"
+                                ? pill("Rendering", "blue")
+                                : pill("Estimate", "gray");
 
                         return (
-                          <li key={q.id}>
-                            <Link
-                              href={`/admin/quotes/${q.id}`}
-                              className="grid grid-cols-12 items-center px-4 py-3 hover:bg-gray-50 transition"
-                            >
-                              <div className="col-span-4 text-sm text-gray-800">
-                                {fmtDate(q.createdAt)}
-                              </div>
+                          <li key={q.id} className="grid grid-cols-12 items-center px-4 py-3">
+                            <div className="col-span-4 text-sm text-gray-800">
+                              {fmtDate(q.createdAt)}
+                            </div>
 
-                              <div className="col-span-4 font-mono text-xs text-gray-700 truncate">
-                                {q.id}
-                              </div>
+                            <div className="col-span-4 font-mono text-xs text-gray-700">
+                              {q.id}
+                            </div>
 
-                              <div className="col-span-4 flex items-center justify-end gap-3">
-                                {range ? (
-                                  <div className="text-xs text-gray-700">{range}</div>
-                                ) : null}
-                                {status}
-                              </div>
-                            </Link>
+                            <div className="col-span-4 flex items-center justify-end gap-3">
+                              {typeof q.estimateLow === "number" ||
+                              typeof q.estimateHigh === "number" ? (
+                                <div className="text-xs text-gray-700">
+                                  {money(q.estimateLow)}{" "}
+                                  {q.estimateHigh != null
+                                    ? `– ${money(q.estimateHigh)}`
+                                    : ""}
+                                </div>
+                              ) : null}
+
+                              {statusPill}
+                            </div>
                           </li>
                         );
                       })}
                     </ul>
                   </div>
                 ) : (
-                  <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-                    <div className="text-sm font-semibold text-gray-900">No quotes yet</div>
-                    <div className="mt-1 text-sm text-gray-700">
-                      Run a test quote from your public page to validate the full flow.
-                    </div>
-                    {computed.tenantSlug ? (
-                      <div className="mt-3">
-                        <Link
-                          href={computed.publicPath}
-                          className="inline-flex rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
-                        >
-                          Open public quote page
-                        </Link>
-                      </div>
-                    ) : null}
-                  </div>
+                  <p className="mt-4 text-sm text-gray-600">
+                    No quotes yet. Run a test quote.
+                  </p>
                 )
               ) : (
-                <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">Couldn’t load recent quotes</div>
-                  <div className="mt-1 text-sm text-gray-700">
-                    {loadingQuotes ? "Loading…" : "Try Refresh, or check your tenant session."}
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      onClick={loadQuotes}
-                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                      disabled={loadingQuotes}
-                    >
-                      {loadingQuotes ? "Refreshing…" : "Retry"}
-                    </button>
-                    <Link
-                      href="/admin/quotes"
-                      className="rounded-lg border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                    >
-                      Open Admin quotes
-                    </Link>
-                  </div>
-                </div>
+                <p className="mt-4 text-sm text-gray-600">
+                  {quotesLoading ? "Loading…" : "Couldn’t load recent quotes yet."}
+                </p>
               )}
+
+              <div className="mt-5 flex flex-wrap gap-3">
+                <Link
+                  href="/admin/quotes"
+                  className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                >
+                  View in Admin
+                </Link>
+                {computed.tenantSlug ? (
+                  <Link
+                    href={computed.publicPath}
+                    className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+                  >
+                    Open public quote page
+                  </Link>
+                ) : null}
+              </div>
             </section>
           </div>
         </div>
 
-        {/* Flow polish */}
+        {/* Next */}
         <section className="rounded-2xl border p-6">
           <h2 className="font-semibold">Next (flow polish)</h2>
           <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 space-y-1">
-            <li>Make onboarding always redirect here when setup is complete.</li>
-            <li>Add “share link” affordance on onboarding + admin pages.</li>
-            <li>Add a tenant quotes page (not admin) later for clean SaaS separation.</li>
+            <li>Make TopNav “Admin” optional for non-admin tenants later.</li>
+            <li>Add “Quotes” page for tenant (not Admin) once ready.</li>
+            <li>Add a small “Share link” button in TopNav when setup is ready.</li>
           </ul>
         </section>
       </div>
