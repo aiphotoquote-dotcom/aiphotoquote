@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type MeSettingsResponse =
   | {
@@ -17,6 +17,10 @@ type MeSettingsResponse =
       } | null;
     }
   | { ok: false; error: any; message?: string };
+
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
 export default function TopNav() {
   // null = unknown/loading, false = incomplete, true = complete
@@ -37,11 +41,11 @@ export default function TopNav() {
           return;
         }
 
-        const industry = json.settings?.industry_key ?? "";
-        const slug = json.tenant?.slug ?? "";
+        const slug = json.tenant?.slug ? String(json.tenant.slug) : "";
+        const industry = json.settings?.industry_key ? String(json.settings.industry_key) : "";
 
-        // Minimal “complete”
-        setComplete(Boolean(industry && slug));
+        // Minimal completion: slug + industry
+        setComplete(Boolean(slug && industry));
       } catch {
         if (!cancelled) setComplete(false);
       }
@@ -53,10 +57,15 @@ export default function TopNav() {
     };
   }, []);
 
-  const settingsLabel = complete === true ? "Settings" : "Configure";
+  const settingsLabel = useMemo(() => {
+    if (complete === null) return "Settings";
+    return complete ? "Settings" : "Configure";
+  }, [complete]);
+
+  const showSetupBadge = complete === false;
 
   return (
-    <header className="border-b">
+    <header className="border-b bg-white">
       <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
         <Link href="/" className="font-semibold text-lg">
           AIPhotoQuote
@@ -76,21 +85,27 @@ export default function TopNav() {
             <nav className="flex items-center gap-4">
               <Link className="underline" href="/dashboard">
                 Dashboard
+                {showSetupBadge ? (
+                  <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
+                    Setup
+                  </span>
+                ) : null}
               </Link>
 
               <Link className="underline" href="/onboarding">
                 {settingsLabel}
-                {complete === false && (
+                {showSetupBadge ? (
                   <span className="ml-2 rounded-full border px-2 py-0.5 text-xs">
                     Setup
                   </span>
-                )}
+                ) : null}
               </Link>
 
               <Link className="underline" href="/admin">
                 Admin
               </Link>
             </nav>
+
             <UserButton />
           </SignedIn>
         </div>
