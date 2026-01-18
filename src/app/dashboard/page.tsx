@@ -16,24 +16,10 @@ type MeSettingsResponse =
         updated_at: string | null;
       } | null;
     }
-  | { ok: false; error: any; message?: string };
+  | { ok: false; error: any };
 
-type RecentQuotesResp =
-  | {
-      ok: true;
-      tenant: { id: string; name: string; slug: string };
-      quotes: Array<{
-        id: string;
-        createdAt: string;
-        input: any;
-        output: any;
-
-        renderOptIn: boolean;
-        renderStatus: string;
-        renderImageUrl: string | null;
-        renderError: string | null;
-      }>;
-    }
+type RecentQuotesResponse =
+  | { ok: true; quotes: any[] }
   | { ok: false; error: any; message?: string };
 
 function cn(...xs: Array<string | false | null | undefined>) {
@@ -44,91 +30,38 @@ function item(ok: boolean) {
   return ok ? "✅" : "⬜️";
 }
 
-function fmtMoney(n: number | null | undefined) {
-  if (n == null) return "—";
-  try {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 0,
-    }).format(n);
-  } catch {
-    return `$${n}`;
-  }
+function safeStr(v: any) {
+  return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
-function fmtDate(iso: string) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+function safeNum(v: any) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
-function renderBadge(status: string) {
-  const s = String(status || "").toLowerCase();
-
-  if (s === "rendered") {
-    return (
-      <span className="rounded-full border border-green-200 bg-green-50 px-2 py-0.5 text-xs font-semibold text-green-800">
-        Rendered
-      </span>
-    );
-  }
-
-  if (s === "queued" || s === "running") {
-    return (
-      <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-xs font-semibold text-blue-800">
-        Rendering
-      </span>
-    );
-  }
-
-  if (s === "failed") {
-    return (
-      <span className="rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-800">
-        Failed
-      </span>
-    );
-  }
-
-  return (
-    <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-semibold text-gray-700">
-      Not requested
-    </span>
-  );
+function fmtDate(v: any) {
+  const s = safeStr(v);
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toLocaleString();
 }
 
-function pickEstimateFromOutput(output: any): { low?: number; high?: number; confidence?: string } {
-  const o = output ?? {};
+function fmtMoney(n: any) {
+  const v = safeNum(n);
+  if (v == null) return "";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(v);
+}
 
-  // Common shapes we’ve used across routes:
-  // 1) { estimate: { low, high }, confidence }
-  // 2) { estimateLow, estimateHigh, confidence }
-  // 3) { output: { estimate: ... } } (nested)
-  const directLow =
-    typeof o?.estimateLow === "number" ? o.estimateLow : undefined;
-  const directHigh =
-    typeof o?.estimateHigh === "number" ? o.estimateHigh : undefined;
-
-  const estObj = o?.estimate && typeof o.estimate === "object" ? o.estimate : null;
-  const objLow =
-    typeof estObj?.low === "number" ? estObj.low : undefined;
-  const objHigh =
-    typeof estObj?.high === "number" ? estObj.high : undefined;
-
-  const conf =
-    typeof o?.confidence === "string" ? o.confidence : undefined;
-
-  // prefer nested estimate object if present
-  const low = objLow ?? directLow;
-  const high = objHigh ?? directHigh;
-
-  return { low, high, confidence: conf };
+function pick<T = any>(obj: any, keys: string[]): T | null {
+  for (const k of keys) {
+    if (obj && obj[k] != null) return obj[k] as T;
+  }
+  return null;
 }
 
 export default function Dashboard() {
@@ -136,7 +69,8 @@ export default function Dashboard() {
   const [me, setMe] = useState<MeSettingsResponse | null>(null);
 
   const [loadingQuotes, setLoadingQuotes] = useState(true);
-  const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
+  const [quotes, setQuotes] = useState<any[]>([]);
+  const [quotesErr, setQuotesErr] = useState<string | null>(null);
 
   const [copied, setCopied] = useState(false);
 
@@ -156,6 +90,7 @@ export default function Dashboard() {
     }
 
     loadMe();
+
     return () => {
       cancelled = true;
     };
@@ -166,40 +101,58 @@ export default function Dashboard() {
 
     async function loadQuotes() {
       setLoadingQuotes(true);
+      setQuotesErr(null);
+
       try {
         const res = await fetch("/api/tenant/recent-quotes", { cache: "no-store" });
-        const json: RecentQuotesResp = await res.json();
-        if (!cancelled) setQuotesResp(json);
-      } catch {
-        if (!cancelled) setQuotesResp({ ok: false, error: "FETCH_FAILED" });
+        const json: RecentQuotesResponse = await res.json();
+
+        if (cancelled) return;
+
+        if (!json || (json as any).ok !== true) {
+          setQuotes([]);
+          setQuotesErr(
+            safeStr((json as any)?.message) || safeStr((json as any)?.error) || "Failed to load recent quotes."
+          );
+          return;
+        }
+
+        const q = Array.isArray((json as any).quotes) ? (json as any).quotes : [];
+        setQuotes(q);
+      } catch (e: any) {
+        if (!cancelled) {
+          setQuotes([]);
+          setQuotesErr(e?.message ? String(e.message) : "Failed to load recent quotes.");
+        }
       } finally {
         if (!cancelled) setLoadingQuotes(false);
       }
     }
 
     loadQuotes();
+
     return () => {
       cancelled = true;
     };
   }, []);
 
   const computed = useMemo(() => {
-    const ok = Boolean(me && "ok" in me && (me as any).ok);
+    const ok = Boolean(me && "ok" in me && (me as any).ok === true);
     const tenant = ok ? (me as any).tenant : null;
     const settings = ok ? (me as any).settings : null;
 
-    const tenantName = tenant?.name ? String(tenant.name) : "";
-    const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
+    const tenantName = safeStr(tenant?.name);
+    const tenantSlug = safeStr(tenant?.slug);
 
-    const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
-    const redirectUrl = settings?.redirect_url ? String(settings.redirect_url) : "";
-    const thankYouUrl = settings?.thank_you_url ? String(settings.thank_you_url) : "";
+    const industryKey = safeStr(settings?.industry_key);
+    const redirectUrl = safeStr(settings?.redirect_url);
+    const thankYouUrl = safeStr(settings?.thank_you_url);
 
     const hasIndustry = Boolean(industryKey);
     const hasRedirect = Boolean(redirectUrl);
     const hasThankYou = Boolean(thankYouUrl);
 
-    const isReady = hasIndustry;
+    const isReady = hasIndustry; // tighten later if you want redirect required
 
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
 
@@ -218,17 +171,11 @@ export default function Dashboard() {
     };
   }, [me]);
 
-  const quotes = useMemo(() => {
-    if (!quotesResp || !(quotesResp as any).ok) return [];
-    return (quotesResp as any).quotes as any[];
-  }, [quotesResp]);
-
   async function copyPublicLink() {
     if (!computed.tenantSlug) return;
 
     const origin =
       typeof window !== "undefined" && window.location?.origin ? window.location.origin : "";
-
     const full = origin ? `${origin}${computed.publicPath}` : computed.publicPath;
 
     try {
@@ -240,38 +187,93 @@ export default function Dashboard() {
     }
   }
 
+  function openTestQuote() {
+    if (!computed.tenantSlug) return;
+    if (typeof window === "undefined") return;
+    window.open(computed.publicPath, "_blank", "noopener,noreferrer");
+  }
+
   return (
     <main className="min-h-screen bg-white">
       <TopNav />
 
       <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
-        <div className="flex items-start justify-between gap-4">
+        {/* Header */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Dashboard</h1>
             <p className="mt-1 text-sm text-gray-600">
-              Tenant flow status + latest quotes.
+              Tenant status + shortcuts + recent quotes.
             </p>
           </div>
 
-          <Link
-            href="/onboarding"
-            className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
-          >
-            {computed.isReady ? "Settings" : "Finish setup"}
-          </Link>
+          <div className="flex flex-wrap gap-3">
+            <Link
+              href="/onboarding"
+              className={cn(
+                "rounded-lg px-4 py-2 text-sm font-semibold",
+                computed.isReady ? "border border-gray-200 hover:bg-gray-50" : "bg-black text-white"
+              )}
+            >
+              {computed.isReady ? "Settings" : "Finish setup"}
+            </Link>
+
+            <button
+              type="button"
+              onClick={openTestQuote}
+              disabled={!computed.tenantSlug}
+              className={cn(
+                "rounded-lg border px-4 py-2 text-sm font-semibold",
+                computed.tenantSlug ? "hover:bg-gray-50" : "opacity-50 cursor-not-allowed"
+              )}
+            >
+              Test quote
+            </button>
+          </div>
+        </div>
+
+        {/* Setup banner */}
+        <div
+          className={cn(
+            "rounded-2xl border p-4",
+            loadingMe
+              ? "border-gray-200 bg-gray-50"
+              : computed.isReady
+                ? "border-green-200 bg-green-50"
+                : "border-yellow-200 bg-yellow-50"
+          )}
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="font-semibold">
+              {loadingMe
+                ? "Loading your tenant…"
+                : computed.isReady
+                  ? "Setup complete ✅"
+                  : "Setup incomplete ⚠️"}
+            </div>
+            <div className="text-sm text-gray-700">
+              {loadingMe
+                ? "Fetching settings…"
+                : computed.isReady
+                  ? "You’re ready to share your quote page."
+                  : "Finish onboarding to set your tenant industry (minimum)."}
+            </div>
+          </div>
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          {/* Setup Checklist */}
+          {/* Setup checklist */}
           <div className="rounded-2xl border p-6">
             <div className="flex items-center justify-between">
               <h2 className="font-semibold">Setup checklist</h2>
               <span
                 className={cn(
                   "rounded-full border px-3 py-1 text-xs font-semibold",
-                  computed.isReady
-                    ? "border-green-200 bg-green-50 text-green-800"
-                    : "border-yellow-200 bg-yellow-50 text-yellow-900"
+                  loadingMe
+                    ? "border-gray-200 bg-gray-50 text-gray-700"
+                    : computed.isReady
+                      ? "border-green-200 bg-green-50 text-green-800"
+                      : "border-yellow-200 bg-yellow-50 text-yellow-900"
                 )}
               >
                 {loadingMe ? "Loading…" : computed.isReady ? "Ready" : "Needs setup"}
@@ -322,10 +324,16 @@ export default function Dashboard() {
               >
                 AI policy
               </Link>
+              <Link
+                href="/admin"
+                className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
+              >
+                Admin home
+              </Link>
             </div>
           </div>
 
-          {/* Public Quote Page */}
+          {/* Public quote page */}
           <div className="rounded-2xl border p-6">
             <h2 className="font-semibold">Public quote page</h2>
             <p className="mt-2 text-sm text-gray-600">
@@ -343,6 +351,8 @@ export default function Dashboard() {
                   <Link
                     href={computed.publicPath}
                     className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white"
+                    target="_blank"
+                    rel="noreferrer noopener"
                   >
                     Open quote page
                   </Link>
@@ -375,90 +385,121 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Latest Quotes */}
+        {/* Recent Quotes */}
         <div className="rounded-2xl border p-6">
           <div className="flex items-center justify-between gap-4">
             <h2 className="font-semibold">Latest quotes</h2>
-            <Link
-              href="/admin/quotes"
-              className="rounded-lg border px-3 py-2 text-sm font-semibold hover:bg-gray-50"
-            >
-              View all (Admin)
+            <Link href="/admin/quotes" className="text-sm font-semibold underline">
+              View all
             </Link>
           </div>
 
           {loadingQuotes ? (
-            <p className="mt-4 text-sm text-gray-600">Loading quotes…</p>
-          ) : quotesResp && (quotesResp as any).ok === false ? (
-            <p className="mt-4 text-sm text-gray-600">
-              Couldn’t load quotes. Refresh and try again.
-            </p>
+            <p className="mt-4 text-sm text-gray-600">Loading recent quotes…</p>
+          ) : quotesErr ? (
+            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap">
+              {quotesErr}
+            </div>
           ) : quotes.length === 0 ? (
             <p className="mt-4 text-sm text-gray-600">
               No quotes yet. Run a test quote from your public page.
             </p>
           ) : (
-            <div className="mt-4 overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b text-xs text-gray-500">
-                    <th className="py-2 pr-3">Created</th>
-                    <th className="py-2 pr-3">Estimate</th>
-                    <th className="py-2 pr-3">Confidence</th>
-                    <th className="py-2 pr-3">Render</th>
-                    <th className="py-2 pr-0 text-right">Open</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {quotes.map((q: any) => {
-                    const picked = pickEstimateFromOutput(q.output);
-                    const est =
-                      picked.low != null || picked.high != null
-                        ? `${fmtMoney(picked.low)} – ${fmtMoney(picked.high)}`
-                        : "—";
+            <div className="mt-4 overflow-hidden rounded-xl border">
+              <div className="grid grid-cols-12 gap-3 border-b bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600">
+                <div className="col-span-5">Quote</div>
+                <div className="col-span-3">Created</div>
+                <div className="col-span-2 text-right">Estimate</div>
+                <div className="col-span-2 text-right">Render</div>
+              </div>
 
-                    const conf = picked.confidence ?? "—";
+              <div className="divide-y">
+                {quotes.slice(0, 10).map((q, idx) => {
+                  const id = safeStr(pick(q, ["id", "quoteLogId", "quote_log_id"]) || "");
+                  const createdAt = pick(q, ["createdAt", "created_at", "created_at_iso", "created"]) || "";
+                  const renderStatus = safeStr(pick(q, ["renderStatus", "render_status"]) || "");
+                  const renderOptIn = Boolean(pick(q, ["renderOptIn", "render_opt_in"]) || false);
 
-                    return (
-                      <tr key={q.id} className="border-b last:border-b-0">
-                        <td className="py-3 pr-3 whitespace-nowrap">{fmtDate(q.createdAt)}</td>
-                        <td className="py-3 pr-3 whitespace-nowrap">{est}</td>
-                        <td className="py-3 pr-3">{conf}</td>
-                        <td className="py-3 pr-3">
-                          <div className="flex items-center gap-2">
-                            {renderBadge(q.renderStatus)}
-                            {q.renderImageUrl ? (
-                              <span className="text-xs text-gray-500">(image)</span>
-                            ) : null}
-                            {q.renderError ? (
-                              <span className="text-xs text-red-600">(error)</span>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td className="py-3 pr-0 text-right">
-                          <Link
-                            href={`/admin/quotes/${q.id}`}
-                            className="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-gray-50"
-                          >
-                            Open
-                          </Link>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                  // estimates may be at top-level or inside output JSON
+                  const estLow =
+                    pick(q, ["estimateLow", "estimate_low"]) ??
+                    pick(q?.output, ["estimateLow", "estimate_low"]) ??
+                    pick(q?.output?.estimate, ["low", "estimateLow", "estimate_low"]);
+                  const estHigh =
+                    pick(q, ["estimateHigh", "estimate_high"]) ??
+                    pick(q?.output, ["estimateHigh", "estimate_high"]) ??
+                    pick(q?.output?.estimate, ["high", "estimateHigh", "estimate_high"]);
+
+                  const estimateText =
+                    estLow != null || estHigh != null
+                      ? `${fmtMoney(estLow) || "—"} – ${fmtMoney(estHigh) || "—"}`
+                      : "—";
+
+                  const adminHref = id ? `/admin/quotes/${id}` : "/admin/quotes";
+
+                  return (
+                    <div
+                      key={`${id || idx}`}
+                      className="grid cursor-pointer grid-cols-12 gap-3 px-4 py-3 text-sm hover:bg-gray-50"
+                      onClick={() => {
+                        if (typeof window !== "undefined") window.location.href = adminHref;
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          if (typeof window !== "undefined") window.location.href = adminHref;
+                        }
+                      }}
+                    >
+                      <div className="col-span-5">
+                        <div className="font-mono text-xs text-gray-700">{id || "—"}</div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          {renderOptIn ? "Render opted-in" : "No render"}
+                        </div>
+                      </div>
+
+                      <div className="col-span-3 text-gray-700">{fmtDate(createdAt) || "—"}</div>
+
+                      <div className="col-span-2 text-right font-semibold text-gray-900">
+                        {estimateText}
+                      </div>
+
+                      <div className="col-span-2 text-right">
+                        <span
+                          className={cn(
+                            "inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold",
+                            renderStatus === "rendered"
+                              ? "border-green-200 bg-green-50 text-green-800"
+                              : renderStatus === "failed"
+                                ? "border-red-200 bg-red-50 text-red-800"
+                                : renderStatus === "queued" || renderStatus === "running"
+                                  ? "border-yellow-200 bg-yellow-50 text-yellow-900"
+                                  : "border-gray-200 bg-gray-50 text-gray-700"
+                          )}
+                        >
+                          {renderStatus || "n/a"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
+
+          <div className="mt-4 text-xs text-gray-500">
+            Tip: click any row to open the Admin quote detail.
+          </div>
         </div>
 
         {/* Next */}
         <div className="rounded-2xl border p-6">
-          <h2 className="font-semibold">Next improvements (today)</h2>
+          <h2 className="font-semibold">Next improvements</h2>
           <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 space-y-1">
-            <li>Show a “Setup complete” banner once industry is set.</li>
-            <li>Dashboard: add a mini “Test quote” CTA (opens /q/&lt;slug&gt;).</li>
-            <li>Navigation: unify Admin ↔ Dashboard ↔ Onboarding flow.</li>
+            <li>Make onboarding redirect back here when complete.</li>
+            <li>Add “render status” badges to Admin quotes list too.</li>
+            <li>Polish the Quote UI during the polishing phase.</li>
           </ul>
         </div>
       </div>
