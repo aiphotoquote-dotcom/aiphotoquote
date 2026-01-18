@@ -10,6 +10,8 @@ import { decryptSecret } from "@/lib/crypto";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* ------------------------- Request schema ------------------------- */
+
 const Req = z.object({
   tenantSlug: z.string().min(2),
   images: z
@@ -31,24 +33,12 @@ const Req = z.object({
       category: z.string().optional(),
     })
     .optional(),
-  // IMPORTANT: render_opt_in belongs at TOP LEVEL
   render_opt_in: z.boolean().optional().default(false),
 });
 
-const QuoteOutputSchema = z.object({
-  confidence: z.enum(["high", "medium", "low"]).optional(),
-  inspection_required: z.boolean().optional(),
-  summary: z.string().optional(),
-  visible_scope: z.array(z.string()).optional(),
-  assumptions: z.array(z.string()).optional(),
-  questions: z.array(z.string()).optional(),
-  estimate: z
-    .object({
-      low: z.number().optional(),
-      high: z.number().optional(),
-    })
-    .optional(),
-});
+function debugId() {
+  return `dbg_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function jsonError(
   status: number,
@@ -58,20 +48,12 @@ function jsonError(
   extra?: any
 ) {
   return NextResponse.json(
-    {
-      ok: false,
-      error: code,
-      message,
-      debugId,
-      ...extra,
-    },
+    { ok: false, error: code, message, debugId, ...extra },
     { status }
   );
 }
 
-function debugId() {
-  return `dbg_${Math.random().toString(36).slice(2, 10)}`;
-}
+/* ------------------------------ POST ------------------------------ */
 
 export async function POST(req: Request) {
   const dbg = debugId();
@@ -81,23 +63,21 @@ export async function POST(req: Request) {
     const parsed = Req.safeParse(raw);
 
     if (!parsed.success) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "BAD_REQUEST",
-          message: "Invalid payload",
-          issues: parsed.error.issues,
-          debugId: dbg,
-        },
-        { status: 400 }
+      return jsonError(
+        400,
+        "BAD_REQUEST",
+        "Invalid payload",
+        dbg,
+        { issues: parsed.error.issues }
       );
     }
 
     const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
-    // 1) Tenant lookup (NO db.query usage)
+    /* -------- Tenant lookup -------- */
+
     const tenantRow = await db
-      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
+      .select({ id: tenants.id, name: tenants.name })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
       .limit(1);
@@ -107,22 +87,20 @@ export async function POST(req: Request) {
       return jsonError(404, "TENANT_NOT_FOUND", "Invalid tenant link.", dbg);
     }
 
-    // 2) Fetch tenant OpenAI key (encrypted)
-    const secretRows = await db
-      .select({
-        tenantId: tenantSecrets.tenantId,
-        openaiKeyEnc: tenantSecrets.openaiKeyEnc,
-      })
+    /* -------- Tenant OpenAI key -------- */
+
+    const secretRow = await db
+      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
       .from(tenantSecrets)
       .where(eq(tenantSecrets.tenantId, tenant.id))
       .limit(1);
 
-    const secret = secretRows[0];
+    const secret = secretRow[0];
     if (!secret?.openaiKeyEnc) {
       return jsonError(
         400,
         "TENANT_OPENAI_KEY_MISSING",
-        "This tenant has not configured an OpenAI key yet.",
+        "Tenant has not configured an OpenAI key.",
         dbg
       );
     }
@@ -132,39 +110,42 @@ export async function POST(req: Request) {
       return jsonError(
         500,
         "TENANT_OPENAI_KEY_DECRYPT_FAILED",
-        "Could not decrypt tenant OpenAI key (check platform encryption key).",
+        "Failed to decrypt tenant OpenAI key.",
         dbg
       );
     }
 
     const openai = new OpenAI({ apiKey: openaiKey });
 
-    // 3) Prepare prompt
-    const notes = customer_context?.notes?.trim() || "";
-    const category = customer_context?.category?.trim() || "service";
-    const serviceType = customer_context?.service_type?.trim() || "";
+    /* -------- Prompt -------- */
 
-    const prompt = [
-      `You are an expert estimator for a service business.`,
-      `Return JSON only.`,
-      ``,
-      `Context:`,
-      `- category: ${category}`,
-      serviceType ? `- service_type: ${serviceType}` : null,
-      notes ? `- notes: ${notes}` : null,
-      ``,
-      `Analyze the provided photos and give: confidence, inspection_required, summary, questions[], estimate{low,high}.`,
-      `Make estimate conservative and realistic.`,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const notes = customer_context?.notes?.trim() || "";
+    const category = customer_context?.category || "service";
+
+    const prompt = `
+You are an expert service estimator.
+
+Return JSON ONLY.
+
+Context:
+- category: ${category}
+${notes ? `- notes: ${notes}` : ""}
+
+From the photos, estimate:
+- confidence (high|medium|low)
+- inspection_required (boolean)
+- summary
+- questions (array)
+- estimate { low, high }
+`.trim();
 
     const visionInput = images.map((img) => ({
       type: "image_url",
       image_url: { url: img.url },
     }));
 
-    // 4) Call OpenAI (cast to any to avoid SDK type churn for vision parts)
+    /* -------- OpenAI call -------- */
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.2,
@@ -177,34 +158,17 @@ export async function POST(req: Request) {
       ],
     });
 
-    const content = completion.choices?.[0]?.message?.content || "{}";
-    let out: any;
+    let output: any = {};
     try {
-      out = JSON.parse(content);
+      output = JSON.parse(
+        completion.choices?.[0]?.message?.content || "{}"
+      );
     } catch {
-      out = { raw: content };
+      output = { raw: completion.choices?.[0]?.message?.content };
     }
 
-    const normalized = QuoteOutputSchema.safeParse(out);
-    const output = normalized.success ? normalized.data : out;
+    /* -------- Persist quote (MATCHES REAL DB) -------- */
 
-    const confidence = (output as any)?.confidence ?? null;
-    const inspectionRequired =
-      typeof (output as any)?.inspection_required === "boolean"
-        ? Boolean((output as any)?.inspection_required)
-        : null;
-
-    const estimateLow =
-      typeof (output as any)?.estimate?.low === "number"
-        ? Math.round((output as any).estimate.low)
-        : null;
-
-    const estimateHigh =
-      typeof (output as any)?.estimate?.high === "number"
-        ? Math.round((output as any).estimate.high)
-        : null;
-
-    // 5) Write quote_logs (input/output are NOT NULL in prod DB)
     const inputPayload = {
       tenantSlug,
       images,
@@ -214,45 +178,34 @@ export async function POST(req: Request) {
     };
 
     const renderOptIn = Boolean(render_opt_in);
-    const renderStatus = renderOptIn ? "queued" : "not_requested";
 
     const inserted = await db
       .insert(quoteLogs)
       .values({
         tenantId: tenant.id,
         input: inputPayload,
-        output: output ?? {},
-
-        confidence: confidence ? String(confidence) : null,
-        estimateLow: estimateLow ?? null,
-        estimateHigh: estimateHigh ?? null,
-        inspectionRequired: inspectionRequired ?? null,
-
+        output,
         renderOptIn,
-        renderStatus,
+        renderStatus: renderOptIn ? "queued" : "not_requested",
       })
       .returning({ id: quoteLogs.id });
-
-    const quoteLogId = inserted?.[0]?.id;
 
     return NextResponse.json(
       {
         ok: true,
-        tenantId: tenant.id,
-        quoteLogId,
+        quoteLogId: inserted[0]?.id,
         output,
         render_opt_in: renderOptIn,
       },
       { status: 200 }
     );
   } catch (err: any) {
-    console.error("QUOTE_SUBMIT_ERROR", { debugId: dbg, err });
+    console.error("QUOTE_SUBMIT_ERROR", { dbg, err });
     return jsonError(
       500,
       "REQUEST_FAILED",
-      err?.message ?? "Unknown error",
-      dbg,
-      err?.cause ? { cause: String(err.cause) } : undefined
+      err?.message || "Unknown error",
+      dbg
     );
   }
 }
