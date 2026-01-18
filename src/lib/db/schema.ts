@@ -86,9 +86,7 @@ export const tenantPricingRules = pgTable("tenant_pricing_rules", {
  * Encrypted tenant secrets (never returned raw)
  */
 export const tenantSecrets = pgTable("tenant_secrets", {
-  // NOTE: If your prod DB "id" is not uuid, we DO NOT rely on it for lookups.
   id: uuid("id").defaultRandom().primaryKey(),
-
   tenantId: uuid("tenant_id")
     .notNull()
     .references(() => tenants.id),
@@ -101,8 +99,12 @@ export const tenantSecrets = pgTable("tenant_secrets", {
 });
 
 /**
- * Quote logs (admin + auditing)
- * IMPORTANT: in prod DB, input/output are NOT NULL.
+ * Quote logs — MUST match prod DB.
+ *
+ * Prod table (confirmed):
+ * id, tenant_id, input, output, created_at,
+ * render_opt_in, render_status, render_image_url,
+ * render_prompt, render_error, rendered_at
  */
 export const quoteLogs = pgTable("quote_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -113,15 +115,10 @@ export const quoteLogs = pgTable("quote_logs", {
   input: jsonb("input").$type<any>().notNull(),
   output: jsonb("output").$type<any>().notNull(),
 
-  confidence: text("confidence"),
-  estimateLow: integer("estimate_low"),
-  estimateHigh: integer("estimate_high"),
-  inspectionRequired: boolean("inspection_required"),
-
   // --- AI Rendering (optional 2nd step) ---
   renderOptIn: boolean("render_opt_in").notNull().default(false),
 
-  // "not_requested" | "queued" | "rendered" | "failed"
+  // "not_requested" | "queued" | "running" | "rendered" | "failed"
   renderStatus: text("render_status").notNull().default("not_requested"),
 
   renderImageUrl: text("render_image_url"),

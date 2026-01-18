@@ -9,9 +9,6 @@ import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 
-/**
- * Zod v4 requires key + value schema for record()
- */
 const Req = z.object({
   tenantSlug: z.string().min(3),
   images: z
@@ -24,6 +21,7 @@ const Req = z.object({
     .min(1)
     .max(12),
 
+  // zod v4 needs key + value schema
   customer_context: z.record(z.string(), z.any()).optional(),
   render_opt_in: z.boolean().optional().default(false),
 });
@@ -54,9 +52,7 @@ function buildPrompt({
 }) {
   const notes = String(customer_context?.notes ?? "");
   const category = String(
-    customer_context?.service_type ??
-      customer_context?.category ??
-      "service"
+    customer_context?.service_type ?? customer_context?.category ?? "service"
   );
 
   return `
@@ -92,14 +88,11 @@ export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
-
-    if (!parsed.success) {
-      return fail("Invalid request payload", dbg, 400);
-    }
+    if (!parsed.success) return fail("Invalid request payload", dbg, 400);
 
     const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
-    /* ---------------- tenant lookup ---------------- */
+    // tenant lookup
     const tenantRow = await db
       .select({ id: tenants.id })
       .from(tenants)
@@ -107,11 +100,9 @@ export async function POST(req: Request) {
       .limit(1);
 
     const tenantId = tenantRow[0]?.id;
-    if (!tenantId) {
-      return fail("Tenant not found", dbg, 404);
-    }
+    if (!tenantId) return fail("Tenant not found", dbg, 404);
 
-    /* -------- tenant OpenAI key (customer-owned) -------- */
+    // tenant key lookup
     const secretRow = await db
       .select({ enc: tenantSecrets.openaiKeyEnc })
       .from(tenantSecrets)
@@ -126,9 +117,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const openai = new OpenAI({
-      apiKey: decryptSecret(secretRow[0].enc),
-    });
+    const openai = new OpenAI({ apiKey: decryptSecret(secretRow[0].enc) });
 
     const prompt = buildPrompt({ tenantSlug, images, customer_context });
 
@@ -137,35 +126,32 @@ export async function POST(req: Request) {
       image_url: { url: img.url },
     }));
 
-    const completion: any = await openai.chat.completions.create({
+    const completion = (await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.2,
       messages: [
         {
           role: "user",
-          content: [{ type: "text", text: prompt }, ...visionParts],
+          content: [{ type: "text", text: prompt }, ...(visionParts as any)],
         },
       ],
-    } as any);
+    } as any)) as any;
 
     let outputJson: any;
     try {
-      outputJson = JSON.parse(
-        completion?.choices?.[0]?.message?.content ?? "{}"
-      );
+      outputJson = JSON.parse(completion?.choices?.[0]?.message?.content ?? "{}");
     } catch {
       outputJson = {
         confidence: "low",
         inspection_required: true,
-        summary:
-          "Unable to confidently estimate from photos. Inspection recommended.",
+        summary: "Unable to confidently estimate from photos. Inspection recommended.",
         questions: [],
         estimate: { low: 0, high: 0 },
       };
     }
 
-    /* ---------------- DB INSERT (MATCHES REAL TABLE) ---------------- */
-    const insert = await db
+    // ✅ INSERT ONLY REAL COLUMNS
+    const inserted = await db
       .insert(quoteLogs)
       .values({
         tenantId,
@@ -177,13 +163,13 @@ export async function POST(req: Request) {
           createdAt: new Date().toISOString(),
         },
         output: outputJson,
-        renderOptIn: render_opt_in,
+        renderOptIn: Boolean(render_opt_in),
         renderStatus: render_opt_in ? "queued" : "not_requested",
       })
       .returning({ id: quoteLogs.id });
 
     return ok({
-      quoteLogId: insert[0]?.id ?? null,
+      quoteLogId: inserted[0]?.id ?? null,
       output: outputJson,
       render_opt_in,
       debugId: dbg,
