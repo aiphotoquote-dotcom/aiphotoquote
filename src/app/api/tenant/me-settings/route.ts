@@ -1,7 +1,7 @@
-// src/app/api/tenant/me-settings/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { eq } from "drizzle-orm";
+import { auth } from "@clerk/nextjs/server";
+import { eq, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSettings } from "@/lib/db/schema";
@@ -9,18 +9,16 @@ import { tenants, tenantSettings } from "@/lib/db/schema";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * Returns the active tenant + its tenant_settings row for the current user context.
- *
- * How we determine "active tenant":
- *  1) cookie activeTenantId / active_tenant_id / tenantId / tenant_id
- *  2) fallback: first tenant (by created_at) as a safe default for now
- *
- * NOTE: This is intentionally lightweight and tenant-centric.
- * It does NOT return secrets.
- */
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
+}
+
 export async function GET() {
   try {
+    const { userId } = await auth();
+    if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
+
+    // Next.js 16: cookies() is async
     const jar = await cookies();
 
     const candidates = [
@@ -28,76 +26,81 @@ export async function GET() {
       jar.get("active_tenant_id")?.value,
       jar.get("tenantId")?.value,
       jar.get("tenant_id")?.value,
-    ]
-      .map((s) => String(s || "").trim())
-      .filter(Boolean);
+    ].filter(Boolean) as string[];
 
-    let tenant = null as any;
+    let tenant: any = null;
 
-    // 1) If cookie present, try that tenant id first
+    // 1) Prefer active-tenant cookie if present
     if (candidates.length) {
       const tenantId = candidates[0];
 
-      // If your Drizzle instance doesn't have db.query.* enabled, use select().
-      tenant = await db
-        .select({
-          id: tenants.id,
-          name: tenants.name,
-          slug: tenants.slug,
-        })
+      const rows = await db
+        .select()
         .from(tenants)
-        .where(eq(tenants.id, tenantId))
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
+        .where(eq(tenants.id, tenantId as any))
+        .limit(1);
+
+      if (rows[0] && String(rows[0].ownerClerkUserId ?? "") === String(userId)) {
+        tenant = rows[0];
+      }
     }
 
-    // 2) Fallback: first tenant
+    // 2) Fallback: first tenant owned by this user
     if (!tenant) {
-      tenant = await db
-        .select({
-          id: tenants.id,
-          name: tenants.name,
-          slug: tenants.slug,
-        })
-        .from(tenants)
-        .orderBy(tenants.createdAt)
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
+      // If ownerClerkUserId is nullable in schema, we must query carefully.
+      const rows = await db.execute(sql`
+        select id, name, slug, owner_clerk_user_id
+        from tenants
+        where owner_clerk_user_id = ${userId}
+        order by created_at desc
+        limit 1
+      `);
+
+      const row: any = (rows as any)?.rows?.[0] ?? (Array.isArray(rows) ? (rows as any)[0] : null);
+      if (row) {
+        tenant = {
+          id: row.id,
+          name: row.name,
+          slug: row.slug,
+          ownerClerkUserId: row.owner_clerk_user_id,
+        };
+      }
     }
 
-    if (!tenant) {
-      return NextResponse.json(
-        { ok: false, error: "NO_TENANT", message: "No tenant found for this account yet." },
-        { status: 404 }
-      );
-    }
+    if (!tenant) return json({ ok: false, error: "NO_TENANT" }, 404);
 
-    const settings = await db
-      .select({
-        tenant_id: tenantSettings.tenantId,
-        industry_key: tenantSettings.industryKey,
-        redirect_url: tenantSettings.redirectUrl,
-        thank_you_url: tenantSettings.thankYouUrl,
-        updated_at: tenantSettings.updatedAt,
-      })
+    const sRows = await db
+      .select()
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
+      .limit(1);
 
-    return NextResponse.json(
+    const s = sRows[0] ?? null;
+
+    // Return snake_case fields because your UI + other routes already expect these names.
+    const settings = s
+      ? {
+          tenant_id: s.tenantId,
+          industry_key: s.industryKey ?? null,
+          redirect_url: (s as any).redirectUrl ?? null,
+          thank_you_url: (s as any).thankYouUrl ?? null,
+          updated_at: (s as any).updatedAt ? String((s as any).updatedAt) : null,
+        }
+      : null;
+
+    return json({
+      ok: true,
+      tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug },
+      settings,
+    });
+  } catch (e: any) {
+    return json(
       {
-        ok: true,
-        tenant,
-        settings,
+        ok: false,
+        error: "ME_SETTINGS_FAILED",
+        message: e?.message ?? String(e),
       },
-      { status: 200 }
-    );
-  } catch (err: any) {
-    console.error("ME_SETTINGS_ERROR", err);
-    return NextResponse.json(
-      { ok: false, error: "ME_SETTINGS_ERROR", message: err?.message ?? String(err) },
-      { status: 500 }
+      500
     );
   }
 }

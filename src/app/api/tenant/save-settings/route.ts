@@ -1,105 +1,102 @@
-// src/app/api/tenant/save-settings/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import { z } from "zod";
 import { auth } from "@clerk/nextjs/server";
 import { eq, sql } from "drizzle-orm";
 
-import { db } from "../../../../lib/db/client";
-import { tenants, tenantSettings } from "../../../../lib/db/schema";
+import { db } from "@/lib/db/client";
+import { tenants } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function json(data: any, init?: ResponseInit) {
-  return NextResponse.json(data, init);
+const Req = z.object({
+  tenantSlug: z.string().min(3).max(64),
+  industry_key: z.string().min(1).max(64),
+  redirect_url: z.string().optional().nullable(),
+  thank_you_url: z.string().optional().nullable(),
+});
+
+function cleanUrl(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+
+  // Allow absolute URLs only (prevents weird relative paths in email redirects)
+  // If you *want* to allow relative later, loosen this.
+  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
+  return s;
 }
 
-export async function POST(req: NextRequest) {
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
+}
+
+export async function POST(req: Request) {
   try {
     const { userId } = await auth();
-    if (!userId) return json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
+    if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
 
-    const body = await req.json().catch(() => ({}));
-
-    // Accept both camelCase and snake_case inputs (admin UI might vary)
-    const industryKey =
-      body.industryKey ?? body.industry_key ?? body.industry ?? null;
-
-    const redirectUrl =
-      body.redirectUrl ?? body.redirect_url ?? body.redirect ?? null;
-
-    const thankYouUrl =
-      body.thankYouUrl ?? body.thank_you_url ?? body.thankYou ?? null;
-
-    if (!industryKey || typeof industryKey !== "string") {
+    const raw = await req.json().catch(() => null);
+    const parsed = Req.safeParse(raw);
+    if (!parsed.success) {
       return json(
-        { ok: false, error: "industryKey is required" },
-        { status: 400 }
+        { ok: false, error: "BAD_REQUEST", issues: parsed.error.issues },
+        400
       );
     }
 
-    // 1) Resolve tenant for this user
-    const tenantRows = await db
-      .select({ id: tenants.id, name: tenants.name, slug: tenants.slug })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1);
+    const { tenantSlug, industry_key } = parsed.data;
+    const redirect_url = cleanUrl(parsed.data.redirect_url);
+    const thank_you_url = cleanUrl(parsed.data.thank_you_url);
 
-    const tenant = tenantRows[0];
-    if (!tenant?.id) {
-      return json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
-    }
+    // Tenant lookup by owner
+    const tRes = await db.execute(sql`
+      select id, name, slug
+      from tenants
+      where owner_clerk_user_id = ${userId}
+      order by created_at desc
+      limit 1
+    `);
+    const tRow: any = (tRes as any)?.rows?.[0] ?? (Array.isArray(tRes) ? (tRes as any)[0] : null);
+    if (!tRow?.id) return json({ ok: false, error: "NO_TENANT" }, 404);
 
-    const tenantId = tenant.id;
+    const tenantId = String(tRow.id);
 
-    // 2) Upsert tenant_settings keyed by tenant_id (PK)
-    // We do it in two steps to stay compatible across Postgres setups.
-    const existing = await db
-      .select({ tenantId: tenantSettings.tenantId })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1);
-
-    if (existing.length === 0) {
-      await db.insert(tenantSettings).values({
-        tenantId,
-        industryKey,
-        redirectUrl,
-        thankYouUrl,
-        updatedAt: sql`now()`,
-      });
-    } else {
+    // Update slug on tenants (if changed)
+    // (slug uniqueness enforced by DB index)
+    if (tenantSlug && tenantSlug !== String(tRow.slug)) {
       await db
-        .update(tenantSettings)
-        .set({
-          industryKey,
-          redirectUrl,
-          thankYouUrl,
-          updatedAt: sql`now()`,
-        })
-        .where(eq(tenantSettings.tenantId, tenantId));
+        .update(tenants)
+        .set({ slug: tenantSlug })
+        .where(eq(tenants.id, tenantId as any));
     }
 
-    // 3) Return saved row (real DB columns via schema)
-    const saved = await db
-      .select({
-        tenantId: tenantSettings.tenantId,
-        industryKey: tenantSettings.industryKey,
-        redirectUrl: tenantSettings.redirectUrl,
-        thankYouUrl: tenantSettings.thankYouUrl,
-        updatedAt: tenantSettings.updatedAt,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1);
+    // Upsert tenant_settings (tenant_id is PK in your DB)
+    await db.execute(sql`
+      insert into tenant_settings (tenant_id, industry_key, redirect_url, thank_you_url, updated_at)
+      values (${tenantId}::uuid, ${industry_key}, ${redirect_url}, ${thank_you_url}, now())
+      on conflict (tenant_id)
+      do update set
+        industry_key = excluded.industry_key,
+        redirect_url = excluded.redirect_url,
+        thank_you_url = excluded.thank_you_url,
+        updated_at = now()
+    `);
 
     return json({
       ok: true,
-      tenant,
-      settings: saved[0] ?? null,
+      tenant: { id: tenantId, slug: tenantSlug },
+      settings: {
+        tenant_id: tenantId,
+        industry_key,
+        redirect_url,
+        thank_you_url,
+        updated_at: new Date().toISOString(),
+      },
     });
-  } catch (err: any) {
+  } catch (e: any) {
     return json(
-      { ok: false, error: { code: "INTERNAL", message: err?.message || String(err) } },
-      { status: 500 }
+      { ok: false, error: "SAVE_SETTINGS_FAILED", message: e?.message ?? String(e) },
+      500
     );
   }
 }
