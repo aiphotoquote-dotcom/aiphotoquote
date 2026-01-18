@@ -10,8 +10,7 @@ import { decryptSecret } from "@/lib/crypto";
 export const runtime = "nodejs";
 
 /**
- * NOTE (Zod v4):
- * z.record() requires (keySchema, valueSchema) in this build.
+ * Zod v4 requires key + value schema for record()
  */
 const Req = z.object({
   tenantSlug: z.string().min(3),
@@ -25,46 +24,45 @@ const Req = z.object({
     .min(1)
     .max(12),
 
-  // flexible bag of fields from the form
   customer_context: z.record(z.string(), z.any()).optional(),
-
-  // opt-in stored at top-level
   render_opt_in: z.boolean().optional().default(false),
 });
 
 function debugId() {
-  return `dbg_${Math.random().toString(36).slice(2, 10)}${Math.random()
-    .toString(36)
-    .slice(2, 10)}`;
+  return `dbg_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function jsonOk(data: any, init?: ResponseInit) {
-  return NextResponse.json({ ok: true, ...data }, init);
+function ok(data: any) {
+  return NextResponse.json({ ok: true, ...data });
 }
 
-function jsonErr(message: string, extra?: any, init?: ResponseInit) {
+function fail(message: string, dbg: string, status = 500) {
   return NextResponse.json(
-    { ok: false, error: { code: "REQUEST_FAILED" }, message, ...extra },
-    init ?? { status: 500 }
+    { ok: false, error: { code: "REQUEST_FAILED" }, message, debugId: dbg },
+    { status }
   );
 }
 
-function buildPrompt(args: {
+function buildPrompt({
+  tenantSlug,
+  images,
+  customer_context,
+}: {
   tenantSlug: string;
-  images: Array<{ url: string; shotType?: string }>;
+  images: { url: string; shotType?: string }[];
   customer_context?: Record<string, any>;
 }) {
-  const { tenantSlug, images, customer_context } = args;
+  const notes = String(customer_context?.notes ?? "");
+  const category = String(
+    customer_context?.service_type ??
+      customer_context?.category ??
+      "service"
+  );
 
-  const notes = String(customer_context?.notes ?? "").trim();
-  const category = String(customer_context?.category ?? customer_context?.service_type ?? "service").trim();
-
-  // Keep prompt tight + deterministic: we're estimating and producing structured JSON
   return `
-You are an expert service estimator for ${tenantSlug}.
-You will analyze the uploaded photos and any customer notes.
+You are an expert estimator for ${tenantSlug}.
 
-Return STRICT JSON only (no markdown, no commentary) matching this shape:
+Return STRICT JSON only:
 {
   "confidence": "high" | "medium" | "low",
   "inspection_required": boolean,
@@ -73,19 +71,17 @@ Return STRICT JSON only (no markdown, no commentary) matching this shape:
   "estimate": { "low": number, "high": number }
 }
 
-Guidelines:
-- This is a rough estimate range and may require inspection.
-- Ask a few short, practical follow-up questions if needed.
-- If you cannot tell enough from the photos, set inspection_required=true and confidence="low".
-- Keep summary customer-friendly.
+Rules:
+- This is an estimate range, not a final quote
+- Be conservative if unsure
+- Ask clear follow-up questions if needed
 
-Customer context:
-- category: ${category || "service"}
-- notes: ${notes || "(none)"}
+Category: ${category}
+Notes: ${notes || "(none)"}
 
-Photo list (shotType is user-labeled hint):
+Photos:
 ${images
-  .map((im, i) => `- ${i + 1}. ${im.shotType ? `[${im.shotType}] ` : ""}${im.url}`)
+  .map((i, idx) => `- ${idx + 1}. ${i.shotType ?? "photo"}: ${i.url}`)
   .join("\n")}
 `.trim();
 }
@@ -98,159 +94,101 @@ export async function POST(req: Request) {
     const parsed = Req.safeParse(body);
 
     if (!parsed.success) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: { code: "BAD_REQUEST" },
-          message: "Invalid request",
-          issues: parsed.error.issues,
-          debugId: dbg,
-        },
-        { status: 400 }
-      );
+      return fail("Invalid request payload", dbg, 400);
     }
 
     const { tenantSlug, images, customer_context, render_opt_in } = parsed.data;
 
-    // --- Tenant lookup (NO db.query usage; works even if schema generic missing) ---
-    const tenantRows = await db
-      .select({ id: tenants.id, slug: tenants.slug })
+    /* ---------------- tenant lookup ---------------- */
+    const tenantRow = await db
+      .select({ id: tenants.id })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
       .limit(1);
 
-    const tenant = tenantRows[0];
-    if (!tenant?.id) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: { code: "TENANT_NOT_FOUND" },
-          message: `Unknown tenantSlug: ${tenantSlug}`,
-          debugId: dbg,
-        },
-        { status: 404 }
-      );
+    const tenantId = tenantRow[0]?.id;
+    if (!tenantId) {
+      return fail("Tenant not found", dbg, 404);
     }
 
-    // --- Fetch TENANT OpenAI key (customer/tenant key, not platform key) ---
-    const secretRows = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+    /* -------- tenant OpenAI key (customer-owned) -------- */
+    const secretRow = await db
+      .select({ enc: tenantSecrets.openaiKeyEnc })
       .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenant.id))
+      .where(eq(tenantSecrets.tenantId, tenantId))
       .limit(1);
 
-    const secret = secretRows[0];
-    if (!secret?.openaiKeyEnc) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: { code: "TENANT_SECRET_MISSING" },
-          message:
-            "Tenant OpenAI key is not configured. Ask the tenant admin to add their OpenAI key in Settings.",
-          debugId: dbg,
-        },
-        { status: 400 }
+    if (!secretRow[0]?.enc) {
+      return fail(
+        "Tenant OpenAI key missing. Configure it in tenant settings.",
+        dbg,
+        400
       );
     }
 
-    const tenantOpenAiKey = decryptSecret(secret.openaiKeyEnc);
-
-    const openai = new OpenAI({ apiKey: tenantOpenAiKey });
+    const openai = new OpenAI({
+      apiKey: decryptSecret(secretRow[0].enc),
+    });
 
     const prompt = buildPrompt({ tenantSlug, images, customer_context });
 
-    // Build vision content parts
-    const visionParts = images.map((im) => ({
+    const visionParts = images.map((img) => ({
       type: "image_url",
-      image_url: { url: im.url },
+      image_url: { url: img.url },
     }));
 
-    // --- Call OpenAI (cast to any to avoid type mismatch across SDK versions) ---
-    const completion: any = await openai.chat.completions.create(
-      {
-        model: "gpt-4o-mini",
-        temperature: 0.2,
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: prompt }, ...visionParts],
-          },
-        ],
-      } as any
-    );
+    const completion: any = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: prompt }, ...visionParts],
+        },
+      ],
+    } as any);
 
-    const rawText =
-      completion?.choices?.[0]?.message?.content ??
-      completion?.output_text ??
-      "";
-
-    // Parse JSON safely
-    let aiJson: any = null;
+    let outputJson: any;
     try {
-      aiJson = typeof rawText === "string" ? JSON.parse(rawText) : rawText;
+      outputJson = JSON.parse(
+        completion?.choices?.[0]?.message?.content ?? "{}"
+      );
     } catch {
-      // If the model returns non-JSON, store it and mark as low confidence
-      aiJson = {
+      outputJson = {
         confidence: "low",
         inspection_required: true,
         summary:
-          "We were unable to generate a clean estimate from the photos. An inspection is required.",
-        questions: ["What exactly would you like restored or replaced?"],
+          "Unable to confidently estimate from photos. Inspection recommended.",
+        questions: [],
         estimate: { low: 0, high: 0 },
-        _raw: rawText,
       };
     }
 
-    // Normalize expected fields
-    const normalized = {
-      confidence: String(aiJson?.confidence ?? "low"),
-      inspection_required: Boolean(aiJson?.inspection_required ?? true),
-      summary: String(aiJson?.summary ?? ""),
-      questions: Array.isArray(aiJson?.questions)
-        ? aiJson.questions.map((x: any) => String(x)).filter(Boolean)
-        : [],
-      estimate: {
-        low: Number(aiJson?.estimate?.low ?? 0),
-        high: Number(aiJson?.estimate?.high ?? 0),
-      },
-    };
-
-    // --- DB insert (match your actual quote_logs schema) ---
-    const inputPayload = {
-      tenantSlug,
-      images,
-      customer_context: customer_context ?? {},
-      render_opt_in: Boolean(render_opt_in),
-      createdAt: new Date().toISOString(),
-    };
-
-    const outputPayload = {
-      ...normalized,
-      render_opt_in: Boolean(render_opt_in),
-    };
-
-    const inserted = await db
+    /* ---------------- DB INSERT (MATCHES REAL TABLE) ---------------- */
+    const insert = await db
       .insert(quoteLogs)
       .values({
-        tenantId: tenant.id,
-        input: inputPayload as any,
-        output: outputPayload as any,
-        renderOptIn: Boolean(render_opt_in),
-        renderStatus: Boolean(render_opt_in) ? "queued" : "not_requested",
+        tenantId,
+        input: {
+          tenantSlug,
+          images,
+          customer_context: customer_context ?? {},
+          render_opt_in,
+          createdAt: new Date().toISOString(),
+        },
+        output: outputJson,
+        renderOptIn: render_opt_in,
+        renderStatus: render_opt_in ? "queued" : "not_requested",
       })
       .returning({ id: quoteLogs.id });
 
-    const quoteLogId = inserted?.[0]?.id ?? null;
-
-    return jsonOk({
-      quoteLogId,
-      tenantId: tenant.id,
-      output: outputPayload,
-      render_opt_in: Boolean(render_opt_in),
+    return ok({
+      quoteLogId: insert[0]?.id ?? null,
+      output: outputJson,
+      render_opt_in,
       debugId: dbg,
     });
-  } catch (e: any) {
-    const msg = e?.message ? String(e.message) : "Unknown error";
-    return jsonErr(msg, { debugId: dbg }, { status: 500 });
+  } catch (err: any) {
+    return fail(err?.message ?? "Unhandled server error", dbg);
   }
 }
