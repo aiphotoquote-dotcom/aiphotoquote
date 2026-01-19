@@ -2,11 +2,11 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
 import { cookies } from "next/headers";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, and } from "drizzle-orm";
 
 import TopNav from "@/components/TopNav";
 import { db } from "@/lib/db/client";
-import { quoteLogs } from "@/lib/db/schema";
+import { quoteLogs, tenants } from "@/lib/db/schema";
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -74,7 +74,6 @@ function pickFirstImageUrl(input: any): string | null {
 }
 
 function pickEstimate(output: any) {
-  // your DB reality: output is JSON only; values could be snake or camel
   const low = output?.estimate_low ?? output?.estimateLow ?? null;
   const high = output?.estimate_high ?? output?.estimateHigh ?? null;
 
@@ -87,24 +86,33 @@ function pickEstimate(output: any) {
   };
 }
 
-async function getActiveTenantIdFromCookies(): Promise<string | null> {
+async function resolveActiveTenantId(userId: string): Promise<string | null> {
+  // 1) Prefer cookie if present
   const jar = await cookies();
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-  return candidates[0] ?? null;
+  const cookieTenantId =
+    jar.get("activeTenantId")?.value ||
+    jar.get("active_tenant_id")?.value ||
+    jar.get("tenantId")?.value ||
+    jar.get("tenant_id")?.value;
+
+  if (cookieTenantId) return cookieTenantId;
+
+  // 2) Fallback: tenant owned by this user
+  const owned = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.ownerClerkUserId, userId))
+    .limit(1);
+
+  return owned[0]?.id ?? null;
 }
 
 export default async function AdminQuotesPage() {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const activeTenantId = await getActiveTenantIdFromCookies();
+  const activeTenantId = await resolveActiveTenantId(userId);
 
-  // If you want to be strict, keep this:
   if (!activeTenantId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -113,8 +121,25 @@ export default async function AdminQuotesPage() {
           <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
             <h1 className="text-2xl font-semibold">Admin · Quotes</h1>
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              No active tenant selected. Go to <Link className="underline" href="/onboarding">Settings</Link>{" "}
-              and make sure your tenant is created/selected.
+              We couldn’t resolve an active tenant for your account.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <Link
+                href="/onboarding"
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Go to Settings
+              </Link>
+              <Link
+                href="/dashboard"
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+              >
+                Back to Dashboard
+              </Link>
+            </div>
+            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+              (This page normally uses the active-tenant cookie, but it can also fall back to your owned
+              tenant. If neither exists, you’ll see this.)
             </p>
           </div>
         </div>
@@ -189,23 +214,15 @@ export default async function AdminQuotesPage() {
           {items.length ? (
             <ul className="divide-y divide-gray-200 dark:divide-gray-800">
               {items.map((q) => {
-                const statusPill = pill(
-                  q.status.label,
-                  q.status.tone
-                );
+                const statusPill = pill(q.status.label, q.status.tone);
 
                 return (
                   <li key={q.id} className="grid grid-cols-12 gap-3 px-5 py-4 items-center">
-                    {/* Quote + thumb */}
                     <div className="col-span-5 flex items-center gap-3">
                       <div className="h-12 w-12 overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900">
                         {q.thumb ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={q.thumb}
-                            alt="thumb"
-                            className="h-full w-full object-cover"
-                          />
+                          <img src={q.thumb} alt="thumb" className="h-full w-full object-cover" />
                         ) : (
                           <div className="flex h-full w-full items-center justify-center text-[10px] text-gray-500 dark:text-gray-400">
                             No photo
@@ -228,17 +245,14 @@ export default async function AdminQuotesPage() {
                       </div>
                     </div>
 
-                    {/* Created */}
                     <div className="col-span-3 text-sm text-gray-700 dark:text-gray-300">
                       {fmtDate(q.createdAt)}
                     </div>
 
-                    {/* Estimate */}
                     <div className="col-span-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
                       {q.estimateLabel}
                     </div>
 
-                    {/* Action */}
                     <div className="col-span-2 flex justify-end">
                       <Link
                         href={`/admin/quotes/${q.id}`}
