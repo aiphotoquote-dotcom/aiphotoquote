@@ -4,7 +4,7 @@ import { auth } from "@clerk/nextjs/server";
 import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs } from "@/lib/db/schema";
+import { quoteLogs, tenants } from "@/lib/db/schema";
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
@@ -53,23 +53,33 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
     );
   }
 
+  // tenant resolve
   const jar = await cookies();
-  const tenantId = getCookieTenantId(jar);
+  let tenantId = getCookieTenantId(jar);
+
+  if (!tenantId) {
+    const t = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.ownerClerkUserId, userId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    tenantId = t?.id ?? null;
+  }
 
   if (!tenantId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Quote</h1>
-
           <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-            No active tenant selected. Go to{" "}
+            No tenant found for your user. Go to{" "}
             <Link className="underline" href="/onboarding">
               Settings
             </Link>{" "}
-            and make sure your tenant is created/selected.
+            and complete setup.
           </div>
-
           <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
               Back to quotes
@@ -81,8 +91,6 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
   }
 
   const quoteId = asStr(params?.id);
-
-  // ✅ Critical: never query with undefined/empty id
   if (!quoteId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -91,7 +99,6 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
             Missing quote id in URL.
           </p>
-
           <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
               Back to quotes
@@ -102,7 +109,6 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
     );
   }
 
-  // Pull the fields your DB actually has (matches your quote_logs schema reality)
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -133,10 +139,7 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
                 Either this quote doesn’t exist, or it belongs to a different tenant.
               </p>
             </div>
-            <Link
-              href="/admin/quotes"
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-            >
+            <Link className="underline" href="/admin/quotes">
               Back to quotes
             </Link>
           </div>
@@ -182,13 +185,11 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
           </div>
         </div>
 
-        {/* Rendering summary */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="font-semibold">AI rendering</h2>
             <div className="text-sm text-gray-700 dark:text-gray-300">
-              Status:{" "}
-              <span className="font-semibold">{row.renderStatus ?? "—"}</span>
+              Status: <span className="font-semibold">{row.renderStatus ?? "—"}</span>
               {row.renderOptIn ? (
                 <span className="ml-2 rounded-full border border-gray-200 px-2 py-0.5 text-xs dark:border-gray-700">
                   Opted-in
@@ -215,11 +216,7 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
                 className="w-full max-w-2xl rounded-xl border border-gray-200 dark:border-gray-800"
               />
               <div className="mt-2">
-                <Link
-                  className="underline text-sm"
-                  href={row.renderImageUrl}
-                  target="_blank"
-                >
+                <Link className="underline text-sm" href={row.renderImageUrl} target="_blank">
                   Open image
                 </Link>
               </div>
@@ -245,7 +242,6 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
           ) : null}
         </section>
 
-        {/* Input/Output */}
         <section className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
             <h2 className="font-semibold">Input</h2>

@@ -4,7 +4,7 @@ import { auth } from "@clerk/nextjs/server";
 import { desc, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs } from "@/lib/db/schema";
+import { quoteLogs, tenants } from "@/lib/db/schema";
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
@@ -37,8 +37,22 @@ export default async function AdminQuotesPage() {
     );
   }
 
+  // 1) Try cookie
   const jar = await cookies();
-  const tenantId = getCookieTenantId(jar);
+  let tenantId = getCookieTenantId(jar);
+
+  // 2) Fallback: resolve tenant by ownerClerkUserId
+  // NOTE: This assumes 1 tenant per user for now.
+  if (!tenantId) {
+    const t = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.ownerClerkUserId, userId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    tenantId = t?.id ?? null;
+  }
 
   if (!tenantId) {
     return (
@@ -47,11 +61,17 @@ export default async function AdminQuotesPage() {
           <h1 className="text-2xl font-semibold">Quotes</h1>
 
           <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-            No active tenant selected. Go to{" "}
+            No tenant found for your user. Go to{" "}
             <Link className="underline" href="/onboarding">
               Settings
             </Link>{" "}
-            and make sure your tenant is created/selected.
+            and complete setup.
+          </div>
+
+          <div className="mt-6">
+            <Link className="underline" href="/dashboard">
+              Back to dashboard
+            </Link>
           </div>
         </div>
       </main>
@@ -77,7 +97,7 @@ export default async function AdminQuotesPage() {
           <div>
             <h1 className="text-2xl font-semibold">Quotes</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Latest quotes for the active tenant.
+              Latest quotes for your tenant.
             </p>
           </div>
 
