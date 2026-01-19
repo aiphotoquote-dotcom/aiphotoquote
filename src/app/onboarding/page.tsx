@@ -36,13 +36,62 @@ function pickUrl(s: any, snake: string, camel: string) {
   return "";
 }
 
-function CodeBox(props: {
+function StatusPill(props: { label: string; tone: "green" | "yellow" | "gray" }) {
+  const cls =
+    props.tone === "green"
+      ? "border-green-200 bg-green-50 text-green-900 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+      : props.tone === "yellow"
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+        : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
+
+  return (
+    <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
+      {props.label}
+    </span>
+  );
+}
+
+function TabButton(props: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  sub?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      className={cn(
+        "w-full rounded-xl border px-4 py-3 text-left transition",
+        props.active
+          ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
+          : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+      )}
+    >
+      <div className="text-sm font-semibold">{props.label}</div>
+      {props.sub ? <div className="mt-1 text-xs opacity-80">{props.sub}</div> : null}
+    </button>
+  );
+}
+
+function CodeCard(props: {
   title: string;
   value: string;
-  copied: boolean;
-  onCopy: () => void;
   hint?: string;
+  disabled?: boolean;
 }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(props.value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // ignore
+    }
+  }
+
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
       <div className="flex items-start justify-between gap-4">
@@ -57,10 +106,16 @@ function CodeBox(props: {
 
         <button
           type="button"
-          onClick={props.onCopy}
-          className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+          onClick={copy}
+          disabled={props.disabled}
+          className={cn(
+            "rounded-lg border px-3 py-2 text-xs font-semibold",
+            props.disabled
+              ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500"
+              : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+          )}
         >
-          {props.copied ? "Copied ✅" : "Copy"}
+          {copied ? "Copied ✅" : "Copy"}
         </button>
       </div>
 
@@ -71,13 +126,12 @@ function CodeBox(props: {
   );
 }
 
+type EmbedTab = "link" | "iframe" | "script";
+
 export default function Onboarding() {
   const [checking, setChecking] = useState(true);
   const [me, setMe] = useState<MeSettingsResponse | null>(null);
-
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [copiedIframe, setCopiedIframe] = useState(false);
-  const [copiedScript, setCopiedScript] = useState(false);
+  const [tab, setTab] = useState<EmbedTab>("link");
 
   useEffect(() => {
     let cancelled = false;
@@ -109,7 +163,6 @@ export default function Onboarding() {
     const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
 
     const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
-
     const redirectUrl = pickUrl(settings, "redirect_url", "redirectUrl");
     const thankYouUrl = pickUrl(settings, "thank_you_url", "thankYouUrl");
 
@@ -123,12 +176,20 @@ export default function Onboarding() {
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
     const publicUrl = origin && tenantSlug ? `${origin}${publicPath}` : publicPath;
 
-    // Embed snippets (static for now, but good UX)
     const iframeSnippet = tenantSlug
-      ? `<iframe src="${publicUrl}" style="width:100%;max-width:900px;height:1000px;border:0;border-radius:16px;" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>`
-      : `<iframe src="${origin}/q/<tenant-slug>" style="width:100%;max-width:900px;height:1000px;border:0;border-radius:16px;" loading="lazy"></iframe>`;
+      ? `<iframe
+  src="${publicUrl}"
+  style="width:100%;max-width:900px;height:1000px;border:0;border-radius:16px;"
+  loading="lazy"
+  referrerpolicy="no-referrer-when-downgrade"
+></iframe>`
+      : `<iframe
+  src="${origin}/q/<tenant-slug>"
+  style="width:100%;max-width:900px;height:1000px;border:0;border-radius:16px;"
+  loading="lazy"
+></iframe>`;
 
-    // “Script embed” placeholder (future)
+    // NOTE: embed.js is a placeholder for now (future-proof UX).
     const scriptSnippet = tenantSlug
       ? `<!-- AIPhotoQuote embed (recommended) -->
 <div id="aiphotoquote-widget"></div>
@@ -151,6 +212,7 @@ export default function Onboarding() {
       hasSlug,
       hasIndustry,
       isReady,
+      origin,
       publicPath,
       publicUrl,
       iframeSnippet,
@@ -158,23 +220,36 @@ export default function Onboarding() {
     };
   }, [me]);
 
-  async function copy(text: string, which: "link" | "iframe" | "script") {
-    try {
-      await navigator.clipboard.writeText(text);
-      if (which === "link") {
-        setCopiedLink(true);
-        setTimeout(() => setCopiedLink(false), 1200);
-      } else if (which === "iframe") {
-        setCopiedIframe(true);
-        setTimeout(() => setCopiedIframe(false), 1200);
-      } else {
-        setCopiedScript(true);
-        setTimeout(() => setCopiedScript(false), 1200);
-      }
-    } catch {
-      // ignore
-    }
-  }
+  const tone: "green" | "yellow" | "gray" = checking
+    ? "gray"
+    : computed.isReady
+      ? "green"
+      : "yellow";
+
+  const label = checking ? "Checking…" : computed.isReady ? "Setup complete ✅" : "Setup needed";
+
+  const shareValue =
+    tab === "link"
+      ? computed.publicUrl
+      : tab === "iframe"
+        ? computed.iframeSnippet
+        : computed.scriptSnippet;
+
+  const shareTitle =
+    tab === "link"
+      ? "Share link"
+      : tab === "iframe"
+        ? "Embed with iframe"
+        : "Embed with script (recommended)";
+
+  const shareHint =
+    tab === "link"
+      ? "Send this to customers or link it from your site."
+      : tab === "iframe"
+        ? "Fastest drop-in on any website builder. Good default."
+        : "Best long-term. We’ll provide the real embed.js soon; keep this ready.";
+
+  const embedDisabled = tab !== "link" ? !computed.tenantSlug : !computed.tenantSlug;
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-black dark:text-gray-100">
@@ -186,21 +261,29 @@ export default function Onboarding() {
           <div>
             <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
             <p className="mt-2 text-sm text-gray-700 dark:text-gray-300">
-              Configure your tenant (industry, OpenAI key, pricing guardrails, and redirect URL).
+              Configure your tenant and publish your customer quote page.
             </p>
-            {checking ? (
-              <p className="mt-2 text-xs text-gray-500">Checking setup status…</p>
+
+            {computed.tenantName ? (
+              <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">
+                Tenant: <span className="font-semibold">{computed.tenantName}</span>
+                {computed.tenantSlug ? (
+                  <span className="ml-2 font-mono text-xs text-gray-600 dark:text-gray-400">
+                    ({computed.tenantSlug})
+                  </span>
+                ) : null}
+              </div>
             ) : null}
           </div>
 
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <StatusPill label={label} tone={tone} />
             <Link
               href="/dashboard"
               className="rounded-xl border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
             >
               Back to dashboard
             </Link>
-
             {computed.tenantSlug ? (
               <Link
                 href={computed.publicPath}
@@ -212,90 +295,139 @@ export default function Onboarding() {
           </div>
         </div>
 
-        {/* Setup status banner */}
-        <div
-          className={cn(
-            "rounded-2xl border p-5 text-sm",
-            computed.isReady
-              ? "border-green-200 bg-green-50 text-green-900 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
-              : "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-          )}
-        >
-          {computed.isReady ? (
-            <div className="flex flex-col gap-1">
-              <div className="font-semibold">Setup complete ✅</div>
-              <div className="opacity-90">
-                You can now embed your public quote page or share the link with customers.
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1">
-              <div className="font-semibold">Setup needed</div>
-              <div className="opacity-90">
-                Add a tenant slug and industry key to enable your public quote page.
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Core form */}
-        <div className="grid gap-6 lg:grid-cols-2">
-          <div className="lg:col-span-1">
-            <TenantOnboardingForm redirectToDashboard />
-          </div>
-
-          {/* Embed & share */}
-          <div className="space-y-6 lg:col-span-1">
-            <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-              <h2 className="text-lg font-semibold">Share & embed</h2>
-              <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-                Once your slug is set, this is the tenant-facing link customers will use.
-              </p>
-
-              <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
-                <div className="text-xs text-gray-500">Public quote page</div>
-                <div className="mt-1 font-mono text-sm text-gray-800 dark:text-gray-100">
-                  {computed.publicUrl}
+        {/* Two-column centerpiece */}
+        <div className="grid gap-6 lg:grid-cols-12">
+          {/* Left: Form */}
+          <section className="lg:col-span-5">
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Tenant configuration</h2>
+                  <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    Your slug + industry turn on your public quote page. URLs control where customers
+                    land after submitting.
+                  </p>
                 </div>
 
-                <div className="mt-3 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={() => copy(computed.publicUrl, "link")}
-                    disabled={!computed.tenantSlug}
-                    className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:hover:bg-gray-950"
-                  >
-                    {copiedLink ? "Copied ✅" : "Copy link"}
-                  </button>
+                <div className="hidden sm:block">
+                  <StatusPill
+                    label={computed.isReady ? "Ready" : "Not ready"}
+                    tone={computed.isReady ? "green" : "yellow"}
+                  />
+                </div>
+              </div>
 
+              <div className="mt-6">
+                <TenantOnboardingForm redirectToDashboard />
+              </div>
+            </div>
+          </section>
+
+          {/* Right: Share & Embed */}
+          <section className="lg:col-span-7 space-y-6">
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Share & embed</h2>
+                  <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    Make this feel “live” for tenants: copy the link, drop in an embed, and preview.
+                  </p>
+                </div>
+
+                {computed.tenantSlug ? (
+                  <div className="text-right text-xs text-gray-500 dark:text-gray-400">
+                    Public path
+                    <div className="mt-1 font-mono text-gray-700 dark:text-gray-200">
+                      {computed.publicPath}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Tabs */}
+              <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                <TabButton
+                  active={tab === "link"}
+                  onClick={() => setTab("link")}
+                  label="Link"
+                  sub="Share with customers"
+                />
+                <TabButton
+                  active={tab === "iframe"}
+                  onClick={() => setTab("iframe")}
+                  label="Iframe"
+                  sub="Fast embed anywhere"
+                />
+                <TabButton
+                  active={tab === "script"}
+                  onClick={() => setTab("script")}
+                  label="Script"
+                  sub="Recommended (future)"
+                />
+              </div>
+
+              {/* Code card */}
+              <div className="mt-5">
+                <CodeCard
+                  title={shareTitle}
+                  value={shareValue}
+                  hint={
+                    computed.tenantSlug
+                      ? shareHint
+                      : "Set a tenant slug first, then your link + embed snippets will populate."
+                  }
+                  disabled={embedDisabled}
+                />
+              </div>
+
+              {/* Preview */}
+              <div className="mt-6">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold">Live preview</div>
                   {computed.tenantSlug ? (
                     <Link
                       href={computed.publicPath}
-                      className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                      className="text-sm font-semibold underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50"
                     >
-                      Open
+                      Open full page
                     </Link>
-                  ) : null}
+                  ) : (
+                    <span className="text-xs text-gray-500 dark:text-gray-400">Set slug to enable</span>
+                  )}
+                </div>
+
+                <div className="mt-3 overflow-hidden rounded-2xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900">
+                  {computed.tenantSlug ? (
+                    <iframe
+                      title="AIPhotoQuote Preview"
+                      src={computed.publicPath}
+                      className="h-[520px] w-full"
+                    />
+                  ) : (
+                    <div className="p-6 text-sm text-gray-600 dark:text-gray-300">
+                      Add your tenant slug, then you’ll see a live preview of your public quote
+                      page here.
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                  Tip: after setup, run one end-to-end test (estimate + optional render) to validate
+                  the full tenant experience.
                 </div>
               </div>
             </div>
 
-            <CodeBox
-              title="Quick embed (iframe)"
-              value={computed.iframeSnippet}
-              copied={copiedIframe}
-              onCopy={() => copy(computed.iframeSnippet, "iframe")}
-              hint="Fastest drop-in. Works anywhere, looks good, minimal effort."
-            />
-
-            <CodeBox
-              title="Recommended embed (script)"
-              value={computed.scriptSnippet}
-              copied={copiedScript}
-              onCopy={() => copy(computed.scriptSnippet, "script")}
-              hint="Future-proof. We’ll ship the real embed.js soon; keep this ready."
-            />
-          </div>
+            {/* Tiny “What tenants do next” card */}
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+              <div className="text-sm font-semibold">Next: go live</div>
+              <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 dark:text-gray-300 space-y-1">
+                <li>Copy the link and add it to your site navigation.</li>
+                <li>Or embed with iframe if you want it inside your site page.</li>
+                <li>Send yourself a test quote to confirm email + rendering behavior.</li>
+              </ul>
+            </div>
+          </section>
         </div>
       </div>
     </main>
