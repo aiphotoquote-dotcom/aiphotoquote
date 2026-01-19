@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
 import { cookies } from "next/headers";
-import { desc, eq, and } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
 import TopNav from "@/components/TopNav";
 import { db } from "@/lib/db/client";
@@ -86,8 +86,13 @@ function pickEstimate(output: any) {
   };
 }
 
+/**
+ * IMPORTANT:
+ * - We only trust the cookie if that tenant is owned by this user.
+ * - Otherwise fallback to first owned tenant.
+ * This prevents "list used fallback tenant" but "detail used cookie tenant" mismatch.
+ */
 async function resolveActiveTenantId(userId: string): Promise<string | null> {
-  // 1) Prefer cookie if present
   const jar = await cookies();
   const cookieTenantId =
     jar.get("activeTenantId")?.value ||
@@ -95,25 +100,48 @@ async function resolveActiveTenantId(userId: string): Promise<string | null> {
     jar.get("tenantId")?.value ||
     jar.get("tenant_id")?.value;
 
-  if (cookieTenantId) return cookieTenantId;
+  if (cookieTenantId) {
+    const okCookie = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.id, cookieTenantId))
+      .limit(1);
 
-  // 2) Fallback: tenant owned by this user
-  const owned = await db
+    // Validate ownership (today's model). Later we can expand to membership.
+    if (okCookie[0]?.id) {
+      const owned = await db
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.id, cookieTenantId))
+        .limit(1);
+
+      // If your schema uses ownerClerkUserId, validate it here:
+      const ownedByUser = await db
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.ownerClerkUserId, userId))
+        .limit(100);
+
+      if (ownedByUser.some((t) => t.id === cookieTenantId)) return cookieTenantId;
+    }
+  }
+
+  const fallback = await db
     .select({ id: tenants.id })
     .from(tenants)
     .where(eq(tenants.ownerClerkUserId, userId))
     .limit(1);
 
-  return owned[0]?.id ?? null;
+  return fallback[0]?.id ?? null;
 }
 
 export default async function AdminQuotesPage() {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const activeTenantId = await resolveActiveTenantId(userId);
+  const tenantId = await resolveActiveTenantId(userId);
 
-  if (!activeTenantId) {
+  if (!tenantId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <TopNav />
@@ -121,7 +149,7 @@ export default async function AdminQuotesPage() {
           <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
             <h1 className="text-2xl font-semibold">Admin · Quotes</h1>
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              We couldn’t resolve an active tenant for your account.
+              No active tenant selected. Go to Settings and make sure your tenant is created/selected.
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Link
@@ -137,10 +165,6 @@ export default async function AdminQuotesPage() {
                 Back to Dashboard
               </Link>
             </div>
-            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-              (This page normally uses the active-tenant cookie, but it can also fall back to your owned
-              tenant. If neither exists, you’ll see this.)
-            </p>
           </div>
         </div>
       </main>
@@ -150,14 +174,13 @@ export default async function AdminQuotesPage() {
   const rows = await db
     .select()
     .from(quoteLogs)
-    .where(eq(quoteLogs.tenantId, activeTenantId))
+    .where(eq(quoteLogs.tenantId, tenantId))
     .orderBy(desc(quoteLogs.createdAt))
     .limit(50);
 
   const items = rows.map((r: any) => {
     const input = r.input ?? {};
     const output = r.output ?? {};
-
     const thumb = pickFirstImageUrl(input);
     const est = pickEstimate(output);
 
@@ -255,7 +278,7 @@ export default async function AdminQuotesPage() {
 
                     <div className="col-span-2 flex justify-end">
                       <Link
-                        href={`/admin/quotes/${q.id}`}
+                        href={`/admin/quotes/${encodeURIComponent(q.id)}`}
                         className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
                       >
                         Review

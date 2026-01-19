@@ -24,15 +24,24 @@ async function resolveActiveTenantId(userId: string): Promise<string | null> {
     jar.get("tenantId")?.value ||
     jar.get("tenant_id")?.value;
 
-  if (cookieTenantId) return cookieTenantId;
+  if (cookieTenantId) {
+    // validate cookie belongs to user (owner model)
+    const ownedByUser = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.ownerClerkUserId, userId))
+      .limit(100);
 
-  const owned = await db
+    if (ownedByUser.some((t) => t.id === cookieTenantId)) return cookieTenantId;
+  }
+
+  const fallback = await db
     .select({ id: tenants.id })
     .from(tenants)
     .where(eq(tenants.ownerClerkUserId, userId))
     .limit(1);
 
-  return owned[0]?.id ?? null;
+  return fallback[0]?.id ?? null;
 }
 
 export default async function AdminQuoteDetailPage({
@@ -43,15 +52,15 @@ export default async function AdminQuoteDetailPage({
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const activeTenantId = await resolveActiveTenantId(userId);
-  if (!activeTenantId) redirect("/onboarding");
+  const tenantId = await resolveActiveTenantId(userId);
+  if (!tenantId) redirect("/onboarding");
 
   const id = params.id;
 
   const rows = await db
     .select()
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, activeTenantId)))
+    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
     .limit(1);
 
   const q: any = rows[0];
@@ -64,7 +73,7 @@ export default async function AdminQuoteDetailPage({
           <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
             <h1 className="text-2xl font-semibold">Quote not found</h1>
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              This quote either doesn’t exist or isn’t in your active tenant.
+              This quote either doesn’t exist or isn’t in your tenant.
             </p>
             <div className="mt-4 flex gap-3">
               <Link
