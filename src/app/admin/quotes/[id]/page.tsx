@@ -30,7 +30,6 @@ export default async function AdminQuoteDetailPage({
 }: {
   params: { id: string };
 }) {
-  // 🔒 Auth
   const { userId } = await auth();
   if (!userId) {
     return (
@@ -50,7 +49,6 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // ✅ Quote id from dynamic segment
   const quoteId = params?.id;
   if (!quoteId) {
     return (
@@ -70,10 +68,10 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // ✅ Tenant resolve (cookie first, DB fallback)
   const jar = await cookies();
   let tenantId = getCookieTenantId(jar);
 
+  // Fallback: if cookie isn't set, use the tenant owned by this user
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -91,11 +89,11 @@ export default async function AdminQuoteDetailPage({
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Quote</h1>
           <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-            No tenant found for your user. Go to{" "}
+            No active tenant selected. Go to{" "}
             <Link className="underline" href="/onboarding">
               Settings
             </Link>{" "}
-            and complete setup.
+            and make sure your tenant is created/selected.
           </div>
           <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
@@ -107,14 +105,12 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // ✅ Fetch the quote
   const row = await db
     .select({
       id: quoteLogs.id,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
       output: quoteLogs.output,
-
       renderOptIn: quoteLogs.renderOptIn,
       renderStatus: quoteLogs.renderStatus,
       renderImageUrl: quoteLogs.renderImageUrl,
@@ -131,28 +127,19 @@ export default async function AdminQuoteDetailPage({
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h1 className="text-2xl font-semibold">Quote not found</h1>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Either this quote doesn’t exist, or it belongs to a different tenant.
-              </p>
-            </div>
+          <h1 className="text-2xl font-semibold">Quote not found</h1>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            Either this quote doesn’t exist, or it belongs to a different tenant.
+          </p>
+          <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
               Back to quotes
             </Link>
-          </div>
-
-          <div className="mt-6 rounded-2xl border border-gray-200 bg-gray-50 p-5 text-sm text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-            <div className="font-mono text-xs">id: {quoteId}</div>
           </div>
         </div>
       </main>
     );
   }
-
-  const created = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
-  const renderedAt = row.renderedAt ? new Date(row.renderedAt).toLocaleString() : null;
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -161,49 +148,25 @@ export default async function AdminQuoteDetailPage({
           <div>
             <h1 className="text-2xl font-semibold">Quote review</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Created {created}
+              {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
             </p>
-            <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-              {row.id}
-            </div>
+            <div className="mt-2 font-mono text-xs text-gray-500">{row.id}</div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <Link
-              href="/admin/quotes"
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-            >
-              Back
-            </Link>
-            <Link
-              href="/dashboard"
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-            >
-              Dashboard
-            </Link>
-          </div>
+          <Link className="underline" href="/admin/quotes">
+            Back to quotes
+          </Link>
         </div>
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="font-semibold">AI rendering</h2>
-            <div className="text-sm text-gray-700 dark:text-gray-300">
-              Status: <span className="font-semibold">{row.renderStatus ?? "—"}</span>
-              {row.renderOptIn ? (
-                <span className="ml-2 rounded-full border border-gray-200 px-2 py-0.5 text-xs dark:border-gray-700">
-                  Opted-in
-                </span>
-              ) : (
-                <span className="ml-2 rounded-full border border-gray-200 px-2 py-0.5 text-xs dark:border-gray-700">
-                  Not opted-in
-                </span>
-              )}
-              {renderedAt ? (
-                <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
-                  Rendered {renderedAt}
-                </span>
-              ) : null}
-            </div>
+          <h2 className="font-semibold">Rendering</h2>
+          <div className="mt-2 text-sm text-gray-700 dark:text-gray-300">
+            Status: <span className="font-semibold">{row.renderStatus ?? "—"}</span>
+            {row.renderOptIn ? (
+              <span className="ml-2 text-xs text-gray-500">(opted-in)</span>
+            ) : (
+              <span className="ml-2 text-xs text-gray-500">(not opted-in)</span>
+            )}
           </div>
 
           {row.renderImageUrl ? (
@@ -214,30 +177,19 @@ export default async function AdminQuoteDetailPage({
                 alt="Rendered result"
                 className="w-full max-w-2xl rounded-xl border border-gray-200 dark:border-gray-800"
               />
-              <div className="mt-2">
-                <Link className="underline text-sm" href={row.renderImageUrl} target="_blank">
-                  Open image
-                </Link>
-              </div>
             </div>
           ) : null}
 
           {row.renderError ? (
-            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
-              <div className="font-semibold">Render error</div>
-              <pre className="mt-2 whitespace-pre-wrap text-xs">{row.renderError}</pre>
-            </div>
+            <pre className="mt-4 whitespace-pre-wrap rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+              {row.renderError}
+            </pre>
           ) : null}
 
           {row.renderPrompt ? (
-            <div className="mt-4">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
-                Render prompt
-              </div>
-              <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black/40 dark:text-gray-200">
-                {row.renderPrompt}
-              </pre>
-            </div>
+            <pre className="mt-4 whitespace-pre-wrap rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black/40 dark:text-gray-200">
+              {row.renderPrompt}
+            </pre>
           ) : null}
         </section>
 
