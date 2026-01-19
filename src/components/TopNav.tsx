@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 type MeSettingsResponse =
   | {
@@ -16,24 +16,15 @@ type MeSettingsResponse =
         updated_at: string | null;
       } | null;
     }
-  | { ok: false; error: any; message?: string };
+  | { ok: false; error: any };
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(label: string) {
-  return (
-    <span className="ml-2 rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-semibold text-gray-700">
-      {label}
-    </span>
-  );
-}
-
 export default function TopNav() {
-  const [me, setMe] = useState<MeSettingsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
+  // null = unknown/loading, false = incomplete, true = complete
+  const [complete, setComplete] = useState<boolean | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,11 +33,19 @@ export default function TopNav() {
       try {
         const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const json: MeSettingsResponse = await res.json();
-        if (!cancelled) setMe(json);
+
+        if (cancelled) return;
+
+        if (!("ok" in json) || !json.ok) {
+          setComplete(false);
+          return;
+        }
+
+        const s = json.settings;
+        const industry = s?.industry_key ?? "";
+        setComplete(Boolean(industry));
       } catch {
-        if (!cancelled) setMe({ ok: false, error: "FETCH_FAILED" });
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setComplete(false);
       }
     }
 
@@ -56,103 +55,69 @@ export default function TopNav() {
     };
   }, []);
 
-  const computed = useMemo(() => {
-    const ok = Boolean(me && "ok" in me && me.ok);
-    const tenant = ok ? (me as any).tenant : null;
-    const settings = ok ? (me as any).settings : null;
-
-    const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
-    const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
-
-    const hasSlug = Boolean(tenantSlug);
-    const hasIndustry = Boolean(industryKey);
-
-    // minimal ready = slug + industry
-    const isReady = hasSlug && hasIndustry;
-
-    const publicPath = tenantSlug ? `/q/${tenantSlug}` : "";
-
-    return {
-      ok,
-      tenantSlug,
-      industryKey,
-      hasSlug,
-      hasIndustry,
-      isReady,
-      publicPath,
-    };
-  }, [me]);
-
-  const settingsLabel = loading ? "Configure" : computed.isReady ? "Settings" : "Configure";
-
-  async function copyPublicLink() {
-    if (!computed.publicPath) return;
-
-    const origin =
-      typeof window !== "undefined" && window.location?.origin
-        ? window.location.origin
-        : "";
-
-    const full = origin ? `${origin}${computed.publicPath}` : computed.publicPath;
-
-    try {
-      await navigator.clipboard.writeText(full);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
-    }
-  }
+  const settingsLabel = complete === true ? "Settings" : "Configure";
 
   return (
-    <header className="border-b bg-white">
-      <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between gap-4">
-        <Link href="/" className="font-semibold text-lg">
+    <header className="border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
+      <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
+        <Link
+          href="/"
+          className="font-semibold text-lg text-gray-900 hover:opacity-90 dark:text-gray-100"
+        >
           AIPhotoQuote
         </Link>
 
         <div className="flex items-center gap-4 text-sm">
           <SignedOut>
-            <Link className="underline" href="/sign-in">
+            <Link
+              className="underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50"
+              href="/sign-in"
+            >
               Sign in
             </Link>
-            <Link className="underline" href="/sign-up">
+            <Link
+              className="underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50"
+              href="/sign-up"
+            >
               Sign up
             </Link>
           </SignedOut>
 
           <SignedIn>
             <nav className="flex items-center gap-4">
-              <Link className="underline" href="/dashboard">
+              <Link
+                className="underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50"
+                href="/dashboard"
+              >
                 Dashboard
               </Link>
 
-              <Link className="underline" href="/onboarding">
+              <Link
+                className={cn(
+                  "underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50",
+                  complete === false ? "font-semibold" : ""
+                )}
+                href="/onboarding"
+              >
                 {settingsLabel}
-                {!loading && computed.ok && !computed.isReady && pill("Setup")}
+                {complete === false && (
+                  <span className="ml-2 rounded-full border border-gray-200 px-2 py-0.5 text-xs text-gray-700 dark:border-gray-700 dark:text-gray-200">
+                    Setup
+                  </span>
+                )}
               </Link>
 
-              {/* Share link shows only when ready (slug exists) */}
-              {!loading && computed.ok && computed.isReady && computed.publicPath ? (
-                <button
-                  type="button"
-                  onClick={copyPublicLink}
-                  className={cn(
-                    "rounded-lg border px-3 py-1.5 text-xs font-semibold",
-                    copied ? "border-green-200 bg-green-50 text-green-800" : "border-gray-200 hover:bg-gray-50"
-                  )}
-                  title="Copy public quote page link"
-                >
-                  {copied ? "Copied!" : "Copy quote link"}
-                </button>
-              ) : null}
-
-              <Link className="underline" href="/admin">
+              <Link
+                className="underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50"
+                href="/admin"
+              >
                 Admin
               </Link>
             </nav>
 
-            <UserButton />
+            <div className="ml-2">
+              <UserButton />
+            </div>
           </SignedIn>
         </div>
       </div>
