@@ -1,618 +1,497 @@
-import { sql } from "drizzle-orm";
-import { notFound } from "next/navigation";
-import { db } from "@/lib/db/client";
+import TopNav from "@/components/TopNav";
+import Link from "next/link";
+import { redirect, notFound } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { db } from "@/lib/db/client";
+import { quoteLogs } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 type PageProps = {
-  params: Promise<{ id: string }>;
+  params: { id: string };
 };
 
-function safeJsonParse(v: any) {
-  try {
-    if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v === "string") return JSON.parse(v);
-    return v;
-  } catch {
-    return null;
-  }
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-function Badge({ ok, text }: { ok: boolean; text: string }) {
-  return (
-    <span
-      className={[
-        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-        ok
-          ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
-          : "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200",
-      ].join(" ")}
-    >
-      {text}
-    </span>
-  );
+function fmtDate(iso: string | Date | null | undefined) {
+  if (!iso) return "";
+  const d = typeof iso === "string" ? new Date(iso) : iso;
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function Pill({
-  label,
-  tone = "neutral",
-}: {
-  label: string;
-  tone?: "neutral" | "green" | "yellow" | "red" | "blue";
-}) {
+function money(n: unknown) {
+  const x = typeof n === "number" ? n : n == null ? null : Number(n);
+  if (x == null || Number.isNaN(x)) return "";
+  return x.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
   const cls =
     tone === "green"
-      ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200"
+      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-        ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-200"
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
         : tone === "red"
-          ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
           : tone === "blue"
-            ? "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-200"
-            : "bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-100";
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
 
   return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}
-    >
+    <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
       {label}
     </span>
   );
 }
 
-function pickAssessment(output: any) {
-  if (!output || typeof output !== "object") return null;
-
-  if (output.assessment && typeof output.assessment === "object")
-    return output.assessment;
-  if (output.output && typeof output.output === "object") return output.output;
-
-  const looksLikeAssessment =
-    typeof output.confidence === "string" ||
-    typeof output.summary === "string" ||
-    typeof output.inspection_required === "boolean" ||
-    Array.isArray(output.questions);
-
-  if (looksLikeAssessment) return output;
-
-  return null;
+function safeString(x: unknown) {
+  return typeof x === "string" ? x : x == null ? "" : String(x);
 }
 
-function titleCase(s: string) {
-  const v = String(s || "").trim();
-  if (!v) return "";
-  return v.charAt(0).toUpperCase() + v.slice(1);
-}
-
-function asArray(v: any): string[] {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map((x) => String(x)).filter(Boolean);
-  return [];
-}
-
-/**
- * Render opt-in can live in multiple places depending on rollout:
- * - quote_logs.render_opt_in (new column)
- * - quote_logs.input.render_opt_in (new request shape)
- * - quote_logs.input.customer_context.render_opt_in (older buggy client payload)
- * - quote_logs.output.meta.render_opt_in
- * - quote_logs.output.output.render_opt_in (normalized public output)
- * - quote_logs.output.rendering.requested (fallback structure)
- */
-function pickRenderOptIn(args: { row: any; renderingColumnsAvailable: boolean }) {
-  const { row, renderingColumnsAvailable } = args;
-
-  // 1) Dedicated column
-  if (renderingColumnsAvailable && typeof row?.render_opt_in === "boolean") {
-    return row.render_opt_in;
-  }
-
-  // 2) Input JSON
-  const input = safeJsonParse(row?.input) ?? {};
-  if (typeof input?.render_opt_in === "boolean") return input.render_opt_in;
-
-  // older client bug: nested under customer_context
-  if (typeof input?.customer_context?.render_opt_in === "boolean") {
-    return input.customer_context.render_opt_in;
-  }
-
-  // 3) Output JSON
-  const output = safeJsonParse(row?.output) ?? {};
-  if (typeof output?.meta?.render_opt_in === "boolean") return output.meta.render_opt_in;
-  if (typeof output?.output?.render_opt_in === "boolean") return output.output.render_opt_in;
-
-  // 4) Rendering block
-  if (typeof output?.rendering?.requested === "boolean") return output.rendering.requested;
-
-  return false;
-}
-
-export default async function AdminQuoteDetailPage(props: PageProps) {
-  const { id } = await props.params;
-
-  let row: any = null;
-  let renderingColumnsAvailable = true;
-
+function prettyJson(x: unknown) {
   try {
-    const rNew = await db.execute(sql`
-      select
-        id,
-        tenant_id,
-        input,
-        output,
-        created_at,
-        render_opt_in,
-        render_status,
-        render_image_url,
-        render_prompt,
-        render_error,
-        rendered_at
-      from quote_logs
-      where id = ${id}::uuid
-      limit 1
-    `);
-
-    row =
-      (rNew as any)?.rows?.[0] ??
-      (Array.isArray(rNew) ? (rNew as any)[0] : null);
+    return JSON.stringify(x ?? null, null, 2);
   } catch {
-    renderingColumnsAvailable = false;
-
-    const rOld = await db.execute(sql`
-      select id, tenant_id, input, output, created_at
-      from quote_logs
-      where id = ${id}::uuid
-      limit 1
-    `);
-
-    row =
-      (rOld as any)?.rows?.[0] ??
-      (Array.isArray(rOld) ? (rOld as any)[0] : null);
+    return String(x ?? "");
   }
+}
 
+function renderStatusTone(s: string) {
+  const x = s.toLowerCase();
+  if (x === "rendered") return "green" as const;
+  if (x === "failed") return "red" as const;
+  if (x === "queued" || x === "running") return "blue" as const;
+  if (x === "not_requested") return "gray" as const;
+  return "gray" as const;
+}
+
+function renderStatusLabel(s: string, renderOptIn?: boolean | null) {
+  const x = (s || "not_requested").toLowerCase();
+  if (x === "rendered") return "Rendered";
+  if (x === "failed") return "Render failed";
+  if (x === "queued" || x === "running") return "Rendering";
+  if (renderOptIn) return "Render requested";
+  return "Estimate";
+}
+
+export default async function AdminQuoteDetailPage({ params }: PageProps) {
+  const session = await auth();
+  if (!session?.userId) redirect("/sign-in");
+
+  const id = params?.id;
+  if (!id) notFound();
+
+  const rows = await db
+    .select({
+      id: quoteLogs.id,
+      tenantId: quoteLogs.tenantId,
+      input: quoteLogs.input,
+      output: quoteLogs.output,
+      createdAt: quoteLogs.createdAt,
+
+      renderOptIn: quoteLogs.renderOptIn,
+      renderStatus: quoteLogs.renderStatus,
+      renderImageUrl: quoteLogs.renderImageUrl,
+      renderPrompt: quoteLogs.renderPrompt,
+      renderError: quoteLogs.renderError,
+      renderedAt: quoteLogs.renderedAt,
+    })
+    .from(quoteLogs)
+    .where(eq(quoteLogs.id, id))
+    .limit(1);
+
+  const row = rows[0];
   if (!row) notFound();
 
-  const input = safeJsonParse(row.input) ?? {};
-  const output = safeJsonParse(row.output) ?? {};
+  const input: any = row.input ?? {};
+  const output: any = row.output ?? {};
 
-  const assessment = pickAssessment(output);
-  const email = output?.email ?? null;
+  const images: Array<{ url: string }> = Array.isArray(input?.images) ? input.images : [];
+  const customerNotes =
+    safeString(input?.customer_context?.notes) ||
+    safeString(input?.customer_context?.note) ||
+    safeString(input?.notes);
 
-  const lead = email?.lead ?? null;
-  const customer = email?.customer ?? null;
+  const serviceType = safeString(input?.customer_context?.service_type);
+  const category = safeString(input?.customer_context?.category) || safeString(output?.category);
 
-  const tenantSlug = input?.tenantSlug ?? "";
-  const images: string[] = (input?.images ?? [])
-    .map((x: any) => x?.url)
-    .filter(Boolean);
+  // common output shapes you've used:
+  const assessment = output?.assessment ?? output;
+  const summary =
+    safeString(assessment?.summary) ||
+    safeString(output?.summary) ||
+    safeString(assessment?.visible_scope?.join?.("\n")) ||
+    "";
 
-  const customerCtx = input?.customer_context ?? {};
-  const createdAt = row.created_at ? new Date(row.created_at).toLocaleString() : "";
-
-  const leadConfigured = Boolean(email?.configured);
-  const leadSent = Boolean(lead?.sent);
-  const customerAttempted = Boolean(customer?.attempted);
-  const customerSent = Boolean(customer?.sent);
-
-  // Rendering (DB columns preferred; fallback to output.rendering)
-  const outputRendering = output?.rendering ?? null;
-
-  const renderOptIn = pickRenderOptIn({ row, renderingColumnsAvailable });
-
-  const renderStatus =
-    (renderingColumnsAvailable ? (row.render_status as string | null) : null) ??
-    (outputRendering?.status as string | null) ??
-    (renderOptIn ? "queued" : "not_requested");
-
-  const renderImageUrl =
-    (renderingColumnsAvailable ? (row.render_image_url as string | null) : null) ??
-    (outputRendering?.imageUrl as string | null) ??
+  const estLow =
+    assessment?.estimate_low ??
+    output?.estimate_low ??
+    assessment?.estimateLow ??
+    output?.estimateLow ??
     null;
 
-  const renderPrompt =
-    (renderingColumnsAvailable ? (row.render_prompt as string | null) : null) ??
-    (outputRendering?.prompt as string | null) ??
+  const estHigh =
+    assessment?.estimate_high ??
+    output?.estimate_high ??
+    assessment?.estimateHigh ??
+    output?.estimateHigh ??
     null;
 
-  const renderError =
-    (renderingColumnsAvailable ? (row.render_error as string | null) : null) ??
-    (outputRendering?.error as string | null) ??
+  const inspectionRequired =
+    assessment?.inspection_required ??
+    output?.inspection_required ??
+    assessment?.inspectionRequired ??
+    output?.inspectionRequired ??
     null;
 
-  const renderedAt =
-    renderingColumnsAvailable && row.rendered_at
-      ? new Date(row.rendered_at).toLocaleString()
-      : (outputRendering?.renderedAt ? new Date(outputRendering.renderedAt).toLocaleString() : "");
-
-  // Assessment fields (normalized)
-  const a = assessment ?? null;
-  const summary = a?.summary ? String(a.summary) : "";
-  const confidence = a?.confidence ? String(a.confidence) : "";
-  const inspectionRequired = a?.inspection_required === true;
-
-  const questions = asArray(a?.questions);
-  const visibleScope = asArray(a?.visible_scope);
-  const assumptions = asArray(a?.assumptions);
-
-  const confidenceTone =
-    confidence === "high"
-      ? "green"
-      : confidence === "medium"
-        ? "yellow"
-        : confidence === "low"
-          ? "red"
-          : "neutral";
-
-  const statusTone =
-    renderStatus === "rendered"
-      ? "green"
-      : renderStatus === "queued"
-        ? "yellow"
-        : renderStatus === "failed"
-          ? "red"
-          : "neutral";
-
-  const pageBg = "bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100";
-  const card =
-    "rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900";
-  const innerCard = "rounded-xl border border-gray-200 p-4 dark:border-gray-800";
-  const muted = "text-sm text-gray-600 dark:text-gray-300";
-  const mono = "font-mono text-gray-900 dark:text-gray-100";
-  const link = "text-blue-700 hover:underline dark:text-blue-300";
-  const pre =
-    "overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950";
+  const renderStatus = safeString(row.renderStatus || "not_requested");
 
   return (
-    <div className={`${pageBg} min-h-screen`}>
-      <div className="mx-auto max-w-5xl p-6">
-        <div className="mb-6 flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Quote Detail</h1>
-            <p className={`mt-1 ${muted}`}>
-              <span className={mono}>{row.id}</span>
-            </p>
-            <p className={`mt-1 ${muted}`}>
-              Tenant: <span className="font-medium">{tenantSlug || row.tenant_id}</span>
-              {createdAt ? (
-                <>
-                  {" "}
-                  · Created: <span className="font-medium">{createdAt}</span>
-                </>
-              ) : null}
-            </p>
+    <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+      <TopNav />
+
+      <div className="mx-auto max-w-7xl px-6 py-8 space-y-6">
+        {/* Header */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3">
+              <Link
+                href="/admin/quotes"
+                className="text-sm font-semibold text-gray-700 underline hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+              >
+                ← Back to Quotes
+              </Link>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                Created {fmtDate(row.createdAt)}
+              </span>
+            </div>
+
+            <h1 className="mt-2 text-2xl font-semibold">Quote Review</h1>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {pill(
+                renderStatusLabel(renderStatus, row.renderOptIn),
+                renderStatusTone(renderStatus)
+              )}
+
+              {typeof inspectionRequired === "boolean" && inspectionRequired
+                ? pill("Inspection required", "yellow")
+                : null}
+
+              {category ? pill(category, "gray") : null}
+
+              {(estLow != null || estHigh != null) && (
+                <span className="text-sm text-gray-700 dark:text-gray-200">
+                  Est:{" "}
+                  <span className="font-semibold">
+                    {money(estLow)}
+                    {estHigh != null ? ` – ${money(estHigh)}` : ""}
+                  </span>
+                </span>
+              )}
+            </div>
+
+            <div className="mt-3 font-mono text-xs text-gray-600 dark:text-gray-400 break-all">
+              {row.id}
+            </div>
           </div>
 
-          <div className="flex gap-2">
+          {/* Primary actions */}
+          <div className="flex flex-wrap items-center gap-3">
+            {row.renderImageUrl ? (
+              <a
+                href={row.renderImageUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                View render
+              </a>
+            ) : null}
+
             <a
-              href="/admin/quotes"
-              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-900 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
+              href={`/admin/quotes/${row.id}`}
+              className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
             >
-              ← Back to Quotes
+              Copy deep link
             </a>
           </div>
         </div>
 
-        {/* Email Status */}
-        <div className={`mb-6 ${card}`}>
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Email Status</h2>
-            <span className="text-xs text-gray-500 dark:text-gray-400">
-              {leadConfigured ? "Resend configured" : "Resend not configured (or missing env vars)"}
-            </span>
-          </div>
-
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className={innerCard}>
-              <div className="flex items-center justify-between">
-                <div className="font-medium">Lead Email (shop)</div>
-                <Badge ok={leadSent} text={leadSent ? "SENT" : "NOT SENT"} />
+        {/* 3-column focus layout */}
+        <div className="grid gap-6 lg:grid-cols-12">
+          {/* LEFT: submission */}
+          <section
+            id="submission"
+            className="lg:col-span-4 rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="font-semibold">Submission</h2>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  What the customer sent you.
+                </p>
               </div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                {lead?.id ? (
-                  <div>
-                    Message ID: <span className={mono}>{lead.id}</span>
-                  </div>
-                ) : null}
-                {lead?.error ? (
-                  <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800 dark:bg-red-900/30 dark:text-red-200">
-                    Error: <span className={mono}>{String(lead.error)}</span>
-                  </div>
-                ) : null}
-                {!lead?.attempted && leadConfigured ? (
-                  <div className="mt-2 text-gray-600 dark:text-gray-300">Not attempted.</div>
-                ) : null}
-                {!leadConfigured ? (
-                  <div className="mt-2 text-gray-600 dark:text-gray-300">
-                    Set <span className={mono}>RESEND_API_KEY</span>, tenant{" "}
-                    <span className={mono}>resend_from_email</span>,{" "}
-                    <span className={mono}>lead_to_email</span>,{" "}
-                    <span className={mono}>business_name</span>.
-                  </div>
-                ) : null}
+
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {images.length ? `${images.length} photo${images.length === 1 ? "" : "s"}` : "No photos"}
               </div>
             </div>
 
-            <div className={innerCard}>
-              <div className="flex items-center justify-between">
-                <div className="font-medium">Customer Receipt</div>
-                <Badge
-                  ok={customerSent}
-                  text={customerSent ? "SENT" : customerAttempted ? "FAILED" : "SKIPPED"}
-                />
-              </div>
-
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                <div>
-                  Customer email:{" "}
-                  <span className={mono}>{customerCtx?.email || "(not provided)"}</span>
+            <div className="mt-5 space-y-4">
+              {/* Notes */}
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  Notes
+                </div>
+                <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                  {customerNotes ? (
+                    <div className="whitespace-pre-wrap">{customerNotes}</div>
+                  ) : (
+                    <span className="text-gray-500 dark:text-gray-500">—</span>
+                  )}
                 </div>
 
-                {customer?.id ? (
-                  <div className="mt-2">
-                    Message ID: <span className={mono}>{customer.id}</span>
+                {(serviceType || category) && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    {serviceType ? pill(`Service: ${serviceType}`, "gray") : null}
+                    {category ? pill(`Category: ${category}`, "gray") : null}
                   </div>
-                ) : null}
-
-                {customer?.error ? (
-                  <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800 dark:bg-red-900/30 dark:text-red-200">
-                    Error: <span className={mono}>{String(customer.error)}</span>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* AI Rendering */}
-        <div className={`mb-6 ${card}`}>
-          <div className="mb-3 flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold">AI Rendering</h2>
-            <div className="flex items-center gap-2">
-              <Pill
-                label={renderStatus === "not_requested" ? "NOT REQUESTED" : titleCase(renderStatus)}
-                tone={statusTone}
-              />
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                Opt-in: <span className="font-medium">{renderOptIn ? "yes" : "no"}</span>
-                {renderedAt ? (
-                  <>
-                    {" "}
-                    · Rendered: <span className="font-medium">{renderedAt}</span>
-                  </>
-                ) : null}
-              </span>
-            </div>
-          </div>
-
-          {!renderingColumnsAvailable ? (
-            <div className="mb-4 rounded-xl border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900 dark:border-yellow-900/40 dark:bg-yellow-900/20 dark:text-yellow-200">
-              Rendering columns are not available in the database yet (using JSON fallbacks).
-            </div>
-          ) : null}
-
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className={innerCard}>
-              <div className="text-sm font-medium">Details</div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200 space-y-2">
-                <div>
-                  Status: <span className={mono}>{String(renderStatus)}</span>
-                </div>
-                <div>
-                  Requested (customer opt-in):{" "}
-                  <span className={mono}>{renderOptIn ? "true" : "false"}</span>
-                </div>
-
-                {renderImageUrl ? (
-                  <div>
-                    Image URL:{" "}
-                    <a className={`${link} break-all`} href={renderImageUrl} target="_blank" rel="noreferrer">
-                      {renderImageUrl}
-                    </a>
-                  </div>
-                ) : (
-                  <div className="text-gray-600 dark:text-gray-300">(no image stored)</div>
-                )}
-
-                {renderError ? (
-                  <div className="mt-2 rounded-lg bg-red-50 p-2 text-red-800 dark:bg-red-900/30 dark:text-red-200">
-                    Error: <span className={mono}>{String(renderError)}</span>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-
-            <div className={innerCard}>
-              <div className="text-sm font-medium">Preview</div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                {renderImageUrl ? (
-                  <a
-                    href={renderImageUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={renderImageUrl}
-                      alt="AI concept rendering"
-                      className="h-64 w-full object-contain bg-gray-50 dark:bg-gray-950"
-                    />
-                  </a>
-                ) : (
-                  <div className="text-gray-600 dark:text-gray-300">(no preview)</div>
                 )}
               </div>
-            </div>
-          </div>
 
-          {renderPrompt ? (
-            <div className="mt-4">
-              <div className="text-sm font-medium">Prompt</div>
-              <pre className="mt-2 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950">
-                {String(renderPrompt)}
-              </pre>
-            </div>
-          ) : null}
-        </div>
-
-        {/* Request */}
-        <div className={`mb-6 ${card}`}>
-          <h2 className="text-lg font-semibold">Request</h2>
-
-          <div className="mt-3 grid gap-4 md:grid-cols-2">
-            <div className={innerCard}>
-              <div className="text-sm font-medium">Customer Context</div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                <div>
-                  Category: <span className={mono}>{customerCtx?.category ?? ""}</span>
+              {/* Photos */}
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  Photos
                 </div>
-                <div>
-                  Service: <span className={mono}>{customerCtx?.service_type ?? ""}</span>
-                </div>
-                <div>
-                  Notes:{" "}
-                  <span className={`whitespace-pre-wrap ${mono}`}>{customerCtx?.notes ?? ""}</span>
-                </div>
-              </div>
-            </div>
 
-            <div className={innerCard}>
-              <div className="text-sm font-medium">Images</div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
                 {images.length ? (
-                  <ul className="list-disc pl-5">
-                    {images.map((u) => (
-                      <li key={u} className="break-all">
-                        <a className={link} href={u} target="_blank" rel="noreferrer">
-                          {u}
-                        </a>
-                      </li>
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    {images.slice(0, 8).map((im, idx) => (
+                      <a
+                        key={`${im.url}-${idx}`}
+                        href={im.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="group relative overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={im.url}
+                          alt={`photo ${idx + 1}`}
+                          className="h-40 w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
+                        />
+                        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent p-2 text-[11px] text-white">
+                          Photo {idx + 1}
+                        </div>
+                      </a>
                     ))}
-                  </ul>
+                  </div>
                 ) : (
-                  <div className="text-gray-600 dark:text-gray-300">(none)</div>
+                  <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+                    No images were attached.
+                  </div>
                 )}
+
+                {images.length > 8 ? (
+                  <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                    Showing 8 of {images.length}. Open any image to view full size.
+                  </div>
+                ) : null}
               </div>
             </div>
-          </div>
+          </section>
 
-          {images.length ? (
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              {images.slice(0, 9).map((u) => (
+          {/* CENTER: AI output */}
+          <section
+            id="analysis"
+            className="lg:col-span-5 rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="font-semibold">AI Result</h2>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  What the model produced (readable + raw).
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
                 <a
-                  key={u}
-                  href={u}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="block overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                  href="#raw"
+                  className="text-xs font-semibold underline text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={u} alt="uploaded" className="h-48 w-full object-cover" />
+                  Raw JSON
                 </a>
-              ))}
+              </div>
             </div>
-          ) : null}
-        </div>
 
-        {/* Assessment (pretty) */}
-        <div className={`mb-6 ${card}`}>
-          <div className="flex items-start justify-between gap-4">
+            <div className="mt-5 space-y-4">
+              {/* Summary */}
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  Summary
+                </div>
+                <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 p-3 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                  {summary ? (
+                    <div className="whitespace-pre-wrap leading-relaxed">{summary}</div>
+                  ) : (
+                    <span className="text-gray-500 dark:text-gray-500">No summary field found.</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Key fields */}
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-black">
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400">Estimate</div>
+                  <div className="mt-1 text-sm font-semibold">
+                    {estLow != null || estHigh != null ? (
+                      <>
+                        {money(estLow)}
+                        {estHigh != null ? ` – ${money(estHigh)}` : ""}
+                      </>
+                    ) : (
+                      <span className="text-gray-500 dark:text-gray-500">—</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-black">
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400">Inspection</div>
+                  <div className="mt-1 text-sm font-semibold">
+                    {typeof inspectionRequired === "boolean" ? (
+                      inspectionRequired ? (
+                        <span className="text-yellow-700 dark:text-yellow-200">Required</span>
+                      ) : (
+                        <span className="text-green-700 dark:text-green-200">Not required</span>
+                      )
+                    ) : (
+                      <span className="text-gray-500 dark:text-gray-500">—</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-black">
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400">Render</div>
+                  <div className="mt-1 text-sm font-semibold">
+                    {renderStatusLabel(renderStatus, row.renderOptIn)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Raw JSON */}
+              <div id="raw">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  Raw output JSON
+                </div>
+                <pre className="mt-2 max-h-[520px] overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+{prettyJson(output)}
+                </pre>
+              </div>
+            </div>
+          </section>
+
+          {/* RIGHT: actions + render info */}
+          <aside
+            id="actions"
+            className="lg:col-span-3 rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950"
+          >
             <div>
-              <h2 className="text-lg font-semibold">Assessment</h2>
-              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Human-friendly view. Raw JSON is available below for debugging.
+              <h2 className="font-semibold">Actions</h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                Quick jumps + status.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Pill
-                label={confidence ? `Confidence: ${titleCase(confidence)}` : "Confidence: —"}
-                tone={confidenceTone}
-              />
-              <Pill
-                label={inspectionRequired ? "Inspection required" : "Inspection not required"}
-                tone={inspectionRequired ? "yellow" : "green"}
-              />
+            <div className="mt-5 space-y-3">
+              <a
+                href="#submission"
+                className="block rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
+              >
+                Jump to Submission
+              </a>
+
+              <a
+                href="#analysis"
+                className="block rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
+              >
+                Jump to AI Result
+              </a>
+
+              <a
+                href="#raw"
+                className="block rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
+              >
+                Jump to Raw JSON
+              </a>
             </div>
-          </div>
 
-          {!a ? (
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">(no assessment stored)</div>
-          ) : (
-            <div className="mt-4 space-y-5">
-              <div className={innerCard}>
-                <div className="text-sm font-semibold">Summary</div>
-                <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
-                  {summary || <span className="text-gray-500 dark:text-gray-400">(no summary)</span>}
+            <div className="mt-6 border-t border-gray-200 pt-5 dark:border-gray-800">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  Render status
+                </div>
+                {pill(renderStatusLabel(renderStatus, row.renderOptIn), renderStatusTone(renderStatus))}
+              </div>
+
+              <div className="mt-3 space-y-2 text-sm text-gray-800 dark:text-gray-200">
+                <div className="flex items-start justify-between gap-3">
+                  <span className="text-gray-600 dark:text-gray-400">Opt-in</span>
+                  <span className="font-semibold">{row.renderOptIn ? "Yes" : "No"}</span>
+                </div>
+
+                <div className="flex items-start justify-between gap-3">
+                  <span className="text-gray-600 dark:text-gray-400">Rendered at</span>
+                  <span className="text-right">{row.renderedAt ? fmtDate(row.renderedAt) : "—"}</span>
                 </div>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className={innerCard}>
-                  <div className="text-sm font-semibold">Visible scope</div>
-                  {visibleScope.length ? (
-                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                      {visibleScope.slice(0, 12).map((x, i) => (
-                        <li key={i}>{x}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">(none listed)</div>
-                  )}
+              {row.renderImageUrl ? (
+                <div className="mt-4">
+                  <a
+                    href={row.renderImageUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block rounded-xl bg-black px-4 py-3 text-center text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                  >
+                    Open rendered image
+                  </a>
                 </div>
+              ) : null}
 
-                <div className={innerCard}>
-                  <div className="text-sm font-semibold">Assumptions</div>
-                  {assumptions.length ? (
-                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                      {assumptions.slice(0, 12).map((x, i) => (
-                        <li key={i}>{x}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">(none listed)</div>
-                  )}
-                </div>
-              </div>
-
-              <div className={innerCard}>
-                <div className="flex items-center justify-between gap-4">
-                  <div className="text-sm font-semibold">Questions to confirm</div>
-                  <div className="text-xs text-gray-500 dark:text-gray-400">
-                    {questions.length ? `${questions.length} item(s)` : "0"}
+              {row.renderPrompt ? (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    Render prompt
                   </div>
+                  <pre className="mt-2 max-h-40 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200 whitespace-pre-wrap">
+{safeString(row.renderPrompt)}
+                  </pre>
                 </div>
+              ) : null}
 
-                {questions.length ? (
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
-                    {questions.slice(0, 12).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">(none)</div>
-                )}
-              </div>
+              {row.renderError ? (
+                <div className="mt-4">
+                  <div className="text-xs font-semibold text-red-700 dark:text-red-200">
+                    Render error
+                  </div>
+                  <pre className="mt-2 max-h-40 overflow-auto rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200 whitespace-pre-wrap">
+{safeString(row.renderError)}
+                  </pre>
+                </div>
+              ) : null}
             </div>
-          )}
-
-          <details className="mt-5 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <summary className="cursor-pointer text-sm font-semibold">Raw assessment JSON (debug)</summary>
-            <pre className={`${pre} mt-3 text-xs`}>{JSON.stringify(a ?? null, null, 2)}</pre>
-          </details>
-        </div>
-
-        {/* Raw output (debug) */}
-        <div className={card}>
-          <h2 className="text-lg font-semibold">Raw quote_logs.output</h2>
-          <details className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <summary className="cursor-pointer text-sm font-semibold">Expand raw output JSON (debug)</summary>
-            <pre className={`${pre} mt-3 text-xs`}>{JSON.stringify(output, null, 2)}</pre>
-          </details>
+          </aside>
         </div>
       </div>
-    </div>
+    </main>
   );
 }
