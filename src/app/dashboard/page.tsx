@@ -168,16 +168,15 @@ export default function Dashboard() {
   const [quotesLoading, setQuotesLoading] = useState(true);
   const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
 
-  const [copiedPublic, setCopiedPublic] = useState(false);
-  const [showSetup, setShowSetup] = useState(false);
-
   const [origin, setOrigin] = useState<string>("");
 
+  const [copiedPublic, setCopiedPublic] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
   const [copiedIframe, setCopiedIframe] = useState(false);
 
+  const [showEmbed, setShowEmbed] = useState(false);
+
   useEffect(() => {
-    // capture origin client-side (works on localhost + prod)
     if (typeof window !== "undefined" && window.location?.origin) {
       setOrigin(window.location.origin);
     }
@@ -234,8 +233,6 @@ export default function Dashboard() {
     const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
 
     const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
-    const redirectUrl = settings?.redirect_url ? String(settings.redirect_url) : "";
-    const thankYouUrl = settings?.thank_you_url ? String(settings.thank_you_url) : "";
 
     const hasSlug = Boolean(tenantSlug);
     const hasIndustry = Boolean(industryKey);
@@ -245,18 +242,13 @@ export default function Dashboard() {
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
     const publicFull = origin && tenantSlug ? `${origin}${publicPath}` : publicPath;
 
-    // Embed strategy (stubbed):
-    // - script: /embed.js?tenant=<slug>
-    // - iframe fallback: /q/<slug>?embed=1
     const embedScriptSrc =
       origin && tenantSlug
         ? `${origin}/embed.js?tenant=${encodeURIComponent(tenantSlug)}`
         : `/embed.js?tenant=<tenant-slug>`;
 
     const iframeSrc =
-      origin && tenantSlug
-        ? `${origin}${publicPath}?embed=1`
-        : `${publicPath}?embed=1`;
+      origin && tenantSlug ? `${origin}${publicPath}?embed=1` : `${publicPath}?embed=1`;
 
     const scriptSnippet = `<script async src="${embedScriptSrc}"></script>\n<div id="aiphotoquote-widget"></div>`;
 
@@ -267,15 +259,11 @@ export default function Dashboard() {
       tenantName,
       tenantSlug,
       industryKey,
-      redirectUrl,
-      thankYouUrl,
       hasSlug,
       hasIndustry,
       isReady,
       publicPath,
       publicFull,
-      embedScriptSrc,
-      iframeSrc,
       scriptSnippet,
       iframeSnippet,
     };
@@ -287,8 +275,12 @@ export default function Dashboard() {
 
     const total = quotes.length;
 
-    const rendered = quotes.filter((q) => (q.renderStatus || "").toLowerCase() === "rendered").length;
-    const failed = quotes.filter((q) => (q.renderStatus || "").toLowerCase() === "failed").length;
+    const rendered = quotes.filter(
+      (q) => (q.renderStatus || "").toLowerCase() === "rendered"
+    ).length;
+    const failed = quotes.filter(
+      (q) => (q.renderStatus || "").toLowerCase() === "failed"
+    ).length;
     const rendering = quotes.filter((q) => {
       const s = (q.renderStatus || "").toLowerCase();
       return s === "queued" || s === "running";
@@ -304,7 +296,9 @@ export default function Dashboard() {
     }
     const avg = mids.length ? Math.round(mids.reduce((a, b) => a + b, 0) / mids.length) : null;
 
-    return { total, rendered, failed, rendering, avg, quotes };
+    const newestAt = quotes[0]?.createdAt ? quotes[0].createdAt : null;
+
+    return { total, rendered, failed, rendering, avg, newestAt, quotes };
   }, [quotesResp]);
 
   async function copyText(text: string) {
@@ -357,7 +351,7 @@ export default function Dashboard() {
                 <h1 className="text-2xl font-semibold">
                   {computed.tenantName || (loading ? "Loading…" : "Dashboard")}
                 </h1>
-                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
                   {computed.tenantSlug ? (
                     <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
                       /{computed.tenantSlug}
@@ -365,15 +359,13 @@ export default function Dashboard() {
                   ) : (
                     <span>Tenant command center</span>
                   )}
-                  {computed.industryKey ? (
-                    <span className="ml-2">{pill(computed.industryKey, "gray")}</span>
-                  ) : null}
+                  {computed.industryKey ? pill(computed.industryKey, "gray") : null}
                 </div>
               </div>
             </div>
 
             <p className="mt-3 text-sm text-gray-600 dark:text-gray-300 max-w-2xl">
-              Your tenant’s share link, embed snippet, and recent activity.
+              Focus on what matters: activity, follow-up, and customer flow.
             </p>
           </div>
 
@@ -385,7 +377,6 @@ export default function Dashboard() {
             >
               View quotes
             </Link>
-
             {!computed.isReady ? (
               <Link
                 href="/onboarding"
@@ -394,255 +385,165 @@ export default function Dashboard() {
                 Finish setup
               </Link>
             ) : (
-              <button
-                type="button"
-                onClick={() => setShowSetup((s) => !s)}
-                className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+              <Link
+                href={computed.publicPath}
+                className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
               >
-                {showSetup ? "Hide setup" : "Setup"}
-              </button>
+                Open quote page
+              </Link>
             )}
           </div>
         </div>
 
-        {/* MODE A: NOT READY */}
+        {/* NOT READY */}
         {!computed.isReady ? (
-          <div className="grid gap-6 lg:grid-cols-3">
-            <div className="lg:col-span-2 rounded-3xl border border-yellow-200 bg-yellow-50 p-6 shadow-sm dark:border-yellow-900/40 dark:bg-yellow-950/40">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <div className="text-sm font-semibold text-yellow-900 dark:text-yellow-200">
-                    Publish your tenant quote page
-                  </div>
-                  <div className="mt-1 text-sm text-yellow-900/80 dark:text-yellow-200/80">
-                    Set your tenant slug + industry to unlock the dashboard.
-                  </div>
+          <div className="rounded-3xl border border-yellow-200 bg-yellow-50 p-6 shadow-sm dark:border-yellow-900/40 dark:bg-yellow-950/40">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-yellow-900 dark:text-yellow-200">
+                  Finish tenant setup
                 </div>
-
-                <Link
-                  href="/onboarding"
-                  className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                >
-                  Open Settings
-                </Link>
-              </div>
-
-              <div className="mt-5 rounded-2xl border border-yellow-200 bg-white p-5 dark:border-yellow-900/30 dark:bg-black/30">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                  Setup checklist
-                </div>
-                <ul className="mt-3 space-y-2 text-sm">
-                  <li className="flex items-center justify-between">
-                    <span className="text-gray-800 dark:text-gray-200">
-                      <span className="mr-2">{computed.hasSlug ? "✅" : "⬜️"}</span>
-                      Tenant slug
-                    </span>
-                    <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
-                      {computed.tenantSlug || "—"}
-                    </span>
-                  </li>
-                  <li className="flex items-center justify-between">
-                    <span className="text-gray-800 dark:text-gray-200">
-                      <span className="mr-2">{computed.hasIndustry ? "✅" : "⬜️"}</span>
-                      Industry key
-                    </span>
-                    <span className="font-mono text-xs text-gray-500 dark:text-gray-400">
-                      {computed.industryKey || "—"}
-                    </span>
-                  </li>
-                </ul>
-
-                <div className="mt-5 flex flex-wrap gap-3">
-                  <Link
-                    href="/admin/setup/openai"
-                    className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
-                  >
-                    OpenAI setup
-                  </Link>
-                  <Link
-                    href="/admin/setup/ai-policy"
-                    className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
-                  >
-                    AI policy
-                  </Link>
+                <div className="mt-1 text-sm text-yellow-900/80 dark:text-yellow-200/80">
+                  Set tenant slug + industry to unlock the full dashboard experience.
                 </div>
               </div>
-            </div>
 
-            <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-semibold">Public link (preview)</div>
-              <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-                Once setup is complete, share this with customers:
-              </div>
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 font-mono text-sm dark:border-gray-800 dark:bg-gray-900/40">
-                {computed.publicPath}
-              </div>
+              <Link
+                href="/onboarding"
+                className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Open Settings
+              </Link>
             </div>
           </div>
         ) : (
           <>
-            {/* MODE B: READY (CENTERPIECE) */}
-
-            {/* Centerpiece: Share + Embed */}
+            {/* HERO: ACTIVITY */}
             <div className="rounded-3xl border border-gray-200 bg-gradient-to-b from-white to-gray-50 p-6 shadow-sm dark:border-gray-800 dark:from-black dark:to-gray-950">
-              <div className="grid gap-6 lg:grid-cols-3">
-                {/* Public link */}
-                <div className="lg:col-span-2">
-                  <div className="flex items-center gap-3">
-                    {pill("Public link", "green")}
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    {pill("Activity", "green")}
                     <span className="text-sm text-gray-600 dark:text-gray-300">
-                      Share this with customers
+                      Your last 10 quotes
                     </span>
                   </div>
 
-                  <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">URL</div>
-                    <div className="mt-1 break-all font-mono text-sm text-gray-900 dark:text-gray-100">
-                      {computed.publicFull}
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+                      <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                        Most recent
+                      </div>
+                      <div className="mt-1 text-sm font-semibold">
+                        {quoteStats.newestAt ? fmtDate(quoteStats.newestAt) : "—"}
+                      </div>
                     </div>
 
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      <Link
-                        href={computed.publicPath}
-                        className="rounded-xl bg-black px-5 py-3 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                      >
-                        Open quote page
-                      </Link>
+                    <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+                      <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                        Avg estimate
+                      </div>
+                      <div className="mt-1 text-sm font-semibold">
+                        {quoteStats.avg != null ? money(quoteStats.avg) : "—"}
+                      </div>
+                    </div>
 
-                      <button
-                        type="button"
-                        onClick={copyPublicLink}
-                        className="rounded-xl border border-gray-200 bg-white px-5 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
-                      >
-                        {copiedPublic ? "Copied ✅" : "Copy link"}
-                      </button>
-
-                      <Link
-                        href="/onboarding"
-                        className="rounded-xl border border-gray-200 bg-white px-5 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
-                      >
-                        Edit settings
-                      </Link>
+                    <div className="rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+                      <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                        Rendering
+                      </div>
+                      <div className="mt-1 text-sm font-semibold">
+                        {quoteStats.rendered} rendered · {quoteStats.rendering} running · {quoteStats.failed} failed
+                      </div>
                     </div>
                   </div>
 
-                  <div className="mt-4 grid gap-4">
-                    {/* EMBED TILE (NEW) */}
-                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            {pill("Embed widget", "blue")}
-                            <span className="text-sm text-gray-600 dark:text-gray-300">
-                              Add AIPhotoQuote to your website in minutes
-                            </span>
-                          </div>
-
-                          <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                            Recommended: <span className="font-semibold">Script embed</span> (loads the widget automatically).
-                          </div>
+                  {/* Compact share strip */}
+                  <div className="mt-5 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                          Share link
                         </div>
+                        <div className="mt-1 truncate font-mono text-sm text-gray-900 dark:text-gray-100">
+                          {computed.publicFull}
+                        </div>
+                      </div>
 
-                        <Link
-                          href="/admin/setup/ai-policy"
-                          className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+                      <div className="flex flex-wrap gap-3">
+                        <button
+                          type="button"
+                          onClick={copyPublicLink}
+                          className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
                         >
-                          Customize
+                          {copiedPublic ? "Copied ✅" : "Copy"}
+                        </button>
+                        <Link
+                          href="/onboarding"
+                          className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+                        >
+                          Settings
                         </Link>
                       </div>
-
-                      <div className="mt-4 grid gap-4">
-                        <CodeBox
-                          title="Option A — Script (recommended)"
-                          subtitle="Paste this into your site (near </body>)."
-                          code={computed.scriptSnippet}
-                          onCopy={copyScript}
-                          copied={copiedScript}
-                        />
-
-                        <CodeBox
-                          title="Option B — iFrame (fallback)"
-                          subtitle="Works anywhere, but looks more “embedded” with the script version."
-                          code={computed.iframeSnippet}
-                          onCopy={copyIframe}
-                          copied={copiedIframe}
-                        />
-
-                        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
-                          <div className="font-semibold">What happens next</div>
-                          <ul className="mt-2 list-disc space-y-1 pl-5">
-                            <li>Customer submits photos → you get a quote log.</li>
-                            <li>If rendering is enabled, it runs as a second step.</li>
-                            <li>You can review everything in Admin → Quotes.</li>
-                          </ul>
-                          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                            Note: the embed script endpoint <span className="font-mono">/embed.js</span> will be implemented next — this tile is UI-first so tenants see the product direction.
-                          </div>
-                        </div>
-                      </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Quick stats */}
-                <div className="grid gap-4">
-                  <StatCard
-                    label="Recent quotes"
-                    value={quotesLoading ? "—" : quoteStats.total}
-                    hint="Last 10 activity"
-                    right={quotesLoading ? pill("Loading…", "gray") : pill("Live", "green")}
-                  />
-                  <StatCard
-                    label="Avg estimate (recent)"
-                    value={quoteStats.avg != null ? money(quoteStats.avg) : "—"}
-                    hint="Based on available ranges"
-                  />
-                  <StatCard
-                    label="Rendering (recent)"
-                    value={
-                      <span className="text-base font-semibold">
-                        {quoteStats.rendered} rendered · {quoteStats.rendering} running · {quoteStats.failed} failed
-                      </span>
-                    }
-                    hint="Last 10 quotes"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Optional collapsed setup panel */}
-            {showSetup ? (
-              <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-sm font-semibold">Setup (collapsed)</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      You’re ready — this is here only if you need to revisit.
-                    </div>
-                  </div>
+                <div className="flex flex-wrap gap-3">
+                  <Link
+                    href="/admin/quotes"
+                    className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+                  >
+                    Open Admin
+                  </Link>
                   <button
                     type="button"
-                    onClick={() => setShowSetup(false)}
-                    className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+                    onClick={() => setShowEmbed((v) => !v)}
+                    className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
                   >
-                    Close
+                    {showEmbed ? "Hide embed" : "Share & embed"}
                   </button>
                 </div>
+              </div>
 
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 text-sm">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900/40">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Tenant slug</div>
-                    <div className="mt-1 font-mono">{computed.tenantSlug}</div>
+              {/* EMBED DRAWER (collapsed by default) */}
+              {showEmbed ? (
+                <div className="mt-6 grid gap-4">
+                  <div className="flex items-center gap-2">
+                    {pill("Embed widget", "blue")}
+                    <span className="text-sm text-gray-600 dark:text-gray-300">
+                      Use this only when you’re adding it to your website
+                    </span>
                   </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900/40">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Industry key</div>
-                    <div className="mt-1 font-mono">{computed.industryKey}</div>
+
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <CodeBox
+                      title="Option A — Script (recommended)"
+                      subtitle="Paste near </body> and add the widget div where you want it."
+                      code={computed.scriptSnippet}
+                      onCopy={copyScript}
+                      copied={copiedScript}
+                    />
+                    <CodeBox
+                      title="Option B — iFrame (fallback)"
+                      subtitle="Works anywhere; less flexible than the script."
+                      code={computed.iframeSnippet}
+                      onCopy={copyIframe}
+                      copied={copiedIframe}
+                    />
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
+                    <div className="font-semibold">Next step (we’ll implement)</div>
+                    <div className="mt-1">
+                      We’ll ship <span className="font-mono">/embed.js</span> so the script loads your widget automatically.
+                    </div>
                   </div>
                 </div>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
 
-            {/* Activity grid */}
+            {/* BELOW HERO: RECENT QUOTES + RIGHT RAIL */}
             <div className="grid gap-6 lg:grid-cols-3">
               {/* Recent quotes list */}
               <div className="lg:col-span-2 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -653,12 +554,6 @@ export default function Dashboard() {
                       Latest customer activity (last 10).
                     </div>
                   </div>
-                  <Link
-                    href="/admin/quotes"
-                    className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
-                  >
-                    Open admin
-                  </Link>
                 </div>
 
                 <div className="mt-5">
@@ -712,14 +607,14 @@ export default function Dashboard() {
                       <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 p-6 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-200">
                         <div className="font-semibold">No quotes yet</div>
                         <div className="mt-1 text-gray-600 dark:text-gray-300">
-                          Share your public link and you’ll see activity here.
+                          Share your public link and activity will appear here.
                         </div>
                         <div className="mt-4 flex flex-wrap gap-3">
                           <Link
                             href={computed.publicPath}
                             className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
                           >
-                            Open public quote page
+                            Open quote page
                           </Link>
                           <button
                             type="button"
@@ -739,8 +634,19 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Right rail: Quick actions */}
+              {/* Right rail */}
               <div className="grid gap-6">
+                <StatCard
+                  label="Recent quotes"
+                  value={quotesLoading ? "—" : quoteStats.total}
+                  hint="Last 10 activity"
+                  right={quotesLoading ? pill("Loading…", "gray") : pill("Live", "green")}
+                />
+                <StatCard
+                  label="Avg estimate (recent)"
+                  value={quoteStats.avg != null ? money(quoteStats.avg) : "—"}
+                  hint="Based on available ranges"
+                />
                 <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
                   <div className="text-sm font-semibold">Quick actions</div>
                   <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -752,7 +658,7 @@ export default function Dashboard() {
                       href={computed.publicPath}
                       className="rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
                     >
-                      Open public quote page
+                      Open quote page
                     </Link>
 
                     <button
