@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
@@ -123,8 +123,7 @@ export default async function AdminQuoteDetailPage({
       renderedAt: quoteLogs.renderedAt,
     })
     .from(quoteLogs)
-    .where(eq(quoteLogs.id, quoteId))
-    .where(eq(quoteLogs.tenantId, tenantId))
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)))
     .limit(1)
     .then((r) => r[0] ?? null);
 
