@@ -19,16 +19,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   return candidates[0] || null;
 }
 
-// ISO week (Monday 00:00:00 UTC)
-function startOfIsoWeekUTC(d: Date) {
-  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const day = date.getUTCDay(); // 0=Sun..6=Sat
-  const diff = (day === 0 ? -6 : 1 - day); // shift back to Monday
-  date.setUTCDate(date.getUTCDate() + diff);
-  date.setUTCHours(0, 0, 0, 0);
-  return date;
-}
-
 async function resolveTenantId(userId: string) {
   const jar = await cookies();
   let tenantId = getCookieTenantId(jar);
@@ -48,14 +38,14 @@ async function resolveTenantId(userId: string) {
 }
 
 async function countRange(tenantId: string, start: Date, end: Date) {
-  // total
   const total = await db
     .select({ n: count() })
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end)))
+    .where(
+      and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end))
+    )
     .then((r) => Number(r[0]?.n ?? 0));
 
-  // render opt-ins
   const optIn = await db
     .select({ n: count() })
     .from(quoteLogs)
@@ -69,7 +59,6 @@ async function countRange(tenantId: string, start: Date, end: Date) {
     )
     .then((r) => Number(r[0]?.n ?? 0));
 
-  // rendered
   const rendered = await db
     .select({ n: count() })
     .from(quoteLogs)
@@ -83,7 +72,6 @@ async function countRange(tenantId: string, start: Date, end: Date) {
     )
     .then((r) => Number(r[0]?.n ?? 0));
 
-  // failed
   const failed = await db
     .select({ n: count() })
     .from(quoteLogs)
@@ -118,31 +106,33 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
+    // Rolling windows (stable every day of week)
     const now = new Date();
-    const thisWeekStart = startOfIsoWeekUTC(now);
-    const nextWeekStart = new Date(thisWeekStart);
-    nextWeekStart.setUTCDate(nextWeekStart.getUTCDate() + 7);
+    const msDay = 24 * 60 * 60 * 1000;
 
-    const lastWeekStart = new Date(thisWeekStart);
-    lastWeekStart.setUTCDate(lastWeekStart.getUTCDate() - 7);
+    const endThis = now;
+    const startThis = new Date(now.getTime() - 7 * msDay);
 
-    const lastWeekEnd = new Date(thisWeekStart);
+    const endLast = startThis;
+    const startLast = new Date(startThis.getTime() - 7 * msDay);
 
-    const thisWeek = await countRange(tenantId, thisWeekStart, nextWeekStart);
-    const lastWeek = await countRange(tenantId, lastWeekStart, lastWeekEnd);
+    const thisPeriod = await countRange(tenantId, startThis, endThis);
+    const lastPeriod = await countRange(tenantId, startLast, endLast);
 
     return NextResponse.json({
       ok: true,
       range: {
-        thisWeekStart: thisWeekStart.toISOString(),
-        lastWeekStart: lastWeekStart.toISOString(),
+        thisStart: startThis.toISOString(),
+        thisEnd: endThis.toISOString(),
+        lastStart: startLast.toISOString(),
+        lastEnd: endLast.toISOString(),
       },
-      thisWeek,
-      lastWeek,
+      thisPeriod,
+      lastPeriod,
       deltaPct: {
-        total: pctChange(thisWeek.total, lastWeek.total),
-        optIn: pctChange(thisWeek.optIn, lastWeek.optIn),
-        rendered: pctChange(thisWeek.rendered, lastWeek.rendered),
+        total: pctChange(thisPeriod.total, lastPeriod.total),
+        optIn: pctChange(thisPeriod.optIn, lastPeriod.optIn),
+        rendered: pctChange(thisPeriod.rendered, lastPeriod.rendered),
       },
     });
   } catch (e: any) {
