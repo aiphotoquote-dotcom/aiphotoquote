@@ -34,18 +34,13 @@ type RecentQuotesResp =
     }
   | { ok: false; error: any; message?: string };
 
-type MetricsWeekResp =
+type MetricsResp =
   | {
       ok: true;
-      tenantId: string;
-      metrics: {
-        quotes7d: number;
-        rendersRequested7d: number;
-        rendersCompleted7d: number;
-        rendersFailed7d: number;
-        renderSuccessRatePct: number | null;
-        lastQuoteAt: string | null;
-      };
+      range: { thisWeekStart: string; lastWeekStart: string };
+      thisWeek: { total: number; optIn: number; rendered: number; failed: number };
+      lastWeek: { total: number; optIn: number; rendered: number; failed: number };
+      deltaPct: { total: number; optIn: number; rendered: number };
     }
   | { ok: false; error: any; message?: string };
 
@@ -53,26 +48,19 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(
-  label: string,
-  tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray"
-) {
+function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
   const cls =
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-      : tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+          : tone === "blue"
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
 
-  return (
-    <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
-      {label}
-    </span>
-  );
+  return <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", cls)}>{label}</span>;
 }
 
 function fmtDate(iso: string) {
@@ -84,47 +72,20 @@ function fmtDate(iso: string) {
 function money(n: unknown) {
   const x = typeof n === "number" ? n : n == null ? null : Number(n);
   if (x == null || Number.isNaN(x)) return "";
-  return x.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
+  return x.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
-function metricCard(props: {
-  label: string;
-  value: string;
-  sub?: string;
-  tone?: "default" | "good" | "warn";
-}) {
-  const tone = props.tone ?? "default";
-  const ring =
-    tone === "good"
-      ? "border-green-200 dark:border-green-900/50"
-      : tone === "warn"
-      ? "border-yellow-200 dark:border-yellow-900/50"
-      : "border-gray-200 dark:border-gray-800";
+function fmtPct(n: number) {
+  if (!Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(0)}%`;
+}
 
-  const bg =
-    tone === "good"
-      ? "bg-white dark:bg-gray-950"
-      : tone === "warn"
-      ? "bg-white dark:bg-gray-950"
-      : "bg-white dark:bg-gray-950";
-
-  return (
-    <div className={cn("rounded-2xl border p-5", ring, bg)}>
-      <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-        {props.label}
-      </div>
-      <div className="mt-2 text-2xl font-semibold tracking-tight text-gray-900 dark:text-gray-100">
-        {props.value}
-      </div>
-      {props.sub ? (
-        <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">{props.sub}</div>
-      ) : null}
-    </div>
-  );
+function deltaTone(n: number) {
+  if (!Number.isFinite(n)) return "gray" as const;
+  if (n > 5) return "green" as const;
+  if (n < -5) return "red" as const;
+  return "gray" as const;
 }
 
 export default function Dashboard() {
@@ -135,7 +96,7 @@ export default function Dashboard() {
   const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
 
   const [metricsLoading, setMetricsLoading] = useState(true);
-  const [metricsResp, setMetricsResp] = useState<MetricsWeekResp | null>(null);
+  const [metrics, setMetrics] = useState<MetricsResp | null>(null);
 
   const [copied, setCopied] = useState(false);
 
@@ -186,11 +147,11 @@ export default function Dashboard() {
 
     async function loadMetrics() {
       try {
-        const res = await fetch("/api/tenant/metrics-week", { cache: "no-store" });
-        const json: MetricsWeekResp = await res.json();
-        if (!cancelled) setMetricsResp(json);
+        const res = await fetch("/api/tenant/metrics", { cache: "no-store" });
+        const json: MetricsResp = await res.json();
+        if (!cancelled) setMetrics(json);
       } catch {
-        if (!cancelled) setMetricsResp({ ok: false, error: "FETCH_FAILED" });
+        if (!cancelled) setMetrics({ ok: false, error: "FETCH_FAILED" });
       } finally {
         if (!cancelled) setMetricsLoading(false);
       }
@@ -211,39 +172,20 @@ export default function Dashboard() {
     const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
 
     const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
-    const redirectUrl = settings?.redirect_url ? String(settings.redirect_url) : "";
-    const thankYouUrl = settings?.thank_you_url ? String(settings.thank_you_url) : "";
 
     const hasSlug = Boolean(tenantSlug);
     const hasIndustry = Boolean(industryKey);
-    const hasRedirect = Boolean(redirectUrl);
-    const hasThankYou = Boolean(thankYouUrl);
-
     const isReady = hasSlug && hasIndustry;
+
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
 
-    return {
-      ok,
-      tenantName,
-      tenantSlug,
-      industryKey,
-      redirectUrl,
-      thankYouUrl,
-      hasSlug,
-      hasIndustry,
-      hasRedirect,
-      hasThankYou,
-      isReady,
-      publicPath,
-    };
+    return { ok, tenantName, tenantSlug, industryKey, hasSlug, hasIndustry, isReady, publicPath };
   }, [me]);
 
   async function copyPublicLink() {
     if (!computed.tenantSlug) return;
 
-    const origin =
-      typeof window !== "undefined" && window.location?.origin ? window.location.origin : "";
-
+    const origin = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "";
     const full = origin ? `${origin}${computed.publicPath}` : computed.publicPath;
 
     try {
@@ -255,20 +197,13 @@ export default function Dashboard() {
     }
   }
 
-  const setupTone = loading ? "gray" : computed.isReady ? "green" : "yellow";
-  const setupLabel = loading ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
+  const readyPill = loading ? pill("Loading…", "gray") : computed.isReady ? pill("Ready", "green") : pill("Needs setup", "yellow");
 
-  const mOk = Boolean(metricsResp && "ok" in metricsResp && metricsResp.ok);
-  const m = mOk ? (metricsResp as any).metrics : null;
+  const metricsOk = Boolean(metrics && "ok" in metrics && (metrics as any).ok);
 
-  const successTone =
-    m && typeof m.renderSuccessRatePct === "number"
-      ? m.renderSuccessRatePct >= 80
-        ? "good"
-        : m.renderSuccessRatePct >= 50
-        ? "warn"
-        : "warn"
-      : "default";
+  const thisWeek = metricsOk ? (metrics as any).thisWeek : null;
+  const lastWeek = metricsOk ? (metrics as any).lastWeek : null;
+  const delta = metricsOk ? (metrics as any).deltaPct : null;
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -280,23 +215,21 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-semibold">Dashboard</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Tenant status, quick links, and weekly performance.
+              Performance, recent activity, and your public quote link.
             </p>
 
             {computed.tenantName ? (
               <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">
                 Tenant: <span className="font-semibold">{computed.tenantName}</span>
                 {computed.tenantSlug ? (
-                  <span className="ml-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-                    ({computed.tenantSlug})
-                  </span>
+                  <span className="ml-2 font-mono text-xs text-gray-600 dark:text-gray-400">({computed.tenantSlug})</span>
                 ) : null}
               </div>
             ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {pill(setupLabel, setupTone as any)}
+            {readyPill}
             <Link
               href="/onboarding"
               className={cn(
@@ -311,259 +244,186 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Metrics row */}
-        <section>
-          <div className="flex items-center justify-between">
+        {/* Performance */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex items-center justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                This week performance
-              </h2>
-              <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                Last 7 days, scoped to the active tenant.
+              <h2 className="font-semibold">This week performance</h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                Compared to last week (counts only for now).
               </p>
             </div>
 
-            {metricsLoading ? pill("Loading…", "gray") : null}
-          </div>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {metricCard({
-              label: "Quotes (7d)",
-              value: mOk ? String(m?.quotes7d ?? 0) : "—",
-              sub: mOk && m?.lastQuoteAt ? `Last quote: ${fmtDate(m.lastQuoteAt)}` : undefined,
-            })}
-
-            {metricCard({
-              label: "Renders requested (7d)",
-              value: mOk ? String(m?.rendersRequested7d ?? 0) : "—",
-              sub: "Customers opted into rendering",
-            })}
-
-            {metricCard({
-              label: "Renders completed (7d)",
-              value: mOk ? String(m?.rendersCompleted7d ?? 0) : "—",
-              sub: mOk ? `Failed: ${String(m?.rendersFailed7d ?? 0)}` : undefined,
-            })}
-
-            {metricCard({
-              label: "Render success",
-              value: mOk
-                ? m?.renderSuccessRatePct == null
-                  ? "—"
-                  : `${m.renderSuccessRatePct}%`
-                : "—",
-              sub: mOk && m?.rendersRequested7d === 0 ? "No renders requested yet" : "Completed / requested",
-              tone: successTone as any,
-            })}
-          </div>
-
-          {!metricsLoading && metricsResp && "ok" in metricsResp && !metricsResp.ok ? (
-            <div className="mt-4 rounded-2xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-              Couldn’t load metrics yet. This usually means no active tenant cookie is set.
-              Try visiting <Link className="underline" href="/onboarding">Settings</Link> once, then refresh.
+            <div className="flex items-center gap-2">
+              {metricsLoading ? pill("Loading…", "gray") : metricsOk ? pill("Live", "green") : pill("Unavailable", "yellow")}
             </div>
-          ) : null}
+          </div>
+
+          {metricsOk && thisWeek && lastWeek && delta ? (
+            <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
+                <div className="text-xs text-gray-500">Quotes</div>
+                <div className="mt-2 flex items-end justify-between">
+                  <div className="text-3xl font-semibold">{thisWeek.total}</div>
+                  {pill(fmtPct(delta.total), deltaTone(delta.total))}
+                </div>
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Last week: {lastWeek.total}</div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
+                <div className="text-xs text-gray-500">Render opt-ins</div>
+                <div className="mt-2 flex items-end justify-between">
+                  <div className="text-3xl font-semibold">{thisWeek.optIn}</div>
+                  {pill(fmtPct(delta.optIn), deltaTone(delta.optIn))}
+                </div>
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Last week: {lastWeek.optIn}</div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
+                <div className="text-xs text-gray-500">Rendered</div>
+                <div className="mt-2 flex items-end justify-between">
+                  <div className="text-3xl font-semibold">{thisWeek.rendered}</div>
+                  {pill(fmtPct(delta.rendered), deltaTone(delta.rendered))}
+                </div>
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Last week: {lastWeek.rendered}</div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
+                <div className="text-xs text-gray-500">Render failures</div>
+                <div className="mt-2 text-3xl font-semibold">{thisWeek.failed}</div>
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Last week: {lastWeek.failed}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-6 text-sm text-gray-600 dark:text-gray-300">
+              {metricsLoading ? "Loading metrics…" : "Metrics couldn’t load yet (tenant might not be selected)."}
+            </div>
+          )}
         </section>
 
-        {/* Main grid */}
+        {/* Public link + Recent quotes */}
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Setup card */}
+          {/* Public quote page */}
           <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950 lg:col-span-1">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold">Setup</h2>
-              {pill(setupLabel, setupTone as any)}
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="font-semibold">Public quote page</h2>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Share this with customers.</p>
+              </div>
             </div>
 
-            {!loading && computed.ok ? (
-              <ul className="mt-4 space-y-2 text-sm text-gray-800 dark:text-gray-200">
-                <li>
-                  <span className="mr-2">{computed.hasSlug ? "✅" : "⬜️"}</span>
-                  Tenant slug{" "}
-                  <span className="ml-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-                    {computed.tenantSlug || "—"}
-                  </span>
-                </li>
-                <li>
-                  <span className="mr-2">{computed.hasIndustry ? "✅" : "⬜️"}</span>
-                  Industry{" "}
-                  <span className="ml-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-                    {computed.industryKey || "—"}
-                  </span>
-                </li>
-                <li>
-                  <span className="mr-2">{computed.hasRedirect ? "✅" : "⬜️"}</span>
-                  Redirect URL (optional)
-                </li>
-                <li>
-                  <span className="mr-2">{computed.hasThankYou ? "✅" : "⬜️"}</span>
-                  Thank-you URL (optional)
-                </li>
-              </ul>
+            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+              <div className="text-xs text-gray-500">Path</div>
+              <div className="mt-1 font-mono text-sm">{computed.publicPath}</div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-3">
+              {computed.tenantSlug ? (
+                <>
+                  <Link
+                    href={computed.publicPath}
+                    className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                  >
+                    Open
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={copyPublicLink}
+                    className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                  >
+                    {copied ? "Copied!" : "Copy link"}
+                  </button>
+                </>
+              ) : (
+                <Link
+                  href="/onboarding"
+                  className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                >
+                  Set tenant slug first
+                </Link>
+              )}
+            </div>
+
+            <div className="mt-5 text-xs text-gray-600 dark:text-gray-400">
+              Tip: do one full end-to-end test (estimate + optional render).
+            </div>
+          </section>
+
+          {/* Recent quotes */}
+          <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950 lg:col-span-2">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold">Recent quotes</h2>
+              {quotesLoading ? pill("Loading…", "gray") : null}
+            </div>
+
+            {!quotesLoading && quotesResp && "ok" in quotesResp && (quotesResp as any).ok ? (
+              (quotesResp as any).quotes.length ? (
+                <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
+                  <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-gray-900 dark:text-gray-300">
+                    <div className="col-span-4">Created</div>
+                    <div className="col-span-4">Quote ID</div>
+                    <div className="col-span-4 text-right">Status</div>
+                  </div>
+
+                  <ul className="divide-y divide-gray-200 dark:divide-gray-800">
+                    {(quotesResp as any).quotes.map((q: any) => {
+                      const statusRaw = (q.renderStatus || "").toString().toLowerCase();
+                      const statusPill =
+                        statusRaw === "rendered"
+                          ? pill("Rendered", "green")
+                          : statusRaw === "failed"
+                            ? pill("Render failed", "red")
+                            : statusRaw === "queued" || statusRaw === "running"
+                              ? pill("Rendering", "blue")
+                              : pill("Estimate", "gray");
+
+                      return (
+                        <li key={q.id} className="grid grid-cols-12 items-center px-4 py-3">
+                          <div className="col-span-4 text-sm text-gray-800 dark:text-gray-200">{fmtDate(q.createdAt)}</div>
+
+                          <div className="col-span-4 font-mono text-xs text-gray-700 dark:text-gray-300">{q.id}</div>
+
+                          <div className="col-span-4 flex items-center justify-end gap-3">
+                            {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
+                              <div className="text-xs text-gray-700 dark:text-gray-300">
+                                {money(q.estimateLow)} {q.estimateHigh != null ? `– ${money(q.estimateHigh)}` : ""}
+                              </div>
+                            ) : null}
+
+                            {statusPill}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : (
+                <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">No quotes yet. Run a test quote.</p>
+              )
             ) : (
               <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                {loading
-                  ? "Loading your tenant…"
-                  : "Couldn’t load tenant settings. Refresh and try again."}
+                {quotesLoading ? "Loading…" : "Couldn’t load recent quotes yet."}
               </p>
             )}
 
             <div className="mt-5 flex flex-wrap gap-3">
               <Link
-                href="/onboarding"
-                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-              >
-                Open settings
-              </Link>
-              <Link
                 href="/admin/quotes"
                 className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
               >
-                Admin quotes
+                View in Admin
               </Link>
-            </div>
-          </section>
-
-          {/* Public link + Recent quotes */}
-          <div className="grid gap-6 lg:col-span-2">
-            {/* Public quote page */}
-            <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <h2 className="font-semibold">Public quote page</h2>
-                  <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    This is what customers use.
-                  </p>
-                </div>
-
-                {computed.tenantSlug ? (
-                  <div className="flex flex-wrap gap-3">
-                    <Link
-                      href={computed.publicPath}
-                      className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                    >
-                      Open
-                    </Link>
-                    <button
-                      type="button"
-                      onClick={copyPublicLink}
-                      className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                    >
-                      {copied ? "Copied!" : "Copy link"}
-                    </button>
-                  </div>
-                ) : (
-                  <Link
-                    href="/onboarding"
-                    className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                  >
-                    Set tenant slug first
-                  </Link>
-                )}
-              </div>
-
-              <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
-                <div className="text-xs text-gray-500 dark:text-gray-400">Path</div>
-                <div className="mt-1 font-mono text-sm">{computed.publicPath}</div>
-              </div>
-
-              <div className="mt-4 text-xs text-gray-600 dark:text-gray-400">
-                Tip: run one complete test quote (estimate + optional rendering) after setup.
-              </div>
-            </section>
-
-            {/* Recent Quotes */}
-            <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex items-center justify-between">
-                <h2 className="font-semibold">Recent quotes</h2>
-                {quotesLoading ? pill("Loading…", "gray") : null}
-              </div>
-
-              {!quotesLoading && quotesResp && "ok" in quotesResp && quotesResp.ok ? (
-                quotesResp.quotes.length ? (
-                  <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-                    <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-gray-900 dark:text-gray-300">
-                      <div className="col-span-4">Created</div>
-                      <div className="col-span-4">Quote ID</div>
-                      <div className="col-span-4 text-right">Status</div>
-                    </div>
-
-                    <ul className="divide-y divide-gray-200 dark:divide-gray-800">
-                      {quotesResp.quotes.map((q) => {
-                        const statusRaw = (q.renderStatus || "").toString().toLowerCase();
-                        const statusPill =
-                          statusRaw === "rendered"
-                            ? pill("Rendered", "green")
-                            : statusRaw === "failed"
-                            ? pill("Render failed", "red")
-                            : statusRaw === "queued" || statusRaw === "running"
-                            ? pill("Rendering", "blue")
-                            : pill("Estimate", "gray");
-
-                        return (
-                          <li key={q.id} className="grid grid-cols-12 items-center px-4 py-3">
-                            <div className="col-span-4 text-sm text-gray-800 dark:text-gray-200">
-                              {fmtDate(q.createdAt)}
-                            </div>
-
-                            <div className="col-span-4 font-mono text-xs text-gray-700 dark:text-gray-300">
-                              {q.id}
-                            </div>
-
-                            <div className="col-span-4 flex items-center justify-end gap-3">
-                              {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
-                                <div className="text-xs text-gray-700 dark:text-gray-300">
-                                  {money(q.estimateLow)}{" "}
-                                  {q.estimateHigh != null ? `– ${money(q.estimateHigh)}` : ""}
-                                </div>
-                              ) : null}
-
-                              {statusPill}
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                ) : (
-                  <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                    No quotes yet. Run a test quote.
-                  </p>
-                )
-              ) : (
-                <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                  {quotesLoading ? "Loading…" : "Couldn’t load recent quotes yet."}
-                </p>
-              )}
-
-              <div className="mt-5 flex flex-wrap gap-3">
+              {computed.tenantSlug ? (
                 <Link
-                  href="/admin/quotes"
+                  href={computed.publicPath}
                   className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
                 >
-                  View in Admin
+                  Open public quote page
                 </Link>
-                {computed.tenantSlug ? (
-                  <Link
-                    href={computed.publicPath}
-                    className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                  >
-                    Open public quote page
-                  </Link>
-                ) : null}
-              </div>
-            </section>
-          </div>
+              ) : null}
+            </div>
+          </section>
         </div>
-
-        {/* Next */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <h2 className="font-semibold">Next</h2>
-          <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 dark:text-gray-300 space-y-1">
-            <li>Add “Retry render” action from Admin quote detail.</li>
-            <li>Add a “Share link” button inside Admin + Settings.</li>
-            <li>Show a mini trend vs last week (optional, later).</li>
-          </ul>
-        </section>
       </div>
     </main>
   );
