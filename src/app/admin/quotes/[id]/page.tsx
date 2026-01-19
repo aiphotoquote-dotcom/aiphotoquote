@@ -17,10 +17,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   return candidates[0] || null;
 }
 
-function asStr(x: unknown) {
-  return typeof x === "string" ? x : "";
-}
-
 function fmtJson(value: unknown) {
   try {
     return JSON.stringify(value ?? null, null, 2);
@@ -29,11 +25,12 @@ function fmtJson(value: unknown) {
   }
 }
 
-type PageProps = {
-  params: { id?: string };
-};
-
-export default async function AdminQuoteDetailPage({ params }: PageProps) {
+export default async function AdminQuoteDetailPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  // 🔒 Auth
   const { userId } = await auth();
   if (!userId) {
     return (
@@ -53,7 +50,27 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
     );
   }
 
-  // tenant resolve
+  // ✅ Quote id from dynamic segment
+  const quoteId = params?.id;
+  if (!quoteId) {
+    return (
+      <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+        <div className="mx-auto max-w-5xl px-6 py-10">
+          <h1 className="text-2xl font-semibold">Quote</h1>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            Missing quote id in URL.
+          </p>
+          <div className="mt-6">
+            <Link className="underline" href="/admin/quotes">
+              Back to quotes
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ✅ Tenant resolve (cookie first, DB fallback)
   const jar = await cookies();
   let tenantId = getCookieTenantId(jar);
 
@@ -90,25 +107,7 @@ export default async function AdminQuoteDetailPage({ params }: PageProps) {
     );
   }
 
-  const quoteId = asStr(params?.id);
-  if (!quoteId) {
-    return (
-      <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
-        <div className="mx-auto max-w-5xl px-6 py-10">
-          <h1 className="text-2xl font-semibold">Quote</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Missing quote id in URL.
-          </p>
-          <div className="mt-6">
-            <Link className="underline" href="/admin/quotes">
-              Back to quotes
-            </Link>
-          </div>
-        </div>
-      </main>
-    );
-  }
-
+  // ✅ Fetch the quote
   const row = await db
     .select({
       id: quoteLogs.id,
