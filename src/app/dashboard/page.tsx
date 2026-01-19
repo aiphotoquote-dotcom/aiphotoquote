@@ -54,7 +54,12 @@ function pill(
             : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
 
   return (
-    <span className={cn("inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold", cls)}>
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
+        cls
+      )}
+    >
       {label}
     </span>
   );
@@ -121,6 +126,41 @@ function StatCard(props: {
   );
 }
 
+function CodeBox(props: {
+  title: string;
+  code: string;
+  onCopy: () => void;
+  copied: boolean;
+  subtitle?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">{props.title}</div>
+          {props.subtitle ? (
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+              {props.subtitle}
+            </div>
+          ) : null}
+        </div>
+
+        <button
+          type="button"
+          onClick={props.onCopy}
+          className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+        >
+          {props.copied ? "Copied ✅" : "Copy"}
+        </button>
+      </div>
+
+      <pre className="mt-3 overflow-x-auto rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs leading-relaxed text-gray-800 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
+        <code>{props.code}</code>
+      </pre>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [me, setMe] = useState<MeSettingsResponse | null>(null);
@@ -128,8 +168,20 @@ export default function Dashboard() {
   const [quotesLoading, setQuotesLoading] = useState(true);
   const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
 
-  const [copied, setCopied] = useState(false);
+  const [copiedPublic, setCopiedPublic] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+
+  const [origin, setOrigin] = useState<string>("");
+
+  const [copiedScript, setCopiedScript] = useState(false);
+  const [copiedIframe, setCopiedIframe] = useState(false);
+
+  useEffect(() => {
+    // capture origin client-side (works on localhost + prod)
+    if (typeof window !== "undefined" && window.location?.origin) {
+      setOrigin(window.location.origin);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,10 +240,27 @@ export default function Dashboard() {
     const hasSlug = Boolean(tenantSlug);
     const hasIndustry = Boolean(industryKey);
 
-    // minimal "ready"
     const isReady = hasSlug && hasIndustry;
 
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
+    const publicFull = origin && tenantSlug ? `${origin}${publicPath}` : publicPath;
+
+    // Embed strategy (stubbed):
+    // - script: /embed.js?tenant=<slug>
+    // - iframe fallback: /q/<slug>?embed=1
+    const embedScriptSrc =
+      origin && tenantSlug
+        ? `${origin}/embed.js?tenant=${encodeURIComponent(tenantSlug)}`
+        : `/embed.js?tenant=<tenant-slug>`;
+
+    const iframeSrc =
+      origin && tenantSlug
+        ? `${origin}${publicPath}?embed=1`
+        : `${publicPath}?embed=1`;
+
+    const scriptSnippet = `<script async src="${embedScriptSrc}"></script>\n<div id="aiphotoquote-widget"></div>`;
+
+    const iframeSnippet = `<iframe src="${iframeSrc}" style="width:100%;max-width:720px;height:860px;border:0;border-radius:16px;overflow:hidden;" loading="lazy"></iframe>`;
 
     return {
       ok,
@@ -204,8 +273,13 @@ export default function Dashboard() {
       hasIndustry,
       isReady,
       publicPath,
+      publicFull,
+      embedScriptSrc,
+      iframeSrc,
+      scriptSnippet,
+      iframeSnippet,
     };
-  }, [me]);
+  }, [me, origin]);
 
   const quoteStats = useMemo(() => {
     const ok = quotesResp && "ok" in quotesResp && quotesResp.ok;
@@ -220,7 +294,6 @@ export default function Dashboard() {
       return s === "queued" || s === "running";
     }).length;
 
-    // Show “avg estimate” only if we have numbers
     const mids: number[] = [];
     for (const q of quotes) {
       const lo = typeof q.estimateLow === "number" ? q.estimateLow : null;
@@ -231,27 +304,38 @@ export default function Dashboard() {
     }
     const avg = mids.length ? Math.round(mids.reduce((a, b) => a + b, 0) / mids.length) : null;
 
-    const latest = quotes[0] || null;
-
-    return { total, rendered, failed, rendering, avg, latest, quotes };
+    return { total, rendered, failed, rendering, avg, quotes };
   }, [quotesResp]);
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   async function copyPublicLink() {
     if (!computed.tenantSlug) return;
+    const ok = await copyText(computed.publicFull);
+    if (!ok) return;
+    setCopiedPublic(true);
+    setTimeout(() => setCopiedPublic(false), 1200);
+  }
 
-    const origin =
-      typeof window !== "undefined" && window.location?.origin
-        ? window.location.origin
-        : "";
-    const full = origin ? `${origin}${computed.publicPath}` : computed.publicPath;
+  async function copyScript() {
+    const ok = await copyText(computed.scriptSnippet);
+    if (!ok) return;
+    setCopiedScript(true);
+    setTimeout(() => setCopiedScript(false), 1200);
+  }
 
-    try {
-      await navigator.clipboard.writeText(full);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
-    }
+  async function copyIframe() {
+    const ok = await copyText(computed.iframeSnippet);
+    if (!ok) return;
+    setCopiedIframe(true);
+    setTimeout(() => setCopiedIframe(false), 1200);
   }
 
   const setupTone = loading ? "gray" : computed.isReady ? "green" : "yellow";
@@ -289,7 +373,7 @@ export default function Dashboard() {
             </div>
 
             <p className="mt-3 text-sm text-gray-600 dark:text-gray-300 max-w-2xl">
-              Your tenant’s share link, recent activity, and the stuff you’ll actually use.
+              Your tenant’s share link, embed snippet, and recent activity.
             </p>
           </div>
 
@@ -331,7 +415,7 @@ export default function Dashboard() {
                     Publish your tenant quote page
                   </div>
                   <div className="mt-1 text-sm text-yellow-900/80 dark:text-yellow-200/80">
-                    Set your tenant slug + industry. (OpenAI key is configured in Admin setup.)
+                    Set your tenant slug + industry to unlock the dashboard.
                   </div>
                 </div>
 
@@ -366,20 +450,6 @@ export default function Dashboard() {
                       {computed.industryKey || "—"}
                     </span>
                   </li>
-                  <li className="flex items-center justify-between">
-                    <span className="text-gray-800 dark:text-gray-200">
-                      <span className="mr-2">{computed.redirectUrl ? "✅" : "⬜️"}</span>
-                      Redirect URL
-                    </span>
-                    <span className="text-xs text-gray-500 dark:text-gray-400">Optional</span>
-                  </li>
-                  <li className="flex items-center justify-between">
-                    <span className="text-gray-800 dark:text-gray-200">
-                      <span className="mr-2">{computed.thankYouUrl ? "✅" : "⬜️"}</span>
-                      Thank-you URL
-                    </span>
-                    <span className="text-xs text-gray-500 dark:text-gray-400">Optional</span>
-                  </li>
                 </ul>
 
                 <div className="mt-5 flex flex-wrap gap-3">
@@ -407,19 +477,17 @@ export default function Dashboard() {
               <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 font-mono text-sm dark:border-gray-800 dark:bg-gray-900/40">
                 {computed.publicPath}
               </div>
-              <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                Tip: pick a clean slug like <span className="font-mono">maggioupholstery</span>.
-              </div>
             </div>
           </div>
         ) : (
           <>
             {/* MODE B: READY (CENTERPIECE) */}
 
-            {/* Centerpiece: Share + Open */}
+            {/* Centerpiece: Share + Embed */}
             <div className="rounded-3xl border border-gray-200 bg-gradient-to-b from-white to-gray-50 p-6 shadow-sm dark:border-gray-800 dark:from-black dark:to-gray-950">
-              <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
-                <div>
+              <div className="grid gap-6 lg:grid-cols-3">
+                {/* Public link */}
+                <div className="lg:col-span-2">
                   <div className="flex items-center gap-3">
                     {pill("Public link", "green")}
                     <span className="text-sm text-gray-600 dark:text-gray-300">
@@ -428,9 +496,9 @@ export default function Dashboard() {
                   </div>
 
                   <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Path</div>
-                    <div className="mt-1 font-mono text-base text-gray-900 dark:text-gray-100">
-                      {computed.publicPath}
+                    <div className="text-xs text-gray-500 dark:text-gray-400">URL</div>
+                    <div className="mt-1 break-all font-mono text-sm text-gray-900 dark:text-gray-100">
+                      {computed.publicFull}
                     </div>
 
                     <div className="mt-4 flex flex-wrap gap-3">
@@ -446,7 +514,7 @@ export default function Dashboard() {
                         onClick={copyPublicLink}
                         className="rounded-xl border border-gray-200 bg-white px-5 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
                       >
-                        {copied ? "Copied ✅" : "Copy link"}
+                        {copiedPublic ? "Copied ✅" : "Copy link"}
                       </button>
 
                       <Link
@@ -458,13 +526,66 @@ export default function Dashboard() {
                     </div>
                   </div>
 
-                  <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                    Next step: add an <span className="font-semibold">Embed widget</span> section here (1-click copy script).
+                  <div className="mt-4 grid gap-4">
+                    {/* EMBED TILE (NEW) */}
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            {pill("Embed widget", "blue")}
+                            <span className="text-sm text-gray-600 dark:text-gray-300">
+                              Add AIPhotoQuote to your website in minutes
+                            </span>
+                          </div>
+
+                          <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+                            Recommended: <span className="font-semibold">Script embed</span> (loads the widget automatically).
+                          </div>
+                        </div>
+
+                        <Link
+                          href="/admin/setup/ai-policy"
+                          className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
+                        >
+                          Customize
+                        </Link>
+                      </div>
+
+                      <div className="mt-4 grid gap-4">
+                        <CodeBox
+                          title="Option A — Script (recommended)"
+                          subtitle="Paste this into your site (near </body>)."
+                          code={computed.scriptSnippet}
+                          onCopy={copyScript}
+                          copied={copiedScript}
+                        />
+
+                        <CodeBox
+                          title="Option B — iFrame (fallback)"
+                          subtitle="Works anywhere, but looks more “embedded” with the script version."
+                          code={computed.iframeSnippet}
+                          onCopy={copyIframe}
+                          copied={copiedIframe}
+                        />
+
+                        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
+                          <div className="font-semibold">What happens next</div>
+                          <ul className="mt-2 list-disc space-y-1 pl-5">
+                            <li>Customer submits photos → you get a quote log.</li>
+                            <li>If rendering is enabled, it runs as a second step.</li>
+                            <li>You can review everything in Admin → Quotes.</li>
+                          </ul>
+                          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                            Note: the embed script endpoint <span className="font-mono">/embed.js</span> will be implemented next — this tile is UI-first so tenants see the product direction.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
                 {/* Quick stats */}
-                <div className="grid w-full gap-4 sm:max-w-sm">
+                <div className="grid gap-4">
                   <StatCard
                     label="Recent quotes"
                     value={quotesLoading ? "—" : quoteStats.total}
@@ -475,6 +596,15 @@ export default function Dashboard() {
                     label="Avg estimate (recent)"
                     value={quoteStats.avg != null ? money(quoteStats.avg) : "—"}
                     hint="Based on available ranges"
+                  />
+                  <StatCard
+                    label="Rendering (recent)"
+                    value={
+                      <span className="text-base font-semibold">
+                        {quoteStats.rendered} rendered · {quoteStats.rendering} running · {quoteStats.failed} failed
+                      </span>
+                    }
+                    hint="Last 10 quotes"
                   />
                 </div>
               </div>
@@ -507,14 +637,6 @@ export default function Dashboard() {
                   <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900/40">
                     <div className="text-xs text-gray-500 dark:text-gray-400">Industry key</div>
                     <div className="mt-1 font-mono">{computed.industryKey}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900/40">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Redirect URL</div>
-                    <div className="mt-1 break-all">{computed.redirectUrl || "—"}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900/40">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Thank-you URL</div>
-                    <div className="mt-1 break-all">{computed.thankYouUrl || "—"}</div>
                   </div>
                 </div>
               </div>
@@ -617,7 +739,7 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Right rail: Quick actions + render status */}
+              {/* Right rail: Quick actions */}
               <div className="grid gap-6">
                 <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
                   <div className="text-sm font-semibold">Quick actions</div>
@@ -638,7 +760,7 @@ export default function Dashboard() {
                       onClick={copyPublicLink}
                       className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900"
                     >
-                      {copied ? "Copied ✅" : "Copy share link"}
+                      {copiedPublic ? "Copied ✅" : "Copy share link"}
                     </button>
 
                     <Link
@@ -654,32 +776,6 @@ export default function Dashboard() {
                     >
                       Edit AI policy
                     </Link>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-                  <div className="text-sm font-semibold">Rendering status</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    What’s happening in the last 10.
-                  </div>
-
-                  <div className="mt-4 grid gap-3">
-                    <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-800 dark:bg-gray-900/40">
-                      <span className="text-sm text-gray-700 dark:text-gray-200">Rendered</span>
-                      <span className="text-sm font-semibold">{quoteStats.rendered}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-800 dark:bg-gray-900/40">
-                      <span className="text-sm text-gray-700 dark:text-gray-200">Rendering</span>
-                      <span className="text-sm font-semibold">{quoteStats.rendering}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-800 dark:bg-gray-900/40">
-                      <span className="text-sm text-gray-700 dark:text-gray-200">Failed</span>
-                      <span className="text-sm font-semibold">{quoteStats.failed}</span>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                    Next: we can add an “embed widget” tile here.
                   </div>
                 </div>
               </div>
