@@ -38,7 +38,10 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
+function pill(
+  label: string,
+  tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray"
+) {
   const cls =
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
@@ -258,7 +261,9 @@ export default function Dashboard() {
               </ul>
             ) : (
               <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                {loading ? "Loading your tenant…" : "Couldn’t load tenant settings. Refresh and try again."}
+                {loading
+                  ? "Loading your tenant…"
+                  : "Couldn’t load tenant settings. Refresh and try again."}
               </p>
             )}
 
@@ -322,11 +327,9 @@ export default function Dashboard() {
                 )}
               </div>
 
-              <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
+              <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900/40">
                 <div className="text-xs text-gray-500 dark:text-gray-400">Path</div>
-                <div className="mt-1 font-mono text-sm text-gray-900 dark:text-gray-100">
-                  {computed.publicPath}
-                </div>
+                <div className="mt-1 font-mono text-sm">{computed.publicPath}</div>
               </div>
 
               <div className="mt-4 text-xs text-gray-600 dark:text-gray-300">
@@ -334,7 +337,7 @@ export default function Dashboard() {
               </div>
             </section>
 
-            {/* Recent Quotes */}
+            {/* Recent quotes */}
             <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-center justify-between">
                 <h2 className="font-semibold">Recent quotes</h2>
@@ -344,7 +347,7 @@ export default function Dashboard() {
               {!quotesLoading && quotesResp && "ok" in quotesResp && quotesResp.ok ? (
                 quotesResp.quotes.length ? (
                   <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-                    <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-gray-900 dark:text-gray-300">
+                    <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-gray-900/40 dark:text-gray-300">
                       <div className="col-span-4">Created</div>
                       <div className="col-span-4">Quote ID</div>
                       <div className="col-span-4 text-right">Status</div>
@@ -373,10 +376,11 @@ export default function Dashboard() {
                             </div>
 
                             <div className="col-span-4 flex items-center justify-end gap-3">
-                              {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
+                              {typeof q.estimateLow === "number" ||
+                              typeof q.estimateHigh === "number" ? (
                                 <div className="text-xs text-gray-700 dark:text-gray-300">
-                                  {money(q.estimateLow)}
-                                  {q.estimateHigh != null ? ` – ${money(q.estimateHigh)}` : ""}
+                                  {money(q.estimateLow)}{" "}
+                                  {q.estimateHigh != null ? `– ${money(q.estimateHigh)}` : ""}
                                 </div>
                               ) : null}
 
@@ -418,7 +422,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Next */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="font-semibold">Next (flow polish)</h2>
           <ul className="mt-3 list-disc pl-5 text-sm text-gray-700 dark:text-gray-300 space-y-1">
