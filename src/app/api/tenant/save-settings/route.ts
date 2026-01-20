@@ -11,51 +11,72 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Save tenant settings (industry, URLs, reporting prefs)
- * Called from TenantOnboardingForm.
+ * Save tenant settings (industry, URLs, rendering settings, reporting prefs, etc.)
+ *
+ * IMPORTANT:
+ * - Clerk auth() is async in this repo setup -> must await.
+ * - Do NOT use db.query.* (db isn't typed with schema generics). Use select/from/where.
+ *
+ * DB columns (confirmed):
+ * tenant_settings.reporting_timezone (text)
+ * tenant_settings.week_starts_on (integer)   // 1=Monday ... 7=Sunday (we'll use 1 default)
  */
 
-const Body = z
-  .object({
-    // support both casings
-    tenantSlug: z.string().min(3).optional(),
-    tenant_slug: z.string().min(3).optional(),
+const Body = z.object({
+  tenantSlug: z.string().min(3),
 
-    industryKey: z.string().min(1).optional(),
-    industry_key: z.string().min(1).optional(),
+  // allow both keys from different clients
+  industryKey: z.string().min(1).optional(),
+  industry_key: z.string().min(1).optional(),
 
-    redirectUrl: z.string().optional().nullable(),
-    redirect_url: z.string().optional().nullable(),
+  redirectUrl: z.string().optional().nullable(),
+  redirect_url: z.string().optional().nullable(),
 
-    thankYouUrl: z.string().optional().nullable(),
-    thank_you_url: z.string().optional().nullable(),
+  thankYouUrl: z.string().optional().nullable(),
+  thank_you_url: z.string().optional().nullable(),
 
-    // NEW reporting settings (support both)
-    timeZone: z.string().optional().nullable(),
-    time_zone: z.string().optional().nullable(),
+  // extra tenant_settings fields (optional)
+  businessName: z.string().optional().nullable(),
+  business_name: z.string().optional().nullable(),
 
-    weekStart: z.string().optional().nullable(),
-    week_start: z.string().optional().nullable(),
-  })
-  .passthrough();
+  leadToEmail: z.string().optional().nullable(),
+  lead_to_email: z.string().optional().nullable(),
 
-function pickString(obj: any, camel: string, snake: string) {
-  const a = obj?.[camel];
-  if (typeof a === "string") return a;
-  const b = obj?.[snake];
-  if (typeof b === "string") return b;
-  return "";
-}
+  resendFromEmail: z.string().optional().nullable(),
+  resend_from_email: z.string().optional().nullable(),
 
-function pickNullableString(obj: any, camel: string, snake: string) {
-  const a = obj?.[camel];
-  if (typeof a === "string") return a;
-  if (a === null) return null;
-  const b = obj?.[snake];
-  if (typeof b === "string") return b;
-  if (b === null) return null;
-  return undefined; // means "not provided"
-}
+  aiMode: z.string().optional().nullable(),
+  ai_mode: z.string().optional().nullable(),
+
+  pricingEnabled: z.boolean().optional().nullable(),
+  pricing_enabled: z.boolean().optional().nullable(),
+
+  renderingEnabled: z.boolean().optional().nullable(),
+  rendering_enabled: z.boolean().optional().nullable(),
+
+  renderingStyle: z.string().optional().nullable(),
+  rendering_style: z.string().optional().nullable(),
+
+  renderingNotes: z.string().optional().nullable(),
+  rendering_notes: z.string().optional().nullable(),
+
+  renderingMaxPerDay: z.number().int().nonnegative().optional().nullable(),
+  rendering_max_per_day: z.number().int().nonnegative().optional().nullable(),
+
+  renderingCustomerOptInRequired: z.boolean().optional().nullable(),
+  rendering_customer_opt_in_required: z.boolean().optional().nullable(),
+
+  aiRenderingEnabled: z.boolean().optional().nullable(),
+  ai_rendering_enabled: z.boolean().optional().nullable(),
+
+  // reporting prefs (NEW)
+  reportingTimezone: z.string().optional().nullable(),
+  reporting_timezone: z.string().optional().nullable(),
+
+  // 1..7 (Monday..Sunday). We'll default to 1
+  weekStartsOn: z.number().int().min(1).max(7).optional().nullable(),
+  week_starts_on: z.number().int().min(1).max(7).optional().nullable(),
+});
 
 function normalizeUrl(u: string | null | undefined) {
   const s = String(u ?? "").trim();
@@ -64,29 +85,26 @@ function normalizeUrl(u: string | null | undefined) {
   return s;
 }
 
-function normalizeWeekStart(v: string | null | undefined) {
-  const s = String(v ?? "").trim().toLowerCase();
-  if (!s) return "monday";
-  // keep it flexible, but normalize common inputs
-  if (s.startsWith("mon")) return "monday";
-  if (s.startsWith("sun")) return "sunday";
-  if (s.startsWith("sat")) return "saturday";
-  if (s.startsWith("tue")) return "tuesday";
-  if (s.startsWith("wed")) return "wednesday";
-  if (s.startsWith("thu")) return "thursday";
-  if (s.startsWith("fri")) return "friday";
-  return s;
+function pick<T>(obj: any, camel: string, snake: string): T | undefined {
+  const a = obj?.[camel];
+  if (a !== undefined) return a as T;
+  const b = obj?.[snake];
+  if (b !== undefined) return b as T;
+  return undefined;
 }
 
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "UNAUTHENTICATED" },
+        { status: 401 }
+      );
     }
 
-    const raw = await req.json().catch(() => null);
-    const parsed = Body.safeParse(raw);
+    const json = await req.json().catch(() => null);
+    const parsed = Body.safeParse(json);
 
     if (!parsed.success) {
       return NextResponse.json(
@@ -97,33 +115,20 @@ export async function POST(req: Request) {
 
     const data: any = parsed.data;
 
-    const tenantSlug = pickString(data, "tenantSlug", "tenant_slug").trim();
-    const industryKey = pickString(data, "industryKey", "industry_key").trim();
+    const tenantSlug = String(data.tenantSlug).trim();
 
-    if (tenantSlug.length < 3 || industryKey.length < 1) {
+    const industryKey =
+      pick<string>(data, "industryKey", "industry_key")?.trim() ?? "";
+
+    if (!industryKey) {
       return NextResponse.json(
-        { ok: false, error: "MISSING_REQUIRED_FIELDS" },
+        { ok: false, error: "MISSING_INDUSTRY_KEY" },
         { status: 400 }
       );
     }
 
-    const redirectRaw = pickNullableString(data, "redirectUrl", "redirect_url");
-    const thankYouRaw = pickNullableString(data, "thankYouUrl", "thank_you_url");
-
-    const timeZoneRaw = pickNullableString(data, "timeZone", "time_zone");
-    const weekStartRaw = pickNullableString(data, "weekStart", "week_start");
-
-    const redirectUrl = redirectRaw === undefined ? undefined : normalizeUrl(redirectRaw);
-    const thankYouUrl = thankYouRaw === undefined ? undefined : normalizeUrl(thankYouRaw);
-
-    const timeZone =
-      timeZoneRaw === undefined ? undefined : String(timeZoneRaw ?? "").trim() || null;
-
-    const weekStart =
-      weekStartRaw === undefined ? undefined : normalizeWeekStart(weekStartRaw);
-
-    // Resolve tenant owned by this user
-    const tenant = await db
+    // Resolve tenant owned by this user (slug is unique)
+    const tenantRows = await db
       .select({
         id: tenants.id,
         slug: tenants.slug,
@@ -131,9 +136,9 @@ export async function POST(req: Request) {
       })
       .from(tenants)
       .where(and(eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId)))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+      .limit(1);
 
+    const tenant = tenantRows[0] ?? null;
     if (!tenant) {
       return NextResponse.json(
         { ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" },
@@ -141,18 +146,47 @@ export async function POST(req: Request) {
       );
     }
 
-    // Build update set (only set optional fields if provided)
-    const baseSet: any = {
-      industryKey,
-      updatedAt: new Date(),
-    };
+    const redirectUrlRaw = pick<string | null>(data, "redirectUrl", "redirect_url");
+    const thankYouUrlRaw = pick<string | null>(data, "thankYouUrl", "thank_you_url");
 
-    if (redirectUrl !== undefined) baseSet.redirectUrl = redirectUrl;
-    if (thankYouUrl !== undefined) baseSet.thankYouUrl = thankYouUrl;
+    const redirectUrl = normalizeUrl(redirectUrlRaw ?? null);
+    const thankYouUrl = normalizeUrl(thankYouUrlRaw ?? null);
 
-    // NEW reporting fields
-    if (timeZone !== undefined) baseSet.timeZone = timeZone;
-    if (weekStart !== undefined) baseSet.weekStart = weekStart;
+    const businessName = pick<string | null>(data, "businessName", "business_name") ?? null;
+    const leadToEmail = pick<string | null>(data, "leadToEmail", "lead_to_email") ?? null;
+    const resendFromEmail =
+      pick<string | null>(data, "resendFromEmail", "resend_from_email") ?? null;
+
+    const aiMode = pick<string | null>(data, "aiMode", "ai_mode") ?? null;
+
+    const pricingEnabled =
+      pick<boolean | null>(data, "pricingEnabled", "pricing_enabled") ?? null;
+
+    const renderingEnabled =
+      pick<boolean | null>(data, "renderingEnabled", "rendering_enabled") ?? null;
+
+    const renderingStyle = pick<string | null>(data, "renderingStyle", "rendering_style") ?? null;
+    const renderingNotes = pick<string | null>(data, "renderingNotes", "rendering_notes") ?? null;
+
+    const renderingMaxPerDay =
+      pick<number | null>(data, "renderingMaxPerDay", "rendering_max_per_day") ?? null;
+
+    const renderingCustomerOptInRequired =
+      pick<boolean | null>(
+        data,
+        "renderingCustomerOptInRequired",
+        "rendering_customer_opt_in_required"
+      ) ?? null;
+
+    const aiRenderingEnabled =
+      pick<boolean | null>(data, "aiRenderingEnabled", "ai_rendering_enabled") ?? null;
+
+    const reportingTimezone =
+      pick<string | null>(data, "reportingTimezone", "reporting_timezone") ??
+      "America/New_York";
+
+    const weekStartsOn =
+      pick<number | null>(data, "weekStartsOn", "week_starts_on") ?? 1; // Monday default
 
     // Upsert tenant_settings (tenant_id is PK)
     await db
@@ -160,37 +194,85 @@ export async function POST(req: Request) {
       .values({
         tenantId: tenant.id,
         industryKey,
-        redirectUrl: redirectUrl === undefined ? null : redirectUrl,
-        thankYouUrl: thankYouUrl === undefined ? null : thankYouUrl,
-        timeZone: timeZone === undefined ? null : timeZone,
-        weekStart: weekStart === undefined ? "monday" : weekStart,
+        redirectUrl,
+        thankYouUrl,
+
+        businessName,
+        leadToEmail,
+        resendFromEmail,
+        aiMode,
+        pricingEnabled,
+        renderingEnabled,
+        renderingStyle,
+        renderingNotes,
+        renderingMaxPerDay,
+        renderingCustomerOptInRequired,
+        aiRenderingEnabled,
+
+        reportingTimezone,
+        weekStartsOn,
+
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
         target: tenantSettings.tenantId,
-        set: baseSet,
+        set: {
+          industryKey,
+          redirectUrl,
+          thankYouUrl,
+
+          businessName,
+          leadToEmail,
+          resendFromEmail,
+          aiMode,
+          pricingEnabled,
+          renderingEnabled,
+          renderingStyle,
+          renderingNotes,
+          renderingMaxPerDay,
+          renderingCustomerOptInRequired,
+          aiRenderingEnabled,
+
+          reportingTimezone,
+          weekStartsOn,
+
+          updatedAt: new Date(),
+        },
       });
 
     // Return saved settings (snake_case response)
-    const settingsRow = await db
+    const settingsRows = await db
       .select({
         tenant_id: tenantSettings.tenantId,
         industry_key: tenantSettings.industryKey,
         redirect_url: tenantSettings.redirectUrl,
         thank_you_url: tenantSettings.thankYouUrl,
+
+        business_name: tenantSettings.businessName,
+        lead_to_email: tenantSettings.leadToEmail,
+        resend_from_email: tenantSettings.resendFromEmail,
+        ai_mode: tenantSettings.aiMode,
+        pricing_enabled: tenantSettings.pricingEnabled,
+        rendering_enabled: tenantSettings.renderingEnabled,
+        rendering_style: tenantSettings.renderingStyle,
+        rendering_notes: tenantSettings.renderingNotes,
+        rendering_max_per_day: tenantSettings.renderingMaxPerDay,
+        rendering_customer_opt_in_required: tenantSettings.renderingCustomerOptInRequired,
+        ai_rendering_enabled: tenantSettings.aiRenderingEnabled,
+
+        reporting_timezone: tenantSettings.reportingTimezone,
+        week_starts_on: tenantSettings.weekStartsOn,
+
         updated_at: tenantSettings.updatedAt,
-        time_zone: tenantSettings.timeZone,
-        week_start: tenantSettings.weekStart,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+      .limit(1);
 
     return NextResponse.json({
       ok: true,
       tenant: { id: tenant.id, slug: tenant.slug },
-      settings: settingsRow,
+      settings: settingsRows[0] ?? null,
     });
   } catch (e: any) {
     return NextResponse.json(
