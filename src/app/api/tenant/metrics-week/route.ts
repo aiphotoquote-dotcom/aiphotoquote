@@ -23,8 +23,9 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
 // Monday 00:00:00 UTC for the week containing `d`
 function startOfWeekUtc(d: Date) {
   const x = new Date(d);
-  // convert to "UTC midnight today" first, then roll back to Monday
-  const utc = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate(), 0, 0, 0, 0));
+  const utc = new Date(
+    Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate(), 0, 0, 0, 0)
+  );
   const day = utc.getUTCDay(); // 0 Sun .. 6 Sat
   const diff = (day + 6) % 7; // days since Monday
   utc.setUTCDate(utc.getUTCDate() - diff);
@@ -53,12 +54,18 @@ export async function GET() {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "UNAUTHENTICATED" },
+        { status: 401 }
+      );
     }
 
     const tenantId = await resolveTenantId(userId);
     if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "NO_ACTIVE_TENANT" },
+        { status: 400 }
+      );
     }
 
     const now = new Date();
@@ -71,78 +78,83 @@ export async function GET() {
     const lastWeekStart = new Date(thisWeekStart);
     lastWeekStart.setUTCDate(thisWeekStart.getUTCDate() - 7);
 
-    // One query: tenant filtered once, counts via FILTER
+    // IMPORTANT: pass ISO strings (driver-safe), cast to timestamptz in SQL
+    const tws = thisWeekStart.toISOString();
+    const nwe = nextWeekStart.toISOString();
+    const lws = lastWeekStart.toISOString();
+    const twe = thisWeekStart.toISOString();
+
     const row = await db
       .select({
         quotesThis: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${thisWeekStart}
-              and ${quoteLogs.createdAt} < ${nextWeekStart}
+            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
           )::int
         `.mapWith(Number),
         quotesLast: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${lastWeekStart}
-              and ${quoteLogs.createdAt} < ${thisWeekStart}
+            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
           )::int
         `.mapWith(Number),
 
         optinsThis: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${thisWeekStart}
-              and ${quoteLogs.createdAt} < ${nextWeekStart}
+            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
               and ${quoteLogs.renderOptIn} = true
           )::int
         `.mapWith(Number),
         optinsLast: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${lastWeekStart}
-              and ${quoteLogs.createdAt} < ${thisWeekStart}
+            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
               and ${quoteLogs.renderOptIn} = true
           )::int
         `.mapWith(Number),
 
         renderedThis: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${thisWeekStart}
-              and ${quoteLogs.createdAt} < ${nextWeekStart}
+            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
               and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'rendered'
           )::int
         `.mapWith(Number),
         renderedLast: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${lastWeekStart}
-              and ${quoteLogs.createdAt} < ${thisWeekStart}
+            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
               and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'rendered'
           )::int
         `.mapWith(Number),
 
         failedThis: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${thisWeekStart}
-              and ${quoteLogs.createdAt} < ${nextWeekStart}
+            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
               and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'failed'
           )::int
         `.mapWith(Number),
         failedLast: sql<number>`
           count(*) filter (
-            where ${quoteLogs.createdAt} >= ${lastWeekStart}
-              and ${quoteLogs.createdAt} < ${thisWeekStart}
+            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
+              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
               and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'failed'
           )::int
         `.mapWith(Number),
       })
       .from(quoteLogs)
       .where(eq(quoteLogs.tenantId, tenantId))
-      .then((r) => r[0]);
+      .then((r) => r[0] ?? null);
 
     return NextResponse.json({
       ok: true,
       range: {
-        thisWeekStart: thisWeekStart.toISOString(),
-        nextWeekStart: nextWeekStart.toISOString(),
-        lastWeekStart: lastWeekStart.toISOString(),
-        lastWeekEnd: thisWeekStart.toISOString(),
+        thisWeekStart: tws,
+        nextWeekStart: nwe,
+        lastWeekStart: lws,
+        lastWeekEnd: twe,
       },
       thisWeek: {
         quotes: row?.quotesThis ?? 0,
