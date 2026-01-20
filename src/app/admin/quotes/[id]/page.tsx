@@ -29,7 +29,6 @@ function fmtJson(value: unknown) {
 }
 
 function pickCustomer(input: any) {
-  // Supports a few shapes so we don't break if schema changes
   const c =
     input?.customer ??
     input?.customer_context?.customer ??
@@ -37,10 +36,15 @@ function pickCustomer(input: any) {
     input?.contact ??
     {};
 
-  const name = c?.name ?? c?.fullName ?? c?.customerName ?? input?.name ?? "Customer";
+  const name =
+    c?.name ?? c?.fullName ?? c?.customerName ?? input?.name ?? "Customer";
 
   const phone =
-    c?.phone ?? c?.phoneNumber ?? input?.phone ?? input?.customer_context?.phone ?? null;
+    c?.phone ??
+    c?.phoneNumber ??
+    input?.phone ??
+    input?.customer_context?.phone ??
+    null;
 
   const email = c?.email ?? input?.email ?? null;
 
@@ -68,6 +72,36 @@ function normalizeStage(s: unknown) {
   return "new";
 }
 
+// ---- server actions (typed args only; no undefined closures) ----
+async function markRead(quoteId: string, tenantId: string) {
+  "use server";
+  await db
+    .update(quoteLogs)
+    .set({
+      isRead: true,
+      stage: "read",
+    })
+    .where(
+      and(
+        eq(quoteLogs.id, quoteId),
+        eq(quoteLogs.tenantId, tenantId),
+        eq(quoteLogs.isRead, false)
+      )
+    );
+}
+
+async function setStageAction(quoteId: string, tenantId: string, formData: FormData) {
+  "use server";
+  const next = normalizeStage(formData.get("stage"));
+  await db
+    .update(quoteLogs)
+    .set({
+      stage: next,
+      isRead: true,
+    })
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+}
+
 export default async function AdminQuoteDetailPage({
   params,
 }: {
@@ -80,7 +114,9 @@ export default async function AdminQuoteDetailPage({
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Admin</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">You must be signed in.</p>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            You must be signed in.
+          </p>
           <div className="mt-6">
             <Link className="underline" href="/sign-in">
               Sign in
@@ -99,7 +135,9 @@ export default async function AdminQuoteDetailPage({
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Quote</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">Missing quote id in URL.</p>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            Missing quote id in URL.
+          </p>
           <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
               Back to quotes
@@ -147,33 +185,6 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // ----- Server actions -----
-  async function markReadIfNeeded() {
-    "use server";
-    // Mark as read only if currently unread
-    await db
-      .update(quoteLogs)
-      .set({
-        isRead: true,
-        // If it's still "new", bump it to "read"
-        stage: "read",
-      })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.isRead, false)));
-  }
-
-  async function updateStage(formData: FormData) {
-    "use server";
-    const next = normalizeStage(formData.get("stage"));
-
-    await db
-      .update(quoteLogs)
-      .set({
-        stage: next,
-        isRead: true,
-      })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
-  }
-
   // Load the quote
   const row = await db
     .select({
@@ -189,9 +200,8 @@ export default async function AdminQuoteDetailPage({
       renderError: quoteLogs.renderError,
       renderedAt: quoteLogs.renderedAt,
 
-      // Admin workflow columns (real DB + real schema)
-      stage: quoteLogs.stage,
       isRead: quoteLogs.isRead,
+      stage: quoteLogs.stage,
     })
     .from(quoteLogs)
     .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)))
@@ -216,15 +226,15 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // Mark read on open (best-effort)
-  try {
-    if (!row.isRead) {
-      await markReadIfNeeded();
+  // Mark read on open (best effort)
+  if (!row.isRead) {
+    try {
+      await markRead(quoteId, tenantId);
       row.isRead = true;
-      if (normalizeStage(row.stage) === "new") row.stage = "read";
+      if (!row.stage || normalizeStage(row.stage) === "new") row.stage = "read";
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore — avoids breaking the page during rollout
   }
 
   const customer = pickCustomer(row.input);
@@ -244,9 +254,9 @@ export default async function AdminQuoteDetailPage({
               <span
                 className={
                   "rounded-full border px-3 py-1 text-xs font-semibold " +
-                  (isUnread
-                    ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-                    : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200")
+                  (row.isRead
+                    ? "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                    : "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200")
                 }
               >
                 {row.isRead ? "Read" : "Unread"}
@@ -260,6 +270,10 @@ export default async function AdminQuoteDetailPage({
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
               {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
             </p>
+
+            <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-400">
+              {row.id}
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -296,7 +310,10 @@ export default async function AdminQuoteDetailPage({
             </div>
 
             {/* Stage control */}
-            <form action={updateStage} className="flex items-center gap-2">
+            <form
+              action={setStageAction.bind(null, quoteId, tenantId)}
+              className="flex items-center gap-2"
+            >
               <label className="text-xs font-semibold text-gray-600 dark:text-gray-300">
                 Stage
               </label>
