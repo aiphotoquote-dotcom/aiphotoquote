@@ -1,3 +1,4 @@
+// src/components/QuoteForm.tsx
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -47,7 +48,10 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
+async function compressImage(
+  file: File,
+  opts?: { maxDim?: number; quality?: number }
+): Promise<File> {
   const maxDim = opts?.maxDim ?? 1600;
   const quality = opts?.quality ?? 0.78;
 
@@ -84,7 +88,11 @@ async function compressImage(file: File, opts?: { maxDim?: number; quality?: num
   ctx.drawImage(img, 0, 0, outW, outH);
 
   const blob: Blob = await new Promise((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Compression failed"))), "image/jpeg", quality);
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("Compression failed"))),
+      "image/jpeg",
+      quality
+    );
   });
 
   const baseName = file.name.replace(/\.[^/.]+$/, "");
@@ -104,7 +112,9 @@ function ProgressBar({
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="flex items-center justify-between gap-4">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          {title}
+        </div>
         <div className="text-xs text-gray-700 dark:text-gray-200">{label}</div>
       </div>
       <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
@@ -145,7 +155,9 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
   }
 
   if (!res.ok || !j?.ok) {
-    throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
+    throw new Error(
+      j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`
+    );
   }
 
   const urls: string[] = Array.isArray(j?.urls)
@@ -234,7 +246,6 @@ export default function QuoteForm({
   const photoCount = photos.length;
 
   const canSubmit = useMemo(() => {
-    // ✅ THIS FIXES THE “HANG”: uploads now count because photos[] always contains them.
     return !working && photoCount >= MIN_PHOTOS && contactOk;
   }, [working, photoCount, contactOk]);
 
@@ -299,8 +310,11 @@ export default function QuoteForm({
       if (p?.previewSrc?.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
       const next = prev.filter((x) => x.id !== id);
 
-      // Re-normalize shot types for first 2 positions to keep “wide/close” customer-friendly behavior.
-      return next.map((x, idx) => ({ ...x, shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType }));
+      // Re-normalize shot types for first 2 positions to keep “wide/close” behavior.
+      return next.map((x, idx) => ({
+        ...x,
+        shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType,
+      }));
     });
   }, []);
 
@@ -377,15 +391,19 @@ export default function QuoteForm({
       return;
     }
 
-    if (!customerName.trim()) {
+    const nameTrim = customerName.trim();
+    const emailNorm = email.trim().toLowerCase();
+    const phoneDigits = digitsOnly(phone);
+
+    if (!nameTrim) {
       setError("Please enter your name.");
       return;
     }
-    if (!isValidEmail(email)) {
+    if (!isValidEmail(emailNorm)) {
       setError("Please enter a valid email address.");
       return;
     }
-    if (digitsOnly(phone).length !== 10) {
+    if (phoneDigits.length !== 10) {
       setError("Please enter a valid 10-digit phone number.");
       return;
     }
@@ -393,8 +411,11 @@ export default function QuoteForm({
     setWorking(true);
 
     try {
-      // 1) Ensure every photo has an uploadedUrl (upload camera files if needed)
-      const needUpload = photos.filter((p) => !p.uploadedUrl && p.file);
+      // IMPORTANT: work off a local copy so we never depend on async React state updates
+      let nextPhotos: PhotoItem[] = photos.map((p) => ({ ...p }));
+
+      // 1) Upload any camera photos that don't have uploadedUrl yet
+      const needUpload = nextPhotos.filter((p) => !p.uploadedUrl && p.file);
       if (needUpload.length) {
         setPhase("compressing");
         const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
@@ -402,68 +423,77 @@ export default function QuoteForm({
         setPhase("uploading");
         const urls = await uploadToBlob(compressed);
 
-        // Map returned urls to the same order as needUpload
+        // Apply returned urls to nextPhotos (stable order)
+        const urlById = new Map<string, string>();
+        needUpload.forEach((p, idx) => {
+          const u = urls[idx];
+          if (u) urlById.set(p.id, u);
+        });
+
+        nextPhotos = nextPhotos.map((p) => {
+          const u = urlById.get(p.id);
+          if (!u) return p;
+
+          // We intentionally do NOT revoke previewSrc here if it's a blob:
+          // setPhotos below will render quickly; on remove/unmount we revoke anyway.
+          return {
+            ...p,
+            uploadedUrl: u,
+            previewSrc: u,
+            file: undefined,
+          };
+        });
+
+        // Update UI state to match what we’re submitting
         setPhotos((prev) => {
-          const byId = new Map<string, string>();
-          needUpload.forEach((p, idx) => {
-            const u = urls[idx];
-            if (u) byId.set(p.id, u);
-          });
-
-          return prev.map((p) => {
-            const u = byId.get(p.id);
-            if (!u) return p;
-
-            // replace preview with remote url, revoke old blob
-            if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
-
-            return {
-              ...p,
-              uploadedUrl: u,
-              previewSrc: u,
-              file: undefined,
-            };
-          });
+          // Revoke any blob previews we’re replacing
+          const prevById = new Map(prev.map((x) => [x.id, x]));
+          for (const np of nextPhotos) {
+            const old = prevById.get(np.id);
+            if (old?.previewSrc?.startsWith("blob:") && np.previewSrc !== old.previewSrc) {
+              URL.revokeObjectURL(old.previewSrc);
+            }
+          }
+          return nextPhotos;
         });
       }
 
-      // read latest photos after possible upload mapping
-      const snapshot = (() => {
-        // safest: pull from state via functional copy
-        // (we’re in same tick; but React setState is async)
-        // So we rebuild from current `photos` + assume uploads mapped above quickly.
-        // If a camera file was uploaded but state isn't updated yet, we still have fallback below.
-        return photos;
-      })();
-
-      // Build urls list in display order (stable)
-      // If some are still missing uploadedUrl (shouldn't happen), block.
-      const urls = snapshot.map((p) => p.uploadedUrl).filter(Boolean) as string[];
-      if (urls.length !== snapshot.length) {
+      // 2) Ensure all photos have uploadedUrl
+      if (nextPhotos.some((p) => !p.uploadedUrl)) {
         throw new Error("Some photos are not uploaded yet. Please try again.");
       }
 
       setPhase("analyzing");
 
-      // 2) Call quote submit API (match your schema: contact separate + render_opt_in top-level)
+      const payload = {
+        tenantSlug,
+        images: nextPhotos.map((p) => ({ url: p.uploadedUrl!, shotType: p.shotType })),
+
+        // ✅ Always include BOTH shapes so admin + server can read it no matter what
+        customer: {
+          name: nameTrim,
+          email: emailNorm,
+          phone: phoneDigits,
+        },
+        contact: {
+          name: nameTrim,
+          email: emailNorm,
+          phone: phoneDigits,
+        },
+
+        customer_context: {
+          notes: notes?.trim() || undefined,
+          category: "service",
+          service_type: "upholstery",
+        },
+
+        render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+      };
+
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          tenantSlug,
-          images: snapshot.map((p) => ({ url: p.uploadedUrl!, shotType: p.shotType })),
-          customer_context: {
-            notes: notes?.trim() || undefined,
-            category: "service",
-            service_type: "upholstery",
-          },
-          contact: {
-            name: customerName.trim(),
-            email: email.trim(),
-            phone: digitsOnly(phone),
-          },
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
-        }),
+        body: JSON.stringify(payload),
       });
 
       const text = await res.text();
@@ -508,7 +538,6 @@ export default function QuoteForm({
     setRenderImageUrl(null);
 
     try {
-      // Your actual endpoint is /api/quote/render
       const res = await fetch("/api/quote/render", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -529,7 +558,6 @@ export default function QuoteForm({
 
       const url = (j?.imageUrl ?? j?.render_image_url ?? j?.url ?? null) as string | null;
       if (!url) {
-        // If your render route returns status-only, treat as failed for now (we’ll add status polling later if needed).
         throw new Error("Render completed but no imageUrl returned.");
       }
 
@@ -565,16 +593,23 @@ export default function QuoteForm({
       <div className="grid gap-3">
         <ProgressBar title="Working" label={workingLabel} active={working} />
         {aiRenderingEnabled ? (
-          <ProgressBar title="AI Rendering" label={renderingLabel} active={renderStatus === "running"} />
+          <ProgressBar
+            title="AI Rendering"
+            label={renderingLabel}
+            active={renderStatus === "running"}
+          />
         ) : null}
       </div>
 
       {/* Photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Take 2 quick photos</h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
+            Take 2 quick photos
+          </h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Take a wide shot, then a close-up. Label each photo after it’s added. (max {MAX_PHOTOS})
+            Take a wide shot, then a close-up. Label each photo after it’s added. (max{" "}
+            {MAX_PHOTOS})
           </p>
         </div>
 
@@ -633,10 +668,17 @@ export default function QuoteForm({
             {photos.map((p, idx) => {
               const badge = shotBadge(p.shotType);
               return (
-                <div key={p.id} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+                <div
+                  key={p.id}
+                  className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
+                >
                   <div className="relative">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.previewSrc} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
+                    <img
+                      src={p.previewSrc}
+                      alt={`photo ${idx + 1}`}
+                      className="h-44 w-full object-cover"
+                    />
                     <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
                       {badge}
                     </div>
@@ -651,7 +693,9 @@ export default function QuoteForm({
                   </div>
 
                   <div className="p-3 flex flex-wrap items-center gap-2">
-                    <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
+                    <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">
+                      Label:
+                    </div>
 
                     <button
                       type="button"
@@ -696,7 +740,9 @@ export default function QuoteForm({
                     </button>
 
                     {!p.uploadedUrl && p.file ? (
-                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">Camera photo (uploads on submit)</span>
+                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">
+                        Camera photo (uploads on submit)
+                      </span>
                     ) : null}
                   </div>
                 </div>
@@ -799,7 +845,8 @@ export default function QuoteForm({
                   Optional: AI rendering preview
                 </div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we’ll generate a visual “after” concept as a second step after your estimate.
+                  If selected, we’ll generate a visual “after” concept as a second
+                  step after your estimate.
                 </div>
               </label>
             </div>
@@ -837,9 +884,13 @@ export default function QuoteForm({
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
         >
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+              Result
+            </h2>
             {quoteLogId ? (
-              <div className="text-xs text-gray-600 dark:text-gray-300">Quote ID: {quoteLogId}</div>
+              <div className="text-xs text-gray-600 dark:text-gray-300">
+                Quote ID: {quoteLogId}
+              </div>
             ) : null}
           </div>
 
@@ -851,8 +902,12 @@ export default function QuoteForm({
             <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900">
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    AI Rendering
+                  </div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">
+                    Status: {renderStatus}
+                  </div>
                 </div>
 
                 <button
@@ -874,7 +929,11 @@ export default function QuoteForm({
               {renderImageUrl ? (
                 <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
+                  <img
+                    src={renderImageUrl}
+                    alt="AI rendering"
+                    className="w-full object-cover"
+                  />
                 </div>
               ) : null}
             </div>
@@ -883,7 +942,8 @@ export default function QuoteForm({
       ) : null}
 
       <p className="text-xs text-gray-600 dark:text-gray-300">
-        By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
+        By submitting, you agree we may contact you about this request. Photos are used
+        only to prepare your estimate.
       </p>
     </div>
   );
