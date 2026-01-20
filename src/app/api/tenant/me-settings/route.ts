@@ -25,13 +25,16 @@ export async function GET() {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "UNAUTHENTICATED" },
+        { status: 401 }
+      );
     }
 
     const jar = await cookies();
     let tenantId = getCookieTenantId(jar);
 
-    // Fallback: choose the tenant owned by this user
+    // fallback to tenant owned by user
     if (!tenantId) {
       const t = await db
         .select({ id: tenants.id })
@@ -45,17 +48,13 @@ export async function GET() {
 
     if (!tenantId) {
       return NextResponse.json(
-        { ok: false, error: "NO_ACTIVE_TENANT", message: "No tenant found for this user." },
+        { ok: false, error: "NO_ACTIVE_TENANT" },
         { status: 400 }
       );
     }
 
     const tenant = await db
-      .select({
-        id: tenants.id,
-        name: tenants.name,
-        slug: tenants.slug,
-      })
+      .select({ id: tenants.id, name: tenants.name, slug: tenants.slug })
       .from(tenants)
       .where(eq(tenants.id, tenantId))
       .limit(1)
@@ -63,7 +62,7 @@ export async function GET() {
 
     if (!tenant) {
       return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND", message: "Active tenant not found." },
+        { ok: false, error: "TENANT_NOT_FOUND" },
         { status: 404 }
       );
     }
@@ -74,21 +73,17 @@ export async function GET() {
         industry_key: tenantSettings.industryKey,
         redirect_url: tenantSettings.redirectUrl,
         thank_you_url: tenantSettings.thankYouUrl,
+        updated_at: tenantSettings.updatedAt,
 
-        // NEW
+        // NEW reporting fields (snake_case in response)
         reporting_timezone: tenantSettings.reportingTimezone,
         week_starts_on: tenantSettings.weekStartsOn,
-
-        updated_at: tenantSettings.updatedAt,
       })
       .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
+      .where(eq(tenantSettings.tenantId, tenant.id))
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // IMPORTANT:
-    // industry_key in your schema is NOT NULL, but older tenants may not have a row yet.
-    // Returning settings: null is fine — UI handles it.
     return NextResponse.json({
       ok: true,
       tenant,
