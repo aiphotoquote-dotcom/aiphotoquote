@@ -42,11 +42,12 @@ export const tenants = pgTable(
  *  - thank_you_url (text)
  *  - updated_at (timestamptz)
  *
- * Added (tenant-configurable):
- *  - week_start (text) default 'monday'
- *  - time_zone (text) default 'America/New_York'
+ * NEW:
+ *  - time_zone (text)           e.g., "America/New_York"
+ *  - week_start (text)          e.g., "monday" (we'll default to monday)
  */
 export const tenantSettings = pgTable("tenant_settings", {
+  // ✅ tenant_id is the PK in the live DB
   tenantId: uuid("tenant_id")
     .notNull()
     .primaryKey()
@@ -57,9 +58,9 @@ export const tenantSettings = pgTable("tenant_settings", {
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
 
-  // ✅ tenant-configurable reporting window
-  weekStart: text("week_start").notNull().default("monday"), // 'monday' | 'sunday'
-  timeZone: text("time_zone").notNull().default("America/New_York"),
+  // ✅ reporting config (tenant-configurable)
+  timeZone: text("time_zone"),       // "America/New_York"
+  weekStart: text("week_start"),     // "monday" | "sunday" etc (we use monday default)
 
   updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
@@ -122,6 +123,7 @@ export const quoteLogs = pgTable("quote_logs", {
   input: jsonb("input").$type<any>().notNull(),
   output: jsonb("output").$type<any>().notNull(),
 
+  // --- AI Rendering (optional 2nd step) ---
   renderOptIn: boolean("render_opt_in").notNull().default(false),
 
   // "not_requested" | "queued" | "running" | "rendered" | "failed"
@@ -139,6 +141,8 @@ export const quoteLogs = pgTable("quote_logs", {
 
 /**
  * Industries
+ * Model existing table without trying to change PKs.
+ * Assumes industries.id already exists and is the PK in your DB.
  */
 export const industries = pgTable(
   "industries",
