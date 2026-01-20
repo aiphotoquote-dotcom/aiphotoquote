@@ -5,7 +5,7 @@ import { auth } from "@clerk/nextjs/server";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenants, tenantSettings } from "@/lib/db/schema";
+import { quoteLogs, tenants } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +21,7 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   return candidates[0] || null;
 }
 
-// Monday 00:00 local (we’ll use tenant TZ just for display/meta; DB filters use ISO timestamps we compute here)
+// Monday 00:00 local time
 function startOfWeekMonday(d: Date) {
   const x = new Date(d);
   const day = x.getDay(); // 0 Sun .. 6 Sat
@@ -50,7 +50,11 @@ async function resolveTenantId(userId: string) {
 }
 
 async function countMetrics(tenantId: string, start: Date, end: Date) {
-  const base = and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end));
+  const base = and(
+    eq(quoteLogs.tenantId, tenantId),
+    gte(quoteLogs.createdAt, start),
+    lt(quoteLogs.createdAt, end)
+  );
 
   const quotes = await db
     .select({ n: sql<number>`count(*)::int` })
@@ -91,22 +95,6 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
-    // Pull reporting prefs (optional)
-    const prefs = await db
-      .select({
-        timeZone: tenantSettings.timeZone,
-        weekStart: tenantSettings.weekStart,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    const tz = prefs?.timeZone || "America/New_York";
-    const weekStart = (prefs?.weekStart || "monday").toLowerCase();
-
-    // You asked: Monday default. We’ll enforce Monday here for now.
-    // (Later we’ll use weekStart setting to allow Sunday, etc.)
     const now = new Date();
     const thisStart = startOfWeekMonday(now);
     const thisEnd = new Date(thisStart);
@@ -126,8 +114,9 @@ export async function GET() {
         lastWeek,
         meta: {
           tenantId,
-          timeZone: tz,
-          weekStartsOn: weekStart || "monday",
+          // purely informational for UI; not DB-enforced yet
+          timeZone: "America/New_York",
+          weekStartsOn: "monday",
           thisWeekStart: thisStart.toISOString(),
           thisWeekEnd: thisEnd.toISOString(),
           lastWeekStart: lastStart.toISOString(),

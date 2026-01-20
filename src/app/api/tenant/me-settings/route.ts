@@ -62,6 +62,7 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
+    // Only select columns that *exist* in prod
     const settings = await db
       .select({
         tenant_id: tenantSettings.tenantId,
@@ -69,10 +70,6 @@ export async function GET() {
         redirect_url: tenantSettings.redirectUrl,
         thank_you_url: tenantSettings.thankYouUrl,
         updated_at: tenantSettings.updatedAt,
-
-        // reporting prefs (snake_case in response)
-        time_zone: tenantSettings.timeZone,
-        week_start: tenantSettings.weekStart,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
@@ -81,11 +78,7 @@ export async function GET() {
 
     return NextResponse.json(
       { ok: true, tenant, settings },
-      {
-        headers: {
-          "cache-control": "no-store, max-age=0",
-        },
-      }
+      { headers: { "cache-control": "no-store, max-age=0" } }
     );
   } catch (e: any) {
     return NextResponse.json(
