@@ -14,6 +14,11 @@ type MeSettingsResponse =
         industry_key: string | null;
         redirect_url: string | null;
         thank_you_url: string | null;
+
+        // allow new settings but keep optional so UI doesn’t break if null
+        reporting_timezone?: string | null;
+        week_starts_on?: number | null;
+
         updated_at: string | null;
       } | null;
     }
@@ -45,10 +50,14 @@ type WeekCounts = {
 type WeeklyMetricsResp =
   | {
       ok: true;
+
+      // ✅ New API shape
+      reporting?: { timezone?: string | null; week_starts_on?: number | null } | null;
+      range?: { thisWeekStart?: string; nextWeekStart?: string; lastWeekStart?: string } | null;
       thisWeek?: Partial<WeekCounts> | null;
       lastWeek?: Partial<WeekCounts> | null;
 
-      // allow alternate shapes without breaking UI
+      // ✅ Back-compat shapes (older)
       this_week?: Partial<WeekCounts> | null;
       last_week?: Partial<WeekCounts> | null;
       weekly?: { thisWeek?: Partial<WeekCounts> | null; lastWeek?: Partial<WeekCounts> | null } | null;
@@ -59,10 +68,7 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(
-  label: string,
-  tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray"
-) {
+function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
   const cls =
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
@@ -87,6 +93,12 @@ function fmtDate(iso: string) {
   return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+function fmtShortDate(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function money(n: unknown) {
   const x = typeof n === "number" ? n : n == null ? null : Number(n);
   if (x == null || Number.isNaN(x)) return "";
@@ -104,7 +116,6 @@ function clampInt(v: unknown) {
 }
 
 function pctDelta(curr: number, prev: number) {
-  // If last week is 0, avoid infinite % — show "—" unless curr > 0 then "new"
   if (prev <= 0) {
     if (curr <= 0) return { label: "—", tone: "gray" as const };
     return { label: "new", tone: "blue" as const };
@@ -123,15 +134,39 @@ function renderStatusPill(statusRaw: unknown) {
   return pill("Estimate", "gray");
 }
 
-function normalizeWeekly(resp: WeeklyMetricsResp | null): { ready: boolean; thisWeek: WeekCounts; lastWeek: WeekCounts } {
+type NormalizedWeekly = {
+  ready: boolean;
+  thisWeek: WeekCounts;
+  lastWeek: WeekCounts;
+  meta: {
+    timezone: string | null;
+    weekStartsOn: number | null;
+    range: { thisWeekStart?: string; nextWeekStart?: string; lastWeekStart?: string } | null;
+  };
+};
+
+function normalizeWeekly(resp: WeeklyMetricsResp | null): NormalizedWeekly {
   const zero: WeekCounts = { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 };
-  if (!resp || !("ok" in resp) || !resp.ok) return { ready: false, thisWeek: zero, lastWeek: zero };
+  const meta = { timezone: null as string | null, weekStartsOn: null as number | null, range: null as any };
 
-  // Accept a few possible shapes
-  const a = (resp as any).thisWeek ?? (resp as any).this_week ?? (resp as any).weekly?.thisWeek ?? null;
-  const b = (resp as any).lastWeek ?? (resp as any).last_week ?? (resp as any).weekly?.lastWeek ?? null;
+  if (!resp || !("ok" in resp) || !resp.ok) return { ready: false, thisWeek: zero, lastWeek: zero, meta };
 
-  if (!a && !b) return { ready: false, thisWeek: zero, lastWeek: zero };
+  // Prefer NEW shape if present
+  const twNew = (resp as any).thisWeek ?? null;
+  const lwNew = (resp as any).lastWeek ?? null;
+
+  // Back-compat
+  const twOld = (resp as any).this_week ?? (resp as any).weekly?.thisWeek ?? null;
+  const lwOld = (resp as any).last_week ?? (resp as any).weekly?.lastWeek ?? null;
+
+  const a = twNew ?? twOld;
+  const b = lwNew ?? lwOld;
+
+  meta.timezone = (resp as any).reporting?.timezone ?? null;
+  meta.weekStartsOn = typeof (resp as any).reporting?.week_starts_on === "number" ? (resp as any).reporting.week_starts_on : null;
+  meta.range = (resp as any).range ?? null;
+
+  if (!a && !b) return { ready: false, thisWeek: zero, lastWeek: zero, meta };
 
   const tw: WeekCounts = {
     quotes: clampInt(a?.quotes),
@@ -147,7 +182,11 @@ function normalizeWeekly(resp: WeeklyMetricsResp | null): { ready: boolean; this
     renderFailures: clampInt(b?.renderFailures ?? b?.render_failures),
   };
 
-  return { ready: true, thisWeek: tw, lastWeek: lw };
+  return { ready: true, thisWeek: tw, lastWeek: lw, meta };
+}
+
+function s(n: number) {
+  return n === 1 ? "" : "s";
 }
 
 export default function Dashboard() {
@@ -267,6 +306,12 @@ export default function Dashboard() {
   const qCount = wk.thisWeek.quotes;
   const qPrev = wk.lastWeek.quotes;
 
+  const weekWindowLabel = useMemo(() => {
+    const r = wk.meta.range;
+    if (!r?.thisWeekStart || !r?.nextWeekStart) return null;
+    return `${fmtShortDate(r.thisWeekStart)} – ${fmtShortDate(r.nextWeekStart)}`;
+  }, [wk.meta.range]);
+
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
       <TopNav />
@@ -318,6 +363,18 @@ export default function Dashboard() {
                 <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
                   Compared to last week. Counts only for now.
                 </p>
+
+                {wk.ready && (weekWindowLabel || wk.meta.timezone) ? (
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    {weekWindowLabel ? <>Week window: <span className="font-semibold">{weekWindowLabel}</span></> : null}
+                    {wk.meta.timezone ? (
+                      <>
+                        {weekWindowLabel ? " · " : null}
+                        TZ: <span className="font-semibold">{wk.meta.timezone}</span>
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="flex items-center gap-2">
@@ -329,26 +386,10 @@ export default function Dashboard() {
             {!weeklyLoading && wk.ready ? (
               <div className="mt-5 grid gap-4 sm:grid-cols-2">
                 {[
-                  {
-                    title: "Quotes",
-                    curr: wk.thisWeek.quotes,
-                    prev: wk.lastWeek.quotes,
-                  },
-                  {
-                    title: "Render opt-ins",
-                    curr: wk.thisWeek.renderOptIns,
-                    prev: wk.lastWeek.renderOptIns,
-                  },
-                  {
-                    title: "Rendered",
-                    curr: wk.thisWeek.rendered,
-                    prev: wk.lastWeek.rendered,
-                  },
-                  {
-                    title: "Render failures",
-                    curr: wk.thisWeek.renderFailures,
-                    prev: wk.lastWeek.renderFailures,
-                  },
+                  { title: "Quotes", curr: wk.thisWeek.quotes, prev: wk.lastWeek.quotes },
+                  { title: "Render opt-ins", curr: wk.thisWeek.renderOptIns, prev: wk.lastWeek.renderOptIns },
+                  { title: "Rendered", curr: wk.thisWeek.rendered, prev: wk.lastWeek.rendered },
+                  { title: "Render failures", curr: wk.thisWeek.renderFailures, prev: wk.lastWeek.renderFailures },
                 ].map((m) => {
                   const d = pctDelta(m.curr, m.prev);
                   return (
@@ -485,8 +526,7 @@ export default function Dashboard() {
                       </div>
 
                       <div className="col-span-3 flex items-center justify-end gap-3">
-                        {typeof q.estimateLow === "number" ||
-                        typeof q.estimateHigh === "number" ? (
+                        {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
                           <div className="text-xs text-gray-700 dark:text-gray-300">
                             {money(q.estimateLow)}{" "}
                             {q.estimateHigh != null ? `– ${money(q.estimateHigh)}` : ""}
@@ -530,8 +570,4 @@ export default function Dashboard() {
       </div>
     </main>
   );
-}
-
-function s(n: number) {
-  return n === 1 ? "" : "s";
 }
