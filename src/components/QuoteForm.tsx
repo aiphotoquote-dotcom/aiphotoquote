@@ -1,3 +1,4 @@
+// src/components/QuoteForm.tsx
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -24,12 +25,24 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function digitsOnly(s: string) {
+function digitsOnlyRaw(s: string) {
   return (s || "").replace(/\D/g, "");
 }
 
+/**
+ * Normalize US phone digits:
+ * - strips non-digits
+ * - if 11 digits starting with "1", drop the leading 1
+ * - returns max 10 digits
+ */
+function normalizeUSPhoneDigits(input: string) {
+  const d = digitsOnlyRaw(input);
+  if (d.length === 11 && d.startsWith("1")) return d.slice(1);
+  return d.slice(0, 10);
+}
+
 function formatUSPhone(input: string) {
-  const d = digitsOnly(input).slice(0, 10);
+  const d = normalizeUSPhoneDigits(input);
   const a = d.slice(0, 3);
   const b = d.slice(3, 6);
   const c = d.slice(6, 10);
@@ -128,46 +141,47 @@ function ProgressBar({
   );
 }
 
-function Stepper({
-  steps,
-}: {
-  steps: Array<{ key: string; label: string; state: "done" | "active" | "todo" }>;
-}) {
+type StepState = "todo" | "active" | "done";
+type StepperStep = { key: string; label: string; state: StepState };
+
+function Stepper({ steps }: { steps: StepperStep[] }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-        What’s happening
+        Progress
       </div>
-      <div className="mt-3 space-y-2">
-        {steps.map((s) => (
-          <div key={s.key} className="flex items-center gap-3">
-            <div
-              className={cn(
-                "h-2.5 w-2.5 rounded-full border",
-                s.state === "done"
-                  ? "bg-black border-black dark:bg-white dark:border-white"
+
+      <div className="mt-3 grid gap-2">
+        {steps.map((s) => {
+          const dot =
+            s.state === "done"
+              ? "bg-green-600"
+              : s.state === "active"
+              ? "bg-black dark:bg-white"
+              : "bg-gray-300 dark:bg-gray-700";
+
+          const text =
+            s.state === "done"
+              ? "text-gray-900 dark:text-gray-100"
+              : s.state === "active"
+              ? "text-gray-900 dark:text-gray-100"
+              : "text-gray-600 dark:text-gray-300";
+
+          return (
+            <div key={s.key} className="flex items-center gap-3">
+              <span className={cn("h-2.5 w-2.5 rounded-full", dot)} />
+              <span className={cn("text-xs font-semibold", text)}>{s.label}</span>
+
+              <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-400">
+                {s.state === "done"
+                  ? "Done"
                   : s.state === "active"
-                    ? "bg-white border-black dark:bg-black dark:border-white"
-                    : "bg-transparent border-gray-300 dark:border-gray-700"
-              )}
-            />
-            <div
-              className={cn(
-                "text-sm",
-                s.state === "active"
-                  ? "font-semibold text-gray-900 dark:text-gray-100"
-                  : s.state === "done"
-                    ? "text-gray-700 dark:text-gray-200"
-                    : "text-gray-500 dark:text-gray-400"
-              )}
-            >
-              {s.label}
+                  ? "In progress"
+                  : "Pending"}
+              </span>
             </div>
-          </div>
-        ))}
-      </div>
-      <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
-        Tip: 2–6 photos usually gives the best estimate.
+          );
+        })}
       </div>
     </div>
   );
@@ -200,15 +214,17 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
 
   if (!res.ok || !j?.ok) {
     throw new Error(
-      j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`
+      j?.error?.message ||
+        j?.message ||
+        `Blob upload failed (HTTP ${res.status})`
     );
   }
 
   const urls: string[] = Array.isArray(j?.urls)
     ? j.urls.map((x: any) => String(x)).filter(Boolean)
     : Array.isArray(j?.files)
-      ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
-      : [];
+    ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
+    : [];
 
   if (!urls.length) throw new Error("Blob upload returned no file urls.");
   return urls;
@@ -221,8 +237,8 @@ export default function QuoteForm({
   tenantSlug: string;
   aiRenderingEnabled?: boolean;
 }) {
-  // ✅ Minimum is 1 now (but we recommend 2+ everywhere in copy/UI)
   const MIN_PHOTOS = 1;
+  const RECOMMENDED_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
   // contact + notes
@@ -240,7 +256,7 @@ export default function QuoteForm({
   // submission lifecycle
   const [working, setWorking] = useState(false);
   const [phase, setPhase] = useState<
-    "idle" | "compressing" | "uploading" | "inspecting" | "estimating"
+    "idle" | "compressing" | "uploading" | "analyzing"
   >("idle");
 
   // results
@@ -286,7 +302,7 @@ export default function QuoteForm({
   const contactOk = useMemo(() => {
     const nOk = customerName.trim().length > 0;
     const eOk = isValidEmail(email);
-    const pOk = digitsOnly(phone).length === 10;
+    const pOk = normalizeUSPhoneDigits(phone).length === 10;
     return nOk && eOk && pOk;
   }, [customerName, email, phone]);
 
@@ -297,20 +313,19 @@ export default function QuoteForm({
   }, [working, photoCount, contactOk]);
 
   const disabledReason = useMemo(() => {
-    if (working) return "Working…";
-    if (photoCount < MIN_PHOTOS) return `Add at least ${MIN_PHOTOS} photo to get started (2+ recommended).`;
+    if (working) return null;
+    if (photoCount < MIN_PHOTOS) return `Add at least ${MIN_PHOTOS} photo to continue.`;
     if (!customerName.trim()) return "Enter your name to continue.";
-    if (!isValidEmail(email)) return "Enter a valid email address to continue.";
-    if (digitsOnly(phone).length !== 10) return "Enter a valid 10-digit phone number to continue.";
+    if (!isValidEmail(email)) return "Enter a valid email to continue.";
+    if (normalizeUSPhoneDigits(phone).length !== 10) return "Enter a valid 10-digit phone number.";
     return null;
-  }, [working, photoCount, customerName, email, phone]);
+  }, [working, photoCount, customerName, email, phone, MIN_PHOTOS]);
 
   const workingLabel = useMemo(() => {
     if (!working) return "Ready";
     if (phase === "compressing") return "Optimizing photos…";
     if (phase === "uploading") return "Uploading…";
-    if (phase === "inspecting") return "Inspecting photos…";
-    if (phase === "estimating") return "Estimating…";
+    if (phase === "analyzing") return "Inspecting…";
     return "Working…";
   }, [working, phase]);
 
@@ -325,42 +340,52 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-  const stepperSteps = useMemo(() => {
-    const doneIf = (cond: boolean) => (cond ? ("done" as const) : ("todo" as const));
-    const activeIf = (cond: boolean) => (cond ? ("active" as const) : ("todo" as const));
+  const photosOk = photoCount >= MIN_PHOTOS;
+  const recommendedOk = photoCount >= RECOMMENDED_PHOTOS;
 
-    // Define a simple linear model based on current phase/working/result
-    const optimizingDone = !working && (result || quoteLogId) ? true : phase !== "compressing" && working ? true : false;
-    const uploadingDone = !working && (result || quoteLogId) ? true : phase !== "uploading" && working ? true : false;
-    const inspectingDone = !working && (result || quoteLogId) ? true : phase !== "inspecting" && working ? true : false;
-    const estimatingDone = Boolean(result);
+  const stepperSteps: StepperStep[] = useMemo(() => {
+    const hasResult = Boolean(result);
 
-    const optimizingState =
-      phase === "compressing" && working ? "active" : optimizingDone ? "done" : "todo";
-    const uploadingState =
-      phase === "uploading" && working ? "active" : uploadingDone ? "done" : "todo";
-    const inspectingState =
-      phase === "inspecting" && working ? "active" : inspectingDone ? "done" : "todo";
-    const estimatingState =
-      phase === "estimating" && working ? "active" : estimatingDone ? "done" : "todo";
+    const photosState: StepState = photosOk ? "done" : "active";
 
-    // If not working and no result yet, show all as todo.
-    if (!working && !result) {
-      return [
-        { key: "opt", label: "Optimize photos", state: "todo" as const },
-        { key: "up", label: "Upload securely", state: "todo" as const },
-        { key: "ins", label: "Inspect damage/scope", state: "todo" as const },
-        { key: "est", label: "Generate estimate", state: "todo" as const },
-      ];
-    }
+    const contactState: StepState = !photosOk
+      ? "todo"
+      : contactOk
+      ? "done"
+      : "active";
+
+    const optimizeState: StepState =
+      working && phase === "compressing"
+        ? "active"
+        : working && (phase === "uploading" || phase === "analyzing" || hasResult)
+        ? "done"
+        : "todo";
+
+    const uploadState: StepState =
+      working && phase === "uploading"
+        ? "active"
+        : working && (phase === "analyzing" || hasResult)
+        ? "done"
+        : "todo";
+
+    const inspectState: StepState =
+      working && phase === "analyzing"
+        ? "active"
+        : hasResult
+        ? "done"
+        : "todo";
+
+    const estimateState: StepState = hasResult ? "done" : "todo";
 
     return [
-      { key: "opt", label: "Optimize photos", state: optimizingState },
-      { key: "up", label: "Upload securely", state: uploadingState },
-      { key: "ins", label: "Inspect damage/scope", state: inspectingState },
-      { key: "est", label: "Generate estimate", state: estimatingState },
+      { key: "photos", label: "Add photos", state: photosState },
+      { key: "contact", label: "Enter your info", state: contactState },
+      { key: "optimize", label: "Optimize", state: optimizeState },
+      { key: "upload", label: "Upload", state: uploadState },
+      { key: "inspect", label: "Inspect", state: inspectState },
+      { key: "estimate", label: "Estimate ready", state: estimateState },
     ];
-  }, [working, phase, result, quoteLogId]);
+  }, [photosOk, contactOk, working, phase, result]);
 
   const addCameraFiles = useCallback((files: File[]) => {
     if (!files.length) return;
@@ -404,7 +429,6 @@ export default function QuoteForm({
       if (p?.previewSrc?.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
       const next = prev.filter((x) => x.id !== id);
 
-      // Re-normalize shot types for first 2 positions to keep “wide/close” behavior.
       return next.map((x, idx) => ({
         ...x,
         shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType,
@@ -477,7 +501,7 @@ export default function QuoteForm({
     }
 
     if (photos.length < MIN_PHOTOS) {
-      setError(`Please add at least ${MIN_PHOTOS} photo to get started. (2+ recommended)`);
+      setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
       return;
     }
     if (photos.length > MAX_PHOTOS) {
@@ -493,7 +517,7 @@ export default function QuoteForm({
       setError("Please enter a valid email address.");
       return;
     }
-    if (digitsOnly(phone).length !== 10) {
+    if (normalizeUSPhoneDigits(phone).length !== 10) {
       setError("Please enter a valid 10-digit phone number.");
       return;
     }
@@ -501,80 +525,63 @@ export default function QuoteForm({
     setWorking(true);
 
     try {
-      // 1) Upload camera files if needed
-      const needUpload = photos.filter((p) => !p.uploadedUrl && p.file);
-      let uploadMap = new Map<string, string>();
+      let currentPhotos = photos;
 
+      const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
       if (needUpload.length) {
         setPhase("compressing");
-        const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
+        const compressed = await Promise.all(
+          needUpload.map((p) => compressImage(p.file!))
+        );
 
         setPhase("uploading");
         const urls = await uploadToBlob(compressed);
 
+        const byId = new Map<string, string>();
         needUpload.forEach((p, idx) => {
           const u = urls[idx];
-          if (u) uploadMap.set(p.id, u);
+          if (u) byId.set(p.id, u);
         });
 
-        // Update UI state (best effort)
-        setPhotos((prev) =>
-          prev.map((p) => {
-            const u = uploadMap.get(p.id);
-            if (!u) return p;
+        const mapped = currentPhotos.map((p) => {
+          const u = byId.get(p.id);
+          if (!u) return p;
 
-            if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+          if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
 
-            return {
-              ...p,
-              uploadedUrl: u,
-              previewSrc: u,
-              file: undefined,
-            };
-          })
-        );
+          return {
+            ...p,
+            uploadedUrl: u,
+            previewSrc: u,
+            file: undefined,
+          };
+        });
+
+        setPhotos(mapped);
+        currentPhotos = mapped;
       }
 
-      // 2) Build a FINAL local snapshot (don’t trust async state timing)
-      const finalPhotos: PhotoItem[] = photos.map((p) => {
-        if (p.uploadedUrl) return p;
-        const u = uploadMap.get(p.id);
-        if (u) return { ...p, uploadedUrl: u, previewSrc: u, file: undefined };
-        return p;
-      });
-
-      // Ensure all photos are uploaded
-      const urls = finalPhotos.map((p) => p.uploadedUrl).filter(Boolean) as string[];
-      if (urls.length !== finalPhotos.length) {
+      const urls = currentPhotos.map((p) => p.uploadedUrl).filter(Boolean) as string[];
+      if (urls.length !== currentPhotos.length) {
         throw new Error("Some photos are not uploaded yet. Please try again.");
       }
 
-      // 3) “Inspecting” is a UX phase (fast) then estimate
-      setPhase("inspecting");
-      await sleep(350);
+      setPhase("analyzing");
 
-      setPhase("estimating");
-
-      const phoneDigits = digitsOnly(phone);
-
-      // 4) Call quote submit API
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
-          images: finalPhotos.map((p) => ({ url: p.uploadedUrl!, shotType: p.shotType })),
+          images: currentPhotos.map((p) => ({
+            url: p.uploadedUrl!,
+            shotType: p.shotType,
+          })),
 
-          // Send BOTH shapes for compatibility during rollout
           customer: {
             name: customerName.trim(),
             email: email.trim(),
-            phone: phoneDigits,
-          },
-          contact: {
-            name: customerName.trim(),
-            email: email.trim(),
-            phone: phoneDigits,
+            phone: normalizeUSPhoneDigits(phone),
           },
 
           customer_context: {
@@ -608,13 +615,11 @@ export default function QuoteForm({
       }
 
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
+
       setQuoteLogId(qid);
       setResult(json?.output ?? json);
 
       renderAttemptedForQuoteRef.current = null;
-
-      // Done
-      setPhase("idle");
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
@@ -652,9 +657,7 @@ export default function QuoteForm({
       }
 
       const url = (j?.imageUrl ?? j?.render_image_url ?? j?.url ?? null) as string | null;
-      if (!url) {
-        throw new Error("Render completed but no imageUrl returned.");
-      }
+      if (!url) throw new Error("Render completed but no imageUrl returned.");
 
       setRenderImageUrl(url);
       setRenderStatus("rendered");
@@ -688,24 +691,18 @@ export default function QuoteForm({
       <div className="grid gap-3">
         <ProgressBar title="Working" label={workingLabel} active={working} />
         <Stepper steps={stepperSteps} />
-
         {aiRenderingEnabled ? (
-          <ProgressBar
-            title="AI Rendering"
-            label={renderingLabel}
-            active={renderStatus === "running"}
-          />
+          <ProgressBar title="AI Rendering" label={renderingLabel} active={renderStatus === "running"} />
         ) : null}
       </div>
 
       {/* Photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">
-            Add photos (1 minimum, 2+ recommended)
-          </h2>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Add photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Start with a wide shot, then a close-up. Label each photo after it’s added. (max {MAX_PHOTOS})
+            Minimum <b>{MIN_PHOTOS}</b> photo to submit — but <b>{RECOMMENDED_PHOTOS}–6</b> photos usually gives a better
+            estimate. (max {MAX_PHOTOS})
           </p>
         </div>
 
@@ -764,17 +761,10 @@ export default function QuoteForm({
             {photos.map((p, idx) => {
               const badge = shotBadge(p.shotType);
               return (
-                <div
-                  key={p.id}
-                  className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800"
-                >
+                <div key={p.id} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                   <div className="relative">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={p.previewSrc}
-                      alt={`photo ${idx + 1}`}
-                      className="h-44 w-full object-cover"
-                    />
+                    <img src={p.previewSrc} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
                     <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
                       {badge}
                     </div>
@@ -789,9 +779,7 @@ export default function QuoteForm({
                   </div>
 
                   <div className="p-3 flex flex-wrap items-center gap-2">
-                    <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">
-                      Label:
-                    </div>
+                    <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
 
                     <button
                       type="button"
@@ -836,9 +824,7 @@ export default function QuoteForm({
                     </button>
 
                     {!p.uploadedUrl && p.file ? (
-                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">
-                        Camera photo (uploads on submit)
-                      </span>
+                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">Camera photo (uploads on submit)</span>
                     ) : null}
                   </div>
                 </div>
@@ -847,14 +833,21 @@ export default function QuoteForm({
           </div>
         ) : (
           <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-            No photos yet. One photo is enough to start — but 2–6 photos usually gives the best estimate.
+            No photos yet. Add at least one photo to continue — two or more is better.
           </div>
         )}
 
         <div className="text-xs text-gray-600 dark:text-gray-300">
-          {photoCount >= MIN_PHOTOS
-            ? `✅ ${photoCount} photo${photoCount === 1 ? "" : "s"} added (2+ recommended)`
-            : `Add at least ${MIN_PHOTOS} photo (you have ${photoCount})`}
+          {photoCount >= MIN_PHOTOS ? (
+            <>
+              ✅ {photoCount} photo{photoCount === 1 ? "" : "s"} added{" "}
+              {!recommendedOk ? (
+                <span className="text-gray-500 dark:text-gray-400">· Add 1+ more for best results</span>
+              ) : null}
+            </>
+          ) : (
+            `Add ${MIN_PHOTOS} photo (you have ${photoCount})`
+          )}
         </div>
       </section>
 
@@ -911,6 +904,9 @@ export default function QuoteForm({
             inputMode="tel"
             autoComplete="tel"
           />
+          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            Tip: if you type a leading “1”, we’ll normalize it automatically.
+          </div>
         </label>
 
         <label className="block">
@@ -956,10 +952,8 @@ export default function QuoteForm({
           {working ? "Working…" : "Get Estimate"}
         </button>
 
-        {!canSubmit && disabledReason ? (
-          <div className="text-xs text-gray-600 dark:text-gray-300">
-            {disabledReason}
-          </div>
+        {disabledReason ? (
+          <div className="text-xs text-gray-600 dark:text-gray-300">{disabledReason}</div>
         ) : null}
 
         <button
@@ -985,14 +979,8 @@ export default function QuoteForm({
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
         >
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-              Result
-            </h2>
-            {quoteLogId ? (
-              <div className="text-xs text-gray-600 dark:text-gray-300">
-                Quote ID: {quoteLogId}
-              </div>
-            ) : null}
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
+            {quoteLogId ? <div className="text-xs text-gray-600 dark:text-gray-300">Quote ID: {quoteLogId}</div> : null}
           </div>
 
           <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
@@ -1003,12 +991,8 @@ export default function QuoteForm({
             <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900">
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    AI Rendering
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">
-                    Status: {renderStatus}
-                  </div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
                 </div>
 
                 <button
@@ -1030,11 +1014,7 @@ export default function QuoteForm({
               {renderImageUrl ? (
                 <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={renderImageUrl}
-                    alt="AI rendering"
-                    className="w-full object-cover"
-                  />
+                  <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
                 </div>
               ) : null}
             </div>
