@@ -79,6 +79,9 @@ export const tenantSettings = pgTable("tenant_settings", {
   renderingCustomerOptInRequired: boolean("rendering_customer_opt_in_required"),
   aiRenderingEnabled: boolean("ai_rendering_enabled"),
   reportingTimezone: text("reporting_timezone"),
+
+  // IMPORTANT: your DB column is INT (not text). Store Monday as 1 (recommended).
+  // e.g. 1=Monday, 2=Tuesday, ... 7=Sunday
   weekStartsOn: integer("week_starts_on"),
 
   updatedAt: timestamp("updated_at", { withTimezone: true }),
