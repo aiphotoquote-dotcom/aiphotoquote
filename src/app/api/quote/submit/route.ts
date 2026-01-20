@@ -10,24 +10,29 @@ import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 
-const CustomerSchema = z.object({
+const LeadSchema = z.object({
   name: z.string().min(2, "Name is required"),
   phone: z.string().min(7, "Phone is required"),
   email: z.string().email("Valid email is required"),
 });
 
 // Back-compat:
-// - you previously sent customer_context.notes/category/service_type
-// - you previously sent render_opt_in
+// - older UI sent: contact + customer_context + render_opt_in
+// - newer API may want: customer + customer_context + render_opt_in
 const Req = z.object({
   tenantSlug: z.string().min(3),
-  images: z.array(z.object({ url: z.string().url(), shotType: z.string().optional() })).min(1).max(12),
 
-  // ✅ NEW: required lead identity
-  customer: CustomerSchema,
+  images: z
+    .array(z.object({ url: z.string().url(), shotType: z.string().optional() }))
+    .min(1)
+    .max(12),
 
-  // existing
+  // ✅ accept either (we'll require one at runtime)
+  customer: LeadSchema.optional(),
+  contact: LeadSchema.optional(),
+
   render_opt_in: z.boolean().optional(),
+
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -41,10 +46,22 @@ function normalizePhone(raw: string) {
   return String(raw ?? "").replace(/\D/g, "");
 }
 
+function pickLead(input: { customer?: any; contact?: any }) {
+  const src = input.customer ?? input.contact ?? null;
+  if (!src) return null;
+
+  const name = String(src.name ?? "").trim();
+  const email = String(src.email ?? "").trim().toLowerCase();
+  const phone = normalizePhone(String(src.phone ?? ""));
+
+  return { name, email, phone };
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
+
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
@@ -54,13 +71,34 @@ export async function POST(req: Request) {
 
     const { tenantSlug, images } = parsed.data;
 
-    const customer = {
-      name: parsed.data.customer.name.trim(),
-      phone: normalizePhone(parsed.data.customer.phone),
-      email: parsed.data.customer.email.trim().toLowerCase(),
-    };
+    // ✅ require lead identity (either customer or contact)
+    const lead = pickLead({ customer: parsed.data.customer, contact: parsed.data.contact });
+    if (!lead) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "MISSING_LEAD",
+          message: "Please provide name, email, and phone.",
+        },
+        { status: 400 }
+      );
+    }
 
-    if (customer.phone.length < 10) {
+    if (lead.name.length < 2) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_NAME", message: "Name is required." },
+        { status: 400 }
+      );
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email)) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_EMAIL", message: "Valid email is required." },
+        { status: 400 }
+      );
+    }
+
+    if (lead.phone.length < 10) {
       return NextResponse.json(
         { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
         { status: 400 }
@@ -76,10 +114,7 @@ export async function POST(req: Request) {
       .then((r) => r[0] ?? null);
 
     if (!tenant) {
-      return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND" },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
     // Settings (optional)
@@ -103,10 +138,7 @@ export async function POST(req: Request) {
       .then((r) => r[0] ?? null);
 
     if (!secretRow?.openaiKeyEnc) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_OPENAI_KEY" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
     }
 
     const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
@@ -115,16 +147,23 @@ export async function POST(req: Request) {
     const renderOptIn = Boolean(parsed.data.render_opt_in);
 
     const customer_context = parsed.data.customer_context ?? {};
-    const category = customer_context.category ?? "service";
+    const category = customer_context.category ?? settings?.industryKey ?? "service";
     const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
 
-    // --- Build input we store (consistent, includes customer) ---
+    // --- Build input we store (consistent, includes lead) ---
     const inputToStore = {
       tenantSlug,
       images,
       render_opt_in: renderOptIn,
-      customer,
+
+      // store under a single key going forward
+      contact: {
+        name: lead.name,
+        email: lead.email,
+        phone: lead.phone,
+      },
+
       customer_context: {
         category,
         service_type,
@@ -133,8 +172,7 @@ export async function POST(req: Request) {
       createdAt: new Date().toISOString(),
     };
 
-    // --- Call OpenAI (your existing logic may differ; keep this minimal) ---
-    // If you already have a richer prompt + schema, keep it. This is a safe placeholder.
+    // --- OpenAI ---
     const prompt = `
 You are generating a quick price estimate range for a ${category} job.
 Service type: ${service_type}
@@ -166,15 +204,16 @@ Return JSON with: estimateLow, estimateHigh, inspectionRequired (boolean), summa
         tenantId: tenant.id,
         input: inputToStore,
         output,
-        // renderOptIn/renderStatus default exist in schema; if you want to set:
         renderOptIn,
       })
       .returning({ id: quoteLogs.id })
       .then((r) => r[0] ?? null);
 
+    const quoteLogId = inserted?.id ?? null;
+
     return NextResponse.json({
       ok: true,
-      quoteId: inserted?.id ?? null,
+      quoteLogId, // ✅ UI expects this
       output,
     });
   } catch (e: any) {
