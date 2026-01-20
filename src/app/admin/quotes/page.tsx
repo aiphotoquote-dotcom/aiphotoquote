@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { and, desc, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
@@ -157,11 +158,46 @@ type PageProps = {
     | Record<string, string | string[] | undefined>;
 };
 
+function TopNav({ active }: { active: "dashboard" | "quotes" | "settings" }) {
+  const linkClass = (isActive: boolean) =>
+    "rounded-lg px-3 py-2 text-sm font-semibold " +
+    (isActive
+      ? "bg-black text-white dark:bg-white dark:text-black"
+      : "text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-900");
+
+  return (
+    <header className="sticky top-0 z-40 border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/70">
+      <div className="mx-auto max-w-6xl px-6 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="h-9 w-9 rounded-xl bg-black dark:bg-white" />
+          <div className="leading-tight">
+            <div className="text-sm font-semibold">AI Photo Quote</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">Admin</div>
+          </div>
+        </div>
+
+        <nav className="flex items-center gap-2">
+          <Link href="/admin" className={linkClass(active === "dashboard")}>
+            Dashboard
+          </Link>
+          <Link href="/admin/quotes" className={linkClass(active === "quotes")}>
+            Quotes
+          </Link>
+          <Link href="/onboarding" className={linkClass(active === "settings")}>
+            Settings
+          </Link>
+        </nav>
+      </div>
+    </header>
+  );
+}
+
 export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+        <TopNav active="quotes" />
         <div className="mx-auto max-w-6xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Quotes</h1>
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
@@ -212,6 +248,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   if (!tenantIdMaybe) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+        <TopNav active="quotes" />
         <div className="mx-auto max-w-6xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Quotes</h1>
           <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
@@ -237,25 +274,18 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       .delete(quoteLogs)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
+    // NOTE: hash fragments (#...) are not available server-side, so we can’t preserve
+    // exact scroll after delete — but the big pain (scrolling to confirm) is fixed.
     redirect(`/admin/quotes${qs({ page, pageSize })}`);
   }
 
-  // total for paging controls + header
-  const total = await db
-    .select({ cnt: quoteLogs.id })
-    .from(quoteLogs)
-    .where(eq(quoteLogs.tenantId, tenantId))
-    .then((r) => r.length);
-
-  // NOTE: Drizzle doesn't give count(*) easily with strict typing without sql`count(*)`.
-  // So we do a proper count query:
-  const totalRow = await db.execute(
-    // eslint-disable-next-line drizzle/no-sql-tagged-template
-    (await import("drizzle-orm")).sql`select count(*)::int as c from "quote_logs" where "tenant_id" = ${tenantId}::uuid`
+  // total count for paging controls
+  const totalRes = await db.execute(
+    sql`select count(*)::int as c from "quote_logs" where "tenant_id" = ${tenantId}::uuid`
   );
   const totalCount =
-    (totalRow as any)?.rows?.[0]?.c ??
-    (Array.isArray(totalRow) ? (totalRow as any)?.[0]?.c : null) ??
+    (totalRes as any)?.rows?.[0]?.c ??
+    (Array.isArray(totalRes) ? (totalRes as any)?.[0]?.c : null) ??
     0;
 
   const rows = await db
@@ -283,14 +313,15 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+      <TopNav active="quotes" />
+
       <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
         {/* Header */}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">Quotes</h1>
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              {totalCount} total · {unreadCount} unread on this page · Page{" "}
-              {safePage} / {totalPages}
+              {totalCount} total · {unreadCount} unread on this page · Page {safePage} / {totalPages}
             </p>
           </div>
 
@@ -361,9 +392,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
         {/* List */}
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
           {rows.length === 0 ? (
-            <div className="p-6 text-sm text-gray-700 dark:text-gray-300">
-              No quotes on this page.
-            </div>
+            <div className="p-6 text-sm text-gray-700 dark:text-gray-300">No quotes on this page.</div>
           ) : (
             <ul className="divide-y divide-gray-200 dark:divide-gray-800">
               {rows.map((r) => {
@@ -372,22 +401,22 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                 const unread = !r.isRead;
 
                 const wantsConfirm = confirmDelete && deleteId && deleteId === r.id;
-                const confirmHref = `/admin/quotes${qs({
-                  page: safePage,
-                  pageSize,
-                  deleteId: r.id,
-                  confirmDelete: 1,
-                })}`;
+                const anchor = `q-${r.id}`;
+
+                // Key fix: include #anchor so browser scrolls back to the row
+                const confirmHref =
+                  `/admin/quotes` +
+                  qs({ page: safePage, pageSize, deleteId: r.id, confirmDelete: 1 }) +
+                  `#${anchor}`;
+
+                const cancelHref = `/admin/quotes${qs({ page: safePage, pageSize })}#${anchor}`;
 
                 return (
-                  <li key={r.id} className="p-5">
+                  <li key={r.id} id={anchor} className="p-5 scroll-mt-24">
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <Link
-                            href={`/admin/quotes/${r.id}`}
-                            className="text-base font-semibold hover:underline"
-                          >
+                          <Link href={`/admin/quotes/${r.id}`} className="text-base font-semibold hover:underline">
                             {lead.name}
                           </Link>
 
@@ -406,11 +435,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         </div>
 
                         <div className="mt-1 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
-                          {lead.phone ? (
-                            <span className="font-mono">{lead.phone}</span>
-                          ) : (
-                            <span className="italic">No phone</span>
-                          )}
+                          {lead.phone ? <span className="font-mono">{lead.phone}</span> : <span className="italic">No phone</span>}
                           {lead.email ? (
                             <>
                               <span>·</span>
@@ -450,7 +475,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
                             <div className="mt-3 flex items-center justify-end gap-2">
                               <Link
-                                href={`/admin/quotes${qs({ page: safePage, pageSize })}`}
+                                href={cancelHref}
                                 className="rounded-md border border-gray-200 bg-white px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
                               >
                                 Cancel
@@ -471,9 +496,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                       </div>
                     </div>
 
-                    <div className="mt-3 font-mono text-[10px] text-gray-400 dark:text-gray-600">
-                      {r.id}
-                    </div>
+                    <div className="mt-3 font-mono text-[10px] text-gray-400 dark:text-gray-600">{r.id}</div>
                   </li>
                 );
               })}
