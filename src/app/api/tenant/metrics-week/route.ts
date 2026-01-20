@@ -1,13 +1,13 @@
-// src/app/api/tenant/metrics-week/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { eq, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenants } from "@/lib/db/schema";
+import { tenantSettings, tenants } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
@@ -18,18 +18,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   ].filter(Boolean) as string[];
 
   return candidates[0] || null;
-}
-
-// Monday 00:00:00 UTC for the week containing `d`
-function startOfWeekUtc(d: Date) {
-  const x = new Date(d);
-  const utc = new Date(
-    Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate(), 0, 0, 0, 0)
-  );
-  const day = utc.getUTCDay(); // 0 Sun .. 6 Sat
-  const diff = (day + 6) % 7; // days since Monday
-  utc.setUTCDate(utc.getUTCDate() - diff);
-  return utc;
 }
 
 async function resolveTenantId(userId: string) {
@@ -54,119 +42,111 @@ export async function GET() {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json(
-        { ok: false, error: "UNAUTHENTICATED" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
     const tenantId = await resolveTenantId(userId);
     if (!tenantId) {
-      return NextResponse.json(
-        { ok: false, error: "NO_ACTIVE_TENANT" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
-    const now = new Date();
-
-    // UTC week bounds
-    const thisWeekStart = startOfWeekUtc(now);
-    const nextWeekStart = new Date(thisWeekStart);
-    nextWeekStart.setUTCDate(thisWeekStart.getUTCDate() + 7);
-
-    const lastWeekStart = new Date(thisWeekStart);
-    lastWeekStart.setUTCDate(thisWeekStart.getUTCDate() - 7);
-
-    // IMPORTANT: pass ISO strings (driver-safe), cast to timestamptz in SQL
-    const tws = thisWeekStart.toISOString();
-    const nwe = nextWeekStart.toISOString();
-    const lws = lastWeekStart.toISOString();
-    const twe = thisWeekStart.toISOString();
-
-    const row = await db
+    // Load reporting settings (defaults if missing)
+    const s = await db
       .select({
-        quotesThis: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
-          )::int
-        `.mapWith(Number),
-        quotesLast: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
-          )::int
-        `.mapWith(Number),
-
-        optinsThis: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
-              and ${quoteLogs.renderOptIn} = true
-          )::int
-        `.mapWith(Number),
-        optinsLast: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
-              and ${quoteLogs.renderOptIn} = true
-          )::int
-        `.mapWith(Number),
-
-        renderedThis: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
-              and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'rendered'
-          )::int
-        `.mapWith(Number),
-        renderedLast: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
-              and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'rendered'
-          )::int
-        `.mapWith(Number),
-
-        failedThis: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${tws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${nwe}::timestamptz)
-              and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'failed'
-          )::int
-        `.mapWith(Number),
-        failedLast: sql<number>`
-          count(*) filter (
-            where ${quoteLogs.createdAt} >= (${lws}::timestamptz)
-              and ${quoteLogs.createdAt} <  (${twe}::timestamptz)
-              and lower(coalesce(${quoteLogs.renderStatus}, '')) = 'failed'
-          )::int
-        `.mapWith(Number),
+        reportingTimezone: tenantSettings.reportingTimezone,
+        weekStartsOn: tenantSettings.weekStartsOn,
       })
-      .from(quoteLogs)
-      .where(eq(quoteLogs.tenantId, tenantId))
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenantId))
+      .limit(1)
       .then((r) => r[0] ?? null);
+
+    const tz = (s?.reportingTimezone ?? "America/New_York").toString();
+    const weekStartsOn = typeof s?.weekStartsOn === "number" ? s!.weekStartsOn! : 1; // default Monday
+
+    // offsetDays = (8 - weekStartsOn) % 7
+    // weekStartsOn: 0=Sun -> off=1, 1=Mon -> off=0, 2=Tue -> off=6, etc
+    const offsetDays = (8 - weekStartsOn) % 7;
+
+    const result = await db.execute(sql`
+      with
+        cfg as (
+          select
+            ${tz}::text as tz,
+            ${offsetDays}::int as off
+        ),
+        bounds as (
+          select
+            (now() at time zone (select tz from cfg)) as local_now
+        ),
+        w as (
+          select
+            (
+              date_trunc('week', (select local_now from bounds) + (select off from cfg) * interval '1 day')
+              - (select off from cfg) * interval '1 day'
+            ) as this_start_local
+        ),
+        t as (
+          select
+            (this_start_local at time zone (select tz from cfg)) as this_start,
+            ((this_start_local + interval '7 days') at time zone (select tz from cfg)) as this_end,
+            ((this_start_local - interval '7 days') at time zone (select tz from cfg)) as last_start,
+            (this_start_local at time zone (select tz from cfg)) as last_end
+          from w
+        )
+      select
+        (select this_start from t) as this_start,
+        (select this_end   from t) as this_end,
+        (select last_start from t) as last_start,
+        (select last_end   from t) as last_end,
+
+        count(*) filter (where q.created_at >= (select this_start from t) and q.created_at < (select this_end from t))::int as quotes_this,
+        count(*) filter (where q.created_at >= (select last_start from t) and q.created_at < (select last_end from t))::int as quotes_last,
+
+        count(*) filter (where q.created_at >= (select this_start from t) and q.created_at < (select this_end from t) and q.render_opt_in = true)::int as optins_this,
+        count(*) filter (where q.created_at >= (select last_start from t) and q.created_at < (select last_end from t) and q.render_opt_in = true)::int as optins_last,
+
+        count(*) filter (where q.created_at >= (select this_start from t) and q.created_at < (select this_end from t) and lower(coalesce(q.render_status,'')) = 'rendered')::int as rendered_this,
+        count(*) filter (where q.created_at >= (select last_start from t) and q.created_at < (select last_end from t) and lower(coalesce(q.render_status,'')) = 'rendered')::int as rendered_last,
+
+        count(*) filter (where q.created_at >= (select this_start from t) and q.created_at < (select this_end from t) and lower(coalesce(q.render_status,'')) = 'failed')::int as failed_this,
+        count(*) filter (where q.created_at >= (select last_start from t) and q.created_at < (select last_end from t) and lower(coalesce(q.render_status,'')) = 'failed')::int as failed_last
+      from quote_logs q
+      where q.tenant_id = ${tenantId}::uuid;
+    `);
+
+    const row: any =
+      Array.isArray((result as any).rows) ? (result as any).rows[0] : (result as any)[0];
+
+    if (!row) {
+      return NextResponse.json({
+        ok: true,
+        reporting: { timezone: tz, week_starts_on: weekStartsOn },
+        range: null,
+        thisWeek: { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 },
+        lastWeek: { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 },
+      });
+    }
 
     return NextResponse.json({
       ok: true,
+      reporting: { timezone: tz, week_starts_on: weekStartsOn },
       range: {
-        thisWeekStart: tws,
-        nextWeekStart: nwe,
-        lastWeekStart: lws,
-        lastWeekEnd: twe,
+        thisWeekStart: new Date(row.this_start).toISOString(),
+        nextWeekStart: new Date(row.this_end).toISOString(),
+        lastWeekStart: new Date(row.last_start).toISOString(),
       },
       thisWeek: {
-        quotes: row?.quotesThis ?? 0,
-        renderOptIns: row?.optinsThis ?? 0,
-        rendered: row?.renderedThis ?? 0,
-        renderFailures: row?.failedThis ?? 0,
+        quotes: row.quotes_this ?? 0,
+        renderOptIns: row.optins_this ?? 0,
+        rendered: row.rendered_this ?? 0,
+        renderFailures: row.failed_this ?? 0,
       },
       lastWeek: {
-        quotes: row?.quotesLast ?? 0,
-        renderOptIns: row?.optinsLast ?? 0,
-        rendered: row?.renderedLast ?? 0,
-        renderFailures: row?.failedLast ?? 0,
+        quotes: row.quotes_last ?? 0,
+        renderOptIns: row.optins_last ?? 0,
+        rendered: row.rendered_last ?? 0,
+        renderFailures: row.failed_last ?? 0,
       },
     });
   } catch (e: any) {

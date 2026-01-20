@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSettings } from "@/lib/db/schema";
@@ -9,102 +9,82 @@ import { tenants, tenantSettings } from "@/lib/db/schema";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
+  const candidates = [
+    jar.get("activeTenantId")?.value,
+    jar.get("active_tenant_id")?.value,
+    jar.get("tenantId")?.value,
+    jar.get("tenant_id")?.value,
+  ].filter(Boolean) as string[];
+
+  return candidates[0] || null;
 }
 
 export async function GET() {
   try {
     const { userId } = await auth();
-    if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    }
 
-    // Next 16: cookies() is async
     const jar = await cookies();
+    let tenantId = getCookieTenantId(jar);
 
-    const candidates = [
-      jar.get("activeTenantId")?.value,
-      jar.get("active_tenant_id")?.value,
-      jar.get("tenantId")?.value,
-      jar.get("tenant_id")?.value,
-    ].filter(Boolean) as string[];
-
-    let tenant: any = null;
-
-    // 1) Prefer active-tenant cookie if present
-    if (candidates.length) {
-      const tenantId = candidates[0];
-
-      const rows = await db
-        .select()
+    // Fallback: use tenant owned by this user
+    if (!tenantId) {
+      const t = await db
+        .select({ id: tenants.id })
         .from(tenants)
-        .where(eq(tenants.id, tenantId as any))
-        .limit(1);
+        .where(eq(tenants.ownerClerkUserId, userId))
+        .limit(1)
+        .then((r) => r[0] ?? null);
 
-      if (rows[0] && String(rows[0].ownerClerkUserId ?? "") === String(userId)) {
-        tenant = rows[0];
-      }
+      tenantId = t?.id ?? null;
     }
 
-    // 2) Fallback: most recent tenant owned by this user
-    if (!tenant) {
-      const rows = await db.execute(sql`
-        select id, name, slug, owner_clerk_user_id
-        from tenants
-        where owner_clerk_user_id = ${userId}
-        order by created_at desc
-        limit 1
-      `);
-
-      const row: any =
-        (rows as any)?.rows?.[0] ?? (Array.isArray(rows) ? (rows as any)[0] : null);
-
-      if (row) {
-        tenant = {
-          id: row.id,
-          name: row.name,
-          slug: row.slug,
-          ownerClerkUserId: row.owner_clerk_user_id,
-        };
-      }
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
-    if (!tenant) return json({ ok: false, error: "NO_TENANT" }, 404);
+    const tenantRow = await db
+      .select({
+        id: tenants.id,
+        name: tenants.name,
+        slug: tenants.slug,
+      })
+      .from(tenants)
+      .where(eq(tenants.id, tenantId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const sRows = await db
-      .select()
+    if (!tenantRow) {
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    }
+
+    const settingsRow = await db
+      .select({
+        tenant_id: tenantSettings.tenantId,
+        industry_key: tenantSettings.industryKey,
+        redirect_url: tenantSettings.redirectUrl,
+        thank_you_url: tenantSettings.thankYouUrl,
+        reporting_timezone: tenantSettings.reportingTimezone,
+        week_starts_on: tenantSettings.weekStartsOn,
+        updated_at: tenantSettings.updatedAt,
+      })
       .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1);
+      .where(eq(tenantSettings.tenantId, tenantId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const s: any = sRows[0] ?? null;
-
-    // Return BOTH snake_case and camelCase for URL fields to avoid UI drift.
-    const settings = s
-      ? {
-          tenant_id: s.tenantId,
-          industry_key: s.industryKey ?? null,
-
-          // snake_case (what your UI expects)
-          redirect_url: s.redirectUrl ?? null,
-          thank_you_url: s.thankYouUrl ?? null,
-
-          // camelCase (what some older UI variants used)
-          redirectUrl: s.redirectUrl ?? null,
-          thankYouUrl: s.thankYouUrl ?? null,
-
-          updated_at: s.updatedAt ? String(s.updatedAt) : null,
-        }
-      : null;
-
-    return json({
+    return NextResponse.json({
       ok: true,
-      tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug },
-      settings,
+      tenant: tenantRow,
+      settings: settingsRow,
     });
   } catch (e: any) {
-    return json(
-      { ok: false, error: "ME_SETTINGS_FAILED", message: e?.message ?? String(e) },
-      500
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
     );
   }
 }

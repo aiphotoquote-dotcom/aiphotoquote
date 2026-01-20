@@ -41,6 +41,10 @@ export const tenants = pgTable(
  *  - redirect_url (text)
  *  - thank_you_url (text)
  *  - updated_at (timestamptz)
+ *
+ * Added:
+ *  - reporting_timezone (text)  e.g. "America/New_York"
+ *  - week_starts_on (int)       0..6 (Sun..Sat)
  */
 export const tenantSettings = pgTable("tenant_settings", {
   // ✅ tenant_id is the PK in the live DB
@@ -53,6 +57,10 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
+
+  // ✅ NEW reporting config
+  reportingTimezone: text("reporting_timezone"),
+  weekStartsOn: integer("week_starts_on"),
 
   updatedAt: timestamp("updated_at", { withTimezone: true }),
 });

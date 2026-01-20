@@ -10,36 +10,38 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Save tenant settings (industry, URLs, etc.)
- * Called from TenantOnboardingForm.
- *
- * IMPORTANT:
- * - Clerk auth() is async in this repo setup -> must await.
- * - Do NOT use db.query.* (db isn't typed with schema generics). Use select/from/where.
+ * Accept BOTH camelCase and snake_case.
+ * Your UI currently sends snake_case, so we must support that.
  */
-
 const Body = z.object({
   tenantSlug: z.string().min(3),
-  industryKey: z.string().min(1),
 
-  // Optional URLs
+  // industry required (either key)
+  industryKey: z.string().min(1).optional(),
+  industry_key: z.string().min(1).optional(),
+
   redirectUrl: z.string().optional().nullable(),
-  thankYouUrl: z.string().optional().nullable(),
+  redirect_url: z.string().optional().nullable(),
 
-  // Optional pricing guardrails (if your form sends them)
-  minJob: z.number().int().nonnegative().optional().nullable(),
-  typicalLow: z.number().int().nonnegative().optional().nullable(),
-  typicalHigh: z.number().int().nonnegative().optional().nullable(),
-  maxWithoutInspection: z.number().int().nonnegative().optional().nullable(),
+  thankYouUrl: z.string().optional().nullable(),
+  thank_you_url: z.string().optional().nullable(),
+
+  reportingTimezone: z.string().optional().nullable(),
+  reporting_timezone: z.string().optional().nullable(),
+
+  weekStartsOn: z.number().int().min(0).max(6).optional().nullable(),
+  week_starts_on: z.number().int().min(0).max(6).optional().nullable(),
 });
 
 function normalizeUrl(u: string | null | undefined) {
   const s = String(u ?? "").trim();
   if (!s) return null;
-
-  // allow "example.com" without scheme
   if (!/^https?:\/\//i.test(s)) return `https://${s}`;
   return s;
+}
+
+function pick<T>(a: T | undefined, b: T | undefined): T | undefined {
+  return a !== undefined ? a : b;
 }
 
 export async function POST(req: Request) {
@@ -51,7 +53,6 @@ export async function POST(req: Request) {
 
     const json = await req.json().catch(() => null);
     const parsed = Body.safeParse(json);
-
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
@@ -59,7 +60,23 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantSlug, industryKey, redirectUrl, thankYouUrl } = parsed.data;
+    const data = parsed.data;
+
+    const industryKey = pick(data.industryKey, data.industry_key);
+    if (!industryKey) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_BODY", message: "industryKey is required" },
+        { status: 400 }
+      );
+    }
+
+    const redirectRaw = pick(data.redirectUrl, data.redirect_url) ?? null;
+    const thankYouRaw = pick(data.thankYouUrl, data.thank_you_url) ?? null;
+
+    const reportingTimezone =
+      (pick(data.reportingTimezone, data.reporting_timezone) ?? "").trim() || null;
+
+    const weekStartsOn = pick(data.weekStartsOn, data.week_starts_on) ?? null;
 
     // Resolve tenant owned by this user (slug is unique)
     const tenantRows = await db
@@ -69,7 +86,7 @@ export async function POST(req: Request) {
         ownerClerkUserId: tenants.ownerClerkUserId,
       })
       .from(tenants)
-      .where(and(eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId)))
+      .where(and(eq(tenants.slug, data.tenantSlug), eq(tenants.ownerClerkUserId, userId)))
       .limit(1);
 
     const tenant = tenantRows[0] ?? null;
@@ -80,10 +97,9 @@ export async function POST(req: Request) {
       );
     }
 
-    const redirect = normalizeUrl(redirectUrl);
-    const thankYou = normalizeUrl(thankYouUrl);
+    const redirect = normalizeUrl(redirectRaw);
+    const thankYou = normalizeUrl(thankYouRaw);
 
-    // Upsert tenant_settings (tenant_id is PK in your DB)
     await db
       .insert(tenantSettings)
       .values({
@@ -91,6 +107,8 @@ export async function POST(req: Request) {
         industryKey,
         redirectUrl: redirect,
         thankYouUrl: thankYou,
+        reportingTimezone,
+        weekStartsOn,
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
@@ -99,6 +117,8 @@ export async function POST(req: Request) {
           industryKey,
           redirectUrl: redirect,
           thankYouUrl: thankYou,
+          reportingTimezone,
+          weekStartsOn,
           updatedAt: new Date(),
         },
       });
@@ -110,6 +130,8 @@ export async function POST(req: Request) {
         industry_key: tenantSettings.industryKey,
         redirect_url: tenantSettings.redirectUrl,
         thank_you_url: tenantSettings.thankYouUrl,
+        reporting_timezone: tenantSettings.reportingTimezone,
+        week_starts_on: tenantSettings.weekStartsOn,
         updated_at: tenantSettings.updatedAt,
       })
       .from(tenantSettings)
