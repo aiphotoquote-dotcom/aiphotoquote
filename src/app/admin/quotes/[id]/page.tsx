@@ -1,10 +1,13 @@
+// src/app/admin/quotes/[id]/page.tsx
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
+
+export const runtime = "nodejs";
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
@@ -17,24 +20,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   return candidates[0] || null;
 }
 
-async function resolveTenantId(userId: string) {
-  const jar = await cookies();
-  let tenantId = getCookieTenantId(jar);
-
-  if (!tenantId) {
-    const t = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    tenantId = t?.id ?? null;
-  }
-
-  return tenantId;
-}
-
 function fmtJson(value: unknown) {
   try {
     return JSON.stringify(value ?? null, null, 2);
@@ -43,9 +28,59 @@ function fmtJson(value: unknown) {
   }
 }
 
+function pickCustomer(input: any) {
+  // Supports a few shapes so we don't break if schema changes
+  const c =
+    input?.customer ??
+    input?.customer_context?.customer ??
+    input?.lead ??
+    input?.contact ??
+    {};
+
+  const name =
+    c?.name ??
+    c?.fullName ??
+    c?.customerName ??
+    input?.name ??
+    "Customer";
+
+  const phone =
+    c?.phone ??
+    c?.phoneNumber ??
+    input?.phone ??
+    input?.customer_context?.phone ??
+    null;
+
+  const email = c?.email ?? input?.email ?? null;
+
+  return {
+    name: String(name || "Customer"),
+    phone: phone ? String(phone) : null,
+    email: email ? String(email) : null,
+  };
+}
+
+const STAGES = [
+  { key: "new", label: "New" },
+  { key: "read", label: "Read" },
+  { key: "contacted", label: "Contacted" },
+  { key: "scheduled", label: "Scheduled" },
+  { key: "quoted", label: "Quoted" },
+  { key: "won", label: "Won" },
+  { key: "lost", label: "Lost" },
+  { key: "archived", label: "Archived" },
+] as const;
+
+function normalizeStage(s: unknown) {
+  const v = String(s ?? "").toLowerCase().trim();
+  if (STAGES.some((x) => x.key === v)) return v;
+  return "new";
+}
+
 export default async function AdminQuoteDetailPage({
   params,
 }: {
+  // Next 16 can deliver params as an async value. Awaiting is safe either way.
   params: Promise<{ id?: string }> | { id?: string };
 }) {
   const { userId } = await auth();
@@ -88,7 +123,20 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  const tenantId = await resolveTenantId(userId);
+  const jar = await cookies();
+  let tenantId = getCookieTenantId(jar);
+
+  // Fallback: if cookie isn't set, use the tenant owned by this user
+  if (!tenantId) {
+    const t = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.ownerClerkUserId, userId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    tenantId = t?.id ?? null;
+  }
 
   if (!tenantId) {
     return (
@@ -112,18 +160,61 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
+  // ----- Server actions -----
+  async function markReadIfNeeded() {
+    "use server";
+    // Mark as read only if unread (null)
+    await db
+      .update(quoteLogs)
+      .set({
+        // NOTE: requires quote_logs.admin_read_at column + schema mapping
+        adminReadAt: new Date(),
+        // Optional: if stage is "new", bump to "read"
+        // NOTE: requires quote_logs.admin_stage column + schema mapping
+        adminStage: "read",
+      })
+      .where(
+        and(
+          eq(quoteLogs.id, quoteId),
+          eq(quoteLogs.tenantId, tenantId),
+          isNull(quoteLogs.adminReadAt)
+        )
+      );
+  }
+
+  async function updateStage(formData: FormData) {
+    "use server";
+    const next = normalizeStage(formData.get("stage"));
+    await db
+      .update(quoteLogs)
+      .set({
+        // NOTE: requires quote_logs.admin_stage column + schema mapping
+        adminStage: next,
+        // If they explicitly stage it, consider it "read"
+        // NOTE: requires quote_logs.admin_read_at column + schema mapping
+        adminReadAt: new Date(),
+      })
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+  }
+
+  // Load the quote
   const row = await db
     .select({
       id: quoteLogs.id,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
       output: quoteLogs.output,
+
       renderOptIn: quoteLogs.renderOptIn,
       renderStatus: quoteLogs.renderStatus,
       renderImageUrl: quoteLogs.renderImageUrl,
       renderPrompt: quoteLogs.renderPrompt,
       renderError: quoteLogs.renderError,
       renderedAt: quoteLogs.renderedAt,
+
+      // NOTE: these require the schema + DB columns:
+      adminStage: (quoteLogs as any).adminStage,
+      adminReadAt: (quoteLogs as any).adminReadAt,
     })
     .from(quoteLogs)
     .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)))
@@ -148,28 +239,122 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
+  // Mark read on open (best-effort)
+  // If the columns don't exist yet, this will throw — so we keep it behind try/catch.
+  try {
+    // Only run if "unread"
+    if ((row as any).adminReadAt == null) {
+      await markReadIfNeeded();
+      (row as any).adminReadAt = new Date().toISOString();
+      if (!row.adminStage || normalizeStage(row.adminStage) === "new") {
+        (row as any).adminStage = "read";
+      }
+    }
+  } catch {
+    // ignore — avoids breaking the page during rollout
+  }
+
+  const customer = pickCustomer(row.input);
+  const stage = normalizeStage((row as any).adminStage);
+  const isUnread = (row as any).adminReadAt == null && stage === "new";
+
+  const stageLabel =
+    STAGES.find((s) => s.key === stage)?.label ?? "New";
+
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+        {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold">Quote</h1>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  "rounded-full border px-3 py-1 text-xs font-semibold " +
+                  (isUnread
+                    ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+                    : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200")
+                }
+              >
+                {isUnread ? "Unread" : "Read"}
+              </span>
+
+              <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
+                Stage: {stageLabel}
+              </span>
+            </div>
+
+            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
               {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
             </p>
+
             <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-400">
               {row.id}
             </div>
           </div>
 
-          <Link
-            href="/admin/quotes"
-            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            Back to quotes
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/admin/quotes"
+              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+            >
+              Back to quotes
+            </Link>
+          </div>
         </div>
 
+        {/* Customer */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="font-semibold">Customer</h2>
+              <div className="mt-2 text-sm text-gray-800 dark:text-gray-200">
+                <div className="text-lg font-semibold">{customer.name}</div>
+                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  {customer.phone ? (
+                    <span className="font-mono">{customer.phone}</span>
+                  ) : (
+                    <span className="italic">No phone provided</span>
+                  )}
+                  {customer.email ? (
+                    <>
+                      {" "}
+                      · <span className="font-mono">{customer.email}</span>
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            {/* Stage control */}
+            <form action={updateStage} className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                Stage
+              </label>
+              <select
+                name="stage"
+                defaultValue={stage}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+              >
+                {STAGES.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Save
+              </button>
+            </form>
+          </div>
+        </section>
+
+        {/* Render */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="font-semibold">Render</h2>
           <div className="mt-2 text-sm text-gray-700 dark:text-gray-300">
@@ -198,6 +383,7 @@ export default async function AdminQuoteDetailPage({
           ) : null}
         </section>
 
+        {/* Input */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="font-semibold">Input</h2>
           <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-100">
@@ -205,6 +391,7 @@ export default async function AdminQuoteDetailPage({
           </pre>
         </section>
 
+        {/* Output */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="font-semibold">Output</h2>
           <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-100">

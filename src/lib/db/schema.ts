@@ -41,8 +41,19 @@ export const tenants = pgTable(
  *  - redirect_url (text)
  *  - thank_you_url (text)
  *  - updated_at (timestamptz)
- *  - time_zone (text)  [new]
- *  - week_start (text) [new]
+ *  - business_name
+ *  - lead_to_email
+ *  - resend_from_email
+ *  - ai_mode
+ *  - pricing_enabled
+ *  - rendering_enabled
+ *  - rendering_style
+ *  - rendering_notes
+ *  - rendering_max_per_day
+ *  - rendering_customer_opt_in_required
+ *  - ai_rendering_enabled
+ *  - reporting_timezone
+ *  - week_starts_on
  */
 export const tenantSettings = pgTable("tenant_settings", {
   tenantId: uuid("tenant_id")
@@ -55,9 +66,20 @@ export const tenantSettings = pgTable("tenant_settings", {
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
 
-  // Reporting preferences
-  timeZone: text("time_zone"),
-  weekStart: text("week_start"), // "monday" | "sunday" (etc)
+  // additional fields (already in your DB)
+  businessName: text("business_name"),
+  leadToEmail: text("lead_to_email"),
+  resendFromEmail: text("resend_from_email"),
+  aiMode: text("ai_mode"),
+  pricingEnabled: boolean("pricing_enabled"),
+  renderingEnabled: boolean("rendering_enabled"),
+  renderingStyle: text("rendering_style"),
+  renderingNotes: text("rendering_notes"),
+  renderingMaxPerDay: integer("rendering_max_per_day"),
+  renderingCustomerOptInRequired: boolean("rendering_customer_opt_in_required"),
+  aiRenderingEnabled: boolean("ai_rendering_enabled"),
+  reportingTimezone: text("reporting_timezone"),
+  weekStartsOn: integer("week_starts_on"),
 
   updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
@@ -111,8 +133,8 @@ export const tenantSecrets = pgTable("tenant_secrets", {
  * render_opt_in, render_status, render_image_url,
  * render_prompt, render_error, rendered_at
  *
- * New admin columns:
- * admin_viewed_at, admin_stage
+ * Added (your migration):
+ * is_read, stage
  */
 export const quoteLogs = pgTable("quote_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -135,8 +157,9 @@ export const quoteLogs = pgTable("quote_logs", {
   renderedAt: timestamp("rendered_at", { withTimezone: true }),
 
   // --- Admin workflow ---
-  adminViewedAt: timestamp("admin_viewed_at", { withTimezone: true }),
-  adminStage: text("admin_stage").notNull().default("new"), // new | in_review | sent | archived
+  isRead: boolean("is_read").notNull().default(false),
+  // "new" | "reviewing" | "quoted" | "scheduled" | "won" | "lost" | "archived"
+  stage: text("stage").notNull().default("new"),
 
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
@@ -145,8 +168,6 @@ export const quoteLogs = pgTable("quote_logs", {
 
 /**
  * Industries
- * Model existing table without trying to change PKs.
- * Assumes industries.id already exists and is the PK in your DB.
  */
 export const industries = pgTable(
   "industries",
