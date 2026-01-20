@@ -41,13 +41,10 @@ export const tenants = pgTable(
  *  - redirect_url (text)
  *  - thank_you_url (text)
  *  - updated_at (timestamptz)
- *
- * NEW:
- *  - time_zone (text)           e.g., "America/New_York"
- *  - week_start (text)          e.g., "monday" (we'll default to monday)
+ *  - time_zone (text)  [new]
+ *  - week_start (text) [new]
  */
 export const tenantSettings = pgTable("tenant_settings", {
-  // ✅ tenant_id is the PK in the live DB
   tenantId: uuid("tenant_id")
     .notNull()
     .primaryKey()
@@ -58,9 +55,9 @@ export const tenantSettings = pgTable("tenant_settings", {
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
 
-  // ✅ reporting config (tenant-configurable)
-  timeZone: text("time_zone"),       // "America/New_York"
-  weekStart: text("week_start"),     // "monday" | "sunday" etc (we use monday default)
+  // Reporting preferences
+  timeZone: text("time_zone"),
+  weekStart: text("week_start"), // "monday" | "sunday" (etc)
 
   updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
@@ -113,6 +110,9 @@ export const tenantSecrets = pgTable("tenant_secrets", {
  * id, tenant_id, input, output, created_at,
  * render_opt_in, render_status, render_image_url,
  * render_prompt, render_error, rendered_at
+ *
+ * New admin columns:
+ * admin_viewed_at, admin_stage
  */
 export const quoteLogs = pgTable("quote_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -133,6 +133,10 @@ export const quoteLogs = pgTable("quote_logs", {
   renderPrompt: text("render_prompt"),
   renderError: text("render_error"),
   renderedAt: timestamp("rendered_at", { withTimezone: true }),
+
+  // --- Admin workflow ---
+  adminViewedAt: timestamp("admin_viewed_at", { withTimezone: true }),
+  adminStage: text("admin_stage").notNull().default("new"), // new | in_review | sent | archived
 
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
