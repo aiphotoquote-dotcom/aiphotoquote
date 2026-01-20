@@ -1,3 +1,4 @@
+// src/app/api/tenant/me-settings/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -30,7 +31,7 @@ export async function GET() {
     const jar = await cookies();
     let tenantId = getCookieTenantId(jar);
 
-    // Fallback: if cookie isn't set, use the first tenant owned by this user
+    // fallback: first tenant owned by user
     if (!tenantId) {
       const t = await db
         .select({ id: tenants.id })
@@ -46,7 +47,7 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
-    const tenantRow = await db
+    const tenant = await db
       .select({
         id: tenants.id,
         name: tenants.name,
@@ -57,11 +58,11 @@ export async function GET() {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    if (!tenantRow) {
+    if (!tenant) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    const settingsRow = await db
+    const settings = await db
       .select({
         tenant_id: tenantSettings.tenantId,
         industry_key: tenantSettings.industryKey,
@@ -69,29 +70,23 @@ export async function GET() {
         thank_you_url: tenantSettings.thankYouUrl,
         updated_at: tenantSettings.updatedAt,
 
-        // ✅ new reporting fields (snake_case in response)
+        // reporting prefs (snake_case in response)
         time_zone: tenantSettings.timeZone,
         week_start: tenantSettings.weekStart,
       })
       .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
+      .where(eq(tenantSettings.tenantId, tenant.id))
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // Defaulting (keep UI stable even if null in DB)
-    const tz = (settingsRow as any)?.time_zone ?? "America/New_York";
-    const ws = (settingsRow as any)?.week_start ?? "monday";
-
-    const settings =
-      settingsRow
-        ? { ...settingsRow, time_zone: tz, week_start: ws }
-        : null;
-
-    return NextResponse.json({
-      ok: true,
-      tenant: tenantRow,
-      settings,
-    });
+    return NextResponse.json(
+      { ok: true, tenant, settings },
+      {
+        headers: {
+          "cache-control": "no-store, max-age=0",
+        },
+      }
+    );
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },

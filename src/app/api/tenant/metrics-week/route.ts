@@ -2,10 +2,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gte, lt, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSettings } from "@/lib/db/schema";
+import { quoteLogs, tenants, tenantSettings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +19,16 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   ].filter(Boolean) as string[];
 
   return candidates[0] || null;
+}
+
+// Monday 00:00 local (we’ll use tenant TZ just for display/meta; DB filters use ISO timestamps we compute here)
+function startOfWeekMonday(d: Date) {
+  const x = new Date(d);
+  const day = x.getDay(); // 0 Sun .. 6 Sat
+  const diff = (day + 6) % 7; // days since Monday
+  x.setDate(x.getDate() - diff);
+  x.setHours(0, 0, 0, 0);
+  return x;
 }
 
 async function resolveTenantId(userId: string) {
@@ -39,12 +49,35 @@ async function resolveTenantId(userId: string) {
   return tenantId;
 }
 
-type Counts = {
-  quotes: number;
-  renderOptIns: number;
-  rendered: number;
-  renderFailures: number;
-};
+async function countMetrics(tenantId: string, start: Date, end: Date) {
+  const base = and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end));
+
+  const quotes = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(quoteLogs)
+    .where(base)
+    .then((r) => r[0]?.n ?? 0);
+
+  const renderOptIns = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(quoteLogs)
+    .where(and(base, eq(quoteLogs.renderOptIn, true)))
+    .then((r) => r[0]?.n ?? 0);
+
+  const rendered = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(quoteLogs)
+    .where(and(base, eq(quoteLogs.renderStatus, "rendered")))
+    .then((r) => r[0]?.n ?? 0);
+
+  const renderFailures = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(quoteLogs)
+    .where(and(base, eq(quoteLogs.renderStatus, "failed")))
+    .then((r) => r[0]?.n ?? 0);
+
+  return { quotes, renderOptIns, rendered, renderFailures };
+}
 
 export async function GET() {
   try {
@@ -58,131 +91,51 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
-    const s = await db
+    // Pull reporting prefs (optional)
+    const prefs = await db
       .select({
-        weekStart: tenantSettings.weekStart,
         timeZone: tenantSettings.timeZone,
+        weekStart: tenantSettings.weekStart,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenantId))
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // Defaults (you asked: Monday default)
-    const weekStart = (s?.weekStart ?? "monday").toLowerCase();
-    const timeZone = s?.timeZone ?? "America/New_York";
+    const tz = prefs?.timeZone || "America/New_York";
+    const weekStart = (prefs?.weekStart || "monday").toLowerCase();
 
-    // If weekStart is "sunday", shift local time by +1 day before date_trunc('week'),
-    // then shift start back by -1 day. Monday is Postgres default for date_trunc('week').
-    const weekStartExpr =
-      weekStart === "sunday"
-        ? sql`(date_trunc('week', timezone(${timeZone}, now()) + interval '1 day') - interval '1 day')`
-        : sql`(date_trunc('week', timezone(${timeZone}, now())))`;
+    // You asked: Monday default. We’ll enforce Monday here for now.
+    // (Later we’ll use weekStart setting to allow Sunday, etc.)
+    const now = new Date();
+    const thisStart = startOfWeekMonday(now);
+    const thisEnd = new Date(thisStart);
+    thisEnd.setDate(thisStart.getDate() + 7);
 
-    const rows = await db.execute(sql<{
-      this_start_utc: Date;
-      this_end_utc: Date;
-      last_start_utc: Date;
-      last_end_utc: Date;
-      quotes_this: number;
-      quotes_last: number;
-      optins_this: number;
-      optins_last: number;
-      rendered_this: number;
-      rendered_last: number;
-      failed_this: number;
-      failed_last: number;
-    }>`
-      with bounds as (
-        select
-          (${weekStartExpr} at time zone ${timeZone}) as this_start_utc,
-          ((${weekStartExpr} + interval '7 days') at time zone ${timeZone}) as this_end_utc,
-          ((${weekStartExpr} - interval '7 days') at time zone ${timeZone}) as last_start_utc,
-          (${weekStartExpr} at time zone ${timeZone}) as last_end_utc
-      )
-      select
-        b.this_start_utc,
-        b.this_end_utc,
-        b.last_start_utc,
-        b.last_end_utc,
+    const lastStart = new Date(thisStart);
+    lastStart.setDate(thisStart.getDate() - 7);
+    const lastEnd = new Date(thisStart);
 
-        count(*) filter (
-          where q.created_at >= b.this_start_utc and q.created_at < b.this_end_utc
-        )::int as quotes_this,
-        count(*) filter (
-          where q.created_at >= b.last_start_utc and q.created_at < b.last_end_utc
-        )::int as quotes_last,
+    const thisWeek = await countMetrics(tenantId, thisStart, thisEnd);
+    const lastWeek = await countMetrics(tenantId, lastStart, lastEnd);
 
-        count(*) filter (
-          where q.created_at >= b.this_start_utc and q.created_at < b.this_end_utc
-            and q.render_opt_in = true
-        )::int as optins_this,
-        count(*) filter (
-          where q.created_at >= b.last_start_utc and q.created_at < b.last_end_utc
-            and q.render_opt_in = true
-        )::int as optins_last,
-
-        count(*) filter (
-          where q.created_at >= b.this_start_utc and q.created_at < b.this_end_utc
-            and lower(coalesce(q.render_status, '')) = 'rendered'
-        )::int as rendered_this,
-        count(*) filter (
-          where q.created_at >= b.last_start_utc and q.created_at < b.last_end_utc
-            and lower(coalesce(q.render_status, '')) = 'rendered'
-        )::int as rendered_last,
-
-        count(*) filter (
-          where q.created_at >= b.this_start_utc and q.created_at < b.this_end_utc
-            and lower(coalesce(q.render_status, '')) = 'failed'
-        )::int as failed_this,
-        count(*) filter (
-          where q.created_at >= b.last_start_utc and q.created_at < b.last_end_utc
-            and lower(coalesce(q.render_status, '')) = 'failed'
-        )::int as failed_last
-
-      from quote_logs q
-      cross join bounds b
-      where q.tenant_id = ${tenantId};
-    `);
-
-    const r = (rows as any)?.rows?.[0] ?? null;
-    if (!r) {
-      return NextResponse.json({
+    return NextResponse.json(
+      {
         ok: true,
-        tz: timeZone,
-        weekStart,
-        range: null,
-        thisWeek: { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 },
-        lastWeek: { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 },
-      });
-    }
-
-    const thisWeek: Counts = {
-      quotes: Number(r.quotes_this ?? 0),
-      renderOptIns: Number(r.optins_this ?? 0),
-      rendered: Number(r.rendered_this ?? 0),
-      renderFailures: Number(r.failed_this ?? 0),
-    };
-
-    const lastWeek: Counts = {
-      quotes: Number(r.quotes_last ?? 0),
-      renderOptIns: Number(r.optins_last ?? 0),
-      rendered: Number(r.rendered_last ?? 0),
-      renderFailures: Number(r.failed_last ?? 0),
-    };
-
-    return NextResponse.json({
-      ok: true,
-      tz: timeZone,
-      weekStart,
-      range: {
-        thisWeekStart: new Date(r.this_start_utc).toISOString(),
-        nextWeekStart: new Date(r.this_end_utc).toISOString(),
-        lastWeekStart: new Date(r.last_start_utc).toISOString(),
+        thisWeek,
+        lastWeek,
+        meta: {
+          tenantId,
+          timeZone: tz,
+          weekStartsOn: weekStart || "monday",
+          thisWeekStart: thisStart.toISOString(),
+          thisWeekEnd: thisEnd.toISOString(),
+          lastWeekStart: lastStart.toISOString(),
+          lastWeekEnd: lastEnd.toISOString(),
+        },
       },
-      thisWeek,
-      lastWeek,
-    });
+      { headers: { "cache-control": "no-store, max-age=0" } }
+    );
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
