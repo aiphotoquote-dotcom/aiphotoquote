@@ -1,230 +1,238 @@
 // src/app/q/[tenantSlug]/page.tsx
-import QuoteForm from "@/components/QuoteForm";
-import { db } from "@/lib/db/client";
-import { sql } from "drizzle-orm";
+"use client";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { useMemo, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 
-type PageProps = {
-  params: Promise<{ tenantSlug?: string }>;
+type Customer = {
+  name: string;
+  phone: string;
+  email: string;
 };
 
-function firstRow<T = any>(r: any): T | null {
-  return (r?.rows?.[0] ?? (Array.isArray(r) ? r?.[0] : null)) as T | null;
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
-function rowCount(r: any): number {
-  if (Array.isArray(r)) return r.length;
-  if (Array.isArray(r?.rows)) return r.rows.length;
-  return 0;
+function normalizePhone(raw: string) {
+  const digits = raw.replace(/\D/g, "");
+  // Basic US-friendly formatting; we still store digits-only.
+  // If you want E.164 later, we can do that too.
+  return digits;
 }
 
-function normalizeTenantSlug(v: any): string {
-  const s = String(v ?? "").trim();
-  return s;
-}
+export default function PublicQuotePage() {
+  const params = useParams<{ tenantSlug: string }>();
+  const router = useRouter();
+  const tenantSlug = params?.tenantSlug;
 
-export default async function Page(props: PageProps) {
-  const p = await props.params;
-  const tenantSlug = normalizeTenantSlug(p?.tenantSlug);
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  // Debug telemetry
-  let fatalError: string | null = null;
-  let dbInfo: any = null;
-  let tenantLookupCount = 0;
-  let settingsLookupCount = 0;
+  // REQUIRED customer fields
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
 
-  // Results
-  let tenantId: string | null = null;
-  let tenantName: string | null = null;
-  let industry_key: string | null = null;
-  let ai_rendering_enabled: boolean | null = null;
-  let settingsReadPath: "none" | "full" | "fallback" = "none";
-  let aiRenderingEnabledComputed = false;
+  // Existing fields (keep what you already had)
+  const [category, setCategory] = useState("service");
+  const [serviceType, setServiceType] = useState("upholstery");
+  const [notes, setNotes] = useState("");
 
-  // Display defaults
-  let displayTenantName = "Get a Photo Quote";
-  let displayIndustry = "service";
-  let aiRenderingEnabled = false;
+  const [renderOptIn, setRenderOptIn] = useState(false);
 
-  try {
-    // Prove what DB we’re connected to
-    try {
-      const dbInfoRes = await db.execute(sql`
-        select
-          current_database() as db,
-          current_schema() as schema,
-          inet_server_addr()::text as server_addr
-      `);
-      dbInfo = firstRow(dbInfoRes);
-    } catch (e: any) {
-      dbInfo = { error: e?.message ?? String(e) };
-    }
+  // Images (your existing uploader likely fills this)
+  const [images, setImages] = useState<Array<{ url: string; shotType?: string }>>([]);
 
+  const canSubmit = useMemo(() => {
+    const n = name.trim().length >= 2;
+    const p = normalizePhone(phone).length >= 10; // minimum 10 digits
+    const e = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+    const hasImages = images.length >= 1;
+    return Boolean(tenantSlug && n && p && e && hasImages && !submitting);
+  }, [tenantSlug, name, phone, email, images.length, submitting]);
+
+  async function submit() {
+    setErr(null);
     if (!tenantSlug) {
-      throw new Error("tenantSlug param missing/empty at runtime");
+      setErr("Missing tenant slug.");
+      return;
     }
 
-    // Tenant lookup
-    const tenantRes = await db.execute(sql`
-      select "id", "name", "slug"
-      from "tenants"
-      where "slug" = ${tenantSlug}
-      limit 1
-    `);
+    const customer: Customer = {
+      name: name.trim(),
+      phone: normalizePhone(phone),
+      email: email.trim().toLowerCase(),
+    };
 
-    tenantLookupCount = rowCount(tenantRes);
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/quote/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenantSlug,
+          images,
+          render_opt_in: renderOptIn,
+          customer, // ✅ NEW
+          customer_context: {
+            notes: notes.trim() || undefined,
+            category,
+            service_type: serviceType,
+          },
+        }),
+      });
 
-    const tenant = firstRow<{ id: string; name: string | null; slug: string }>(tenantRes);
-    tenantId = tenant?.id ?? null;
-    tenantName = tenant?.name ?? null;
-
-    if (tenantName) displayTenantName = tenantName;
-
-    // Settings lookup
-    if (tenantId) {
+      const text = await res.text();
+      let json: any = null;
       try {
-        const settingsRes = await db.execute(sql`
-          select "industry_key", "ai_rendering_enabled"
-          from "tenant_settings"
-          where "tenant_id" = ${tenantId}::uuid
-          limit 1
-        `);
-
-        settingsLookupCount = rowCount(settingsRes);
-
-        const settings = firstRow<{
-          industry_key: string | null;
-          ai_rendering_enabled: boolean | null;
-        }>(settingsRes);
-
-        industry_key = settings?.industry_key ?? null;
-        ai_rendering_enabled =
-          typeof settings?.ai_rendering_enabled === "boolean"
-            ? settings.ai_rendering_enabled
-            : null;
-
-        if (industry_key) displayIndustry = industry_key;
-        aiRenderingEnabled = ai_rendering_enabled === true;
-
-        settingsReadPath = "full";
-        aiRenderingEnabledComputed = aiRenderingEnabled;
+        json = text ? JSON.parse(text) : null;
       } catch {
-        const settingsRes = await db.execute(sql`
-          select "industry_key"
-          from "tenant_settings"
-          where "tenant_id" = ${tenantId}::uuid
-          limit 1
-        `);
-
-        settingsLookupCount = rowCount(settingsRes);
-
-        const settings = firstRow<{ industry_key: string | null }>(settingsRes);
-        industry_key = settings?.industry_key ?? null;
-
-        if (industry_key) displayIndustry = industry_key;
-
-        aiRenderingEnabled = false;
-        settingsReadPath = "fallback";
-        aiRenderingEnabledComputed = false;
+        throw new Error(`Submit returned non-JSON (HTTP ${res.status}).`);
       }
+
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.message || json?.error || `Submit failed (HTTP ${res.status}).`);
+      }
+
+      // If you already have a thank-you route, keep that
+      // Otherwise, just push them somewhere sane:
+      router.push("/thank-you");
+    } catch (e: any) {
+      setErr(e?.message ?? "Submit failed.");
+    } finally {
+      setSubmitting(false);
     }
-  } catch (e: any) {
-    fatalError = e?.message ?? String(e);
   }
 
   return (
-    <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-      <div className="mx-auto max-w-5xl px-6 py-12">
-        {/* DEBUG */}
-        <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-          <div className="font-semibold mb-2">DEBUG /q/[tenantSlug]</div>
-          <pre className="whitespace-pre-wrap">
-{JSON.stringify(
-  {
-    tenantSlug,
-    dbInfo,
-    fatalError,
-    tenantLookupCount,
-    settingsLookupCount,
-    tenantId,
-    tenantName,
-    industry_key,
-    ai_rendering_enabled,
-    settingsReadPath,
-    aiRenderingEnabledComputed,
-  },
-  null,
-  2
-)}
-          </pre>
-        </div>
+    <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+      <div className="mx-auto max-w-2xl px-6 py-10 space-y-6">
+        <h1 className="text-2xl font-semibold">Get an AI Estimate</h1>
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          Upload photos and tell us a bit about what you need.
+        </p>
 
-        <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
-          <div className="lg:col-span-2">
-            <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
-              <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
-              Photo quote powered by AI
+        {err ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+            {err}
+          </div>
+        ) : null}
+
+        <section className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950 space-y-4">
+          <div className="text-sm font-semibold">Your info</div>
+
+          <div>
+            <div className="text-xs text-gray-700 dark:text-gray-200">
+              Name <span className="text-red-600">*</span>
             </div>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={submitting}
+              autoComplete="name"
+              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-black"
+              placeholder="Jane Doe"
+            />
+          </div>
 
-            <h1 className="mt-4 text-4xl font-semibold tracking-tight">
-              {displayTenantName}
-            </h1>
-
-            <p className="mt-3 text-base text-gray-700 dark:text-gray-200">
-              Get a fast estimate range by uploading a few clear photos. No phone calls required.
-            </p>
-
-            <div className="mt-6 space-y-3 text-sm text-gray-800 dark:text-gray-200">
-              <div className="flex gap-3">
-                <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
-                <p>
-                  <span className="font-semibold">No obligation.</span> This is an estimate range — final pricing depends on inspection and scope.
-                </p>
-              </div>
-              <div className="flex gap-3">
-                <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
-                <p>
-                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include close-ups + a full view.
-                </p>
-              </div>
-              <div className="flex gap-3">
-                <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
-                <p>
-                  Tailored for <span className="font-semibold">{displayIndustry}</span> quotes. We’ll follow up if anything needs clarification.
-                </p>
-              </div>
+          <div>
+            <div className="text-xs text-gray-700 dark:text-gray-200">
+              Phone <span className="text-red-600">*</span>
+            </div>
+            <input
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              disabled={submitting}
+              autoComplete="tel"
+              inputMode="tel"
+              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-black"
+              placeholder="(555) 123-4567"
+            />
+            <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+              We’ll only use this to contact you about your quote.
             </div>
           </div>
 
-          <div className="lg:col-span-3">
-            <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm md:p-8 dark:border-gray-800 dark:bg-gray-900">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-2xl font-semibold">Get a Photo Quote</h2>
-                  <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                    Upload photos and add a quick note. We’ll return an estimate range.
-                  </p>
-                </div>
+          <div>
+            <div className="text-xs text-gray-700 dark:text-gray-200">
+              Email <span className="text-red-600">*</span>
+            </div>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={submitting}
+              autoComplete="email"
+              inputMode="email"
+              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-black"
+              placeholder="jane@email.com"
+            />
+          </div>
+        </section>
 
-                <div className="hidden md:flex flex-col items-end text-xs text-gray-600 dark:text-gray-300">
-                  <span className="font-semibold text-gray-900 dark:text-gray-100">Tenant</span>
-                  <span className="rounded-md bg-gray-50 px-2 py-1 dark:bg-gray-950 dark:border dark:border-gray-800">
-                    /q/{tenantSlug || "(missing)"}
-                  </span>
-                </div>
-              </div>
+        {/* Keep whatever image uploader you already have.
+            If you don’t, tell me which component you’re using and I’ll wire it cleanly. */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950 space-y-4">
+          <div className="text-sm font-semibold">Job details</div>
 
-              <div className="mt-6">
-                <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
-              </div>
-
-              <p className="mt-6 text-xs text-gray-600 dark:text-gray-300">
-                By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
-              </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="text-xs text-gray-700 dark:text-gray-200">Category</div>
+              <input
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                disabled={submitting}
+                className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-black"
+              />
+            </div>
+            <div>
+              <div className="text-xs text-gray-700 dark:text-gray-200">Service type</div>
+              <input
+                value={serviceType}
+                onChange={(e) => setServiceType(e.target.value)}
+                disabled={submitting}
+                className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-black"
+              />
             </div>
           </div>
+
+          <div>
+            <div className="text-xs text-gray-700 dark:text-gray-200">Notes</div>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              disabled={submitting}
+              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm dark:border-gray-800 dark:bg-black"
+              rows={4}
+              placeholder="What should we know? (e.g., fix rips, new foam, color match, etc.)"
+            />
+          </div>
+
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={renderOptIn}
+              onChange={(e) => setRenderOptIn(e.target.checked)}
+              disabled={submitting}
+            />
+            Include an AI rendering preview (if available)
+          </label>
+        </section>
+
+        <button
+          type="button"
+          onClick={submit}
+          disabled={!canSubmit}
+          className={cn(
+            "w-full rounded-xl bg-black px-5 py-3 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50",
+            "dark:bg-white dark:text-black"
+          )}
+        >
+          {submitting ? "Submitting…" : "Get AI Estimate"}
+        </button>
+
+        <div className="text-xs text-gray-500 dark:text-gray-400">
+          By submitting, you agree we can contact you about this request.
         </div>
       </div>
     </main>
