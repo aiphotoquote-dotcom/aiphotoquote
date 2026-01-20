@@ -43,10 +43,6 @@ function formatUSPhone(raw: string) {
 }
 
 function pickLead(input: any) {
-  // supports several shapes:
-  // - input.customer (API route stores this)
-  // - input.contact (older/alternate clients)
-  // - input.customer_context fields (very old)
   const c =
     input?.customer ??
     input?.contact ??
@@ -157,7 +153,12 @@ export default async function AdminQuoteDetailPage({
   }
 
   const resolvedParams = await params;
-  const quoteId = resolvedParams?.id;
+
+  // ✅ IMPORTANT: narrow to a real string so Drizzle eq() never sees undefined
+  const quoteId: string | null =
+    typeof resolvedParams?.id === "string" && resolvedParams.id.trim()
+      ? resolvedParams.id.trim()
+      : null;
 
   if (!quoteId) {
     return (
@@ -256,14 +257,16 @@ export default async function AdminQuoteDetailPage({
   }
 
   // mark read on open (best-effort)
-  // if unread, set is_read=true and bump stage new->read
   try {
     if (!row.isRead) {
-      const nextStage = normalizeStage(row.stage) === "new" ? ("read" as StageKey) : normalizeStage(row.stage);
+      const nextStage =
+        normalizeStage(row.stage) === "new" ? ("read" as StageKey) : normalizeStage(row.stage);
+
       await db
         .update(quoteLogs)
         .set({ isRead: true, stage: nextStage })
         .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+
       row.isRead = true;
       row.stage = nextStage;
     }
@@ -276,10 +279,7 @@ export default async function AdminQuoteDetailPage({
     const next = normalizeStage(formData.get("stage"));
     await db
       .update(quoteLogs)
-      .set({
-        stage: next,
-        isRead: true,
-      })
+      .set({ stage: next, isRead: true })
       .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
   }
 
@@ -287,9 +287,7 @@ export default async function AdminQuoteDetailPage({
   const stage = normalizeStage(row.stage);
   const stageLabel = STAGES.find((s) => s.key === stage)?.label ?? "New";
 
-  const createdLabel = row.createdAt
-    ? new Date(row.createdAt).toLocaleString()
-    : "—";
+  const createdLabel = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
 
   const telHref = lead.phoneDigits ? `tel:${lead.phoneDigits}` : null;
   const mailHref = lead.email ? `mailto:${lead.email}` : null;
@@ -320,14 +318,12 @@ export default async function AdminQuoteDetailPage({
                     </span>
                   ) : null}
 
-                  {!row.isRead ? chip("Unread", "yellow") : chip("Read", "gray")}
+                  {row.isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
                   {chip(`Stage: ${stageLabel}`, "blue")}
                   {renderChip(row.renderStatus)}
                 </div>
 
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {createdLabel}
-                </div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{createdLabel}</div>
               </div>
             </div>
 
