@@ -15,7 +15,7 @@ type MeSettingsResponse =
         redirect_url: string | null;
         thank_you_url: string | null;
 
-        // allow new settings but keep optional so UI doesn’t break if null
+        // NEW (tenant reporting defaults)
         reporting_timezone?: string | null;
         week_starts_on?: number | null;
 
@@ -51,16 +51,29 @@ type WeeklyMetricsResp =
   | {
       ok: true;
 
-      // ✅ New API shape
-      reporting?: { timezone?: string | null; week_starts_on?: number | null } | null;
-      range?: { thisWeekStart?: string; nextWeekStart?: string; lastWeekStart?: string } | null;
+      // common shapes we might return
       thisWeek?: Partial<WeekCounts> | null;
       lastWeek?: Partial<WeekCounts> | null;
 
-      // ✅ Back-compat shapes (older)
       this_week?: Partial<WeekCounts> | null;
       last_week?: Partial<WeekCounts> | null;
-      weekly?: { thisWeek?: Partial<WeekCounts> | null; lastWeek?: Partial<WeekCounts> | null } | null;
+
+      weekly?: {
+        thisWeek?: Partial<WeekCounts> | null;
+        lastWeek?: Partial<WeekCounts> | null;
+      } | null;
+
+      // optional metadata
+      range?: {
+        thisWeekStart?: string;
+        nextWeekStart?: string;
+        lastWeekStart?: string;
+      };
+
+      reporting?: {
+        timezone?: string | null;
+        weekStartsOn?: number | null;
+      };
     }
   | { ok: false; error: any; message?: string };
 
@@ -68,7 +81,10 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
+function pill(
+  label: string,
+  tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray"
+) {
   const cls =
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
@@ -93,10 +109,18 @@ function fmtDate(iso: string) {
   return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function fmtShortDate(iso: string) {
+function fmtShortDate(iso: string, tz?: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  try {
+    return d.toLocaleDateString(undefined, {
+      timeZone: tz || undefined,
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
 }
 
 function money(n: unknown) {
@@ -113,6 +137,21 @@ function clampInt(v: unknown) {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.trunc(n));
+}
+
+function clampWeekStartsOn(v: unknown) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return 1; // Monday
+  const i = Math.trunc(n);
+  if (i < 0) return 0;
+  if (i > 6) return 6;
+  return i;
+}
+
+function weekStartsLabel(n: number) {
+  // 0 Sun .. 6 Sat
+  const labels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  return labels[n] ?? "Monday";
 }
 
 function pctDelta(curr: number, prev: number) {
@@ -134,39 +173,18 @@ function renderStatusPill(statusRaw: unknown) {
   return pill("Estimate", "gray");
 }
 
-type NormalizedWeekly = {
+function normalizeWeekly(resp: WeeklyMetricsResp | null): {
   ready: boolean;
   thisWeek: WeekCounts;
   lastWeek: WeekCounts;
-  meta: {
-    timezone: string | null;
-    weekStartsOn: number | null;
-    range: { thisWeekStart?: string; nextWeekStart?: string; lastWeekStart?: string } | null;
-  };
-};
-
-function normalizeWeekly(resp: WeeklyMetricsResp | null): NormalizedWeekly {
+} {
   const zero: WeekCounts = { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 };
-  const meta = { timezone: null as string | null, weekStartsOn: null as number | null, range: null as any };
+  if (!resp || !("ok" in resp) || !resp.ok) return { ready: false, thisWeek: zero, lastWeek: zero };
 
-  if (!resp || !("ok" in resp) || !resp.ok) return { ready: false, thisWeek: zero, lastWeek: zero, meta };
+  const a = (resp as any).thisWeek ?? (resp as any).this_week ?? (resp as any).weekly?.thisWeek ?? null;
+  const b = (resp as any).lastWeek ?? (resp as any).last_week ?? (resp as any).weekly?.lastWeek ?? null;
 
-  // Prefer NEW shape if present
-  const twNew = (resp as any).thisWeek ?? null;
-  const lwNew = (resp as any).lastWeek ?? null;
-
-  // Back-compat
-  const twOld = (resp as any).this_week ?? (resp as any).weekly?.thisWeek ?? null;
-  const lwOld = (resp as any).last_week ?? (resp as any).weekly?.lastWeek ?? null;
-
-  const a = twNew ?? twOld;
-  const b = lwNew ?? lwOld;
-
-  meta.timezone = (resp as any).reporting?.timezone ?? null;
-  meta.weekStartsOn = typeof (resp as any).reporting?.week_starts_on === "number" ? (resp as any).reporting.week_starts_on : null;
-  meta.range = (resp as any).range ?? null;
-
-  if (!a && !b) return { ready: false, thisWeek: zero, lastWeek: zero, meta };
+  if (!a && !b) return { ready: false, thisWeek: zero, lastWeek: zero };
 
   const tw: WeekCounts = {
     quotes: clampInt(a?.quotes),
@@ -182,11 +200,7 @@ function normalizeWeekly(resp: WeeklyMetricsResp | null): NormalizedWeekly {
     renderFailures: clampInt(b?.renderFailures ?? b?.render_failures),
   };
 
-  return { ready: true, thisWeek: tw, lastWeek: lw, meta };
-}
-
-function s(n: number) {
-  return n === 1 ? "" : "s";
+  return { ready: true, thisWeek: tw, lastWeek: lw };
 }
 
 export default function Dashboard() {
@@ -271,7 +285,6 @@ export default function Dashboard() {
 
     const tenantName = tenant?.name ? String(tenant.name) : "";
     const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
-
     const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
 
     const hasSlug = Boolean(tenantSlug);
@@ -280,7 +293,28 @@ export default function Dashboard() {
     const isReady = hasSlug && hasIndustry;
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
 
-    return { ok, tenantName, tenantSlug, hasSlug, hasIndustry, isReady, publicPath };
+    const reportingTimezone =
+      typeof settings?.reporting_timezone === "string" && settings.reporting_timezone.trim()
+        ? settings.reporting_timezone.trim()
+        : "America/New_York";
+
+    const weekStartsOn = clampWeekStartsOn(settings?.week_starts_on);
+    // You said: keep Monday default. We still display what’s stored,
+    // but if missing, it’ll be Monday.
+    const weekStartsOnLabel = weekStartsLabel(weekStartsOn);
+
+    return {
+      ok,
+      tenantName,
+      tenantSlug,
+      hasSlug,
+      hasIndustry,
+      isReady,
+      publicPath,
+      reportingTimezone,
+      weekStartsOn,
+      weekStartsOnLabel,
+    };
   }, [me]);
 
   async function copyPublicLink() {
@@ -306,11 +340,17 @@ export default function Dashboard() {
   const qCount = wk.thisWeek.quotes;
   const qPrev = wk.lastWeek.quotes;
 
-  const weekWindowLabel = useMemo(() => {
-    const r = wk.meta.range;
-    if (!r?.thisWeekStart || !r?.nextWeekStart) return null;
-    return `${fmtShortDate(r.thisWeekStart)} – ${fmtShortDate(r.nextWeekStart)}`;
-  }, [wk.meta.range]);
+  const range = (weeklyResp as any)?.range ?? null;
+  const thisStart = range?.thisWeekStart ? String(range.thisWeekStart) : "";
+  const thisEnd = range?.nextWeekStart ? String(range.nextWeekStart) : "";
+
+  const windowLine =
+    thisStart && thisEnd
+      ? `Week window: ${fmtShortDate(thisStart, computed.reportingTimezone)} – ${fmtShortDate(
+          thisEnd,
+          computed.reportingTimezone
+        )} · TZ: ${computed.reportingTimezone} · Starts: ${computed.weekStartsOnLabel}`
+      : `TZ: ${computed.reportingTimezone} · Starts: ${computed.weekStartsOnLabel}`;
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -364,17 +404,9 @@ export default function Dashboard() {
                   Compared to last week. Counts only for now.
                 </p>
 
-                {wk.ready && (weekWindowLabel || wk.meta.timezone) ? (
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    {weekWindowLabel ? <>Week window: <span className="font-semibold">{weekWindowLabel}</span></> : null}
-                    {wk.meta.timezone ? (
-                      <>
-                        {weekWindowLabel ? " · " : null}
-                        TZ: <span className="font-semibold">{wk.meta.timezone}</span>
-                      </>
-                    ) : null}
-                  </div>
-                ) : null}
+                <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  {windowLine}
+                </div>
               </div>
 
               <div className="flex items-center gap-2">
@@ -570,4 +602,8 @@ export default function Dashboard() {
       </div>
     </main>
   );
+}
+
+function s(n: number) {
+  return n === 1 ? "" : "s";
 }
