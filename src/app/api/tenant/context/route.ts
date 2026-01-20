@@ -1,86 +1,119 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
+import { eq, and } from "drizzle-orm";
 
-import {
-  ACTIVE_TENANT_COOKIE,
-  ensureOwnerMembershipForLegacyTenants,
-  listUserTenants,
-} from "@/lib/auth/tenant";
+import { db } from "@/lib/db/client";
+import { tenants } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
-}
-
-const PostBody = z.object({
-  tenantId: z.string().uuid(),
+const Body = z.object({
+  tenantId: z.string().uuid().optional(),
+  tenantSlug: z.string().min(3).optional(),
 });
 
-export async function GET(req: Request) {
-  // Bootstrap legacy tenants (owner_clerk_user_id) into tenant_members if needed
-  await ensureOwnerMembershipForLegacyTenants();
+function setTenantCookies(res: NextResponse, tenantId: string) {
+  // set BOTH keys because your code checks multiple names
+  const isProd = process.env.NODE_ENV === "production";
 
-  const tenants = await listUserTenants();
+  const opts = {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure: isProd,
+    path: "/",
+    // 30 days
+    maxAge: 60 * 60 * 24 * 30,
+  };
 
-  // Read cookie (if any)
-  const cookieHeader = req.headers.get("cookie") || "";
-  const cookieMatch = cookieHeader
-    .split(";")
-    .map((s) => s.trim())
-    .find((s) => s.startsWith(`${ACTIVE_TENANT_COOKIE}=`));
-  const current = cookieMatch ? decodeURIComponent(cookieMatch.split("=").slice(1).join("=")) : "";
-
-  // Determine active tenant
-  const stillValid = tenants.find((t) => t.tenantId === current);
-  const activeTenantId = stillValid?.tenantId ?? tenants[0]?.tenantId ?? null;
-
-  const res = json({
-    ok: true,
-    activeTenantId,
-    tenants,
-  });
-
-  // If cookie missing/invalid and we have a tenant, set it
-  if (activeTenantId && activeTenantId !== current) {
-    res.cookies.set(ACTIVE_TENANT_COOKIE, activeTenantId, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: true,
-      path: "/",
-      maxAge: 60 * 60 * 24 * 30, // 30 days
-    });
-  }
+  res.cookies.set("activeTenantId", tenantId, opts);
+  res.cookies.set("active_tenant_id", tenantId, opts);
+  res.cookies.set("tenantId", tenantId, opts);
+  res.cookies.set("tenant_id", tenantId, opts);
 
   return res;
+}
+
+export async function GET() {
+  try {
+    const jar = await cookies();
+    const tenantId =
+      jar.get("activeTenantId")?.value ||
+      jar.get("active_tenant_id")?.value ||
+      jar.get("tenantId")?.value ||
+      jar.get("tenant_id")?.value ||
+      null;
+
+    return NextResponse.json({ ok: true, tenantId });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
+    );
+  }
 }
 
 export async function POST(req: Request) {
-  await ensureOwnerMembershipForLegacyTenants();
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    }
 
-  const body = await req.json().catch(() => null);
-  const parsed = PostBody.safeParse(body);
-  if (!parsed.success) {
-    return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
+    const json = await req.json().catch(() => null);
+    const parsed = Body.safeParse(json);
+
+    if (!parsed.success) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
+        { status: 400 }
+      );
+    }
+
+    const { tenantId, tenantSlug } = parsed.data;
+
+    // Require at least one selector
+    if (!tenantId && !tenantSlug) {
+      return NextResponse.json(
+        { ok: false, error: "MISSING_TENANT_SELECTOR" },
+        { status: 400 }
+      );
+    }
+
+    // Verify the tenant is owned by this user (hard stop)
+    const where =
+      tenantId && tenantSlug
+        ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId))
+        : tenantId
+          ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
+          : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
+
+    const t = await db
+      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
+      .from(tenants)
+      .where(where)
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!t) {
+      return NextResponse.json(
+        { ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" },
+        { status: 404 }
+      );
+    }
+
+    const res = NextResponse.json({
+      ok: true,
+      tenant: { id: t.id, slug: t.slug, name: t.name },
+    });
+
+    return setTenantCookies(res, t.id);
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
+    );
   }
-
-  // Ensure user belongs to that tenant
-  const tenants = await listUserTenants();
-  const found = tenants.find((t) => t.tenantId === parsed.data.tenantId);
-  if (!found) {
-    return json({ ok: false, error: "NOT_A_MEMBER_OF_TENANT" }, 403);
-  }
-
-  const res = json({ ok: true, activeTenantId: found.tenantId });
-
-  res.cookies.set(ACTIVE_TENANT_COOKIE, found.tenantId, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: true,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30,
-  });
-
-  return res;
 }

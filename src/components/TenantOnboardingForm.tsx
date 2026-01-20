@@ -1,4 +1,3 @@
-// src/components/TenantOnboardingForm.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -12,12 +11,11 @@ type MeSettingsResponse =
         tenant_id: string;
         industry_key: string | null;
 
+        // support both
         redirect_url?: string | null;
         thank_you_url?: string | null;
-
-        // NEW
-        reporting_timezone?: string | null;
-        week_starts_on?: number | null;
+        redirectUrl?: string | null;
+        thankYouUrl?: string | null;
 
         updated_at: string | null;
       } | null;
@@ -26,15 +24,6 @@ type MeSettingsResponse =
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
-}
-
-function clampWeekStartsOn(v: unknown) {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return 1; // Monday default
-  const i = Math.trunc(n);
-  if (i < 0) return 0;
-  if (i > 6) return 6;
-  return i;
 }
 
 export default function TenantOnboardingForm(props: { redirectToDashboard?: boolean }) {
@@ -47,6 +36,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  const [tenantId, setTenantId] = useState("");
   const [tenantName, setTenantName] = useState("");
   const [tenantSlug, setTenantSlug] = useState("");
 
@@ -54,24 +44,33 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
   const [redirectUrl, setRedirectUrl] = useState("");
   const [thankYouUrl, setThankYouUrl] = useState("");
 
-  // NEW (tenant settings)
-  const [reportingTimezone, setReportingTimezone] = useState("America/New_York");
-  const [weekStartsOn, setWeekStartsOn] = useState<number>(1); // Monday
-
   const canSave = useMemo(() => {
     return Boolean(tenantSlug.trim().length >= 3 && industryKey.trim().length >= 1);
   }, [tenantSlug, industryKey]);
 
-  function pickString(s: any, key: string, fallback = "") {
-    const v = s?.[key];
-    return typeof v === "string" ? v : fallback;
+  function pickUrl(s: any, snake: string, camel: string) {
+    const a = s?.[snake];
+    if (typeof a === "string") return a;
+    const b = s?.[camel];
+    if (typeof b === "string") return b;
+    return "";
   }
 
-  function pickNumber(s: any, key: string, fallback: number) {
-    const v = s?.[key];
-    if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
-    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Math.trunc(Number(v));
-    return fallback;
+  async function setActiveTenantCookie(id: string, slug?: string) {
+    const tid = String(id || "").trim();
+    if (!tid) return;
+
+    try {
+      await fetch("/api/tenant/context", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tenantId: tid, tenantSlug: slug || undefined }),
+      });
+      // We intentionally don't hard-fail UI if cookie set fails.
+      // Worst case: admin pages fall back to "owned tenant" anyway.
+    } catch {
+      // ignore
+    }
   }
 
   async function load() {
@@ -84,22 +83,22 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       const json: MeSettingsResponse = await res.json();
 
       if (!("ok" in json) || !json.ok) {
-        setLoadErr(json?.message || "Failed to load tenant settings.");
+        setLoadErr("Failed to load tenant settings.");
         return;
       }
 
-      setTenantName(json.tenant?.name ?? "");
-      setTenantSlug(json.tenant?.slug ?? "");
+      const t = json.tenant;
+      setTenantId(t?.id ?? "");
+      setTenantName(t?.name ?? "");
+      setTenantSlug(t?.slug ?? "");
 
-      const s: any = json.settings ?? null;
+      const s: any = json.settings;
+      setIndustryKey(s?.industry_key ?? "");
+      setRedirectUrl(pickUrl(s, "redirect_url", "redirectUrl"));
+      setThankYouUrl(pickUrl(s, "thank_you_url", "thankYouUrl"));
 
-      setIndustryKey(pickString(s, "industry_key", ""));
-      setRedirectUrl(pickString(s, "redirect_url", ""));
-      setThankYouUrl(pickString(s, "thank_you_url", ""));
-
-      // NEW
-      setReportingTimezone(pickString(s, "reporting_timezone", "America/New_York") || "America/New_York");
-      setWeekStartsOn(clampWeekStartsOn(pickNumber(s, "week_starts_on", 1)));
+      // ✅ ensure cookie is set for this tenant (center of truth for Admin pages)
+      if (t?.id) await setActiveTenantCookie(t.id, t.slug);
     } catch (e: any) {
       setLoadErr(e?.message ?? "Failed to load tenant settings.");
     } finally {
@@ -116,19 +115,11 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
     setSaveErr(null);
     setSaved(false);
 
-    // We keep Monday as default AND we keep it locked to Monday for now.
-    const safeWeekStartsOn = 1;
-
     const payload = {
       tenantSlug: tenantSlug.trim(),
       industry_key: industryKey.trim(),
-
       redirect_url: redirectUrl.trim() || null,
       thank_you_url: thankYouUrl.trim() || null,
-
-      // NEW
-      reporting_timezone: reportingTimezone.trim() || "America/New_York",
-      week_starts_on: safeWeekStartsOn,
     };
 
     setSaving(true);
@@ -154,7 +145,11 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       setSaved(true);
       setTimeout(() => setSaved(false), 1200);
 
+      // Refresh view + re-set cookie (some flows create tenant first)
       await load();
+
+      // extra-safe: set cookie with current local state if we have it
+      if (tenantId) await setActiveTenantCookie(tenantId, tenantSlug);
 
       if (redirectToDashboard) router.push("/dashboard");
     } catch (e: any) {
@@ -170,10 +165,10 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Settings
+              Tenant settings
             </div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Configure your tenant, public link behavior, and reporting defaults.
+              Configure your slug, industry, and redirect URLs.
             </div>
           </div>
 
@@ -183,7 +178,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
             disabled={loading || saving}
             className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:hover:bg-gray-900"
           >
-            Refresh
+            Retry
           </button>
         </div>
 
@@ -196,8 +191,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
         {loading ? (
           <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading…</div>
         ) : (
-          <div className="mt-5 grid gap-5">
-            {/* Tenant identity */}
+          <div className="mt-5 grid gap-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <div className="text-xs text-gray-700 dark:text-gray-200">Tenant name</div>
@@ -227,7 +221,6 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
               </div>
             </div>
 
-            {/* Industry */}
             <div>
               <div className="text-xs text-gray-700 dark:text-gray-200">
                 Industry key <span className="text-red-600">*</span>
@@ -242,10 +235,11 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
               />
             </div>
 
-            {/* URLs */}
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <div className="text-xs text-gray-700 dark:text-gray-200">Redirect URL (optional)</div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">
+                  Redirect URL (optional)
+                </div>
                 <input
                   className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={redirectUrl}
@@ -255,12 +249,14 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                   autoComplete="off"
                 />
                 <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  Where to send the customer after they submit.
+                  Where to send customer after submit.
                 </div>
               </div>
 
               <div>
-                <div className="text-xs text-gray-700 dark:text-gray-200">Thank-you URL (optional)</div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">
+                  Thank-you URL (optional)
+                </div>
                 <input
                   className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={thankYouUrl}
@@ -270,60 +266,9 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                   autoComplete="off"
                 />
                 <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  Alternate final destination (if your flow uses it).
+                  Alternate final destination (if used by your flow).
                 </div>
               </div>
-            </div>
-
-            {/* Reporting */}
-            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    Reporting defaults
-                  </div>
-                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                    Used for weekly metrics on the dashboard.
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <div className="text-xs text-gray-700 dark:text-gray-200">
-                    Reporting timezone
-                  </div>
-                  <input
-                    className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
-                    value={reportingTimezone}
-                    onChange={(e) => setReportingTimezone(e.target.value)}
-                    placeholder="America/New_York"
-                    disabled={saving}
-                    autoComplete="off"
-                  />
-                  <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                    Example: <span className="font-mono">America/New_York</span>,{" "}
-                    <span className="font-mono">America/Chicago</span>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="text-xs text-gray-700 dark:text-gray-200">
-                    Week starts on
-                  </div>
-                  <input
-                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-100 p-3 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
-                    value="Monday"
-                    readOnly
-                  />
-                  <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                    Default is Monday (we can make this selectable later).
-                  </div>
-                </div>
-              </div>
-
-              {/* Keep state aligned even though it's locked */}
-              <input type="hidden" value={weekStartsOn} readOnly />
             </div>
 
             {saveErr ? (
