@@ -3,6 +3,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { and, eq } from "drizzle-orm";
+import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
@@ -105,20 +106,19 @@ function stageLabel(stage: StageKey) {
   return STAGES.find((s) => s.key === stage)?.label ?? "New";
 }
 
-export default async function AdminQuoteDetailPage({
-  params,
-}: {
+type PageProps = {
   params: Promise<{ id?: string }> | { id?: string };
-}) {
+  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+};
+
+export default async function AdminQuoteDetailPage({ params, searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Admin</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            You must be signed in.
-          </p>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">You must be signed in.</p>
           <div className="mt-6">
             <Link className="underline" href="/sign-in">
               Sign in
@@ -137,9 +137,7 @@ export default async function AdminQuoteDetailPage({
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Quote</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Missing quote id in URL.
-          </p>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">Missing quote id in URL.</p>
           <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
               Back to quotes
@@ -149,6 +147,11 @@ export default async function AdminQuoteDetailPage({
       </main>
     );
   }
+
+  const sp = searchParams ? await searchParams : {};
+  const confirmDelete =
+    sp?.confirmDelete === "1" ||
+    (Array.isArray(sp?.confirmDelete) && sp.confirmDelete.includes("1"));
 
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
@@ -187,11 +190,11 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // ✅ IMPORTANT: lock these as DEFINITELY strings for Drizzle eq(...)
-  const quoteId = quoteIdParam; // string
-  const tenantId = tenantIdMaybe; // string
+  // ✅ lock types as DEFINITELY strings for Drizzle eq(...)
+  const quoteId = quoteIdParam;
+  const tenantId = tenantIdMaybe;
 
-  // Server action: update stage (also marks read)
+  // ----- Server actions -----
   async function updateStage(formData: FormData) {
     "use server";
     const next = normalizeStage(formData.get("stage"));
@@ -202,7 +205,6 @@ export default async function AdminQuoteDetailPage({
       .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
   }
 
-  // Server action: mark read on open
   async function markReadOnOpen() {
     "use server";
     await db
@@ -211,6 +213,16 @@ export default async function AdminQuoteDetailPage({
       .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
   }
 
+  async function deleteLead() {
+    "use server";
+    await db
+      .delete(quoteLogs)
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+
+    redirect("/admin/quotes");
+  }
+
+  // Load quote
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -258,7 +270,7 @@ export default async function AdminQuoteDetailPage({
       row.isRead = true;
       if (normalizeStage(row.stage) === "new") row.stage = "read";
     } catch {
-      // ignore (don’t block page render)
+      // ignore
     }
   }
 
@@ -266,6 +278,9 @@ export default async function AdminQuoteDetailPage({
   const stage = normalizeStage(row.stage);
   const unread = !row.isRead;
   const stageText = stageLabel(stage);
+
+  const deleteConfirmHref = `/admin/quotes/${row.id}?confirmDelete=1`;
+  const deleteCancelHref = `/admin/quotes/${row.id}`;
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -296,9 +311,7 @@ export default async function AdminQuoteDetailPage({
               {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
             </p>
 
-            <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-              {row.id}
-            </div>
+            <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-400">{row.id}</div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -308,8 +321,47 @@ export default async function AdminQuoteDetailPage({
             >
               Back to quotes
             </Link>
+
+            {!confirmDelete ? (
+              <Link
+                href={deleteConfirmHref}
+                className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-800 hover:bg-red-100 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200 dark:hover:bg-red-950/60"
+              >
+                Delete
+              </Link>
+            ) : null}
           </div>
         </div>
+
+        {/* Delete confirm panel */}
+        {confirmDelete ? (
+          <section className="rounded-2xl border border-red-200 bg-red-50 p-6 dark:border-red-900/50 dark:bg-red-950/40">
+            <h2 className="text-lg font-semibold text-red-900 dark:text-red-100">
+              Delete this lead?
+            </h2>
+            <p className="mt-2 text-sm text-red-800 dark:text-red-200">
+              This will permanently remove the quote log for <b>{lead.name}</b>. This cannot be undone.
+            </p>
+
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Link
+                href={deleteCancelHref}
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
+              >
+                Cancel
+              </Link>
+
+              <form action={deleteLead}>
+                <button
+                  type="submit"
+                  className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
+                >
+                  Yes, delete
+                </button>
+              </form>
+            </div>
+          </section>
+        ) : null}
 
         {/* Lead */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
