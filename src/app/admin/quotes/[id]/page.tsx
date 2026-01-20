@@ -46,8 +46,9 @@ function pickLead(input: any) {
   const c =
     input?.customer ??
     input?.contact ??
-    input?.lead ??
     input?.customer_context?.customer ??
+    input?.lead ??
+    input?.contact ??
     {};
 
   const name =
@@ -55,6 +56,7 @@ function pickLead(input: any) {
     c?.fullName ??
     c?.customerName ??
     input?.name ??
+    input?.customer_context?.name ??
     "New customer";
 
   const phone =
@@ -93,38 +95,14 @@ const STAGES = [
 
 type StageKey = (typeof STAGES)[number]["key"];
 
-function normalizeStage(v: unknown): StageKey {
-  const s = String(v ?? "").toLowerCase().trim();
-  const hit = STAGES.find((x) => x.key === s);
-  return (hit?.key ?? "new") as StageKey;
+function normalizeStage(s: unknown): StageKey {
+  const v = String(s ?? "").toLowerCase().trim();
+  const hit = STAGES.find((x) => x.key === v)?.key;
+  return (hit ?? "new") as StageKey;
 }
 
-function chip(label: string, tone: "gray" | "yellow" | "green" | "blue" | "red" = "gray") {
-  const cls =
-    tone === "green"
-      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
-      : tone === "yellow"
-        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-        : tone === "red"
-          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-          : tone === "blue"
-            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
-
-  return (
-    <span className={"rounded-full border px-3 py-1 text-xs font-semibold " + cls}>
-      {label}
-    </span>
-  );
-}
-
-function renderChip(statusRaw: unknown) {
-  const s = String(statusRaw ?? "").toLowerCase();
-  if (s === "rendered") return chip("Rendered", "green");
-  if (s === "failed") return chip("Render failed", "red");
-  if (s === "queued" || s === "running") return chip("Rendering", "blue");
-  if (s === "not_requested") return chip("No render", "gray");
-  return chip("Estimate", "gray");
+function stageLabel(stage: StageKey) {
+  return STAGES.find((s) => s.key === stage)?.label ?? "New";
 }
 
 export default async function AdminQuoteDetailPage({
@@ -133,7 +111,6 @@ export default async function AdminQuoteDetailPage({
   params: Promise<{ id?: string }> | { id?: string };
 }) {
   const { userId } = await auth();
-
   if (!userId) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -153,14 +130,9 @@ export default async function AdminQuoteDetailPage({
   }
 
   const resolvedParams = await params;
+  const quoteIdParam = resolvedParams?.id;
 
-  // ✅ IMPORTANT: narrow to a real string so Drizzle eq() never sees undefined
-  const quoteId: string | null =
-    typeof resolvedParams?.id === "string" && resolvedParams.id.trim()
-      ? resolvedParams.id.trim()
-      : null;
-
-  if (!quoteId) {
+  if (!quoteIdParam) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
@@ -179,10 +151,10 @@ export default async function AdminQuoteDetailPage({
   }
 
   const jar = await cookies();
-  let tenantId = getCookieTenantId(jar);
+  let tenantIdMaybe = getCookieTenantId(jar);
 
-  // fallback: owner tenant
-  if (!tenantId) {
+  // Fallback: if cookie isn't set, use tenant owned by this user
+  if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
       .from(tenants)
@@ -190,10 +162,10 @@ export default async function AdminQuoteDetailPage({
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    tenantId = t?.id ?? null;
+    tenantIdMaybe = t?.id ?? null;
   }
 
-  if (!tenantId) {
+  if (!tenantIdMaybe) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
@@ -215,7 +187,30 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // load quote
+  // ✅ IMPORTANT: lock these as DEFINITELY strings for Drizzle eq(...)
+  const quoteId = quoteIdParam; // string
+  const tenantId = tenantIdMaybe; // string
+
+  // Server action: update stage (also marks read)
+  async function updateStage(formData: FormData) {
+    "use server";
+    const next = normalizeStage(formData.get("stage"));
+
+    await db
+      .update(quoteLogs)
+      .set({ stage: next, isRead: true })
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+  }
+
+  // Server action: mark read on open
+  async function markReadOnOpen() {
+    "use server";
+    await db
+      .update(quoteLogs)
+      .set({ isRead: true, stage: "read" })
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+  }
+
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -256,180 +251,141 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // mark read on open (best-effort)
-  try {
-    if (!row.isRead) {
-      const nextStage =
-        normalizeStage(row.stage) === "new" ? ("read" as StageKey) : normalizeStage(row.stage);
-
-      await db
-        .update(quoteLogs)
-        .set({ isRead: true, stage: nextStage })
-        .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
-
+  // Mark read on open (best-effort)
+  if (!row.isRead) {
+    try {
+      await markReadOnOpen();
       row.isRead = true;
-      row.stage = nextStage;
+      if (normalizeStage(row.stage) === "new") row.stage = "read";
+    } catch {
+      // ignore (don’t block page render)
     }
-  } catch {
-    // ignore
-  }
-
-  async function updateStage(formData: FormData) {
-    "use server";
-    const next = normalizeStage(formData.get("stage"));
-    await db
-      .update(quoteLogs)
-      .set({ stage: next, isRead: true })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
   }
 
   const lead = pickLead(row.input);
   const stage = normalizeStage(row.stage);
-  const stageLabel = STAGES.find((s) => s.key === stage)?.label ?? "New";
-
-  const createdLabel = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
-
-  const telHref = lead.phoneDigits ? `tel:${lead.phoneDigits}` : null;
-  const mailHref = lead.email ? `mailto:${lead.email}` : null;
+  const unread = !row.isRead;
+  const stageText = stageLabel(stage);
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
-      {/* Sticky header */}
-      <div className="sticky top-0 z-20 border-b border-gray-200 bg-white/90 backdrop-blur dark:border-gray-800 dark:bg-black/80">
-        <div className="mx-auto max-w-5xl px-6 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <Link
-                href="/admin/quotes"
-                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+      <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold">Quote</h1>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  "rounded-full border px-3 py-1 text-xs font-semibold " +
+                  (unread
+                    ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+                    : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200")
+                }
               >
-                ← Back
-              </Link>
+                {unread ? "Unread" : "Read"}
+              </span>
 
-              <div className="flex flex-col">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    {lead.name}
-                  </div>
-
-                  {lead.phone ? (
-                    <span className="font-mono text-xs text-gray-600 dark:text-gray-300">
-                      {lead.phone}
-                    </span>
-                  ) : null}
-
-                  {row.isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
-                  {chip(`Stage: ${stageLabel}`, "blue")}
-                  {renderChip(row.renderStatus)}
-                </div>
-
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{createdLabel}</div>
-              </div>
+              <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
+                Stage: {stageText}
+              </span>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {telHref ? (
-                <a
-                  href={telHref}
-                  className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                >
-                  Call
-                </a>
-              ) : (
-                <span className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                  No phone
-                </span>
-              )}
+            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
+            </p>
 
-              {mailHref ? (
-                <a
-                  href={mailHref}
-                  className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                >
-                  Email
-                </a>
-              ) : null}
-
-              <form action={updateStage} className="flex items-center gap-2">
-                <select
-                  name="stage"
-                  defaultValue={stage}
-                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-                >
-                  {STAGES.map((s) => (
-                    <option key={s.key} value={s.key}>
-                      {s.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="submit"
-                  className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                >
-                  Save
-                </button>
-              </form>
+            <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-400">
+              {row.id}
             </div>
           </div>
 
-          <div className="mt-2 font-mono text-[11px] text-gray-500 dark:text-gray-400">
-            Quote ID: {row.id}
+          <div className="flex items-center gap-2">
+            <Link
+              href="/admin/quotes"
+              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+            >
+              Back to quotes
+            </Link>
           </div>
         </div>
-      </div>
 
-      {/* Body */}
-      <div className="mx-auto max-w-5xl px-6 py-8 space-y-6">
-        {/* Render */}
+        {/* Lead */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 className="font-semibold">Render</h2>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-300">
-                Opt-in: <b>{row.renderOptIn ? "true" : "false"}</b> · Status:{" "}
-                <b>{row.renderStatus || "—"}</b>
-                {row.renderedAt ? (
-                  <>
-                    {" "}
-                    · Rendered: <b>{new Date(row.renderedAt).toLocaleString()}</b>
-                  </>
-                ) : null}
+              <h2 className="font-semibold">Customer</h2>
+              <div className="mt-2 text-sm text-gray-800 dark:text-gray-200">
+                <div className="text-lg font-semibold">{lead.name}</div>
+                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                  {lead.phone ? (
+                    <span className="font-mono">{lead.phone}</span>
+                  ) : (
+                    <span className="italic">No phone</span>
+                  )}
+                  {lead.email ? (
+                    <>
+                      {" "}
+                      · <span className="font-mono">{lead.email}</span>
+                    </>
+                  ) : null}
+                </div>
               </div>
             </div>
 
-            {row.renderImageUrl ? (
+            <form action={updateStage} className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                Stage
+              </label>
+              <select
+                name="stage"
+                defaultValue={stage}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+              >
+                {STAGES.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Save
+              </button>
+            </form>
+          </div>
+        </section>
+
+        {/* Render */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <h2 className="font-semibold">Render</h2>
+          <div className="mt-2 text-sm text-gray-700 dark:text-gray-300">
+            Opt-in: <b>{row.renderOptIn ? "true" : "false"}</b> · Status:{" "}
+            <b>{row.renderStatus || "—"}</b>
+          </div>
+
+          {row.renderImageUrl ? (
+            <div className="mt-4">
+              <div className="text-xs text-gray-500">Render image</div>
               <a
                 href={row.renderImageUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                className="mt-1 inline-block underline text-sm"
               >
-                Open image
+                Open render image
               </a>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
 
           {row.renderError ? (
             <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
               {row.renderError}
             </div>
           ) : null}
-
-          {row.renderImageUrl ? (
-            <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={row.renderImageUrl}
-                alt="AI rendering"
-                className="w-full object-cover"
-                loading="lazy"
-              />
-            </div>
-          ) : (
-            <div className="mt-4 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-              No render image for this quote.
-            </div>
-          )}
         </section>
 
         {/* Input */}
