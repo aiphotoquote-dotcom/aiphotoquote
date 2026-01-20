@@ -1,3 +1,4 @@
+// src/app/api/tenant/save-settings/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
@@ -10,28 +11,51 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Accept BOTH camelCase and snake_case.
- * Your UI currently sends snake_case, so we must support that.
+ * Save tenant settings (industry, URLs, reporting prefs)
+ * Called from TenantOnboardingForm.
  */
-const Body = z.object({
-  tenantSlug: z.string().min(3),
 
-  // industry required (either key)
-  industryKey: z.string().min(1).optional(),
-  industry_key: z.string().min(1).optional(),
+const Body = z
+  .object({
+    // support both casings
+    tenantSlug: z.string().min(3).optional(),
+    tenant_slug: z.string().min(3).optional(),
 
-  redirectUrl: z.string().optional().nullable(),
-  redirect_url: z.string().optional().nullable(),
+    industryKey: z.string().min(1).optional(),
+    industry_key: z.string().min(1).optional(),
 
-  thankYouUrl: z.string().optional().nullable(),
-  thank_you_url: z.string().optional().nullable(),
+    redirectUrl: z.string().optional().nullable(),
+    redirect_url: z.string().optional().nullable(),
 
-  reportingTimezone: z.string().optional().nullable(),
-  reporting_timezone: z.string().optional().nullable(),
+    thankYouUrl: z.string().optional().nullable(),
+    thank_you_url: z.string().optional().nullable(),
 
-  weekStartsOn: z.number().int().min(0).max(6).optional().nullable(),
-  week_starts_on: z.number().int().min(0).max(6).optional().nullable(),
-});
+    // NEW reporting settings (support both)
+    timeZone: z.string().optional().nullable(),
+    time_zone: z.string().optional().nullable(),
+
+    weekStart: z.string().optional().nullable(),
+    week_start: z.string().optional().nullable(),
+  })
+  .passthrough();
+
+function pickString(obj: any, camel: string, snake: string) {
+  const a = obj?.[camel];
+  if (typeof a === "string") return a;
+  const b = obj?.[snake];
+  if (typeof b === "string") return b;
+  return "";
+}
+
+function pickNullableString(obj: any, camel: string, snake: string) {
+  const a = obj?.[camel];
+  if (typeof a === "string") return a;
+  if (a === null) return null;
+  const b = obj?.[snake];
+  if (typeof b === "string") return b;
+  if (b === null) return null;
+  return undefined; // means "not provided"
+}
 
 function normalizeUrl(u: string | null | undefined) {
   const s = String(u ?? "").trim();
@@ -40,8 +64,18 @@ function normalizeUrl(u: string | null | undefined) {
   return s;
 }
 
-function pick<T>(a: T | undefined, b: T | undefined): T | undefined {
-  return a !== undefined ? a : b;
+function normalizeWeekStart(v: string | null | undefined) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "monday";
+  // keep it flexible, but normalize common inputs
+  if (s.startsWith("mon")) return "monday";
+  if (s.startsWith("sun")) return "sunday";
+  if (s.startsWith("sat")) return "saturday";
+  if (s.startsWith("tue")) return "tuesday";
+  if (s.startsWith("wed")) return "wednesday";
+  if (s.startsWith("thu")) return "thursday";
+  if (s.startsWith("fri")) return "friday";
+  return s;
 }
 
 export async function POST(req: Request) {
@@ -51,8 +85,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
-    const json = await req.json().catch(() => null);
-    const parsed = Body.safeParse(json);
+    const raw = await req.json().catch(() => null);
+    const parsed = Body.safeParse(raw);
+
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
@@ -60,36 +95,45 @@ export async function POST(req: Request) {
       );
     }
 
-    const data = parsed.data;
+    const data: any = parsed.data;
 
-    const industryKey = pick(data.industryKey, data.industry_key);
-    if (!industryKey) {
+    const tenantSlug = pickString(data, "tenantSlug", "tenant_slug").trim();
+    const industryKey = pickString(data, "industryKey", "industry_key").trim();
+
+    if (tenantSlug.length < 3 || industryKey.length < 1) {
       return NextResponse.json(
-        { ok: false, error: "INVALID_BODY", message: "industryKey is required" },
+        { ok: false, error: "MISSING_REQUIRED_FIELDS" },
         { status: 400 }
       );
     }
 
-    const redirectRaw = pick(data.redirectUrl, data.redirect_url) ?? null;
-    const thankYouRaw = pick(data.thankYouUrl, data.thank_you_url) ?? null;
+    const redirectRaw = pickNullableString(data, "redirectUrl", "redirect_url");
+    const thankYouRaw = pickNullableString(data, "thankYouUrl", "thank_you_url");
 
-    const reportingTimezone =
-      (pick(data.reportingTimezone, data.reporting_timezone) ?? "").trim() || null;
+    const timeZoneRaw = pickNullableString(data, "timeZone", "time_zone");
+    const weekStartRaw = pickNullableString(data, "weekStart", "week_start");
 
-    const weekStartsOn = pick(data.weekStartsOn, data.week_starts_on) ?? null;
+    const redirectUrl = redirectRaw === undefined ? undefined : normalizeUrl(redirectRaw);
+    const thankYouUrl = thankYouRaw === undefined ? undefined : normalizeUrl(thankYouRaw);
 
-    // Resolve tenant owned by this user (slug is unique)
-    const tenantRows = await db
+    const timeZone =
+      timeZoneRaw === undefined ? undefined : String(timeZoneRaw ?? "").trim() || null;
+
+    const weekStart =
+      weekStartRaw === undefined ? undefined : normalizeWeekStart(weekStartRaw);
+
+    // Resolve tenant owned by this user
+    const tenant = await db
       .select({
         id: tenants.id,
         slug: tenants.slug,
         ownerClerkUserId: tenants.ownerClerkUserId,
       })
       .from(tenants)
-      .where(and(eq(tenants.slug, data.tenantSlug), eq(tenants.ownerClerkUserId, userId)))
-      .limit(1);
+      .where(and(eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId)))
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const tenant = tenantRows[0] ?? null;
     if (!tenant) {
       return NextResponse.json(
         { ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" },
@@ -97,51 +141,56 @@ export async function POST(req: Request) {
       );
     }
 
-    const redirect = normalizeUrl(redirectRaw);
-    const thankYou = normalizeUrl(thankYouRaw);
+    // Build update set (only set optional fields if provided)
+    const baseSet: any = {
+      industryKey,
+      updatedAt: new Date(),
+    };
 
+    if (redirectUrl !== undefined) baseSet.redirectUrl = redirectUrl;
+    if (thankYouUrl !== undefined) baseSet.thankYouUrl = thankYouUrl;
+
+    // NEW reporting fields
+    if (timeZone !== undefined) baseSet.timeZone = timeZone;
+    if (weekStart !== undefined) baseSet.weekStart = weekStart;
+
+    // Upsert tenant_settings (tenant_id is PK)
     await db
       .insert(tenantSettings)
       .values({
         tenantId: tenant.id,
         industryKey,
-        redirectUrl: redirect,
-        thankYouUrl: thankYou,
-        reportingTimezone,
-        weekStartsOn,
+        redirectUrl: redirectUrl === undefined ? null : redirectUrl,
+        thankYouUrl: thankYouUrl === undefined ? null : thankYouUrl,
+        timeZone: timeZone === undefined ? null : timeZone,
+        weekStart: weekStart === undefined ? "monday" : weekStart,
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
         target: tenantSettings.tenantId,
-        set: {
-          industryKey,
-          redirectUrl: redirect,
-          thankYouUrl: thankYou,
-          reportingTimezone,
-          weekStartsOn,
-          updatedAt: new Date(),
-        },
+        set: baseSet,
       });
 
-    // Return saved settings (fresh)
-    const settingsRows = await db
+    // Return saved settings (snake_case response)
+    const settingsRow = await db
       .select({
         tenant_id: tenantSettings.tenantId,
         industry_key: tenantSettings.industryKey,
         redirect_url: tenantSettings.redirectUrl,
         thank_you_url: tenantSettings.thankYouUrl,
-        reporting_timezone: tenantSettings.reportingTimezone,
-        week_starts_on: tenantSettings.weekStartsOn,
         updated_at: tenantSettings.updatedAt,
+        time_zone: tenantSettings.timeZone,
+        week_start: tenantSettings.weekStart,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
     return NextResponse.json({
       ok: true,
       tenant: { id: tenant.id, slug: tenant.slug },
-      settings: settingsRows[0] ?? null,
+      settings: settingsRow,
     });
   } catch (e: any) {
     return NextResponse.json(
