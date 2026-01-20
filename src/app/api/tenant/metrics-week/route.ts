@@ -2,10 +2,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gte, lt } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSettings } from "@/lib/db/schema";
+import { quoteLogs, tenants } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +19,17 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   ].filter(Boolean) as string[];
 
   return candidates[0] || null;
+}
+
+// Monday 00:00:00 (UTC) start of week.
+// This is stable + predictable. Later we can make it tenant-configurable.
+function startOfWeekMondayUTC(d: Date) {
+  const x = new Date(d);
+  const day = x.getUTCDay(); // 0 Sun .. 6 Sat
+  const diff = (day + 6) % 7; // days since Monday
+  x.setUTCDate(x.getUTCDate() - diff);
+  x.setUTCHours(0, 0, 0, 0);
+  return x;
 }
 
 async function resolveTenantId(userId: string) {
@@ -39,180 +50,128 @@ async function resolveTenantId(userId: string) {
   return tenantId;
 }
 
-function clampWeekStartsOn(v: unknown) {
-  // stored as 0..6 (Sun..Sat). Default Monday=1.
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return 1;
-  const i = Math.trunc(n);
-  if (i < 0) return 0;
-  if (i > 6) return 6;
-  return i;
+async function countTotal(tenantId: string, start: Date, end: Date) {
+  const rows = await db
+    .select({ id: quoteLogs.id })
+    .from(quoteLogs)
+    .where(
+      and(
+        eq(quoteLogs.tenantId, tenantId),
+        gte(quoteLogs.createdAt, start),
+        lt(quoteLogs.createdAt, end)
+      )
+    );
+
+  return rows.length;
+}
+
+async function countOptIns(tenantId: string, start: Date, end: Date) {
+  const rows = await db
+    .select({ id: quoteLogs.id })
+    .from(quoteLogs)
+    .where(
+      and(
+        eq(quoteLogs.tenantId, tenantId),
+        gte(quoteLogs.createdAt, start),
+        lt(quoteLogs.createdAt, end),
+        eq(quoteLogs.renderOptIn, true)
+      )
+    );
+
+  return rows.length;
+}
+
+async function countRendered(tenantId: string, start: Date, end: Date) {
+  const rows = await db
+    .select({ id: quoteLogs.id })
+    .from(quoteLogs)
+    .where(
+      and(
+        eq(quoteLogs.tenantId, tenantId),
+        gte(quoteLogs.createdAt, start),
+        lt(quoteLogs.createdAt, end),
+        eq(quoteLogs.renderStatus, "rendered")
+      )
+    );
+
+  return rows.length;
+}
+
+async function countFailed(tenantId: string, start: Date, end: Date) {
+  const rows = await db
+    .select({ id: quoteLogs.id })
+    .from(quoteLogs)
+    .where(
+      and(
+        eq(quoteLogs.tenantId, tenantId),
+        gte(quoteLogs.createdAt, start),
+        lt(quoteLogs.createdAt, end),
+        eq(quoteLogs.renderStatus, "failed")
+      )
+    );
+
+  return rows.length;
 }
 
 export async function GET() {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json(
-        { ok: false, error: "UNAUTHENTICATED" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
     const tenantId = await resolveTenantId(userId);
     if (!tenantId) {
-      return NextResponse.json(
-        { ok: false, error: "NO_ACTIVE_TENANT" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
     }
 
-    // Pull tenant reporting preferences (timezone + week start)
-    const s = await db
-      .select({
-        reportingTimezone: tenantSettings.reportingTimezone,
-        weekStartsOn: tenantSettings.weekStartsOn,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+    const now = new Date();
 
-    const tz =
-      typeof s?.reportingTimezone === "string" && s.reportingTimezone.trim()
-        ? s.reportingTimezone.trim()
-        : "America/New_York";
+    // Week bounds (UTC Monday)
+    const thisWeekStart = startOfWeekMondayUTC(now);
+    const nextWeekStart = new Date(thisWeekStart);
+    nextWeekStart.setUTCDate(nextWeekStart.getUTCDate() + 7);
 
-    const weekStartsOn = clampWeekStartsOn(s?.weekStartsOn);
+    const lastWeekStart = new Date(thisWeekStart);
+    lastWeekStart.setUTCDate(lastWeekStart.getUTCDate() - 7);
 
-    // Compute week bounds in *tenant timezone* with *tenant week start*
-    // Then count all metrics in one query using FILTER.
-    //
-    // Key idea:
-    // - take "today" in tenant TZ as a DATE
-    // - compute start date by subtracting day-diff based on desired DOW (0 Sun..6 Sat)
-    // - convert local midnight timestamps back into timestamptz via "AT TIME ZONE tz"
-    const q = await db.execute(
-      sql`
-        with cfg as (
-          select
-            ${tz}::text as tz,
-            ${weekStartsOn}::int as ws
-        ),
-        local_today as (
-          select
-            (now() at time zone (select tz from cfg))::date as today,
-            (select tz from cfg) as tz,
-            (select ws from cfg) as ws
-        ),
-        dates as (
-          select
-            -- extract(dow) uses 0=Sun .. 6=Sat (matches our stored convention)
-            (today - ((extract(dow from today)::int - ws + 7) % 7))::date as this_start_date,
-            (today - ((extract(dow from today)::int - ws + 7) % 7) - 7)::date as last_start_date,
-            tz
-          from local_today
-        ),
-        bounds as (
-          select
-            (this_start_date::timestamp at time zone tz) as this_start,
-            ((this_start_date::timestamp + interval '7 days') at time zone tz) as this_end,
-            (last_start_date::timestamp at time zone tz) as last_start,
-            ((last_start_date::timestamp + interval '7 days') at time zone tz) as last_end
-          from dates
-        )
-        select
-          b.this_start,
-          b.this_end,
-          b.last_start,
-          b.last_end,
+    const thisWeekEnd = nextWeekStart;
+    const lastWeekEnd = thisWeekStart;
 
-          count(*) filter (
-            where q.created_at >= b.this_start and q.created_at < b.this_end
-          )::int as quotes_this,
+    const [qThis, qLast, oThis, oLast, rThis, rLast, fThis, fLast] = await Promise.all([
+      countTotal(tenantId, thisWeekStart, thisWeekEnd),
+      countTotal(tenantId, lastWeekStart, lastWeekEnd),
 
-          count(*) filter (
-            where q.created_at >= b.last_start and q.created_at < b.last_end
-          )::int as quotes_last,
+      countOptIns(tenantId, thisWeekStart, thisWeekEnd),
+      countOptIns(tenantId, lastWeekStart, lastWeekEnd),
 
-          count(*) filter (
-            where q.created_at >= b.this_start and q.created_at < b.this_end
-              and q.render_opt_in = true
-          )::int as optins_this,
+      countRendered(tenantId, thisWeekStart, thisWeekEnd),
+      countRendered(tenantId, lastWeekStart, lastWeekEnd),
 
-          count(*) filter (
-            where q.created_at >= b.last_start and q.created_at < b.last_end
-              and q.render_opt_in = true
-          )::int as optins_last,
-
-          count(*) filter (
-            where q.created_at >= b.this_start and q.created_at < b.this_end
-              and lower(coalesce(q.render_status, '')) = 'rendered'
-          )::int as rendered_this,
-
-          count(*) filter (
-            where q.created_at >= b.last_start and q.created_at < b.last_end
-              and lower(coalesce(q.render_status, '')) = 'rendered'
-          )::int as rendered_last,
-
-          count(*) filter (
-            where q.created_at >= b.this_start and q.created_at < b.this_end
-              and lower(coalesce(q.render_status, '')) = 'failed'
-          )::int as failed_this,
-
-          count(*) filter (
-            where q.created_at >= b.last_start and q.created_at < b.last_end
-              and lower(coalesce(q.render_status, '')) = 'failed'
-          )::int as failed_last
-
-        from quote_logs q
-        cross join bounds b
-        where q.tenant_id = ${tenantId};
-      `
-    );
-
-    // drizzle returns { rows } with driver-specific shapes
-    const row: any =
-      (q as any)?.rows?.[0] ??
-      (Array.isArray(q) ? (q as any)[0] : null) ??
-      null;
-
-    if (!row) {
-      // If no rows came back, still return range (compute range without counts would be extra query)
-      return NextResponse.json({
-        ok: true,
-        reporting: { timezone: tz, weekStartsOn },
-        range: null,
-        thisWeek: { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 },
-        lastWeek: { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 },
-      });
-    }
-
-    const thisStart = row.this_start ? new Date(row.this_start).toISOString() : null;
-    const thisEnd = row.this_end ? new Date(row.this_end).toISOString() : null;
-    const lastStart = row.last_start ? new Date(row.last_start).toISOString() : null;
-    const lastEnd = row.last_end ? new Date(row.last_end).toISOString() : null;
+      countFailed(tenantId, thisWeekStart, thisWeekEnd),
+      countFailed(tenantId, lastWeekStart, lastWeekEnd),
+    ]);
 
     return NextResponse.json({
       ok: true,
-      reporting: { timezone: tz, weekStartsOn },
+      weekStart: "monday",
+      tz: "UTC",
       range: {
-        thisWeekStart: thisStart,
-        nextWeekStart: thisEnd,
-        lastWeekStart: lastStart,
-        lastWeekEnd: lastEnd,
+        thisWeekStart: thisWeekStart.toISOString(),
+        nextWeekStart: nextWeekStart.toISOString(),
+        lastWeekStart: lastWeekStart.toISOString(),
       },
       thisWeek: {
-        quotes: Number(row.quotes_this ?? 0) || 0,
-        renderOptIns: Number(row.optins_this ?? 0) || 0,
-        rendered: Number(row.rendered_this ?? 0) || 0,
-        renderFailures: Number(row.failed_this ?? 0) || 0,
+        quotes: qThis,
+        renderOptIns: oThis,
+        rendered: rThis,
+        renderFailures: fThis,
       },
       lastWeek: {
-        quotes: Number(row.quotes_last ?? 0) || 0,
-        renderOptIns: Number(row.optins_last ?? 0) || 0,
-        rendered: Number(row.rendered_last ?? 0) || 0,
-        renderFailures: Number(row.failed_last ?? 0) || 0,
+        quotes: qLast,
+        renderOptIns: oLast,
+        rendered: rLast,
+        renderFailures: fLast,
       },
     });
   } catch (e: any) {
