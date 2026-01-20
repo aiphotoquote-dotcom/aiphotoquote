@@ -10,29 +10,30 @@ import { decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 
-const LeadSchema = z.object({
+const CustomerSchema = z.object({
   name: z.string().min(2, "Name is required"),
   phone: z.string().min(7, "Phone is required"),
   email: z.string().email("Valid email is required"),
 });
 
 // Back-compat:
-// - older UI sent: contact + customer_context + render_opt_in
-// - newer API may want: customer + customer_context + render_opt_in
+// - QuoteForm currently sends: contact {name,email,phone}
+// - We now prefer: customer {name,email,phone}
 const Req = z.object({
   tenantSlug: z.string().min(3),
-
   images: z
     .array(z.object({ url: z.string().url(), shotType: z.string().optional() }))
     .min(1)
     .max(12),
 
-  // ✅ accept either (we'll require one at runtime)
-  customer: LeadSchema.optional(),
-  contact: LeadSchema.optional(),
+  // ✅ NEW preferred shape
+  customer: CustomerSchema.optional(),
 
+  // ✅ Back-compat shape
+  contact: CustomerSchema.optional(),
+
+  // existing
   render_opt_in: z.boolean().optional(),
-
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -46,22 +47,10 @@ function normalizePhone(raw: string) {
   return String(raw ?? "").replace(/\D/g, "");
 }
 
-function pickLead(input: { customer?: any; contact?: any }) {
-  const src = input.customer ?? input.contact ?? null;
-  if (!src) return null;
-
-  const name = String(src.name ?? "").trim();
-  const email = String(src.email ?? "").trim().toLowerCase();
-  const phone = normalizePhone(String(src.phone ?? ""));
-
-  return { name, email, phone };
-}
-
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
-
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
@@ -71,34 +60,26 @@ export async function POST(req: Request) {
 
     const { tenantSlug, images } = parsed.data;
 
-    // ✅ require lead identity (either customer or contact)
-    const lead = pickLead({ customer: parsed.data.customer, contact: parsed.data.contact });
-    if (!lead) {
+    // Accept customer OR contact (but require one of them)
+    const incoming = parsed.data.customer ?? parsed.data.contact;
+    if (!incoming) {
       return NextResponse.json(
         {
           ok: false,
-          error: "MISSING_LEAD",
-          message: "Please provide name, email, and phone.",
+          error: "MISSING_CUSTOMER",
+          message: "Customer info is required (name, phone, email).",
         },
         { status: 400 }
       );
     }
 
-    if (lead.name.length < 2) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_NAME", message: "Name is required." },
-        { status: 400 }
-      );
-    }
+    const customer = {
+      name: incoming.name.trim(),
+      phone: normalizePhone(incoming.phone),
+      email: incoming.email.trim().toLowerCase(),
+    };
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(lead.email)) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_EMAIL", message: "Valid email is required." },
-        { status: 400 }
-      );
-    }
-
-    if (lead.phone.length < 10) {
+    if (customer.phone.length < 10) {
       return NextResponse.json(
         { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
         { status: 400 }
@@ -118,7 +99,7 @@ export async function POST(req: Request) {
     }
 
     // Settings (optional)
-    const settings = await db
+    await db
       .select({
         tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
@@ -147,22 +128,18 @@ export async function POST(req: Request) {
     const renderOptIn = Boolean(parsed.data.render_opt_in);
 
     const customer_context = parsed.data.customer_context ?? {};
-    const category = customer_context.category ?? settings?.industryKey ?? "service";
+    const category = customer_context.category ?? "service";
     const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
 
-    // --- Build input we store (consistent, includes lead) ---
+    // --- Build input we store (consistent, includes customer) ---
     const inputToStore = {
       tenantSlug,
       images,
       render_opt_in: renderOptIn,
 
-      // store under a single key going forward
-      contact: {
-        name: lead.name,
-        email: lead.email,
-        phone: lead.phone,
-      },
+      // ✅ Normalize into a single place so admin always knows where to look
+      customer,
 
       customer_context: {
         category,
@@ -172,7 +149,6 @@ export async function POST(req: Request) {
       createdAt: new Date().toISOString(),
     };
 
-    // --- OpenAI ---
     const prompt = `
 You are generating a quick price estimate range for a ${category} job.
 Service type: ${service_type}
@@ -209,11 +185,9 @@ Return JSON with: estimateLow, estimateHigh, inspectionRequired (boolean), summa
       .returning({ id: quoteLogs.id })
       .then((r) => r[0] ?? null);
 
-    const quoteLogId = inserted?.id ?? null;
-
     return NextResponse.json({
       ok: true,
-      quoteLogId, // ✅ UI expects this
+      quoteLogId: inserted?.id ?? null,
       output,
     });
   } catch (e: any) {
