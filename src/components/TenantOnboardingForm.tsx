@@ -1,3 +1,4 @@
+// src/components/TenantOnboardingForm.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -14,6 +15,7 @@ type MeSettingsResponse =
         redirect_url?: string | null;
         thank_you_url?: string | null;
 
+        // NEW
         reporting_timezone?: string | null;
         week_starts_on?: number | null;
 
@@ -24,6 +26,15 @@ type MeSettingsResponse =
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
+}
+
+function clampWeekStartsOn(v: unknown) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return 1; // Monday default
+  const i = Math.trunc(n);
+  if (i < 0) return 0;
+  if (i > 6) return 6;
+  return i;
 }
 
 export default function TenantOnboardingForm(props: { redirectToDashboard?: boolean }) {
@@ -43,22 +54,24 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
   const [redirectUrl, setRedirectUrl] = useState("");
   const [thankYouUrl, setThankYouUrl] = useState("");
 
-  // ✅ reporting config
+  // NEW (tenant settings)
   const [reportingTimezone, setReportingTimezone] = useState("America/New_York");
-  const [weekStartsOn, setWeekStartsOn] = useState<number>(1);
+  const [weekStartsOn, setWeekStartsOn] = useState<number>(1); // Monday
 
   const canSave = useMemo(() => {
     return Boolean(tenantSlug.trim().length >= 3 && industryKey.trim().length >= 1);
   }, [tenantSlug, industryKey]);
 
-  function pickStr(s: any, key: string, fallback = "") {
+  function pickString(s: any, key: string, fallback = "") {
     const v = s?.[key];
     return typeof v === "string" ? v : fallback;
   }
 
-  function pickNum(s: any, key: string, fallback: number) {
+  function pickNumber(s: any, key: string, fallback: number) {
     const v = s?.[key];
-    return typeof v === "number" ? v : fallback;
+    if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+    if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Math.trunc(Number(v));
+    return fallback;
   }
 
   async function load() {
@@ -71,21 +84,22 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
       const json: MeSettingsResponse = await res.json();
 
       if (!("ok" in json) || !json.ok) {
-        setLoadErr("Failed to load tenant settings.");
+        setLoadErr(json?.message || "Failed to load tenant settings.");
         return;
       }
 
       setTenantName(json.tenant?.name ?? "");
       setTenantSlug(json.tenant?.slug ?? "");
 
-      const s: any = json.settings;
-      setIndustryKey(s?.industry_key ?? "");
+      const s: any = json.settings ?? null;
 
-      setRedirectUrl(pickStr(s, "redirect_url", ""));
-      setThankYouUrl(pickStr(s, "thank_you_url", ""));
+      setIndustryKey(pickString(s, "industry_key", ""));
+      setRedirectUrl(pickString(s, "redirect_url", ""));
+      setThankYouUrl(pickString(s, "thank_you_url", ""));
 
-      setReportingTimezone(pickStr(s, "reporting_timezone", "America/New_York"));
-      setWeekStartsOn(pickNum(s, "week_starts_on", 1));
+      // NEW
+      setReportingTimezone(pickString(s, "reporting_timezone", "America/New_York") || "America/New_York");
+      setWeekStartsOn(clampWeekStartsOn(pickNumber(s, "week_starts_on", 1)));
     } catch (e: any) {
       setLoadErr(e?.message ?? "Failed to load tenant settings.");
     } finally {
@@ -102,14 +116,19 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
     setSaveErr(null);
     setSaved(false);
 
+    // We keep Monday as default AND we keep it locked to Monday for now.
+    const safeWeekStartsOn = 1;
+
     const payload = {
       tenantSlug: tenantSlug.trim(),
       industry_key: industryKey.trim(),
+
       redirect_url: redirectUrl.trim() || null,
       thank_you_url: thankYouUrl.trim() || null,
 
+      // NEW
       reporting_timezone: reportingTimezone.trim() || "America/New_York",
-      week_starts_on: weekStartsOn,
+      week_starts_on: safeWeekStartsOn,
     };
 
     setSaving(true);
@@ -151,10 +170,10 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Tenant settings
+              Settings
             </div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Configure your slug, industry, redirect URLs, and reporting.
+              Configure your tenant, public link behavior, and reporting defaults.
             </div>
           </div>
 
@@ -164,7 +183,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
             disabled={loading || saving}
             className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:hover:bg-gray-900"
           >
-            Retry
+            Refresh
           </button>
         </div>
 
@@ -177,7 +196,8 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
         {loading ? (
           <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading…</div>
         ) : (
-          <div className="mt-5 grid gap-4">
+          <div className="mt-5 grid gap-5">
+            {/* Tenant identity */}
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <div className="text-xs text-gray-700 dark:text-gray-200">Tenant name</div>
@@ -207,6 +227,7 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
               </div>
             </div>
 
+            {/* Industry */}
             <div>
               <div className="text-xs text-gray-700 dark:text-gray-200">
                 Industry key <span className="text-red-600">*</span>
@@ -221,11 +242,10 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
               />
             </div>
 
+            {/* URLs */}
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <div className="text-xs text-gray-700 dark:text-gray-200">
-                  Redirect URL (optional)
-                </div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">Redirect URL (optional)</div>
                 <input
                   className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={redirectUrl}
@@ -235,14 +255,12 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                   autoComplete="off"
                 />
                 <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  Where to send customer after submit.
+                  Where to send the customer after they submit.
                 </div>
               </div>
 
               <div>
-                <div className="text-xs text-gray-700 dark:text-gray-200">
-                  Thank-you URL (optional)
-                </div>
+                <div className="text-xs text-gray-700 dark:text-gray-200">Thank-you URL (optional)</div>
                 <input
                   className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   value={thankYouUrl}
@@ -252,56 +270,60 @@ export default function TenantOnboardingForm(props: { redirectToDashboard?: bool
                   autoComplete="off"
                 />
                 <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  Alternate final destination (if used by your flow).
+                  Alternate final destination (if your flow uses it).
                 </div>
               </div>
             </div>
 
-            {/* ✅ Reporting settings */}
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <div className="text-xs text-gray-700 dark:text-gray-200">
-                  Reporting timezone
-                </div>
-                <select
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
-                  value={reportingTimezone}
-                  onChange={(e) => setReportingTimezone(e.target.value)}
-                  disabled={saving}
-                >
-                  <option value="America/New_York">America/New_York</option>
-                  <option value="America/Chicago">America/Chicago</option>
-                  <option value="America/Denver">America/Denver</option>
-                  <option value="America/Los_Angeles">America/Los_Angeles</option>
-                  <option value="UTC">UTC</option>
-                </select>
-                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  Controls “this week / last week” windows.
+            {/* Reporting */}
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    Reporting defaults
+                  </div>
+                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                    Used for weekly metrics on the dashboard.
+                  </div>
                 </div>
               </div>
 
-              <div>
-                <div className="text-xs text-gray-700 dark:text-gray-200">
-                  Week starts on
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <div className="text-xs text-gray-700 dark:text-gray-200">
+                    Reporting timezone
+                  </div>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+                    value={reportingTimezone}
+                    onChange={(e) => setReportingTimezone(e.target.value)}
+                    placeholder="America/New_York"
+                    disabled={saving}
+                    autoComplete="off"
+                  />
+                  <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    Example: <span className="font-mono">America/New_York</span>,{" "}
+                    <span className="font-mono">America/Chicago</span>
+                  </div>
                 </div>
-                <select
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
-                  value={weekStartsOn}
-                  onChange={(e) => setWeekStartsOn(Number(e.target.value))}
-                  disabled={saving}
-                >
-                  <option value={0}>Sunday</option>
-                  <option value={1}>Monday</option>
-                  <option value={2}>Tuesday</option>
-                  <option value={3}>Wednesday</option>
-                  <option value={4}>Thursday</option>
-                  <option value={5}>Friday</option>
-                  <option value={6}>Saturday</option>
-                </select>
-                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  Weekly comparisons align to this day.
+
+                <div>
+                  <div className="text-xs text-gray-700 dark:text-gray-200">
+                    Week starts on
+                  </div>
+                  <input
+                    className="mt-2 w-full rounded-xl border border-gray-200 bg-gray-100 p-3 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200"
+                    value="Monday"
+                    readOnly
+                  />
+                  <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                    Default is Monday (we can make this selectable later).
+                  </div>
                 </div>
               </div>
+
+              {/* Keep state aligned even though it's locked */}
+              <input type="hidden" value={weekStartsOn} readOnly />
             </div>
 
             {saveErr ? (

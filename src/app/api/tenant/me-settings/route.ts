@@ -1,3 +1,4 @@
+// src/app/api/tenant/me-settings/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -30,7 +31,7 @@ export async function GET() {
     const jar = await cookies();
     let tenantId = getCookieTenantId(jar);
 
-    // Fallback: use tenant owned by this user
+    // Fallback: choose the tenant owned by this user
     if (!tenantId) {
       const t = await db
         .select({ id: tenants.id })
@@ -43,10 +44,13 @@ export async function GET() {
     }
 
     if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "NO_ACTIVE_TENANT", message: "No tenant found for this user." },
+        { status: 400 }
+      );
     }
 
-    const tenantRow = await db
+    const tenant = await db
       .select({
         id: tenants.id,
         name: tenants.name,
@@ -57,18 +61,24 @@ export async function GET() {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    if (!tenantRow) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    if (!tenant) {
+      return NextResponse.json(
+        { ok: false, error: "TENANT_NOT_FOUND", message: "Active tenant not found." },
+        { status: 404 }
+      );
     }
 
-    const settingsRow = await db
+    const settings = await db
       .select({
         tenant_id: tenantSettings.tenantId,
         industry_key: tenantSettings.industryKey,
         redirect_url: tenantSettings.redirectUrl,
         thank_you_url: tenantSettings.thankYouUrl,
+
+        // NEW
         reporting_timezone: tenantSettings.reportingTimezone,
         week_starts_on: tenantSettings.weekStartsOn,
+
         updated_at: tenantSettings.updatedAt,
       })
       .from(tenantSettings)
@@ -76,10 +86,13 @@ export async function GET() {
       .limit(1)
       .then((r) => r[0] ?? null);
 
+    // IMPORTANT:
+    // industry_key in your schema is NOT NULL, but older tenants may not have a row yet.
+    // Returning settings: null is fine — UI handles it.
     return NextResponse.json({
       ok: true,
-      tenant: tenantRow,
-      settings: settingsRow,
+      tenant,
+      settings,
     });
   } catch (e: any) {
     return NextResponse.json(
