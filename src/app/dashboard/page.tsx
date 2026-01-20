@@ -14,11 +14,6 @@ type MeSettingsResponse =
         industry_key: string | null;
         redirect_url: string | null;
         thank_you_url: string | null;
-
-        // NEW (tenant reporting defaults)
-        reporting_timezone?: string | null;
-        week_starts_on?: number | null;
-
         updated_at: string | null;
       } | null;
     }
@@ -50,30 +45,24 @@ type WeekCounts = {
 type WeeklyMetricsResp =
   | {
       ok: true;
-
-      // common shapes we might return
       thisWeek?: Partial<WeekCounts> | null;
       lastWeek?: Partial<WeekCounts> | null;
 
+      // legacy/alternate shapes we may have used before
       this_week?: Partial<WeekCounts> | null;
       last_week?: Partial<WeekCounts> | null;
+      weekly?: { thisWeek?: Partial<WeekCounts> | null; lastWeek?: Partial<WeekCounts> | null } | null;
 
-      weekly?: {
-        thisWeek?: Partial<WeekCounts> | null;
-        lastWeek?: Partial<WeekCounts> | null;
-      } | null;
-
-      // optional metadata
-      range?: {
+      // meta is optional (new)
+      meta?: {
+        tenantId?: string;
+        timeZone?: string;
+        weekStartsOn?: string;
         thisWeekStart?: string;
-        nextWeekStart?: string;
+        thisWeekEnd?: string;
         lastWeekStart?: string;
-      };
-
-      reporting?: {
-        timezone?: string | null;
-        weekStartsOn?: number | null;
-      };
+        lastWeekEnd?: string;
+      } | null;
     }
   | { ok: false; error: any; message?: string };
 
@@ -109,18 +98,10 @@ function fmtDate(iso: string) {
   return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function fmtShortDate(iso: string, tz?: string) {
+function fmtShortDate(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  try {
-    return d.toLocaleDateString(undefined, {
-      timeZone: tz || undefined,
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  }
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function money(n: unknown) {
@@ -137,21 +118,6 @@ function clampInt(v: unknown) {
   const n = typeof v === "number" ? v : Number(v);
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.trunc(n));
-}
-
-function clampWeekStartsOn(v: unknown) {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return 1; // Monday
-  const i = Math.trunc(n);
-  if (i < 0) return 0;
-  if (i > 6) return 6;
-  return i;
-}
-
-function weekStartsLabel(n: number) {
-  // 0 Sun .. 6 Sat
-  const labels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  return labels[n] ?? "Monday";
 }
 
 function pctDelta(curr: number, prev: number) {
@@ -177,30 +143,56 @@ function normalizeWeekly(resp: WeeklyMetricsResp | null): {
   ready: boolean;
   thisWeek: WeekCounts;
   lastWeek: WeekCounts;
+  meta: {
+    timeZone?: string;
+    weekStartsOn?: string;
+    thisWeekStart?: string;
+    thisWeekEnd?: string;
+  };
 } {
   const zero: WeekCounts = { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 };
-  if (!resp || !("ok" in resp) || !resp.ok) return { ready: false, thisWeek: zero, lastWeek: zero };
 
-  const a = (resp as any).thisWeek ?? (resp as any).this_week ?? (resp as any).weekly?.thisWeek ?? null;
-  const b = (resp as any).lastWeek ?? (resp as any).last_week ?? (resp as any).weekly?.lastWeek ?? null;
+  if (!resp || !("ok" in resp) || !resp.ok) {
+    return { ready: false, thisWeek: zero, lastWeek: zero, meta: {} };
+  }
 
-  if (!a && !b) return { ready: false, thisWeek: zero, lastWeek: zero };
+  // Prefer the current API shape first
+  const a =
+    (resp as any).thisWeek ??
+    (resp as any).weekly?.thisWeek ??
+    (resp as any).this_week ??
+    (resp as any).weekly?.thisWeek ??
+    null;
+
+  const b =
+    (resp as any).lastWeek ??
+    (resp as any).weekly?.lastWeek ??
+    (resp as any).last_week ??
+    (resp as any).weekly?.lastWeek ??
+    null;
+
+  const meta = (resp as any).meta ?? {};
+
+  // If the API is ok:true but missing payload, treat as not-ready
+  if (!a && !b) {
+    return { ready: false, thisWeek: zero, lastWeek: zero, meta };
+  }
 
   const tw: WeekCounts = {
     quotes: clampInt(a?.quotes),
-    renderOptIns: clampInt(a?.renderOptIns ?? a?.render_opt_ins),
+    renderOptIns: clampInt(a?.renderOptIns ?? a?.render_opt_ins ?? a?.render_optins),
     rendered: clampInt(a?.rendered),
     renderFailures: clampInt(a?.renderFailures ?? a?.render_failures),
   };
 
   const lw: WeekCounts = {
     quotes: clampInt(b?.quotes),
-    renderOptIns: clampInt(b?.renderOptIns ?? b?.render_opt_ins),
+    renderOptIns: clampInt(b?.renderOptIns ?? b?.render_opt_ins ?? b?.render_optins),
     rendered: clampInt(b?.rendered),
     renderFailures: clampInt(b?.renderFailures ?? b?.render_failures),
   };
 
-  return { ready: true, thisWeek: tw, lastWeek: lw };
+  return { ready: true, thisWeek: tw, lastWeek: lw, meta };
 }
 
 export default function Dashboard() {
@@ -285,6 +277,7 @@ export default function Dashboard() {
 
     const tenantName = tenant?.name ? String(tenant.name) : "";
     const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
+
     const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
 
     const hasSlug = Boolean(tenantSlug);
@@ -293,28 +286,7 @@ export default function Dashboard() {
     const isReady = hasSlug && hasIndustry;
     const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
 
-    const reportingTimezone =
-      typeof settings?.reporting_timezone === "string" && settings.reporting_timezone.trim()
-        ? settings.reporting_timezone.trim()
-        : "America/New_York";
-
-    const weekStartsOn = clampWeekStartsOn(settings?.week_starts_on);
-    // You said: keep Monday default. We still display what’s stored,
-    // but if missing, it’ll be Monday.
-    const weekStartsOnLabel = weekStartsLabel(weekStartsOn);
-
-    return {
-      ok,
-      tenantName,
-      tenantSlug,
-      hasSlug,
-      hasIndustry,
-      isReady,
-      publicPath,
-      reportingTimezone,
-      weekStartsOn,
-      weekStartsOnLabel,
-    };
+    return { ok, tenantName, tenantSlug, hasSlug, hasIndustry, isReady, publicPath };
   }, [me]);
 
   async function copyPublicLink() {
@@ -340,17 +312,14 @@ export default function Dashboard() {
   const qCount = wk.thisWeek.quotes;
   const qPrev = wk.lastWeek.quotes;
 
-  const range = (weeklyResp as any)?.range ?? null;
-  const thisStart = range?.thisWeekStart ? String(range.thisWeekStart) : "";
-  const thisEnd = range?.nextWeekStart ? String(range.nextWeekStart) : "";
-
-  const windowLine =
-    thisStart && thisEnd
-      ? `Week window: ${fmtShortDate(thisStart, computed.reportingTimezone)} – ${fmtShortDate(
-          thisEnd,
-          computed.reportingTimezone
-        )} · TZ: ${computed.reportingTimezone} · Starts: ${computed.weekStartsOnLabel}`
-      : `TZ: ${computed.reportingTimezone} · Starts: ${computed.weekStartsOnLabel}`;
+  const windowLabel =
+    wk.meta?.thisWeekStart && wk.meta?.thisWeekEnd
+      ? `Week window: ${fmtShortDate(wk.meta.thisWeekStart)} – ${fmtShortDate(
+          wk.meta.thisWeekEnd
+        )} · TZ: ${wk.meta.timeZone ?? "America/New_York"} · Starts: ${
+          wk.meta.weekStartsOn ?? "monday"
+        }`
+      : `TZ: ${wk.meta.timeZone ?? "America/New_York"} · Starts: ${wk.meta.weekStartsOn ?? "monday"}`;
 
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
@@ -403,10 +372,7 @@ export default function Dashboard() {
                 <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
                   Compared to last week. Counts only for now.
                 </p>
-
-                <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  {windowLine}
-                </div>
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{windowLabel}</p>
               </div>
 
               <div className="flex items-center gap-2">
