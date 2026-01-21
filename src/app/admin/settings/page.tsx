@@ -1,3 +1,4 @@
+// src/app/admin/settings/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -73,12 +74,27 @@ export default function AdminTenantSettingsPage() {
   const SETTINGS_URL = "/api/admin/tenant-settings";
   const EMAIL_STATUS_URL = "/api/admin/email/status";
 
+  // ✅ HARDEN: tenants is always an array, even if something goes sideways
+  const tenants = useMemo(() => (Array.isArray(context?.tenants) ? context.tenants : []), [context]);
+  const activeTenantId = context?.activeTenantId ?? null;
+
+  // ✅ HARDEN: never call .find on undefined
+  const activeTenant = useMemo(() => {
+    if (!activeTenantId) return null;
+    return tenants.find((t) => t.tenantId === activeTenantId) || null;
+  }, [tenants, activeTenantId]);
+
   async function loadContext() {
     const res = await fetch(CONTEXT_URL, { cache: "no-store" });
     const data = await safeJson<ContextResp>(res);
     if (!data.ok) throw new Error(data.message || data.error || "Failed to load tenant context");
-    setContext({ activeTenantId: data.activeTenantId, tenants: data.tenants });
-    return data.activeTenantId;
+
+    setContext({
+      activeTenantId: data.activeTenantId ?? null,
+      tenants: Array.isArray(data.tenants) ? data.tenants : [],
+    });
+
+    return data.activeTenantId ?? null;
   }
 
   async function loadSettings() {
@@ -104,10 +120,12 @@ export default function AdminTenantSettingsPage() {
     setLoading(true);
 
     try {
-      const activeTenantId = await loadContext();
-      if (!activeTenantId) {
-        setErr("No tenants found for this user yet.");
+      const id = await loadContext();
+      if (!id) {
+        setRole(null);
         setEmailStatus(null);
+        setMsg(null);
+        setErr("No tenants found for this user yet.");
         return;
       }
 
@@ -182,8 +200,6 @@ export default function AdminTenantSettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const activeTenant = context.tenants.find((t) => t.tenantId === context.activeTenantId) || null;
-
   return (
     <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
       <div className="mb-6 flex items-start justify-between gap-4">
@@ -231,18 +247,16 @@ export default function AdminTenantSettingsPage() {
         <p className="mt-1 text-sm text-gray-600">If you belong to multiple tenants, switch here.</p>
 
         <div className="mt-3 flex flex-col gap-2">
-          {context.tenants.length === 0 ? (
+          {tenants.length === 0 ? (
             <div className="text-sm text-gray-700">No tenants yet.</div>
           ) : (
-            context.tenants.map((t) => (
+            tenants.map((t) => (
               <button
                 key={t.tenantId}
                 onClick={() => switchTenant(t.tenantId)}
                 className={[
                   "w-full text-left rounded-md border px-3 py-2 text-sm hover:bg-gray-50",
-                  t.tenantId === context.activeTenantId
-                    ? "border-blue-400 bg-blue-50"
-                    : "border-gray-200 bg-white",
+                  t.tenantId === activeTenantId ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white",
                 ].join(" ")}
               >
                 <div className="flex items-center justify-between">
@@ -273,9 +287,7 @@ export default function AdminTenantSettingsPage() {
                 emailStatus.enabled ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50",
               ].join(" ")}
             >
-              <div className="font-medium text-gray-900">
-                {emailStatus.enabled ? "Configured" : "Needs setup"}
-              </div>
+              <div className="font-medium text-gray-900">{emailStatus.enabled ? "Configured" : "Needs setup"}</div>
               <ul className="mt-1 list-disc pl-5 text-gray-700 space-y-1">
                 {emailStatus.notes.map((n, i) => (
                   <li key={i}>{n}</li>
@@ -307,9 +319,7 @@ export default function AdminTenantSettingsPage() {
             </div>
           </div>
         ) : emailStatus ? (
-          <div className="mt-3 text-sm text-red-700">
-            {emailStatus.message || emailStatus.error || "Failed to load email status."}
-          </div>
+          <div className="mt-3 text-sm text-red-700">{emailStatus.message || emailStatus.error || "Failed to load email status."}</div>
         ) : (
           <div className="mt-3 text-sm text-gray-700">Loading status…</div>
         )}
