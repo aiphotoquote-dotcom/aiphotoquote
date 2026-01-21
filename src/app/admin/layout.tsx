@@ -10,14 +10,12 @@ export const dynamic = "force-dynamic";
 
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   const { userId } = await auth();
-
-  // If you want admin to require auth:
   if (!userId) redirect("/sign-in");
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-black dark:text-gray-100">
       <AdminTopNav />
-      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">{children}</main>
+      <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">{children}</div>
     </div>
   );
 }
