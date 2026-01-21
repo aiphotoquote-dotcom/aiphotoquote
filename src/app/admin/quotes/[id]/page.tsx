@@ -1,7 +1,7 @@
 // src/app/admin/quotes/[id]/page.tsx
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { notFound, redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
@@ -191,26 +191,30 @@ function pickEstimate(output: any) {
   if (!output || typeof output !== "object") return null;
 
   const low =
-    output.estimateLow ??
-    output.low ??
-    output.min ??
-    output.estimate_low ??
+    (output as any).estimateLow ??
+    (output as any).low ??
+    (output as any).min ??
+    (output as any).estimate_low ??
     null;
 
   const high =
-    output.estimateHigh ??
-    output.high ??
-    output.max ??
-    output.estimate_high ??
+    (output as any).estimateHigh ??
+    (output as any).high ??
+    (output as any).max ??
+    (output as any).estimate_high ??
     null;
 
   const inspection =
-    output.inspectionRequired ??
-    output.inspection_required ??
-    output.inspection ??
+    (output as any).inspectionRequired ??
+    (output as any).inspection_required ??
+    (output as any).inspection ??
     null;
 
-  const summary = output.summary ?? output.notes ?? output.message ?? null;
+  const summary =
+    (output as any).summary ??
+    (output as any).notes ??
+    (output as any).message ??
+    null;
 
   const toNum = (v: any) => {
     const n = Number(v);
@@ -228,6 +232,57 @@ function pickEstimate(output: any) {
   };
 }
 
+async function userHasTenantAccess(args: {
+  userId: string;
+  tenantId: string;
+}): Promise<boolean> {
+  const { userId, tenantId } = args;
+
+  // 1) owner access
+  const ownerOk = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
+    .limit(1)
+    .then((r) => Boolean(r[0]));
+
+  if (ownerOk) return true;
+
+  // 2) member access (robust to column naming differences)
+  // Try common variants:
+  // - tenant_members.tenant_id + tenant_members.clerk_user_id
+  // - tenant_members.tenant_id + tenant_members.user_id
+  try {
+    const r1 = await db.execute(sql`
+      select 1 as ok
+      from tenant_members
+      where tenant_id = ${tenantId}::uuid
+        and clerk_user_id = ${userId}
+      limit 1
+    `);
+    const ok = Array.isArray((r1 as any)?.rows) ? (r1 as any).rows.length > 0 : Array.isArray(r1) ? r1.length > 0 : false;
+    if (ok) return true;
+  } catch {
+    // ignore and try next
+  }
+
+  try {
+    const r2 = await db.execute(sql`
+      select 1 as ok
+      from tenant_members
+      where tenant_id = ${tenantId}::uuid
+        and user_id = ${userId}
+      limit 1
+    `);
+    const ok = Array.isArray((r2 as any)?.rows) ? (r2 as any).rows.length > 0 : Array.isArray(r2) ? r2.length > 0 : false;
+    if (ok) return true;
+  } catch {
+    // ignore
+  }
+
+  return false;
+}
+
 export default async function AdminQuoteDetailPage({
   params,
 }: {
@@ -240,7 +295,7 @@ export default async function AdminQuoteDetailPage({
   const quoteId = resolved?.id ? String(resolved.id) : "";
   if (!quoteId) notFound();
 
-  // 1) Load the quote by ID ONLY (do NOT depend on tenant cookie)
+  // Load quote by ID only (avoids tenant-cookie mismatch)
   const base = await db
     .select({
       id: quoteLogs.id,
@@ -252,28 +307,21 @@ export default async function AdminQuoteDetailPage({
     .then((r) => r[0] ?? null);
 
   if (!base?.tenantId) notFound();
-
   const quoteTenantId = base.tenantId;
 
-  // 2) Authorize: for now, owner-only (later we can add tenant_members)
-  const ownerOk = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(and(eq(tenants.id, quoteTenantId), eq(tenants.ownerClerkUserId, userId)))
-    .limit(1)
-    .then((r) => Boolean(r[0]));
-
-  if (!ownerOk) {
+  // Authorize owner OR member
+  const allowed = await userHasTenantAccess({ userId, tenantId: quoteTenantId });
+  if (!allowed) {
     return (
       <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
         <div className="mx-auto max-w-5xl px-6 py-10">
           <h1 className="text-2xl font-semibold">Not authorized</h1>
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            This quote belongs to a tenant you don’t have access to.
+            This lead belongs to a tenant you don’t have access to.
           </p>
           <div className="mt-6">
             <Link className="underline" href="/admin/quotes">
-              Back to quotes
+              Back to leads
             </Link>
           </div>
         </div>
@@ -281,7 +329,7 @@ export default async function AdminQuoteDetailPage({
     );
   }
 
-  // ----- Server action: update stage -----
+  // Server action: update stage
   async function updateStage(formData: FormData) {
     "use server";
     const next = normalizeStage(formData.get("stage"));
@@ -293,7 +341,7 @@ export default async function AdminQuoteDetailPage({
     redirect(`/admin/quotes/${quoteId}`);
   }
 
-  // 3) Load full quote (scoped to the quote's tenant)
+  // Load the quote (scoped to quote's tenant)
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -318,7 +366,6 @@ export default async function AdminQuoteDetailPage({
   if (!row) notFound();
 
   // Mark as read on open (best-effort)
-  // Also bump stage from "new" -> "read" without clobbering other stages.
   if (!row.isRead) {
     try {
       await db
@@ -450,7 +497,9 @@ export default async function AdminQuoteDetailPage({
               {est.summary ? <div className="mt-2">{est.summary}</div> : null}
             </div>
           ) : (
-            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">No structured estimate found.</div>
+            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              No structured estimate found.
+            </div>
           )}
         </section>
 
@@ -476,7 +525,9 @@ export default async function AdminQuoteDetailPage({
               ))}
             </div>
           ) : (
-            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">No photos on this lead.</div>
+            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              No photos on this lead.
+            </div>
           )}
         </section>
 
