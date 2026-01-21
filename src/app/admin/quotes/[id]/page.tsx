@@ -7,6 +7,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
+import CopyButton from "@/components/CopyButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -232,6 +233,35 @@ function pickEstimate(output: any) {
   };
 }
 
+function money(n: number) {
+  return `$${n.toLocaleString()}`;
+}
+
+function estimateLine(est: { low: number | null; high: number | null }) {
+  if (est.low != null && est.high != null) return `${money(est.low)} – ${money(est.high)}`;
+  if (est.low != null) return `From ${money(est.low)}`;
+  if (est.high != null) return `Up to ${money(est.high)}`;
+  return "No range available";
+}
+
+function inspectionBadge(v: boolean | null) {
+  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
+  if (v === true)
+    return cn(
+      base,
+      "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+    );
+  if (v === false)
+    return cn(
+      base,
+      "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+    );
+  return cn(
+    base,
+    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+  );
+}
+
 type PageProps = {
   params: { id: string };
 };
@@ -251,7 +281,6 @@ export default async function QuoteDetailPage({ params }: PageProps) {
     jar.get("tenant_id")?.value ||
     null;
 
-  // Fallback to owner tenant if cookie missing
   let tenantId: string | null = activeTenantId;
   if (!tenantId) {
     const t = await db
@@ -266,7 +295,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
   if (!tenantId) redirect("/admin");
 
-  // ✅ IMPORTANT: create a non-null variable that can be safely captured by server actions
+  // ✅ key fix: stable non-null variable for server actions
   const tenantIdSafe: string = tenantId;
 
   const row = await db
@@ -280,7 +309,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
       isRead: quoteLogs.isRead,
       renderOptIn: quoteLogs.renderOptIn,
       renderStatus: quoteLogs.renderStatus,
-      renderImageUrl: (quoteLogs as any).renderImageUrl ?? null, // ok if column doesn't exist
+      renderImageUrl: (quoteLogs as any).renderImageUrl ?? null,
     })
     .from(quoteLogs)
     .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)))
@@ -292,6 +321,30 @@ export default async function QuoteDetailPage({ params }: PageProps) {
   const lead = pickLead(row.input);
   const imgs = pickImages(row.input);
   const est = pickEstimate(row.output);
+
+  const category = String(row.input?.customer_context?.category ?? "service");
+  const serviceType = String(row.input?.customer_context?.service_type ?? "upholstery");
+  const notes = row.input?.customer_context?.notes ? String(row.input.customer_context.notes) : "";
+
+  const copyText = (() => {
+    const lines: string[] = [];
+    lines.push(`Customer: ${lead.name}`);
+    if (lead.phone) lines.push(`Phone: ${lead.phone}`);
+    if (lead.email) lines.push(`Email: ${lead.email}`);
+    lines.push(`Category: ${category}`);
+    lines.push(`Service: ${serviceType}`);
+    if (notes) lines.push(`Notes: ${notes}`);
+    lines.push("");
+    lines.push("Estimate:");
+    if (est) {
+      lines.push(`Range: ${estimateLine(est)}`);
+      lines.push(`Inspection: ${est.inspection === true ? "Required" : est.inspection === false ? "Not required" : "Unknown"}`);
+      if (est.summary) lines.push(`Summary: ${est.summary}`);
+    } else {
+      lines.push("No output recorded yet.");
+    }
+    return lines.join("\n");
+  })();
 
   async function updateStage(formData: FormData) {
     "use server";
@@ -347,9 +400,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
           <div className="text-right">
             <div className="text-xs text-gray-500 dark:text-gray-400">Quote ID</div>
-            <div className="font-mono text-xs text-gray-700 dark:text-gray-200">
-              {row.id}
-            </div>
+            <div className="font-mono text-xs text-gray-700 dark:text-gray-200">{row.id}</div>
           </div>
         </div>
 
@@ -407,9 +458,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
                 </div>
 
                 <form action={updateStage} className="mt-3 flex items-center gap-2">
-                  <label className="text-xs text-gray-600 dark:text-gray-300">
-                    Stage
-                  </label>
+                  <label className="text-xs text-gray-600 dark:text-gray-300">Stage</label>
                   <select
                     name="stage"
                     defaultValue={normalizeStage(row.stage)}
@@ -442,7 +491,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
                 ) : null}
               </div>
 
-              {/* Estimate summary */}
+              {/* Estimate summary (small) */}
               <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
                 <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
                   Estimate
@@ -450,26 +499,12 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
                 {est ? (
                   <div className="mt-2 space-y-2">
-                    <div className="text-lg font-semibold">
-                      {est.low != null && est.high != null ? (
-                        <>
-                          ${est.low.toLocaleString()} – ${est.high.toLocaleString()}
-                        </>
-                      ) : (
-                        <span className="text-gray-500 dark:text-gray-400">
-                          No range available
-                        </span>
-                      )}
-                    </div>
+                    <div className="text-lg font-semibold">{estimateLine(est)}</div>
 
                     <div className="text-sm text-gray-700 dark:text-gray-200">
                       Inspection:{" "}
                       <span className="font-semibold">
-                        {est.inspection == null
-                          ? "Unknown"
-                          : est.inspection
-                            ? "Required"
-                            : "Not required"}
+                        {est.inspection == null ? "Unknown" : est.inspection ? "Required" : "Not required"}
                       </span>
                     </div>
 
@@ -566,44 +601,116 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
         {/* Input + Output */}
         <section className="grid gap-4 lg:grid-cols-2">
+          {/* INPUT */}
           <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
             <h2 className="text-lg font-semibold">Input</h2>
 
-            <details className="mt-3">
-              <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
-                View raw JSON
-              </summary>
-              <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-                {JSON.stringify(row.input ?? null, null, 2)}
-              </pre>
-            </details>
-
-            <div className="mt-4 space-y-2 text-sm">
-              <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Parsed</div>
-              <div className="text-gray-700 dark:text-gray-200">
-                Category:{" "}
-                <span className="font-semibold">
-                  {String(row.input?.customer_context?.category ?? "service")}
-                </span>
-              </div>
-              <div className="text-gray-700 dark:text-gray-200">
-                Service type:{" "}
-                <span className="font-semibold">
-                  {String(row.input?.customer_context?.service_type ?? "upholstery")}
-                </span>
-              </div>
-              {row.input?.customer_context?.notes ? (
-                <div className="text-gray-700 dark:text-gray-200">
-                  Notes: <span className="font-semibold">{String(row.input.customer_context.notes)}</span>
+            <div className="mt-3 space-y-2 text-sm">
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Parsed</div>
+                <div className="mt-2 text-gray-700 dark:text-gray-200">
+                  Category: <span className="font-semibold">{category}</span>
                 </div>
-              ) : null}
+                <div className="text-gray-700 dark:text-gray-200">
+                  Service type: <span className="font-semibold">{serviceType}</span>
+                </div>
+                {notes ? (
+                  <div className="mt-2 text-gray-700 dark:text-gray-200">
+                    Notes: <span className="font-semibold">{notes}</span>
+                  </div>
+                ) : (
+                  <div className="mt-2 text-gray-500 dark:text-gray-400">No notes provided.</div>
+                )}
+              </div>
+
+              <details>
+                <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
+                  View raw JSON
+                </summary>
+                <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                  {JSON.stringify(row.input ?? null, null, 2)}
+                </pre>
+              </details>
             </div>
           </div>
 
+          {/* OUTPUT (UPGRADED) */}
           <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-            <h2 className="text-lg font-semibold">Output</h2>
+            <div className="flex items-start justify-between gap-3">
+              <h2 className="text-lg font-semibold">Output</h2>
+              <CopyButton text={copyText} label="Copy quote" copiedLabel="Copied" />
+            </div>
 
-            <details className="mt-3" open>
+            <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-950">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                    Estimate range
+                  </div>
+                  <div className="mt-2 text-2xl font-semibold tracking-tight">
+                    {est ? estimateLine(est) : "No output recorded"}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className={inspectionBadge(est?.inspection ?? null)}>
+                    Inspection:{" "}
+                    {est?.inspection == null
+                      ? "Unknown"
+                      : est.inspection
+                        ? "Required"
+                        : "Not required"}
+                  </span>
+                </div>
+              </div>
+
+              {est?.summary ? (
+                <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                    Customer-facing summary
+                  </div>
+                  <div className="mt-2 leading-relaxed">{est.summary}</div>
+                </div>
+              ) : (
+                <div className="mt-4 text-sm text-gray-500 dark:text-gray-400">
+                  No summary available.
+                </div>
+              )}
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Photos</div>
+                  <div className="mt-2 text-lg font-semibold">{imgs.length}</div>
+                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    More photos → better accuracy
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Stage</div>
+                  <div className="mt-2">
+                    <span className={stageChip(String(row.stage))}>{stageLabel(String(row.stage))}</span>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    Updates mark as read
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Render</div>
+                  <div className="mt-2">
+                    <span className={renderChip(row.renderStatus)}>
+                      {String(row.renderStatus ?? "not_requested")}
+                    </span>
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    Opt-in: {String(Boolean(row.renderOptIn))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <details className="mt-4">
               <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
                 View raw JSON
               </summary>
@@ -611,15 +718,6 @@ export default async function QuoteDetailPage({ params }: PageProps) {
                 {JSON.stringify(row.output ?? null, null, 2)}
               </pre>
             </details>
-
-            {est?.summary ? (
-              <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                  Customer-friendly summary
-                </div>
-                <div className="mt-2">{est.summary}</div>
-              </div>
-            ) : null}
           </div>
         </section>
 
