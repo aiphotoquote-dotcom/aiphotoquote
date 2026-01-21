@@ -1,540 +1,307 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-
-type MeSettingsResponse =
-  | {
-      ok: true;
-      tenant: { id: string; name: string; slug: string };
-      settings: {
-        tenant_id: string;
-        industry_key: string | null;
-        redirect_url: string | null;
-        thank_you_url: string | null;
-        updated_at: string | null;
-      } | null;
-    }
-  | { ok: false; error: any; message?: string };
-
-type RecentQuotesResp =
-  | {
-      ok: true;
-      quotes: Array<{
-        id: string;
-        createdAt: string;
-        estimateLow?: number | null;
-        estimateHigh?: number | null;
-        inspectionRequired?: boolean | null;
-        renderStatus?: string | null;
-        renderImageUrl?: string | null;
-        renderOptIn?: boolean | null;
-      }>;
-    }
-  | { ok: false; error: any; message?: string };
-
-type WeekCounts = {
-  quotes: number;
-  renderOptIns: number;
-  rendered: number;
-  renderFailures: number;
-};
-
-type WeeklyMetricsResp =
-  | {
-      ok: true;
-      thisWeek?: Partial<WeekCounts> | null;
-      lastWeek?: Partial<WeekCounts> | null;
-
-      // legacy/alternate shapes
-      this_week?: Partial<WeekCounts> | null;
-      last_week?: Partial<WeekCounts> | null;
-      weekly?: { thisWeek?: Partial<WeekCounts> | null; lastWeek?: Partial<WeekCounts> | null } | null;
-
-      meta?: {
-        tenantId?: string;
-        timeZone?: string;
-        weekStartsOn?: string;
-        thisWeekStart?: string;
-        thisWeekEnd?: string;
-        lastWeekStart?: string;
-        lastWeekEnd?: string;
-      } | null;
-    }
-  | { ok: false; error: any; message?: string };
+import React, { useEffect, useMemo, useState } from "react";
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function pill(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
-  const cls =
-    tone === "green"
-      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
-      : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-      : tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
+type MetricsResp =
+  | {
+      ok: true;
+      totals: {
+        totalLeads: number;
+        unread: number;
+        stageNew: number;
+        inProgress: number; // read/estimate/quoted bucket
+      };
+    }
+  | { ok: false; error: string; message?: string };
 
-  return <span className={cn("rounded-full border px-3 py-1 text-xs font-semibold", cls)}>{label}</span>;
+type RecentResp =
+  | {
+      ok: true;
+      leads: Array<{
+        id: string;
+        createdAt: string;
+        stage: string;
+        isRead: boolean;
+        customerName: string;
+        customerPhone: string;
+        customerEmail?: string;
+      }>;
+    }
+  | { ok: false; error: string; message?: string };
+
+function normalizeStage(v: any) {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "new";
+  if (s === "quoted" || s === "quote") return "quoted";
+  if (s === "read") return "read";
+  if (s === "new") return "new";
+  if (s === "estimate" || s === "estimated") return "estimate";
+  return s;
 }
 
-function fmtDate(iso: string) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+function stageLabel(s: string) {
+  const st = normalizeStage(s);
+  if (st === "new") return "New";
+  if (st === "read") return "Read";
+  if (st === "estimate") return "Estimate";
+  if (st === "quoted") return "Quoted";
+  if (st === "closed") return "Closed";
+  return st.charAt(0).toUpperCase() + st.slice(1);
 }
 
-function fmtShortDate(iso: string) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+function stageChip(st: string) {
+  const s = normalizeStage(st);
+  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
+  if (s === "new")
+    return cn(
+      base,
+      "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+    );
+  if (s === "read")
+    return cn(
+      base,
+      "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+    );
+  if (s === "estimate")
+    return cn(
+      base,
+      "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200"
+    );
+  if (s === "quoted")
+    return cn(
+      base,
+      "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+    );
+  if (s === "closed")
+    return cn(
+      base,
+      "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+    );
+  return cn(
+    base,
+    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+  );
 }
 
-function money(n: unknown) {
-  const x = typeof n === "number" ? n : n == null ? null : Number(n);
-  if (x == null || Number.isNaN(x)) return "";
-  return x.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  });
-}
-
-function clampInt(v: unknown) {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.trunc(n));
-}
-
-function pctDelta(curr: number, prev: number) {
-  if (prev <= 0) {
-    if (curr <= 0) return { label: "—", tone: "gray" as const };
-    return { label: "new", tone: "blue" as const };
+function prettyDate(d: string) {
+  try {
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return d;
+    return dt.toLocaleString();
+  } catch {
+    return d;
   }
-  const p = Math.round(((curr - prev) / prev) * 100);
-  if (p === 0) return { label: "0%", tone: "gray" as const };
-  if (p > 0) return { label: `+${p}%`, tone: "green" as const };
-  return { label: `${p}%`, tone: "red" as const };
 }
 
-function renderStatusPill(statusRaw: unknown) {
-  const s = String(statusRaw ?? "").toLowerCase();
-  if (s === "rendered") return pill("Rendered", "green");
-  if (s === "failed") return pill("Render failed", "red");
-  if (s === "queued" || s === "running") return pill("Rendering", "blue");
-  return pill("Estimate", "gray");
-}
-
-function normalizeWeekly(resp: WeeklyMetricsResp | null): {
-  ready: boolean;
-  thisWeek: WeekCounts;
-  lastWeek: WeekCounts;
-  meta: {
-    timeZone?: string;
-    weekStartsOn?: string;
-    thisWeekStart?: string;
-    thisWeekEnd?: string;
-  };
-} {
-  const zero: WeekCounts = { quotes: 0, renderOptIns: 0, rendered: 0, renderFailures: 0 };
-
-  if (!resp || !("ok" in resp) || !resp.ok) {
-    return { ready: false, thisWeek: zero, lastWeek: zero, meta: {} };
-  }
-
-  const a =
-    (resp as any).thisWeek ??
-    (resp as any).weekly?.thisWeek ??
-    (resp as any).this_week ??
-    (resp as any).weekly?.thisWeek ??
-    null;
-
-  const b =
-    (resp as any).lastWeek ??
-    (resp as any).weekly?.lastWeek ??
-    (resp as any).last_week ??
-    (resp as any).weekly?.lastWeek ??
-    null;
-
-  const meta = (resp as any).meta ?? {};
-
-  if (!a && !b) {
-    return { ready: false, thisWeek: zero, lastWeek: zero, meta };
-  }
-
-  const tw: WeekCounts = {
-    quotes: clampInt(a?.quotes),
-    renderOptIns: clampInt(a?.renderOptIns ?? a?.render_opt_ins ?? a?.render_optins),
-    rendered: clampInt(a?.rendered),
-    renderFailures: clampInt(a?.renderFailures ?? a?.render_failures),
-  };
-
-  const lw: WeekCounts = {
-    quotes: clampInt(b?.quotes),
-    renderOptIns: clampInt(b?.renderOptIns ?? b?.render_opt_ins ?? b?.render_optins),
-    rendered: clampInt(b?.rendered),
-    renderFailures: clampInt(b?.renderFailures ?? b?.render_failures),
-  };
-
-  return { ready: true, thisWeek: tw, lastWeek: lw, meta };
-}
-
-function s(n: number) {
-  return n === 1 ? "" : "s";
+function StatCard(props: { label: string; value: number; sub: string }) {
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+      <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+        {props.label}
+      </div>
+      <div className="mt-2 text-3xl font-semibold text-gray-900 dark:text-gray-100">
+        {props.value}
+      </div>
+      <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">{props.sub}</div>
+    </div>
+  );
 }
 
 export default function AdminDashboardClient() {
-  const [meLoading, setMeLoading] = useState(true);
-  const [me, setMe] = useState<MeSettingsResponse | null>(null);
+  const [metrics, setMetrics] = useState<MetricsResp | null>(null);
+  const [recent, setRecent] = useState<RecentResp | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const [quotesLoading, setQuotesLoading] = useState(true);
-  const [quotesResp, setQuotesResp] = useState<RecentQuotesResp | null>(null);
-
-  const [weeklyLoading, setWeeklyLoading] = useState(true);
-  const [weeklyResp, setWeeklyResp] = useState<WeeklyMetricsResp | null>(null);
-
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadMe() {
-      try {
-        const res = await fetch("/api/tenant/me-settings", { cache: "no-store" });
-        const json: MeSettingsResponse = await res.json();
-        if (!cancelled) setMe(json);
-      } catch {
-        if (!cancelled) setMe({ ok: false, error: "FETCH_FAILED" });
-      } finally {
-        if (!cancelled) setMeLoading(false);
-      }
-    }
-
-    loadMe();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadQuotes() {
-      try {
-        const res = await fetch("/api/tenant/recent-quotes", { cache: "no-store" });
-        const json: RecentQuotesResp = await res.json();
-        if (!cancelled) setQuotesResp(json);
-      } catch {
-        if (!cancelled) setQuotesResp({ ok: false, error: "FETCH_FAILED" });
-      } finally {
-        if (!cancelled) setQuotesLoading(false);
-      }
-    }
-
-    loadQuotes();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadWeekly() {
-      try {
-        const res = await fetch("/api/tenant/metrics-week", { cache: "no-store" });
-        const json: WeeklyMetricsResp = await res.json();
-        if (!cancelled) setWeeklyResp(json);
-      } catch {
-        if (!cancelled) setWeeklyResp({ ok: false, error: "FETCH_FAILED" });
-      } finally {
-        if (!cancelled) setWeeklyLoading(false);
-      }
-    }
-
-    loadWeekly();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const computed = useMemo(() => {
-    const ok = Boolean(me && "ok" in me && me.ok);
-    const tenant = ok ? (me as any).tenant : null;
-    const settings = ok ? (me as any).settings : null;
-
-    const tenantName = tenant?.name ? String(tenant.name) : "";
-    const tenantSlug = tenant?.slug ? String(tenant.slug) : "";
-
-    const industryKey = settings?.industry_key ? String(settings.industry_key) : "";
-
-    const hasSlug = Boolean(tenantSlug);
-    const hasIndustry = Boolean(industryKey);
-
-    const isReady = hasSlug && hasIndustry;
-    const publicPath = tenantSlug ? `/q/${tenantSlug}` : "/q/<tenant-slug>";
-
-    return { ok, tenantName, tenantSlug, hasSlug, hasIndustry, isReady, publicPath };
-  }, [me]);
-
-  async function copyPublicLink() {
-    if (!computed.tenantSlug) return;
-
-    const origin =
-      typeof window !== "undefined" && window.location?.origin ? window.location.origin : "";
-    const full = origin ? `${origin}${computed.publicPath}` : computed.publicPath;
-
+  async function loadAll() {
+    setLoading(true);
     try {
-      await navigator.clipboard.writeText(full);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch {
-      setCopied(false);
+      const [mRes, rRes] = await Promise.all([
+        fetch("/api/admin/dashboard/metrics", { cache: "no-store" }),
+        fetch("/api/admin/dashboard/recent?limit=8", { cache: "no-store" }),
+      ]);
+
+      const mJson = (await mRes.json()) as MetricsResp;
+      const rJson = (await rRes.json()) as RecentResp;
+
+      setMetrics(mJson);
+      setRecent(rJson);
+    } catch (e: any) {
+      setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+      setRecent({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+    } finally {
+      setLoading(false);
     }
   }
 
-  const setupTone = meLoading ? "gray" : computed.isReady ? "green" : "yellow";
-  const setupLabel = meLoading ? "Loading…" : computed.isReady ? "Ready" : "Needs setup";
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const wk = normalizeWeekly(weeklyResp);
-  const qCount = wk.thisWeek.quotes;
-  const qPrev = wk.lastWeek.quotes;
-
-  const windowLabel =
-    wk.meta?.thisWeekStart && wk.meta?.thisWeekEnd
-      ? `Week window: ${fmtShortDate(wk.meta.thisWeekStart)} – ${fmtShortDate(wk.meta.thisWeekEnd)} · TZ: ${
-          wk.meta.timeZone ?? "America/New_York"
-        } · Starts: ${wk.meta.weekStartsOn ?? "monday"}`
-      : `TZ: ${wk.meta.timeZone ?? "America/New_York"} · Starts: ${wk.meta.weekStartsOn ?? "monday"}`;
+  const totals = useMemo(() => {
+    if (metrics && "ok" in metrics && metrics.ok) return metrics.totals;
+    return { totalLeads: 0, unread: 0, stageNew: 0, inProgress: 0 };
+  }, [metrics]);
 
   return (
     <div className="space-y-8">
-      {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Dashboard</h1>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Performance, recent activity, and your public quote link.
-          </p>
-
-          {computed.tenantName ? (
-            <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">
-              Tenant: <span className="font-semibold">{computed.tenantName}</span>
-              {computed.tenantSlug ? (
-                <span className="ml-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-                  ({computed.tenantSlug})
-                </span>
-              ) : null}
+      {/* Hero header */}
+      <div className="rounded-3xl border border-gray-200 bg-white p-7 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+              Admin Dashboard
             </div>
-          ) : null}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          {pill(setupLabel, setupTone as any)}
-          <Link
-            href="/onboarding"
-            className={cn(
-              "rounded-lg px-4 py-2 text-sm font-semibold",
-              computed.isReady
-                ? "border border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                : "bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
-            )}
-          >
-            {computed.isReady ? "Settings" : "Finish setup"}
-          </Link>
-        </div>
-      </div>
-
-      {/* Main grid */}
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Performance */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950 lg:col-span-2">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold">This week performance</h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Compared to last week. Counts only for now.</p>
-              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{windowLabel}</p>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {pill("Live", "blue")}
-              {weeklyLoading ? pill("Loading…", "gray") : null}
-            </div>
+            <h1 className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              What’s happening today
+            </h1>
+            <p className="mt-2 max-w-2xl text-sm text-gray-600 dark:text-gray-300">
+              Quick snapshot of inbound leads and where they are in your pipeline.
+            </p>
           </div>
 
-          {!weeklyLoading && wk.ready ? (
-            <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              {[
-                { title: "Quotes", curr: wk.thisWeek.quotes, prev: wk.lastWeek.quotes },
-                { title: "Render opt-ins", curr: wk.thisWeek.renderOptIns, prev: wk.lastWeek.renderOptIns },
-                { title: "Rendered", curr: wk.thisWeek.rendered, prev: wk.lastWeek.rendered },
-                { title: "Render failures", curr: wk.thisWeek.renderFailures, prev: wk.lastWeek.renderFailures },
-              ].map((m) => {
-                const d = pctDelta(m.curr, m.prev);
-                return (
-                  <div
-                    key={m.title}
-                    className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black"
-                  >
-                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{m.title}</div>
-                    <div className="mt-3 flex items-end justify-between">
-                      <div className="text-3xl font-semibold">{m.curr}</div>
-                      {pill(d.label, d.tone)}
-                    </div>
-                    <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                      Last week: <span className="font-semibold">{m.prev}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-              Weekly metrics not available yet.
-            </div>
-          )}
-
-          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-gray-50 px-5 py-4 text-sm dark:border-gray-800 dark:bg-black">
-            <div className="text-gray-700 dark:text-gray-300">
-              {wk.ready ? (
-                <>
-                  You’ve got <b>{qCount}</b> quote{s(qCount)} so far this week
-                  {qPrev > 0 ? (
-                    <>
-                      {" "}
-                      (last week: <b>{qPrev}</b>).
-                    </>
-                  ) : (
-                    <>.</>
-                  )}
-                </>
-              ) : (
-                <>Run a few quotes to start seeing performance trends.</>
-              )}
-            </div>
-
+          <div className="flex flex-wrap gap-2">
             <Link
               href="/admin/quotes"
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-white dark:border-gray-800 dark:hover:bg-gray-900"
+              className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
             >
-              Review quotes
+              View Quotes
+            </Link>
+            <Link
+              href="/admin/settings"
+              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+            >
+              Settings
+            </Link>
+            <Link
+              href="/admin/setup"
+              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+            >
+              Setup
             </Link>
           </div>
-        </section>
-
-        {/* Public link */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950 lg:col-span-1">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="font-semibold">Public quote page</h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Share this with customers.</p>
-            </div>
-            {computed.tenantSlug ? null : pill("Needs slug", "yellow")}
-          </div>
-
-          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-            <div className="text-xs text-gray-500">Path</div>
-            <div className="mt-1 font-mono text-sm text-gray-900 dark:text-gray-100">{computed.publicPath}</div>
-          </div>
-
-          <div className="mt-4 flex flex-wrap gap-3">
-            {computed.tenantSlug ? (
-              <>
-                <Link
-                  href={computed.publicPath}
-                  className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                >
-                  Open
-                </Link>
-                <button
-                  type="button"
-                  onClick={copyPublicLink}
-                  className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-                >
-                  {copied ? "Copied!" : "Copy link"}
-                </button>
-              </>
-            ) : (
-              <Link
-                href="/onboarding"
-                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-              >
-                Set slug in Settings
-              </Link>
-            )}
-          </div>
-
-          <div className="mt-4 text-xs text-gray-600 dark:text-gray-400">Tip: do one full end-to-end test (estimate + optional render).</div>
-        </section>
+        </div>
       </div>
 
-      {/* Recent Quotes */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold">Recent quotes</h2>
-          {quotesLoading ? pill("Loading…", "gray") : null}
-        </div>
+      {/* Metric tiles */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="TOTAL LEADS" value={totals.totalLeads} sub="All-time for active tenant" />
+        <StatCard label="UNREAD" value={totals.unread} sub="Needs attention" />
+        <StatCard label="NEW" value={totals.stageNew} sub="Stage: New" />
+        <StatCard label="IN PROGRESS" value={totals.inProgress} sub="Read / Estimate / Quoted" />
+      </div>
 
-        {!quotesLoading && quotesResp && "ok" in quotesResp && quotesResp.ok ? (
-          quotesResp.quotes.length ? (
-            <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-              <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-black dark:text-gray-300">
-                <div className="col-span-4">Created</div>
-                <div className="col-span-5">Quote ID</div>
-                <div className="col-span-3 text-right">Status</div>
-              </div>
+      {/* Recent leads */}
+      <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Recent leads</h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Latest submissions for the active tenant.
+            </p>
+          </div>
 
-              <ul className="divide-y divide-gray-200 dark:divide-gray-800">
-                {quotesResp.quotes.map((q) => (
-                  <li key={q.id} className="grid grid-cols-12 items-center px-4 py-3">
-                    <div className="col-span-4 text-sm text-gray-800 dark:text-gray-200">{fmtDate(q.createdAt)}</div>
-
-                    <div className="col-span-5 font-mono text-xs text-gray-700 dark:text-gray-300">{q.id}</div>
-
-                    <div className="col-span-3 flex items-center justify-end gap-3">
-                      {typeof q.estimateLow === "number" || typeof q.estimateHigh === "number" ? (
-                        <div className="text-xs text-gray-700 dark:text-gray-300">
-                          {money(q.estimateLow)} {q.estimateHigh != null ? `– ${money(q.estimateHigh)}` : ""}
-                        </div>
-                      ) : null}
-
-                      {renderStatusPill(q.renderStatus)}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">No quotes yet. Run a test quote.</p>
-          )
-        ) : (
-          <p className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-            {quotesLoading ? "Loading…" : "Couldn’t load recent quotes yet."}
-          </p>
-        )}
-
-        <div className="mt-5 flex flex-wrap gap-3">
-          <Link
-            href="/admin/quotes"
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            View in Admin
-          </Link>
-
-          {computed.tenantSlug ? (
-            <Link
-              href={computed.publicPath}
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+          <div className="flex items-center gap-2">
+            <button
+              onClick={loadAll}
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
             >
-              Open public quote page
+              Refresh
+            </button>
+            <Link
+              href="/admin/quotes"
+              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+            >
+              Open full list
             </Link>
-          ) : null}
+          </div>
         </div>
-      </section>
+
+        <div className="mt-5 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+          <div className="grid grid-cols-12 bg-gray-50 px-4 py-3 text-xs font-semibold text-gray-600 dark:bg-black dark:text-gray-300">
+            <div className="col-span-5">Customer</div>
+            <div className="col-span-2">Stage</div>
+            <div className="col-span-3">Submitted</div>
+            <div className="col-span-2 text-right">Status</div>
+          </div>
+
+          {loading ? (
+            <div className="px-4 py-6 text-sm text-gray-600 dark:text-gray-300">Loading…</div>
+          ) : recent && "ok" in recent && recent.ok ? (
+            recent.leads.length ? (
+              <ul className="divide-y divide-gray-200 dark:divide-gray-800">
+                {recent.leads.map((l) => {
+                  const unread = !l.isRead;
+                  return (
+                    <li
+                      key={l.id}
+                      className={cn(
+                        "grid grid-cols-12 items-center px-4 py-4 transition-colors",
+                        unread
+                          ? "bg-blue-50/60 dark:bg-blue-950/25"
+                          : "bg-white dark:bg-gray-950"
+                      )}
+                    >
+                      <div className="col-span-5 min-w-0">
+                        <Link
+                          href={`/admin/quotes/${l.id}`}
+                          className="block truncate font-semibold text-gray-900 hover:underline dark:text-gray-100"
+                        >
+                          {l.customerName}
+                        </Link>
+                        <div className="mt-0.5 text-sm text-gray-600 dark:text-gray-300">
+                          {l.customerPhone || "—"}
+                        </div>
+                      </div>
+
+                      <div className="col-span-2">
+                        <span className={stageChip(l.stage)}>{normalizeStage(l.stage)}</span>
+                      </div>
+
+                      <div className="col-span-3 text-sm text-gray-700 dark:text-gray-200">
+                        {prettyDate(l.createdAt)}
+                      </div>
+
+                      <div className="col-span-2 flex justify-end">
+                        <span
+                          className={cn(
+                            "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+                            unread
+                              ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+                              : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+                          )}
+                        >
+                          {unread ? "Unread" : "Read"}
+                        </span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <div className="px-4 py-6 text-sm text-gray-600 dark:text-gray-300">
+                No leads yet. Submit a test quote.
+              </div>
+            )
+          ) : (
+            <div className="px-4 py-6 text-sm text-red-700 dark:text-red-300">
+              Couldn’t load recent leads.
+              {recent && !recent.ok && recent.message ? (
+                <div className="mt-2 whitespace-pre-wrap text-xs opacity-80">{recent.message}</div>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Tip: unread rows are lightly highlighted so you can scan faster.
+        </p>
+      </div>
     </div>
   );
 }
