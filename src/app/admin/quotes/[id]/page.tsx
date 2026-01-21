@@ -43,7 +43,6 @@ function prettyDate(d: any) {
 function normalizeStage(v: any) {
   const s = String(v ?? "").trim().toLowerCase();
   if (!s) return "new";
-  // canonicalize a few common ones
   if (s === "quoted" || s === "quote") return "quoted";
   if (s === "read") return "read";
   if (s === "new") return "new";
@@ -60,7 +59,6 @@ function stageLabel(s: string) {
   if (st === "estimate") return "Estimate";
   if (st === "quoted") return "Quoted";
   if (st === "closed") return "Closed";
-  // fallback for custom stages
   return st.charAt(0).toUpperCase() + st.slice(1);
 }
 
@@ -68,12 +66,35 @@ function stageChip(st: string) {
   const s = normalizeStage(st);
   const base =
     "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
-  if (s === "new") return cn(base, "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200");
-  if (s === "read") return cn(base, "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200");
-  if (s === "estimate") return cn(base, "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200");
-  if (s === "quoted") return cn(base, "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200");
-  if (s === "closed") return cn(base, "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200");
-  return cn(base, "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200");
+  if (s === "new")
+    return cn(
+      base,
+      "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+    );
+  if (s === "read")
+    return cn(
+      base,
+      "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+    );
+  if (s === "estimate")
+    return cn(
+      base,
+      "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200"
+    );
+  if (s === "quoted")
+    return cn(
+      base,
+      "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+    );
+  if (s === "closed")
+    return cn(
+      base,
+      "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+    );
+  return cn(
+    base,
+    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+  );
 }
 
 function renderChip(v: any) {
@@ -81,16 +102,34 @@ function renderChip(v: any) {
   const base =
     "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
   if (!s || s === "not_requested")
-    return cn(base, "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200");
+    return cn(
+      base,
+      "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+    );
   if (s === "requested" || s === "queued")
-    return cn(base, "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200");
+    return cn(
+      base,
+      "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200"
+    );
   if (s === "rendering" || s === "running")
-    return cn(base, "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200");
+    return cn(
+      base,
+      "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+    );
   if (s === "rendered" || s === "done")
-    return cn(base, "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200");
+    return cn(
+      base,
+      "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+    );
   if (s === "failed")
-    return cn(base, "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200");
-  return cn(base, "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200");
+    return cn(
+      base,
+      "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+    );
+  return cn(
+    base,
+    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+  );
 }
 
 function pickLead(input: any) {
@@ -213,7 +252,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
     null;
 
   // Fallback to owner tenant if cookie missing
-  let tenantId = activeTenantId;
+  let tenantId: string | null = activeTenantId;
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -227,6 +266,9 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
   if (!tenantId) redirect("/admin");
 
+  // ✅ IMPORTANT: create a non-null variable that can be safely captured by server actions
+  const tenantIdSafe: string = tenantId;
+
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -238,10 +280,10 @@ export default async function QuoteDetailPage({ params }: PageProps) {
       isRead: quoteLogs.isRead,
       renderOptIn: quoteLogs.renderOptIn,
       renderStatus: quoteLogs.renderStatus,
-      renderImageUrl: (quoteLogs as any).renderImageUrl ?? null, // safe if column exists; ignored if not
+      renderImageUrl: (quoteLogs as any).renderImageUrl ?? null, // ok if column doesn't exist
     })
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)))
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)))
     .limit(1)
     .then((r) => r[0] ?? null);
 
@@ -255,14 +297,12 @@ export default async function QuoteDetailPage({ params }: PageProps) {
     "use server";
     const nextRaw = String(formData.get("stage") ?? "").trim();
     const next = normalizeStage(nextRaw);
-
-    // allow custom stages, but keep sane strings
     if (!next || next.length > 48) return;
 
     await db
       .update(quoteLogs)
       .set({ stage: next, isRead: true })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)));
 
     redirect(`/admin/quotes/${quoteId}`);
   }
@@ -272,7 +312,7 @@ export default async function QuoteDetailPage({ params }: PageProps) {
     await db
       .update(quoteLogs)
       .set({ isRead: true })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)));
 
     redirect(`/admin/quotes/${quoteId}`);
   }
@@ -291,8 +331,12 @@ export default async function QuoteDetailPage({ params }: PageProps) {
             </Link>
 
             <div className="hidden sm:flex items-center gap-2">
-              <span className={stageChip(String(row.stage))}>Stage: {stageLabel(String(row.stage))}</span>
-              <span className={renderChip(row.renderStatus)}>Render: {String(row.renderStatus ?? "not_requested")}</span>
+              <span className={stageChip(String(row.stage))}>
+                Stage: {stageLabel(String(row.stage))}
+              </span>
+              <span className={renderChip(row.renderStatus)}>
+                Render: {String(row.renderStatus ?? "not_requested")}
+              </span>
               {!row.isRead ? (
                 <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
                   Unread
@@ -303,7 +347,9 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
           <div className="text-right">
             <div className="text-xs text-gray-500 dark:text-gray-400">Quote ID</div>
-            <div className="font-mono text-xs text-gray-700 dark:text-gray-200">{row.id}</div>
+            <div className="font-mono text-xs text-gray-700 dark:text-gray-200">
+              {row.id}
+            </div>
           </div>
         </div>
 
@@ -331,13 +377,20 @@ export default async function QuoteDetailPage({ params }: PageProps) {
               </div>
 
               <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                Submitted: <span className="font-semibold text-gray-700 dark:text-gray-200">{prettyDate(row.createdAt)}</span>
+                Submitted:{" "}
+                <span className="font-semibold text-gray-700 dark:text-gray-200">
+                  {prettyDate(row.createdAt)}
+                </span>
               </div>
 
               {/* Mobile chips */}
               <div className="mt-4 flex flex-wrap gap-2 sm:hidden">
-                <span className={stageChip(String(row.stage))}>Stage: {stageLabel(String(row.stage))}</span>
-                <span className={renderChip(row.renderStatus)}>Render: {String(row.renderStatus ?? "not_requested")}</span>
+                <span className={stageChip(String(row.stage))}>
+                  Stage: {stageLabel(String(row.stage))}
+                </span>
+                <span className={renderChip(row.renderStatus)}>
+                  Render: {String(row.renderStatus ?? "not_requested")}
+                </span>
                 {!row.isRead ? (
                   <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
                     Unread
@@ -349,10 +402,14 @@ export default async function QuoteDetailPage({ params }: PageProps) {
             {/* Actions */}
             <div className="flex flex-col gap-3 min-w-[260px]">
               <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Quick actions</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  Quick actions
+                </div>
 
                 <form action={updateStage} className="mt-3 flex items-center gap-2">
-                  <label className="text-xs text-gray-600 dark:text-gray-300">Stage</label>
+                  <label className="text-xs text-gray-600 dark:text-gray-300">
+                    Stage
+                  </label>
                   <select
                     name="stage"
                     defaultValue={normalizeStage(row.stage)}
@@ -387,7 +444,9 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
               {/* Estimate summary */}
               <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Estimate</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  Estimate
+                </div>
 
                 {est ? (
                   <div className="mt-2 space-y-2">
@@ -397,14 +456,20 @@ export default async function QuoteDetailPage({ params }: PageProps) {
                           ${est.low.toLocaleString()} – ${est.high.toLocaleString()}
                         </>
                       ) : (
-                        <span className="text-gray-500 dark:text-gray-400">No range available</span>
+                        <span className="text-gray-500 dark:text-gray-400">
+                          No range available
+                        </span>
                       )}
                     </div>
 
                     <div className="text-sm text-gray-700 dark:text-gray-200">
                       Inspection:{" "}
                       <span className="font-semibold">
-                        {est.inspection == null ? "Unknown" : est.inspection ? "Required" : "Not required"}
+                        {est.inspection == null
+                          ? "Unknown"
+                          : est.inspection
+                            ? "Required"
+                            : "Not required"}
                       </span>
                     </div>
 
@@ -415,7 +480,9 @@ export default async function QuoteDetailPage({ params }: PageProps) {
                     ) : null}
                   </div>
                 ) : (
-                  <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">No output recorded yet.</div>
+                  <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                    No output recorded yet.
+                  </div>
                 )}
               </div>
             </div>
@@ -426,13 +493,18 @@ export default async function QuoteDetailPage({ params }: PageProps) {
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">Photos</h2>
-            <div className="text-xs text-gray-500 dark:text-gray-400">{imgs.length} photo{imgs.length === 1 ? "" : "s"}</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              {imgs.length} photo{imgs.length === 1 ? "" : "s"}
+            </div>
           </div>
 
           {imgs.length ? (
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
               {imgs.map((im, idx) => (
-                <div key={`${im.url}-${idx}`} className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
+                <div
+                  key={`${im.url}-${idx}`}
+                  className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
+                >
                   <div className="relative">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={im.url} alt={`photo ${idx + 1}`} className="h-56 w-full object-cover" />
@@ -477,7 +549,10 @@ export default async function QuoteDetailPage({ params }: PageProps) {
             </div>
             <span className="text-gray-300 dark:text-gray-700">•</span>
             <div>
-              Status: <span className={renderChip(row.renderStatus)}>{String(row.renderStatus ?? "not_requested")}</span>
+              Status:{" "}
+              <span className={renderChip(row.renderStatus)}>
+                {String(row.renderStatus ?? "not_requested")}
+              </span>
             </div>
           </div>
 
@@ -503,7 +578,6 @@ export default async function QuoteDetailPage({ params }: PageProps) {
               </pre>
             </details>
 
-            {/* Helpful extracted bits */}
             <div className="mt-4 space-y-2 text-sm">
               <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Parsed</div>
               <div className="text-gray-700 dark:text-gray-200">
@@ -540,7 +614,9 @@ export default async function QuoteDetailPage({ params }: PageProps) {
 
             {est?.summary ? (
               <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Customer-friendly summary</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  Customer-friendly summary
+                </div>
                 <div className="mt-2">{est.summary}</div>
               </div>
             ) : null}
