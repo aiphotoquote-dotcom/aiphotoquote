@@ -1,11 +1,12 @@
 // src/app/api/auth/session/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { appUsers } from "@/lib/db/schema";
 import { requireAuthIdentity } from "@/lib/auth";
-import { ensureAppUserId } from "@/lib/auth/ensureAppUser";
+import { ensureAppUser } from "@/lib/auth/ensureAppUser";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +25,9 @@ function getActiveTenantId() {
 export async function GET() {
   try {
     const identity = await requireAuthIdentity();
-    const appUserId = await ensureAppUserId(identity);
+
+    // Your module exports ensureAppUser(identity) -> appUserId
+    const appUserId = await ensureAppUser(identity);
 
     const user = await db
       .select({
@@ -34,12 +37,10 @@ export async function GET() {
         authProvider: appUsers.authProvider,
       })
       .from(appUsers)
-      .where((appUsers.id as any).eq ? (appUsers.id as any).eq(appUserId) : undefined)
+      .where(eq(appUsers.id, appUserId))
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // Fallback if drizzle eq import isn’t used here
-    // (keeps this file independent and stable)
     const activeTenantId = getActiveTenantId();
 
     return NextResponse.json({
