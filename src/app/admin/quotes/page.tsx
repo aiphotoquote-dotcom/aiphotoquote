@@ -249,10 +249,21 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const whereAll = and(...whereParts);
 
   // helper for preserving filters in links
+  const viewParam =
+    viewNorm === "unread"
+      ? "unread"
+      : viewNorm === "new"
+      ? "new"
+      : viewNorm === "inprogress" || viewNorm === "pipeline"
+      ? "in_progress"
+      : null;
+
+  // Prefer canonical "view=" if present, otherwise keep legacy params.
   const filterParams = {
-    unread: unreadOnly ? 1 : null,
-    in_progress: inProgressOnly ? 1 : null,
-    stage: stageParam ? stageParam : null,
+    view: viewParam,
+    unread: !viewParam && unreadOnly ? 1 : null,
+    in_progress: !viewParam && inProgressOnly ? 1 : null,
+    stage: stageParam && !viewParam ? stageParam : null,
   };
 
   async function deleteLead(formData: FormData) {
