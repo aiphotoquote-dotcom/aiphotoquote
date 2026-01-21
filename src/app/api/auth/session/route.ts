@@ -11,8 +11,8 @@ import { ensureAppUser } from "@/lib/auth/ensureAppUser";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function getActiveTenantId() {
-  const jar = cookies();
+async function getActiveTenantId() {
+  const jar = await cookies();
   return (
     jar.get("activeTenantId")?.value ||
     jar.get("active_tenant_id")?.value ||
@@ -26,7 +26,7 @@ export async function GET() {
   try {
     const identity = await requireAuthIdentity();
 
-    // Your module exports ensureAppUser(identity) -> appUserId
+    // ensureAppUser(identity) -> appUserId
     const appUserId = await ensureAppUser(identity);
 
     const user = await db
@@ -41,7 +41,7 @@ export async function GET() {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    const activeTenantId = getActiveTenantId();
+    const activeTenantId = await getActiveTenantId();
 
     return NextResponse.json({
       ok: true,
