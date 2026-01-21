@@ -1,8 +1,7 @@
 // src/app/admin/quotes/[id]/page.tsx
 import Link from "next/link";
-import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { notFound, redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
@@ -48,10 +47,11 @@ function normalizeStage(v: any) {
   if (s === "read") return "read";
   if (s === "new") return "new";
   if (s === "estimate" || s === "estimated") return "estimate";
+  if (s === "closed" || s === "won" || s === "lost") return "closed";
   return s;
 }
 
-const STAGES = ["new", "read", "estimate", "quoted", "closed"];
+const STAGES = ["new", "read", "estimate", "quoted", "closed"] as const;
 
 function stageLabel(s: string) {
   const st = normalizeStage(s);
@@ -223,81 +223,77 @@ function pickEstimate(output: any) {
   return {
     low: L,
     high: H,
-    inspection:
-      typeof inspection === "boolean"
-        ? inspection
-        : inspection == null
-          ? null
-          : Boolean(inspection),
+    inspection: typeof inspection === "boolean" ? inspection : null,
     summary: summary ? String(summary) : null,
   };
 }
 
-function money(n: number) {
-  return `$${n.toLocaleString()}`;
-}
-
-function estimateLine(est: { low: number | null; high: number | null }) {
-  if (est.low != null && est.high != null) return `${money(est.low)} – ${money(est.high)}`;
-  if (est.low != null) return `From ${money(est.low)}`;
-  if (est.high != null) return `Up to ${money(est.high)}`;
-  return "No range available";
-}
-
-function inspectionBadge(v: boolean | null) {
-  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
-  if (v === true)
-    return cn(
-      base,
-      "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-    );
-  if (v === false)
-    return cn(
-      base,
-      "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
-    );
-  return cn(
-    base,
-    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
-  );
-}
-
-type PageProps = {
-  params: { id: string };
-};
-
-export default async function QuoteDetailPage({ params }: PageProps) {
+export default async function AdminQuoteDetailPage({
+  params,
+}: {
+  params: Promise<{ id?: string }> | { id?: string };
+}) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const quoteId = String(params?.id ?? "").trim();
+  const resolved = await params;
+  const quoteId = resolved?.id ? String(resolved.id) : "";
   if (!quoteId) notFound();
 
-  const jar = await cookies();
-  const activeTenantId =
-    jar.get("activeTenantId")?.value ||
-    jar.get("active_tenant_id")?.value ||
-    jar.get("tenantId")?.value ||
-    jar.get("tenant_id")?.value ||
-    null;
+  // 1) Load the quote by ID ONLY (do NOT depend on tenant cookie)
+  const base = await db
+    .select({
+      id: quoteLogs.id,
+      tenantId: quoteLogs.tenantId,
+    })
+    .from(quoteLogs)
+    .where(eq(quoteLogs.id, quoteId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
 
-  let tenantId: string | null = activeTenantId;
-  if (!tenantId) {
-    const t = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+  if (!base?.tenantId) notFound();
 
-    tenantId = t?.id ?? null;
+  const quoteTenantId = base.tenantId;
+
+  // 2) Authorize: for now, owner-only (later we can add tenant_members)
+  const ownerOk = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(and(eq(tenants.id, quoteTenantId), eq(tenants.ownerClerkUserId, userId)))
+    .limit(1)
+    .then((r) => Boolean(r[0]));
+
+  if (!ownerOk) {
+    return (
+      <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+        <div className="mx-auto max-w-5xl px-6 py-10">
+          <h1 className="text-2xl font-semibold">Not authorized</h1>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            This quote belongs to a tenant you don’t have access to.
+          </p>
+          <div className="mt-6">
+            <Link className="underline" href="/admin/quotes">
+              Back to quotes
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
   }
 
-  if (!tenantId) redirect("/admin");
+  // ----- Server action: update stage -----
+  async function updateStage(formData: FormData) {
+    "use server";
+    const next = normalizeStage(formData.get("stage"));
+    await db
+      .update(quoteLogs)
+      .set({ stage: next, isRead: true })
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, quoteTenantId)));
 
-  // ✅ key fix: stable non-null variable for server actions
-  const tenantIdSafe: string = tenantId;
+    redirect(`/admin/quotes/${quoteId}`);
+  }
 
+  // 3) Load full quote (scoped to the quote's tenant)
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -305,425 +301,203 @@ export default async function QuoteDetailPage({ params }: PageProps) {
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
       output: quoteLogs.output,
-      stage: quoteLogs.stage,
-      isRead: quoteLogs.isRead,
       renderOptIn: quoteLogs.renderOptIn,
       renderStatus: quoteLogs.renderStatus,
-      renderImageUrl: (quoteLogs as any).renderImageUrl ?? null,
+      renderImageUrl: quoteLogs.renderImageUrl,
+      renderPrompt: quoteLogs.renderPrompt,
+      renderError: quoteLogs.renderError,
+      renderedAt: quoteLogs.renderedAt,
+      isRead: quoteLogs.isRead,
+      stage: quoteLogs.stage,
     })
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)))
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, quoteTenantId)))
     .limit(1)
     .then((r) => r[0] ?? null);
 
   if (!row) notFound();
 
+  // Mark as read on open (best-effort)
+  // Also bump stage from "new" -> "read" without clobbering other stages.
+  if (!row.isRead) {
+    try {
+      await db
+        .update(quoteLogs)
+        .set({
+          isRead: true,
+          stage: sql`case when ${quoteLogs.stage} = 'new' then 'read' else ${quoteLogs.stage} end`,
+        })
+        .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, quoteTenantId)));
+
+      row.isRead = true;
+      if (normalizeStage(row.stage) === "new") row.stage = "read";
+    } catch {
+      // ignore
+    }
+  }
+
   const lead = pickLead(row.input);
   const imgs = pickImages(row.input);
   const est = pickEstimate(row.output);
 
-  const category = String(row.input?.customer_context?.category ?? "service");
-  const serviceType = String(row.input?.customer_context?.service_type ?? "upholstery");
-  const notes = row.input?.customer_context?.notes ? String(row.input.customer_context.notes) : "";
-
-  const copyText = (() => {
-    const lines: string[] = [];
-    lines.push(`Customer: ${lead.name}`);
-    if (lead.phone) lines.push(`Phone: ${lead.phone}`);
-    if (lead.email) lines.push(`Email: ${lead.email}`);
-    lines.push(`Category: ${category}`);
-    lines.push(`Service: ${serviceType}`);
-    if (notes) lines.push(`Notes: ${notes}`);
-    lines.push("");
-    lines.push("Estimate:");
-    if (est) {
-      lines.push(`Range: ${estimateLine(est)}`);
-      lines.push(`Inspection: ${est.inspection === true ? "Required" : est.inspection === false ? "Not required" : "Unknown"}`);
-      if (est.summary) lines.push(`Summary: ${est.summary}`);
-    } else {
-      lines.push("No output recorded yet.");
-    }
-    return lines.join("\n");
-  })();
-
-  async function updateStage(formData: FormData) {
-    "use server";
-    const nextRaw = String(formData.get("stage") ?? "").trim();
-    const next = normalizeStage(nextRaw);
-    if (!next || next.length > 48) return;
-
-    await db
-      .update(quoteLogs)
-      .set({ stage: next, isRead: true })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)));
-
-    redirect(`/admin/quotes/${quoteId}`);
-  }
-
-  async function markRead() {
-    "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantIdSafe)));
-
-    redirect(`/admin/quotes/${quoteId}`);
-  }
+  const stage = normalizeStage(row.stage);
+  const unread = !row.isRead;
 
   return (
-    <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+    <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
-        {/* Top bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <Link
-              href="/admin/quotes"
-              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-900 dark:hover:bg-gray-800"
-            >
-              ← Back to quotes
-            </Link>
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold">Lead</h1>
 
-            <div className="hidden sm:flex items-center gap-2">
-              <span className={stageChip(String(row.stage))}>
-                Stage: {stageLabel(String(row.stage))}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+                  unread
+                    ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+                    : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+                )}
+              >
+                {unread ? "Unread" : "Read"}
               </span>
+
+              <span className={stageChip(stage)}>Stage: {stageLabel(stage)}</span>
               <span className={renderChip(row.renderStatus)}>
-                Render: {String(row.renderStatus ?? "not_requested")}
+                Render: {String(row.renderStatus || "—")}
               </span>
-              {!row.isRead ? (
-                <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
-                  Unread
-                </span>
-              ) : null}
+            </div>
+
+            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              Submitted: {prettyDate(row.createdAt)}
+            </div>
+
+            <div className="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <span className="font-mono">{row.id}</span>
+              <CopyButton value={row.id} label="Copy" />
             </div>
           </div>
 
-          <div className="text-right">
-            <div className="text-xs text-gray-500 dark:text-gray-400">Quote ID</div>
-            <div className="font-mono text-xs text-gray-700 dark:text-gray-200">{row.id}</div>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/admin/quotes"
+              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+            >
+              Back to list
+            </Link>
           </div>
         </div>
 
-        {/* Header */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+        {/* Lead card */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">{lead.name}</h1>
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-                {lead.phone ? (
-                  <a className="underline" href={`tel:${lead.phoneDigits ?? ""}`}>
-                    {lead.phone}
-                  </a>
-                ) : (
-                  <span className="text-gray-500 dark:text-gray-400">No phone</span>
-                )}
-                <span className="text-gray-300 dark:text-gray-700">•</span>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Customer</div>
+              <div className="mt-2 text-lg font-semibold">{lead.name}</div>
+              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                {lead.phone ? <span className="font-mono">{lead.phone}</span> : <i>No phone</i>}
                 {lead.email ? (
-                  <a className="underline" href={`mailto:${lead.email}`}>
-                    {lead.email}
-                  </a>
-                ) : (
-                  <span className="text-gray-500 dark:text-gray-400">No email</span>
-                )}
-              </div>
-
-              <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                Submitted:{" "}
-                <span className="font-semibold text-gray-700 dark:text-gray-200">
-                  {prettyDate(row.createdAt)}
-                </span>
-              </div>
-
-              {/* Mobile chips */}
-              <div className="mt-4 flex flex-wrap gap-2 sm:hidden">
-                <span className={stageChip(String(row.stage))}>
-                  Stage: {stageLabel(String(row.stage))}
-                </span>
-                <span className={renderChip(row.renderStatus)}>
-                  Render: {String(row.renderStatus ?? "not_requested")}
-                </span>
-                {!row.isRead ? (
-                  <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
-                    Unread
-                  </span>
+                  <>
+                    {" "}
+                    · <span className="font-mono">{lead.email}</span>
+                  </>
                 ) : null}
               </div>
             </div>
 
-            {/* Actions */}
-            <div className="flex flex-col gap-3 min-w-[260px]">
-              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                  Quick actions
-                </div>
-
-                <form action={updateStage} className="mt-3 flex items-center gap-2">
-                  <label className="text-xs text-gray-600 dark:text-gray-300">Stage</label>
-                  <select
-                    name="stage"
-                    defaultValue={normalizeStage(row.stage)}
-                    className="ml-auto rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-gray-900"
-                  >
-                    {STAGES.map((s) => (
-                      <option key={s} value={s}>
-                        {stageLabel(s)}
-                      </option>
-                    ))}
-                  </select>
-
-                  <button
-                    type="submit"
-                    className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                  >
-                    Save
-                  </button>
-                </form>
-
-                {!row.isRead ? (
-                  <form action={markRead} className="mt-2">
-                    <button
-                      type="submit"
-                      className="w-full rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-900 dark:hover:bg-gray-800"
-                    >
-                      Mark read
-                    </button>
-                  </form>
-                ) : null}
-              </div>
-
-              {/* Estimate summary (small) */}
-              <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                  Estimate
-                </div>
-
-                {est ? (
-                  <div className="mt-2 space-y-2">
-                    <div className="text-lg font-semibold">{estimateLine(est)}</div>
-
-                    <div className="text-sm text-gray-700 dark:text-gray-200">
-                      Inspection:{" "}
-                      <span className="font-semibold">
-                        {est.inspection == null ? "Unknown" : est.inspection ? "Required" : "Not required"}
-                      </span>
-                    </div>
-
-                    {est.summary ? (
-                      <div className="text-sm text-gray-700 dark:text-gray-200">
-                        <span className="font-semibold">Summary:</span> {est.summary}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">
-                    No output recorded yet.
-                  </div>
-                )}
-              </div>
-            </div>
+            <form action={updateStage} className="flex items-center gap-2">
+              <label className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                Stage
+              </label>
+              <select
+                name="stage"
+                defaultValue={stage}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+              >
+                {STAGES.map((s) => (
+                  <option key={s} value={s}>
+                    {stageLabel(s)}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Save
+              </button>
+            </form>
           </div>
         </section>
 
-        {/* Photos */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">Photos</h2>
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              {imgs.length} photo{imgs.length === 1 ? "" : "s"}
-            </div>
-          </div>
-
-          {imgs.length ? (
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {imgs.map((im, idx) => (
-                <div
-                  key={`${im.url}-${idx}`}
-                  className="overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800"
-                >
-                  <div className="relative">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={im.url} alt={`photo ${idx + 1}`} className="h-56 w-full object-cover" />
-                    {im.shotType ? (
-                      <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
-                        {im.shotType}
-                      </div>
-                    ) : null}
-                    <a
-                      href={im.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="absolute right-2 top-2 rounded-lg bg-white/90 px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-white dark:bg-gray-900/90 dark:text-gray-100"
-                    >
-                      Open
-                    </a>
-                  </div>
-
-                  <div className="p-3">
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Photo {idx + 1}</div>
-                    <div className="mt-1 font-mono text-[11px] break-all text-gray-700 dark:text-gray-200">
-                      {im.url}
-                    </div>
-                  </div>
-                </div>
-              ))}
+        {/* Estimate */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <div className="font-semibold">Estimate</div>
+          {est ? (
+            <div className="mt-3 text-sm text-gray-700 dark:text-gray-300 space-y-1">
+              <div>
+                Range:{" "}
+                <b>
+                  {est.low != null ? `$${est.low.toLocaleString()}` : "—"} –{" "}
+                  {est.high != null ? `$${est.high.toLocaleString()}` : "—"}
+                </b>
+              </div>
+              <div>
+                Inspection required:{" "}
+                <b>{est.inspection == null ? "—" : est.inspection ? "Yes" : "No"}</b>
+              </div>
+              {est.summary ? <div className="mt-2">{est.summary}</div> : null}
             </div>
           ) : (
-            <div className="mt-4 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-              No images found in this quote input.
-            </div>
+            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">No structured estimate found.</div>
           )}
         </section>
 
-        {/* Render */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-          <h2 className="text-lg font-semibold">AI Render</h2>
-
-          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-            <div>
-              Opt-in: <span className="font-semibold">{String(Boolean(row.renderOptIn))}</span>
+        {/* Photos */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <div className="font-semibold">Photos</div>
+          {imgs.length ? (
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {imgs.map((p, idx) => (
+                <a
+                  key={`${p.url}-${idx}`}
+                  href={p.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-xl border border-gray-200 overflow-hidden hover:opacity-95 dark:border-gray-800"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={p.url} alt={`photo ${idx + 1}`} className="h-48 w-full object-cover" />
+                  <div className="p-3 text-xs text-gray-600 dark:text-gray-300">
+                    {p.shotType ? `Label: ${p.shotType}` : "Photo"}
+                  </div>
+                </a>
+              ))}
             </div>
-            <span className="text-gray-300 dark:text-gray-700">•</span>
-            <div>
-              Status:{" "}
-              <span className={renderChip(row.renderStatus)}>
-                {String(row.renderStatus ?? "not_requested")}
-              </span>
-            </div>
-          </div>
-
-          {row.renderImageUrl ? (
-            <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={String(row.renderImageUrl)} alt="AI render" className="w-full object-cover" />
-            </div>
-          ) : null}
+          ) : (
+            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">No photos on this lead.</div>
+          )}
         </section>
 
-        {/* Input + Output */}
-        <section className="grid gap-4 lg:grid-cols-2">
-          {/* INPUT */}
-          <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-            <h2 className="text-lg font-semibold">Input</h2>
-
-            <div className="mt-3 space-y-2 text-sm">
-              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Parsed</div>
-                <div className="mt-2 text-gray-700 dark:text-gray-200">
-                  Category: <span className="font-semibold">{category}</span>
-                </div>
-                <div className="text-gray-700 dark:text-gray-200">
-                  Service type: <span className="font-semibold">{serviceType}</span>
-                </div>
-                {notes ? (
-                  <div className="mt-2 text-gray-700 dark:text-gray-200">
-                    Notes: <span className="font-semibold">{notes}</span>
-                  </div>
-                ) : (
-                  <div className="mt-2 text-gray-500 dark:text-gray-400">No notes provided.</div>
-                )}
-              </div>
-
-              <details>
-                <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
-                  View raw JSON
-                </summary>
-                <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-                  {JSON.stringify(row.input ?? null, null, 2)}
-                </pre>
-              </details>
+        {/* Raw */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <div className="font-semibold">Raw</div>
+          <div className="mt-3 grid gap-4 lg:grid-cols-2">
+            <div>
+              <div className="text-xs text-gray-500">input</div>
+              <pre className="mt-2 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-100">
+                {JSON.stringify(row.input ?? null, null, 2)}
+              </pre>
             </div>
-          </div>
-
-          {/* OUTPUT (UPGRADED) */}
-          <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-            <div className="flex items-start justify-between gap-3">
-              <h2 className="text-lg font-semibold">Output</h2>
-              <CopyButton text={copyText} label="Copy quote" copiedLabel="Copied" />
-            </div>
-
-            <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                    Estimate range
-                  </div>
-                  <div className="mt-2 text-2xl font-semibold tracking-tight">
-                    {est ? estimateLine(est) : "No output recorded"}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className={inspectionBadge(est?.inspection ?? null)}>
-                    Inspection:{" "}
-                    {est?.inspection == null
-                      ? "Unknown"
-                      : est.inspection
-                        ? "Required"
-                        : "Not required"}
-                  </span>
-                </div>
-              </div>
-
-              {est?.summary ? (
-                <div className="mt-4 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                    Customer-facing summary
-                  </div>
-                  <div className="mt-2 leading-relaxed">{est.summary}</div>
-                </div>
-              ) : (
-                <div className="mt-4 text-sm text-gray-500 dark:text-gray-400">
-                  No summary available.
-                </div>
-              )}
-
-              <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Photos</div>
-                  <div className="mt-2 text-lg font-semibold">{imgs.length}</div>
-                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                    More photos → better accuracy
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Stage</div>
-                  <div className="mt-2">
-                    <span className={stageChip(String(row.stage))}>{stageLabel(String(row.stage))}</span>
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Updates mark as read
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Render</div>
-                  <div className="mt-2">
-                    <span className={renderChip(row.renderStatus)}>
-                      {String(row.renderStatus ?? "not_requested")}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Opt-in: {String(Boolean(row.renderOptIn))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <details className="mt-4">
-              <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
-                View raw JSON
-              </summary>
-              <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+            <div>
+              <div className="text-xs text-gray-500">output</div>
+              <pre className="mt-2 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-100">
                 {JSON.stringify(row.output ?? null, null, 2)}
               </pre>
-            </details>
+            </div>
           </div>
         </section>
-
-        <div className="pb-10 text-xs text-gray-500 dark:text-gray-400">
-          Tip: photos + notes drive estimate quality. Stage updates automatically mark as read.
-        </div>
       </div>
     </main>
   );
