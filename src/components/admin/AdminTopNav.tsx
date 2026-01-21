@@ -1,10 +1,16 @@
 // src/components/admin/AdminTopNav.tsx
 "use client";
 
-import React, { useCallback } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import React, { useMemo, useState } from "react";
 import { UserButton } from "@clerk/nextjs";
-import NavShell, { type NavLink } from "@/components/nav/NavShell";
-import AdminTenantSwitcher from "@/components/admin/AdminTenantSwitcher";
+
+import TenantSwitcher from "@/components/tenant/TenantSwitcher";
+
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
 
 type NavKey = "dashboard" | "quotes" | "settings" | "setup";
 
@@ -22,51 +28,106 @@ function activeFromPath(pathname: string): NavKey {
 }
 
 export default function AdminTopNav() {
-  const links: NavLink[] = [
+  const pathname = usePathname() || "";
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  const activeKey = useMemo(() => activeFromPath(pathname), [pathname]);
+
+  const linkBase =
+    "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors";
+  const linkIdle =
+    "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-gray-900 dark:hover:text-white";
+  const linkActive = "bg-black text-white dark:bg-white dark:text-black";
+
+  const links: Array<{ key: NavKey; href: string; label: string }> = [
     { key: "dashboard", href: "/admin", label: "Dashboard" },
     { key: "quotes", href: "/admin/quotes", label: "Quotes" },
     { key: "settings", href: "/admin/settings", label: "Settings" },
     { key: "setup", href: "/admin/setup", label: "Setup" },
   ];
 
-  const active = useCallback((p: string) => activeFromPath(p), []);
-
   return (
-    <NavShell
-      brandHref="/admin"
-      brandLabel="AI Photo Quote"
-      links={links}
-      activeFromPath={active}
-      rightSlot={
+    <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/60">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <Link
+            href="/admin"
+            className="flex items-center gap-2 rounded-lg px-2 py-1 font-semibold text-gray-900 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-900"
+          >
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-black dark:bg-white" />
+            <span>AI Photo Quote</span>
+          </Link>
+
+          <nav className="hidden md:flex items-center gap-1">
+            {links.map((l) => (
+              <Link
+                key={l.key}
+                href={l.href}
+                className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}
+              >
+                {l.label}
+              </Link>
+            ))}
+          </nav>
+        </div>
+
         <div className="flex items-center gap-2">
-          <AdminTenantSwitcher />
-          <div className="rounded-lg border border-gray-200 bg-white px-2 py-1 dark:border-gray-800 dark:bg-black">
+          {/* Tenant switcher (only shows selector if user has multiple tenants) */}
+          <div className="hidden md:block">
+            <TenantSwitcher />
+          </div>
+
+          {/* Clerk user button (sign out / switch account) */}
+          <div className="ml-1 flex items-center">
             <UserButton
-              afterSignOutUrl="/"
               appearance={{
                 elements: {
-                  avatarBox: "h-7 w-7",
+                  avatarBox: "h-9 w-9",
                 },
               }}
-            />
-          </div>
-        </div>
-      }
-      mobileExtraSlot={
-        <div className="flex items-center justify-between gap-2">
-          <AdminTenantSwitcher />
-          <div className="rounded-lg border border-gray-200 bg-white px-2 py-1 dark:border-gray-800 dark:bg-black">
-            <UserButton
               afterSignOutUrl="/"
-              appearance={{
-                elements: {
-                  avatarBox: "h-7 w-7",
-                },
-              }}
             />
           </div>
+
+          <button
+            type="button"
+            className="md:hidden rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
+            onClick={() => setMobileOpen((v) => !v)}
+            aria-expanded={mobileOpen}
+            aria-label="Toggle navigation"
+          >
+            Menu
+          </button>
         </div>
-      }
-    />
+      </div>
+
+      {mobileOpen ? (
+        <div className="md:hidden border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
+          <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-2">
+            <div className="pb-2">
+              <TenantSwitcher className="w-full" />
+            </div>
+
+            {links.map((l) => (
+              <Link
+                key={l.key}
+                href={l.href}
+                className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}
+                onClick={() => setMobileOpen(false)}
+              >
+                {l.label}
+              </Link>
+            ))}
+
+            <div className="pt-2">
+              <div className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
+                <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">Account</span>
+                <UserButton afterSignOutUrl="/" />
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </header>
   );
 }

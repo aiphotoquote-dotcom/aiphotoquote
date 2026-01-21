@@ -2,69 +2,127 @@
 "use client";
 
 import Link from "next/link";
-import React, { useCallback } from "react";
-import NavShell, { type NavLink } from "@/components/nav/NavShell";
+import React, { useState } from "react";
+import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
 
-type MarketingKey = "home" | "demo" | "pricing" | "docs";
+import TenantSwitcher from "@/components/tenant/TenantSwitcher";
 
-function activeFromPath(pathname: string): MarketingKey {
-  const p = (pathname || "").toLowerCase();
-  if (p === "/" || p === "/home") return "home";
-  if (p.startsWith("/q/")) return "demo";
-  if (p.startsWith("/pricing")) return "pricing";
-  if (p.startsWith("/docs")) return "docs";
-  return "home";
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
 }
 
 export default function MarketingTopNav() {
-  const links: NavLink[] = [
-    { key: "home", href: "/", label: "Home" },
-    { key: "demo", href: "/q/demo", label: "Demo" },
-    // remove these two until you create pages if you want to avoid 404 clicks
-    { key: "pricing", href: "/pricing", label: "Pricing" },
-    { key: "docs", href: "/docs", label: "Docs" },
-  ];
+  const [mobileOpen, setMobileOpen] = useState(false);
 
-  const active = useCallback((p: string) => activeFromPath(p), []);
+  const linkBase =
+    "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors";
+  const linkIdle =
+    "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-gray-900 dark:hover:text-white";
 
   return (
-    <NavShell
-      brandHref="/"
-      brandLabel="AI Photo Quote"
-      links={links}
-      activeFromPath={active}
-      rightSlot={
-        <>
+    <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/60">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
+        <div className="flex items-center gap-3">
           <Link
-            href="/sign-in"
-            className="inline-flex rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
+            href="/"
+            className="flex items-center gap-2 rounded-lg px-2 py-1 font-semibold text-gray-900 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-900"
           >
-            Sign in
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-black dark:bg-white" />
+            <span>AI Photo Quote</span>
           </Link>
-          <Link
-            href="/sign-up"
-            className="inline-flex rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-          >
-            Get started
-          </Link>
-        </>
-      }
-      mobileExtraSlot={
-        <div className="grid grid-cols-2 gap-2">
-          <Link
-            href="/sign-in"
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900 text-center"
-          >
-            Sign in
-          </Link>
-          <Link
-            href="/sign-up"
-            className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black text-center"
-          >
-            Get started
-          </Link>
+
+          <nav className="hidden md:flex items-center gap-1">
+            <Link href="/#features" className={cn(linkBase, linkIdle)}>
+              Features
+            </Link>
+            <Link href="/#pricing" className={cn(linkBase, linkIdle)}>
+              Pricing
+            </Link>
+            <Link href="/#how-it-works" className={cn(linkBase, linkIdle)}>
+              How it works
+            </Link>
+          </nav>
         </div>
-      }
-    />
+
+        <div className="flex items-center gap-2">
+          <SignedIn>
+            <div className="hidden md:block">
+              <TenantSwitcher />
+            </div>
+
+            <Link
+              href="/admin"
+              className="hidden md:inline-flex rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+            >
+              Dashboard
+            </Link>
+
+            <UserButton afterSignOutUrl="/" />
+          </SignedIn>
+
+          <SignedOut>
+            <Link
+              href="/sign-in"
+              className="hidden md:inline-flex rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+            >
+              Sign in
+            </Link>
+          </SignedOut>
+
+          <button
+            type="button"
+            className="md:hidden rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
+            onClick={() => setMobileOpen((v) => !v)}
+            aria-expanded={mobileOpen}
+            aria-label="Toggle navigation"
+          >
+            Menu
+          </button>
+        </div>
+      </div>
+
+      {mobileOpen ? (
+        <div className="md:hidden border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
+          <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-2">
+            <Link href="/#features" className={cn(linkBase, linkIdle)} onClick={() => setMobileOpen(false)}>
+              Features
+            </Link>
+            <Link href="/#pricing" className={cn(linkBase, linkIdle)} onClick={() => setMobileOpen(false)}>
+              Pricing
+            </Link>
+            <Link href="/#how-it-works" className={cn(linkBase, linkIdle)} onClick={() => setMobileOpen(false)}>
+              How it works
+            </Link>
+
+            <SignedIn>
+              <div className="pt-2">
+                <TenantSwitcher className="w-full" />
+              </div>
+              <Link
+                href="/admin"
+                className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                onClick={() => setMobileOpen(false)}
+              >
+                Dashboard
+              </Link>
+              <div className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
+                <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">Account</span>
+                <UserButton afterSignOutUrl="/" />
+              </div>
+            </SignedIn>
+
+            <SignedOut>
+              <Link
+                href="/sign-in"
+                className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                onClick={() => setMobileOpen(false)}
+              >
+                Sign in
+              </Link>
+            </SignedOut>
+          </div>
+        </div>
+      ) : null}
+    </header>
   );
 }
