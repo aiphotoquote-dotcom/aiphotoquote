@@ -251,8 +251,9 @@ function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
-function getActiveTenantIdFromCookies() {
-  const c = cookies();
+// ✅ Next 16: cookies() is async in your build
+async function getActiveTenantIdFromCookies() {
+  const c = await cookies();
   return (
     c.get("activeTenantId")?.value ||
     c.get("active_tenant_id")?.value ||
@@ -270,9 +271,8 @@ export default async function QuoteDetailPage(props: PageProps) {
   const quoteId = String(p?.id ?? "").trim();
   if (!quoteId || !isUuid(quoteId)) notFound();
 
-  const tenantId = getActiveTenantIdFromCookies();
+  const tenantId = await getActiveTenantIdFromCookies();
   if (!tenantId || !isUuid(tenantId)) {
-    // If we don't know what tenant we're in, route them back to quotes
     redirect("/admin/quotes");
   }
 
@@ -323,8 +323,7 @@ export default async function QuoteDetailPage(props: PageProps) {
   const images = pickImages(input);
   const estimate = pickEstimate(output);
 
-  const submittedAt =
-    (input?.createdAt ?? row.createdAt ?? null) as any;
+  const submittedAt = (input?.createdAt ?? row.createdAt ?? null) as any;
 
   const stage = normalizeStage(row.stage);
   const renderStatus = String(row.renderStatus ?? "not_requested");
@@ -344,7 +343,12 @@ export default async function QuoteDetailPage(props: PageProps) {
                 Render: {renderStatus.replaceAll("_", " ")}
               </span>
               {!row.isRead ? (
-                <span className={cn(chipBase(), "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200")}>
+                <span
+                  className={cn(
+                    chipBase(),
+                    "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+                  )}
+                >
                   Unread
                 </span>
               ) : null}
@@ -385,7 +389,10 @@ export default async function QuoteDetailPage(props: PageProps) {
                     {lead.phone ? (
                       <div className="flex items-center gap-2">
                         <span className="text-gray-500 dark:text-gray-400">📞</span>
-                        <a className="underline decoration-gray-300 underline-offset-2" href={`tel:${lead.phoneDigits ?? ""}`}>
+                        <a
+                          className="underline decoration-gray-300 underline-offset-2"
+                          href={`tel:${lead.phoneDigits ?? ""}`}
+                        >
                           {lead.phone}
                         </a>
                       </div>
@@ -411,9 +418,7 @@ export default async function QuoteDetailPage(props: PageProps) {
                 <input type="hidden" name="quoteId" value={row.id} />
                 <input type="hidden" name="tenantId" value={row.tenantId} />
 
-                <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">
-                  Stage
-                </label>
+                <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">Stage</label>
 
                 <select
                   name="stage"
@@ -435,16 +440,12 @@ export default async function QuoteDetailPage(props: PageProps) {
                 </button>
               </form>
 
-              <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                Saving also marks the lead as read.
-              </p>
+              <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">Saving also marks the lead as read.</p>
             </section>
 
             {/* Render card */}
             <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                Render
-              </div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Render</div>
               <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-gray-600 dark:text-gray-300">Opt-in:</span>
                 <span className="font-semibold">{row.renderOptIn ? "true" : "false"}</span>
@@ -511,12 +512,8 @@ export default async function QuoteDetailPage(props: PageProps) {
             {/* Photos */}
             <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
               <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                  Photos
-                </div>
-                <div className="text-xs text-gray-600 dark:text-gray-300">
-                  Tap to open
-                </div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Photos</div>
+                <div className="text-xs text-gray-600 dark:text-gray-300">Tap to open</div>
               </div>
 
               {images.length ? (
@@ -536,12 +533,8 @@ export default async function QuoteDetailPage(props: PageProps) {
                         className="h-52 w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
                       />
                       <div className="flex items-center justify-between gap-2 p-3">
-                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                          Photo {idx + 1}
-                        </div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">
-                          Label: {img.shotType ?? "—"}
-                        </div>
+                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Photo {idx + 1}</div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">Label: {img.shotType ?? "—"}</div>
                       </div>
                     </a>
                   ))}
@@ -555,24 +548,18 @@ export default async function QuoteDetailPage(props: PageProps) {
 
             {/* Raw */}
             <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                Developer
-              </div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Developer</div>
 
               <div className="mt-4 space-y-3">
                 <details className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-                  <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    Raw input
-                  </summary>
+                  <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">Raw input</summary>
                   <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
                     {JSON.stringify(input ?? null, null, 2)}
                   </pre>
                 </details>
 
                 <details className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-                  <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
-                    Raw output
-                  </summary>
+                  <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">Raw output</summary>
                   <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
                     {JSON.stringify(output ?? null, null, 2)}
                   </pre>
