@@ -70,7 +70,7 @@ function pickLead(input: any) {
   };
 }
 
-function getTenantIdFromCookies(jar: ReadonlyRequestCookies) {
+function getTenantIdFromCookies(jar: any) {
   return (
     jar.get("activeTenantId")?.value ||
     jar.get("active_tenant_id")?.value ||
