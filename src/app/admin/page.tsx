@@ -9,6 +9,6 @@ export default async function AdminPage() {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  // Always send admin landing to quotes list (prevents /admin 404)
-  redirect("/admin/quotes");
+  // Admin landing: go to dashboard after login
+  redirect("/admin/dashboard");
 }
