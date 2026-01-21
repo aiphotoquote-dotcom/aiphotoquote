@@ -116,7 +116,7 @@ export default function AdminDashboardPage() {
           Quick snapshot of inbound leads and where they are in your pipeline.
         </p>
 
-        {/* ACTION ROW: keep View Quotes, replace Settings/Setup with live pills */}
+        {/* ACTION ROW: keep View Quotes, use space for live pills */}
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <Link
             href="/admin/quotes"
@@ -128,13 +128,15 @@ export default function AdminDashboardPage() {
           {/* Clickable “do this now” pills */}
           {mOk ? (
             <div className="flex flex-wrap items-center gap-2">
-              <Link href="/admin/quotes?unread=1" className="hover:opacity-90">
+              <Link href="/admin/quotes?view=unread" className="hover:opacity-90">
                 {chip(`Unread: ${(metrics as any).unread}`, (metrics as any).staleUnread > 0 ? "yellow" : "gray")}
               </Link>
-              <Link href="/admin/quotes?stage=new" className="hover:opacity-90">
+
+              <Link href="/admin/quotes?view=new" className="hover:opacity-90">
                 {chip(`New: ${(metrics as any).stageNew}`, "blue")}
               </Link>
-              <Link href="/admin/quotes?in_progress=1" className="hover:opacity-90">
+
+              <Link href="/admin/quotes?view=in_progress" className="hover:opacity-90">
                 {chip(`In progress: ${(metrics as any).inProgress}`, "green")}
               </Link>
 
