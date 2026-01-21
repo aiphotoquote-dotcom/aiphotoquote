@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -14,6 +14,7 @@ type NavKey = "dashboard" | "quotes" | "settings" | "setup";
 function activeFromPath(pathname: string): NavKey {
   const p = (pathname || "").toLowerCase();
 
+  // Admin area
   if (p === "/admin" || p.startsWith("/admin/")) {
     if (p.startsWith("/admin/quotes")) return "quotes";
     if (p.startsWith("/admin/settings")) return "settings";
@@ -24,24 +25,30 @@ function activeFromPath(pathname: string): NavKey {
   return "dashboard";
 }
 
+const LINKS = [
+  { key: "dashboard", href: "/admin", label: "Dashboard" },
+  { key: "quotes", href: "/admin/quotes", label: "Quotes" },
+  { key: "settings", href: "/admin/settings", label: "Settings" },
+  { key: "setup", href: "/admin/setup", label: "Setup" },
+] as const satisfies ReadonlyArray<{ key: NavKey; href: string; label: string }>;
+
 export default function AdminTopNav() {
   const pathname = usePathname() || "";
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  const activeKey = useMemo(() => activeFromPath(pathname), [pathname]);
+  // Force the memo result to the union type to avoid any accidental narrowing.
+  const activeKey: NavKey = useMemo(() => activeFromPath(pathname), [pathname]);
+
+  // Close menu on navigation
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
 
   const linkBase =
     "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors";
   const linkIdle =
     "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-gray-900 dark:hover:text-white";
   const linkActive = "bg-black text-white dark:bg-white dark:text-black";
-
-  const links: Array<{ key: NavKey; href: string; label: string }> = [
-    { key: "dashboard", href: "/admin", label: "Dashboard" },
-    { key: "quotes", href: "/admin/quotes", label: "Quotes" },
-    { key: "settings", href: "/admin/settings", label: "Settings" },
-    { key: "setup", href: "/admin/setup", label: "Setup" },
-  ];
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/60">
@@ -56,7 +63,7 @@ export default function AdminTopNav() {
           </Link>
 
           <nav className="hidden md:flex items-center gap-1">
-            {links.map((l) => (
+            {LINKS.map((l) => (
               <Link
                 key={l.key}
                 href={l.href}
@@ -84,12 +91,11 @@ export default function AdminTopNav() {
       {mobileOpen ? (
         <div className="md:hidden border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
           <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-1">
-            {links.map((l) => (
+            {LINKS.map((l) => (
               <Link
                 key={l.key}
                 href={l.href}
                 className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}
-                onClick={() => setMobileOpen(false)}
               >
                 {l.label}
               </Link>
