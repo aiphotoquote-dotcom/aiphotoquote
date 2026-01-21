@@ -3,27 +3,41 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
-import { and, eq, desc } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
+import { requireAppUserId } from "@/lib/auth/requireAppUser";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-type TenantRow = {
-  tenantId: string;
-  slug: string;
-  name: string | null;
-  role: "owner" | "admin" | "member";
-};
 
 const Body = z.object({
   tenantId: z.string().uuid().optional(),
   tenantSlug: z.string().min(3).optional(),
 });
 
-function getActiveTenantIdFromJar(jar: Awaited<ReturnType<typeof cookies>>) {
+function setTenantCookies(res: NextResponse, tenantId: string) {
+  const isProd = process.env.NODE_ENV === "production";
+  const opts = {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure: isProd,
+    path: "/",
+    maxAge: 60 * 60 * 24 * 30, // 30 days
+  };
+
+  // set BOTH keys because your code checks multiple names
+  res.cookies.set("activeTenantId", tenantId, opts);
+  res.cookies.set("active_tenant_id", tenantId, opts);
+  res.cookies.set("tenantId", tenantId, opts);
+  res.cookies.set("tenant_id", tenantId, opts);
+
+  return res;
+}
+
+function readActiveTenantIdFromCookies(): string | null {
+  const jar = cookies(); // Next 16: not async
   return (
     jar.get("activeTenantId")?.value ||
     jar.get("active_tenant_id")?.value ||
@@ -33,83 +47,10 @@ function getActiveTenantIdFromJar(jar: Awaited<ReturnType<typeof cookies>>) {
   );
 }
 
-function setTenantCookies(res: NextResponse, tenantId: string) {
-  const isProd = process.env.NODE_ENV === "production";
-
-  const opts = {
-    httpOnly: true,
-    sameSite: "lax" as const,
-    secure: isProd,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30, // 30 days
-  };
-
-  // set BOTH keys because different parts of your app check different names
-  res.cookies.set("activeTenantId", tenantId, opts);
-  res.cookies.set("active_tenant_id", tenantId, opts);
-  res.cookies.set("tenantId", tenantId, opts);
-  res.cookies.set("tenant_id", tenantId, opts);
-
-  return res;
-}
-
-async function listUserTenants(userId: string): Promise<TenantRow[]> {
-  // For now we treat "owned tenants" as role=owner.
-  // If you later want tenant_members support, we’ll expand this query.
-  const rows = await db
-    .select({
-      id: tenants.id,
-      slug: tenants.slug,
-      name: tenants.name,
-    })
-    .from(tenants)
-    .where(eq(tenants.ownerClerkUserId, userId))
-    .orderBy(desc(tenants.createdAt));
-
-  return rows.map((t) => ({
-    tenantId: t.id,
-    slug: t.slug,
-    name: t.name ?? null,
-    role: "owner",
-  }));
-}
-
 export async function GET() {
   try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
-
-    // ✅ FIX: cookies() must be awaited in your build
-    const jar = await cookies();
-
-    const tenantsList = await listUserTenants(userId);
-
-    let activeTenantId = getActiveTenantIdFromJar(jar);
-
-    // If cookie is missing/invalid, pick first tenant (if any) and set cookies
-    const activeIsValid =
-      activeTenantId && tenantsList.some((t) => t.tenantId === activeTenantId);
-
-    if (!activeIsValid) {
-      activeTenantId = tenantsList[0]?.tenantId ?? null;
-
-      const res = NextResponse.json({
-        ok: true,
-        activeTenantId,
-        tenants: tenantsList,
-      });
-
-      if (activeTenantId) setTenantCookies(res, activeTenantId);
-      return res;
-    }
-
-    return NextResponse.json({
-      ok: true,
-      activeTenantId,
-      tenants: tenantsList,
-    });
+    const tenantId = readActiveTenantIdFromCookies();
+    return NextResponse.json({ ok: true, tenantId });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
@@ -125,6 +66,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
+    // portable internal user id (app_users.id)
+    const appUserId = await requireAppUserId();
+
     const json = await req.json().catch(() => null);
     const parsed = Body.safeParse(json);
 
@@ -137,6 +81,7 @@ export async function POST(req: Request) {
 
     const { tenantId, tenantSlug } = parsed.data;
 
+    // Require at least one selector
     if (!tenantId && !tenantSlug) {
       return NextResponse.json(
         { ok: false, error: "MISSING_TENANT_SELECTOR" },
@@ -144,17 +89,15 @@ export async function POST(req: Request) {
       );
     }
 
-    // Verify tenant is owned by this user (hard stop)
+    // Back-compat ownership: owner_user_id OR owner_clerk_user_id
+    const ownedByMe = or(eq(tenants.ownerUserId, appUserId), eq(tenants.ownerClerkUserId, userId));
+
     const where =
       tenantId && tenantSlug
-        ? and(
-            eq(tenants.id, tenantId),
-            eq(tenants.slug, tenantSlug),
-            eq(tenants.ownerClerkUserId, userId)
-          )
+        ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), ownedByMe)
         : tenantId
-          ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
-          : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
+          ? and(eq(tenants.id, tenantId), ownedByMe)
+          : and(eq(tenants.slug, tenantSlug!), ownedByMe);
 
     const t = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
@@ -170,12 +113,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const tenantsList = await listUserTenants(userId);
-
     const res = NextResponse.json({
       ok: true,
-      activeTenantId: t.id,
-      tenants: tenantsList,
       tenant: { id: t.id, slug: t.slug, name: t.name },
     });
 
