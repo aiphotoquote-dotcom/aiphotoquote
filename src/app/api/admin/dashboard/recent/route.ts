@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { and, desc, eq } from "drizzle-orm";
+import { cookies } from "next/headers";
+import { auth } from "@clerk/nextjs/server";
+import { desc, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
-import { requireActiveTenantId } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,6 +62,7 @@ function pickLead(input: any) {
     null;
 
   const phoneDigits = phone ? digitsOnly(String(phone)) : "";
+
   return {
     name: String(name || "New customer"),
     phone: phoneDigits ? formatUSPhone(phoneDigits) : "",
@@ -68,12 +70,37 @@ function pickLead(input: any) {
   };
 }
 
+function getTenantIdFromCookies(jar: ReadonlyRequestCookies) {
+  return (
+    jar.get("activeTenantId")?.value ||
+    jar.get("active_tenant_id")?.value ||
+    jar.get("tenantId")?.value ||
+    jar.get("tenant_id")?.value ||
+    null
+  );
+}
+
 export async function GET(req: Request) {
   try {
+    // Auth hard-stop (admin API)
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    }
+
     const url = new URL(req.url);
     const limit = Math.max(1, Math.min(25, Number(url.searchParams.get("limit") || 8)));
 
-    const tenantId = await requireActiveTenantId();
+    // IMPORTANT: `await cookies()` is safe whether Next types it sync or async
+    const jar = await cookies();
+    const tenantId = getTenantIdFromCookies(jar);
+
+    if (!tenantId) {
+      return NextResponse.json(
+        { ok: false, error: "NO_ACTIVE_TENANT", message: "Select a tenant first." },
+        { status: 400 }
+      );
+    }
 
     const rows = await db
       .select({
