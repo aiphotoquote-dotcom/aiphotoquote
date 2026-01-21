@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
@@ -19,6 +19,7 @@ const Body = z.object({
 
 function setTenantCookies(res: NextResponse, tenantId: string) {
   const isProd = process.env.NODE_ENV === "production";
+
   const opts = {
     httpOnly: true,
     sameSite: "lax" as const,
@@ -36,8 +37,10 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
   return res;
 }
 
-function readActiveTenantIdFromCookies(): string | null {
-  const jar = cookies(); // Next 16: not async
+async function readActiveTenantIdFromCookies(): Promise<string | null> {
+  // ✅ Next 16 typing: cookies() may be async depending on runtime/build
+  const jar = await cookies();
+
   return (
     jar.get("activeTenantId")?.value ||
     jar.get("active_tenant_id")?.value ||
@@ -47,10 +50,57 @@ function readActiveTenantIdFromCookies(): string | null {
   );
 }
 
+/**
+ * GET: returns tenant context for the signed-in user.
+ * - activeTenantId (from cookies)
+ * - tenants[] (currently owner-only until tenant_members is wired to app_users)
+ */
 export async function GET() {
   try {
-    const tenantId = readActiveTenantIdFromCookies();
-    return NextResponse.json({ ok: true, tenantId });
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    }
+
+    // Ensure app_user exists (mobility layer)
+    await requireAppUserId();
+
+    const activeTenantId = await readActiveTenantIdFromCookies();
+
+    // For now: treat "tenants" as those owned by this Clerk user.
+    // (We’ll extend this to tenant_members + app_users next.)
+    const rows = await db
+      .select({
+        tenantId: tenants.id,
+        slug: tenants.slug,
+        name: tenants.name,
+      })
+      .from(tenants)
+      .where(eq(tenants.ownerClerkUserId, userId))
+      .orderBy(tenants.createdAt);
+
+    const tenantList = rows.map((t) => ({
+      tenantId: t.tenantId,
+      slug: t.slug,
+      name: t.name,
+      role: "owner" as const,
+    }));
+
+    // If cookie is missing but user has tenants, set cookie to first tenant for convenience
+    if (!activeTenantId && tenantList.length > 0) {
+      const res = NextResponse.json({
+        ok: true,
+        activeTenantId: tenantList[0].tenantId,
+        tenants: tenantList,
+      });
+      return setTenantCookies(res, tenantList[0].tenantId);
+    }
+
+    return NextResponse.json({
+      ok: true,
+      activeTenantId,
+      tenants: tenantList,
+    });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
@@ -59,6 +109,9 @@ export async function GET() {
   }
 }
 
+/**
+ * POST: set active tenant cookie (must be owned by this user for now)
+ */
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
@@ -66,12 +119,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
-    // portable internal user id (app_users.id)
-    const appUserId = await requireAppUserId();
+    // Ensure app_user exists (mobility layer)
+    await requireAppUserId();
 
     const json = await req.json().catch(() => null);
     const parsed = Body.safeParse(json);
-
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
@@ -81,23 +133,17 @@ export async function POST(req: Request) {
 
     const { tenantId, tenantSlug } = parsed.data;
 
-    // Require at least one selector
     if (!tenantId && !tenantSlug) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_TENANT_SELECTOR" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, { status: 400 });
     }
 
-    // Back-compat ownership: owner_user_id OR owner_clerk_user_id
-    const ownedByMe = or(eq(tenants.ownerUserId, appUserId), eq(tenants.ownerClerkUserId, userId));
-
+    // For now: user must OWN the tenant (we’ll extend to tenant_members next).
     const where =
       tenantId && tenantSlug
-        ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), ownedByMe)
+        ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId))
         : tenantId
-          ? and(eq(tenants.id, tenantId), ownedByMe)
-          : and(eq(tenants.slug, tenantSlug!), ownedByMe);
+          ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
+          : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
 
     const t = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
@@ -107,17 +153,10 @@ export async function POST(req: Request) {
       .then((r) => r[0] ?? null);
 
     if (!t) {
-      return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
     }
 
-    const res = NextResponse.json({
-      ok: true,
-      tenant: { id: t.id, slug: t.slug, name: t.name },
-    });
-
+    const res = NextResponse.json({ ok: true, activeTenantId: t.id, tenant: t });
     return setTenantCookies(res, t.id);
   } catch (e: any) {
     return NextResponse.json(
