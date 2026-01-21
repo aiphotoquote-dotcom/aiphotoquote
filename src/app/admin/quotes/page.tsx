@@ -178,17 +178,32 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const sp = searchParams ? await searchParams : {};
+   const sp = searchParams ? await searchParams : {};
 
-  // ---------- filters from querystring ----------
-  const unreadOnly = sp.unread === "1" || (Array.isArray(sp.unread) && sp.unread.includes("1"));
+  // ---------- view / filters from querystring ----------
+  const viewRaw = Array.isArray(sp.view) ? sp.view[0] : sp.view;
+  const viewNorm = viewRaw ? String(viewRaw).toLowerCase().trim() : null;
 
-  const inProgressOnly =
+  // legacy params still supported
+  const unreadLegacy =
+    sp.unread === "1" || (Array.isArray(sp.unread) && sp.unread.includes("1"));
+
+  const inProgressLegacy =
     sp.in_progress === "1" || (Array.isArray(sp.in_progress) && sp.in_progress.includes("1"));
 
   const stageParamRaw = Array.isArray(sp.stage) ? sp.stage[0] : sp.stage;
-  const stageParam = stageParamRaw ? normalizeStage(stageParamRaw) : null;
+  const stageLegacy = stageParamRaw ? normalizeStage(stageParamRaw) : null;
 
+  // view= wins (canonical)
+  const unreadOnly = viewNorm === "unread" ? true : unreadLegacy;
+
+  const inProgressOnly =
+    viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline"
+      ? true
+      : inProgressLegacy;
+
+  const stageParam =
+    viewNorm === "new" ? ("new" as const) : stageLegacy;
   // pagination
   const page = clampInt(sp.page, 1, 1, 10_000);
   const pageSize = clampInt(sp.pageSize, 25, 5, 200);
@@ -254,7 +269,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       ? "unread"
       : viewNorm === "new"
       ? "new"
-      : viewNorm === "inprogress" || viewNorm === "pipeline"
+      : viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline"
       ? "in_progress"
       : null;
 
@@ -310,14 +325,17 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   // ---------- persistent pill bar links ----------
   const pillBase = { page: 1, pageSize }; // reset page on filter change
   const hrefAll = `/admin/quotes${qs({ ...pillBase })}`;
-  const hrefUnread = `/admin/quotes${qs({ ...pillBase, unread: 1 })}`;
-  const hrefNew = `/admin/quotes${qs({ ...pillBase, stage: "new" })}`;
-  const hrefInProgress = `/admin/quotes${qs({ ...pillBase, in_progress: 1 })}`;
+  const hrefUnread = `/admin/quotes${qs({ ...pillBase, view: "unread" })}`;
+  const hrefNew = `/admin/quotes${qs({ ...pillBase, view: "new" })}`;
+  const hrefInProgress = `/admin/quotes${qs({ ...pillBase, view: "in_progress" })}`;
 
-  const activeAll = !unreadOnly && !inProgressOnly && !stageParam;
-  const activeUnread = unreadOnly;
-  const activeNew = stageParam === "new";
-  const activeInProgress = inProgressOnly;
+  const activeAll = !viewNorm && !unreadOnly && !inProgressOnly && !stageParam;
+  const activeUnread = viewNorm === "unread" || (!viewNorm && unreadOnly);
+  const activeNew = viewNorm === "new" || (!viewNorm && stageParam === "new");
+  const activeInProgress =
+    viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline"
+      ? true
+      : (!viewNorm && inProgressOnly);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
