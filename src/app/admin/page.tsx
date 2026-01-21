@@ -1,266 +1,201 @@
 // src/app/admin/page.tsx
+"use client";
+
 import Link from "next/link";
-import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
-import { auth } from "@clerk/nextjs/server";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import React, { useEffect, useMemo, useState } from "react";
 
-import { db } from "@/lib/db/client";
-import { quoteLogs } from "@/lib/db/schema";
+type MetricsResp =
+  | {
+      ok: true;
+      totalLeads: number;
+      unread: number;
+      stageNew: number;
+      inProgress: number;
+      todayNew: number;
+      yesterdayNew: number;
+      staleUnread: number;
+    }
+  | { ok: false; error: string; message?: string };
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+type RecentResp =
+  | {
+      ok: true;
+      leads: Array<{
+        id: string;
+        submittedAt: string;
+        stage: string;
+        isRead: boolean;
+        customerName: string;
+        customerPhone: string | null;
+      }>;
+    }
+  | { ok: false; error: string; message?: string };
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function digitsOnly(s: string) {
-  return String(s || "").replace(/\D/g, "");
+function fmtDate(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
 }
 
-function formatUSPhone(raw: string) {
-  const d = digitsOnly(raw).slice(0, 10);
-  const a = d.slice(0, 3);
-  const b = d.slice(3, 6);
-  const c = d.slice(6, 10);
-  if (!d) return "";
-  if (d.length <= 3) return a ? `(${a}` : "";
-  if (d.length <= 6) return `(${a}) ${b}`;
-  return `(${a}) ${b}-${c}`;
+function stageLabel(s: string) {
+  const st = String(s || "").toLowerCase();
+  if (st === "new") return "new";
+  if (st === "read") return "read";
+  if (st === "estimate") return "estimate";
+  if (st === "quoted") return "quoted";
+  return st || "new";
 }
 
-function prettyDate(d: any) {
-  try {
-    const dt = new Date(d);
-    if (Number.isNaN(dt.getTime())) return String(d ?? "");
-    return dt.toLocaleString();
-  } catch {
-    return String(d ?? "");
-  }
-}
-
-function normalizeStage(v: any) {
-  const s = String(v ?? "").trim().toLowerCase();
-  if (!s) return "new";
-  if (s === "quote" || s === "quoted") return "quoted";
-  if (s === "estimate" || s === "estimated") return "estimate";
-  if (s === "read") return "read";
-  if (s === "new") return "new";
-  return s;
-}
-
-function stageChip(stageRaw: any) {
-  const s = normalizeStage(stageRaw);
-
-  const base =
-    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
+function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" = "gray") {
+  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
   const cls =
-    s === "new"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : s === "read"
-      ? "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
-      : s === "estimate"
-      ? "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200"
-      : s === "quoted"
+    tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+      : tone === "yellow"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+      : tone === "red"
+      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+      : tone === "blue"
+      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
       : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
-
-  const label =
-    s === "new"
-      ? "new"
-      : s === "read"
-      ? "read"
-      : s === "estimate"
-      ? "estimate"
-      : s === "quoted"
-      ? "quoted"
-      : s;
 
   return <span className={cn(base, cls)}>{label}</span>;
 }
 
-function statusChip(isRead: boolean) {
-  const base =
-    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
-  const cls = isRead
-    ? "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
-    : "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200";
-  return <span className={cn(base, cls)}>{isRead ? "Read" : "Unread"}</span>;
-}
+export default function AdminDashboardPage() {
+  const [metrics, setMetrics] = useState<MetricsResp | null>(null);
+  const [recent, setRecent] = useState<RecentResp | null>(null);
+  const [loading, setLoading] = useState(true);
 
-function pickLead(input: any) {
-  const c = input?.customer ?? input?.contact ?? input ?? null;
-
-  const name =
-    c?.name ??
-    input?.name ??
-    input?.customer_name ??
-    input?.customerName ??
-    null;
-
-  const phone =
-    c?.phone ??
-    c?.phoneNumber ??
-    input?.phone ??
-    input?.customer_phone ??
-    input?.customerPhone ??
-    input?.customer_context?.phone ??
-    null;
-
-  const phoneDigits = phone ? digitsOnly(String(phone)) : "";
-  const displayPhone = phoneDigits ? formatUSPhone(phoneDigits) : "";
-
-  return {
-    name: String(name || "New customer"),
-    phone: displayPhone || "",
-  };
-}
-
-function getTenantIdFromCookies(jar: Awaited<ReturnType<typeof cookies>>) {
-  return (
-    jar.get("activeTenantId")?.value ||
-    jar.get("active_tenant_id")?.value ||
-    jar.get("tenantId")?.value ||
-    jar.get("tenant_id")?.value ||
-    null
-  );
-}
-
-export default async function AdminHomePage() {
-  // Layout already guards auth, but keep this here too to be safe.
-  const { userId } = await auth();
-  if (!userId) redirect("/sign-in");
-
-  const jar = await cookies();
-  const tenantId = getTenantIdFromCookies(jar);
-
-  // If no active tenant cookie, send them to setup (or onboarding).
-  if (!tenantId) {
-    redirect("/admin/setup");
+  async function load() {
+    setLoading(true);
+    try {
+      const [m, r] = await Promise.all([
+        fetch("/api/admin/dashboard/metrics", { cache: "no-store" }).then((x) => x.json()) as Promise<MetricsResp>,
+        fetch("/api/admin/dashboard/recent", { cache: "no-store" }).then((x) => x.json()) as Promise<RecentResp>,
+      ]);
+      setMetrics(m);
+      setRecent(r);
+    } catch (e: any) {
+      setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+      setRecent({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+    } finally {
+      setLoading(false);
+    }
   }
 
-  // ---- Metrics ----
-  const total = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(quoteLogs)
-    .where(eq(quoteLogs.tenantId, tenantId))
-    .then((r) => Number(r?.[0]?.n ?? 0));
+  useEffect(() => {
+    load();
+  }, []);
 
-  const unread = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(quoteLogs)
-    .where(and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.isRead, false)))
-    .then((r) => Number(r?.[0]?.n ?? 0));
+  const mOk = Boolean(metrics && "ok" in metrics && metrics.ok);
+  const rOk = Boolean(recent && "ok" in recent && recent.ok);
 
-  const stageNew = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(quoteLogs)
-    .where(and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.stage, "new")))
-    .then((r) => Number(r?.[0]?.n ?? 0));
-
-  const inProgressStages = ["read", "estimate", "quoted"];
-  const inProgress = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(quoteLogs)
-    .where(
-      and(eq(quoteLogs.tenantId, tenantId), inArray(quoteLogs.stage, inProgressStages))
-    )
-    .then((r) => Number(r?.[0]?.n ?? 0));
-
-  // ---- Recent leads ----
-  const recent = await db
-    .select({
-      id: quoteLogs.id,
-      createdAt: quoteLogs.createdAt,
-      isRead: quoteLogs.isRead,
-      stage: quoteLogs.stage,
-      input: quoteLogs.input,
-    })
-    .from(quoteLogs)
-    .where(eq(quoteLogs.tenantId, tenantId))
-    .orderBy(desc(quoteLogs.createdAt))
-    .limit(8);
-
-  const rows = recent.map((r) => {
-    const lead = pickLead(r.input);
-    return {
-      id: String(r.id),
-      createdAt: String(r.createdAt),
-      isRead: Boolean(r.isRead),
-      stage: String(r.stage ?? "new"),
-      name: lead.name,
-      phone: lead.phone,
-    };
-  });
+  const todayDelta = useMemo(() => {
+    if (!mOk) return { label: "—", tone: "gray" as const };
+    const curr = (metrics as any).todayNew ?? 0;
+    const prev = (metrics as any).yesterdayNew ?? 0;
+    if (prev <= 0) return curr > 0 ? { label: "new", tone: "blue" as const } : { label: "—", tone: "gray" as const };
+    const p = Math.round(((curr - prev) / prev) * 100);
+    if (p === 0) return { label: "0%", tone: "gray" as const };
+    if (p > 0) return { label: `+${p}%`, tone: "green" as const };
+    return { label: `${p}%`, tone: "red" as const };
+  }, [mOk, metrics]);
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <section className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            What’s happening today
-          </p>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Quick snapshot of inbound leads and where they are in your pipeline.
-          </p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What’s happening today</p>
+        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+          Quick snapshot of inbound leads and where they are in your pipeline.
+        </p>
 
-        <div className="flex flex-wrap gap-2">
+        {/* ACTION ROW: keep View Quotes, replace Settings/Setup with live pills */}
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           <Link
             href="/admin/quotes"
             className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
           >
             View Quotes
           </Link>
-          <Link
-            href="/admin/settings"
-            className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-          >
-            Settings
-          </Link>
-          <Link
-            href="/admin/setup"
-            className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-          >
-            Setup
-          </Link>
-        </div>
-      </section>
 
-      {/* KPI cards */}
-      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard
-          title="TOTAL LEADS"
-          value={total}
-          sub="All-time for active tenant"
-          tone="gray"
-        />
-        <KpiCard
-          title="UNREAD"
-          value={unread}
-          sub="Needs attention"
-          tone={unread > 0 ? "yellow" : "gray"}
-        />
-        <KpiCard
-          title="NEW"
-          value={stageNew}
-          sub="Stage: New"
-          tone={stageNew > 0 ? "blue" : "gray"}
-        />
-        <KpiCard
-          title="IN PROGRESS"
-          value={inProgress}
-          sub="Read / Estimate / Quoted"
-          tone={inProgress > 0 ? "green" : "gray"}
-        />
-      </section>
+          {/* Clickable “do this now” pills */}
+          {mOk ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Link href="/admin/quotes?unread=1" className="hover:opacity-90">
+                {chip(`Unread: ${(metrics as any).unread}`, (metrics as any).staleUnread > 0 ? "yellow" : "gray")}
+              </Link>
+              <Link href="/admin/quotes?stage=new" className="hover:opacity-90">
+                {chip(`New: ${(metrics as any).stageNew}`, "blue")}
+              </Link>
+              <Link href="/admin/quotes?in_progress=1" className="hover:opacity-90">
+                {chip(`In progress: ${(metrics as any).inProgress}`, "green")}
+              </Link>
+
+              <span className="ml-1">
+                {chip(`Today: ${(metrics as any).todayNew} (${todayDelta.label})`, todayDelta.tone)}
+              </span>
+            </div>
+          ) : loading ? (
+            <div className="text-sm text-gray-500">Loading…</div>
+          ) : (
+            <div className="text-sm text-red-600">{(metrics as any)?.message || "Failed to load metrics."}</div>
+          )}
+
+          <button
+            type="button"
+            onClick={load}
+            className="ml-auto rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Cards */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+          <div className="text-xs font-semibold tracking-wide text-gray-500">TOTAL LEADS</div>
+          <div className="mt-2 text-4xl font-semibold">{mOk ? (metrics as any).totalLeads : "—"}</div>
+          <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">All-time for active tenant</div>
+        </div>
+
+        <div className="rounded-2xl border border-yellow-200 bg-yellow-50 p-5 shadow-sm dark:border-yellow-900/40 dark:bg-yellow-950/20">
+          <div className="text-xs font-semibold tracking-wide text-yellow-900 dark:text-yellow-200">UNREAD</div>
+          <div className="mt-2 text-4xl font-semibold text-yellow-900 dark:text-yellow-100">
+            {mOk ? (metrics as any).unread : "—"}
+          </div>
+          <div className="mt-2 text-sm text-yellow-900/80 dark:text-yellow-200/80">
+            Needs attention{mOk && (metrics as any).staleUnread > 0 ? ` · ${(metrics as any).staleUnread} stale >24h` : ""}
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5 shadow-sm dark:border-blue-900/40 dark:bg-blue-950/20">
+          <div className="text-xs font-semibold tracking-wide text-blue-900 dark:text-blue-200">NEW</div>
+          <div className="mt-2 text-4xl font-semibold text-blue-900 dark:text-blue-100">
+            {mOk ? (metrics as any).stageNew : "—"}
+          </div>
+          <div className="mt-2 text-sm text-blue-900/80 dark:text-blue-200/80">Stage: New</div>
+        </div>
+
+        <div className="rounded-2xl border border-green-200 bg-green-50 p-5 shadow-sm dark:border-green-900/40 dark:bg-green-950/20">
+          <div className="text-xs font-semibold tracking-wide text-green-900 dark:text-green-200">IN PROGRESS</div>
+          <div className="mt-2 text-4xl font-semibold text-green-900 dark:text-green-100">
+            {mOk ? (metrics as any).inProgress : "—"}
+          </div>
+          <div className="mt-2 text-sm text-green-900/80 dark:text-green-200/80">Read / Estimate / Quoted</div>
+        </div>
+      </div>
 
       {/* Recent leads */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-start justify-between gap-3">
+      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">Recent leads</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -270,119 +205,60 @@ export default async function AdminHomePage() {
 
           <Link
             href="/admin/quotes"
-            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
           >
             Open full list
           </Link>
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-          <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-black dark:text-gray-300">
-            <div className="col-span-5">Customer</div>
-            <div className="col-span-2">Stage</div>
-            <div className="col-span-3">Submitted</div>
-            <div className="col-span-2 text-right">Status</div>
+        {!rOk ? (
+          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">
+            {loading ? "Loading…" : (recent as any)?.message || "Couldn’t load recent leads."}
           </div>
+        ) : (
+          <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
+            <div className="grid grid-cols-12 bg-gray-50 px-4 py-2 text-xs font-semibold text-gray-600 dark:bg-black dark:text-gray-300">
+              <div className="col-span-5">Customer</div>
+              <div className="col-span-2">Stage</div>
+              <div className="col-span-3">Submitted</div>
+              <div className="col-span-2 text-right">Status</div>
+            </div>
 
-          {rows.length ? (
             <ul className="divide-y divide-gray-200 dark:divide-gray-800">
-              {rows.map((r) => (
+              {(recent as any).leads.map((x: any) => (
                 <li
-                  key={r.id}
+                  key={x.id}
                   className={cn(
                     "grid grid-cols-12 items-center px-4 py-3",
-                    !r.isRead
-                      ? "bg-yellow-50/60 dark:bg-yellow-950/20"
-                      : "bg-white dark:bg-gray-950"
+                    x.isRead ? "" : "bg-yellow-50/60 dark:bg-yellow-950/10"
                   )}
                 >
                   <div className="col-span-5">
-                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                      {r.name}
-                    </div>
-                    {r.phone ? (
-                      <div className="text-sm text-gray-600 dark:text-gray-300">
-                        {r.phone}
-                      </div>
+                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{x.customerName}</div>
+                    {x.customerPhone ? (
+                      <div className="text-xs text-gray-600 dark:text-gray-300">{x.customerPhone}</div>
                     ) : null}
-                    <div className="mt-1 text-xs font-mono text-gray-500 dark:text-gray-400">
-                      {r.id}
-                    </div>
                   </div>
 
-                  <div className="col-span-2">{stageChip(r.stage)}</div>
-
-                  <div className="col-span-3 text-sm text-gray-700 dark:text-gray-300">
-                    {prettyDate(r.createdAt)}
+                  <div className="col-span-2">
+                    {chip(stageLabel(x.stage), stageLabel(x.stage) === "new" ? "blue" : "gray")}
                   </div>
+
+                  <div className="col-span-3 text-sm text-gray-700 dark:text-gray-200">{fmtDate(x.submittedAt)}</div>
 
                   <div className="col-span-2 flex justify-end">
-                    {statusChip(r.isRead)}
-                  </div>
-
-                  <div className="col-span-12 mt-3 flex gap-2">
-                    <Link
-                      href={`/admin/quotes/${r.id}`}
-                      className="rounded-lg bg-black px-3 py-2 text-xs font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                    >
-                      Open
-                    </Link>
-                    <Link
-                      href={`/admin/quotes`}
-                      className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-                    >
-                      View list
-                    </Link>
+                    {x.isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
                   </div>
                 </li>
               ))}
             </ul>
-          ) : (
-            <div className="px-4 py-6 text-sm text-gray-600 dark:text-gray-300">
-              No leads yet for this tenant. Submit a test quote to populate the dashboard.
-            </div>
-          )}
-        </div>
+          </div>
+        )}
 
         <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
           Tip: unread rows are lightly highlighted so you can scan faster.
         </div>
-      </section>
-    </div>
-  );
-}
-
-function KpiCard({
-  title,
-  value,
-  sub,
-  tone,
-}: {
-  title: string;
-  value: number;
-  sub: string;
-  tone: "gray" | "blue" | "green" | "yellow" | "red";
-}) {
-  const ring =
-    tone === "blue"
-      ? "border-blue-200 bg-blue-50 dark:border-blue-900/50 dark:bg-blue-950/40"
-      : tone === "green"
-      ? "border-green-200 bg-green-50 dark:border-green-900/50 dark:bg-green-950/40"
-      : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 dark:border-yellow-900/50 dark:bg-yellow-950/40"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 dark:border-red-900/50 dark:bg-red-950/40"
-      : "border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950";
-
-  return (
-    <div className={cn("rounded-2xl border p-5 shadow-sm", ring)}>
-      <div className="text-xs font-semibold tracking-wider text-gray-600 dark:text-gray-300">
-        {title}
       </div>
-      <div className="mt-3 text-3xl font-semibold text-gray-900 dark:text-gray-100">
-        {value}
-      </div>
-      <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{sub}</div>
     </div>
   );
 }

@@ -1,7 +1,7 @@
+// src/app/api/admin/dashboard/recent/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
@@ -9,10 +9,19 @@ import { quoteLogs } from "@/lib/db/schema";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function getTenantIdFromCookies(jar: any) {
+  return (
+    jar.get("activeTenantId")?.value ||
+    jar.get("active_tenant_id")?.value ||
+    jar.get("tenantId")?.value ||
+    jar.get("tenant_id")?.value ||
+    null
+  );
+}
+
 function digitsOnly(s: string) {
   return (s || "").replace(/\D/g, "");
 }
-
 function formatUSPhone(raw: string) {
   const d = digitsOnly(raw).slice(0, 10);
   const a = d.slice(0, 3);
@@ -22,16 +31,6 @@ function formatUSPhone(raw: string) {
   if (d.length <= 3) return a ? `(${a}` : "";
   if (d.length <= 6) return `(${a}) ${b}`;
   return `(${a}) ${b}-${c}`;
-}
-
-function normalizeStage(v: any) {
-  const s = String(v ?? "").trim().toLowerCase();
-  if (!s) return "new";
-  if (s === "quoted" || s === "quote") return "quoted";
-  if (s === "read") return "read";
-  if (s === "new") return "new";
-  if (s === "estimate" || s === "estimated") return "estimate";
-  return s;
 }
 
 function pickLead(input: any) {
@@ -53,51 +52,20 @@ function pickLead(input: any) {
     input?.customer_context?.phone ??
     null;
 
-  const email =
-    c?.email ??
-    input?.email ??
-    input?.customer_email ??
-    input?.customerEmail ??
-    input?.customer_context?.email ??
-    null;
-
   const phoneDigits = phone ? digitsOnly(String(phone)) : "";
-
   return {
     name: String(name || "New customer"),
-    phone: phoneDigits ? formatUSPhone(phoneDigits) : "",
-    email: email ? String(email) : "",
+    phone: phoneDigits ? formatUSPhone(phoneDigits) : null,
   };
 }
 
-function getTenantIdFromCookies(jar: any) {
-  return (
-    jar.get("activeTenantId")?.value ||
-    jar.get("active_tenant_id")?.value ||
-    jar.get("tenantId")?.value ||
-    jar.get("tenant_id")?.value ||
-    null
-  );
-}
-
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    // Auth hard-stop (admin API)
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
-
-    const url = new URL(req.url);
-    const limit = Math.max(1, Math.min(25, Number(url.searchParams.get("limit") || 8)));
-
-    // IMPORTANT: `await cookies()` is safe whether Next types it sync or async
     const jar = await cookies();
     const tenantId = getTenantIdFromCookies(jar);
-
     if (!tenantId) {
       return NextResponse.json(
-        { ok: false, error: "NO_ACTIVE_TENANT", message: "Select a tenant first." },
+        { ok: false, error: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
         { status: 400 }
       );
     }
@@ -106,27 +74,24 @@ export async function GET(req: Request) {
       .select({
         id: quoteLogs.id,
         createdAt: quoteLogs.createdAt,
-        input: quoteLogs.input,
         stage: quoteLogs.stage,
         isRead: quoteLogs.isRead,
+        input: quoteLogs.input,
       })
       .from(quoteLogs)
       .where(eq(quoteLogs.tenantId, tenantId))
       .orderBy(desc(quoteLogs.createdAt))
-      .limit(limit);
+      .limit(12);
 
     const leads = rows.map((r) => {
       const lead = pickLead(r.input);
-      const stage = normalizeStage(r.stage);
-
       return {
         id: r.id,
-        createdAt: r.createdAt,
-        stage,
-        isRead: Boolean(r.isRead),
+        submittedAt: r.createdAt,
+        stage: r.stage,
+        isRead: r.isRead,
         customerName: lead.name,
         customerPhone: lead.phone,
-        customerEmail: lead.email,
       };
     });
 
