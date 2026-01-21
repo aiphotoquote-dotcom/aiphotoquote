@@ -3,42 +3,24 @@ import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 
+import MarketingTopNav from "@/components/marketing/MarketingTopNav";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const { userId } = await auth();
 
-  // ✅ Signed in users go straight to the new centerpiece dashboard
+  // ✅ Signed in users go to the dashboard experience
   if (userId) redirect("/admin");
 
   // ✅ Otherwise: marketing home
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+      <MarketingTopNav />
+
       <div className="mx-auto max-w-6xl px-6 py-16">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 font-semibold">
-            <span className="inline-block h-2.5 w-2.5 rounded-full bg-black dark:bg-white" />
-            AI Photo Quote
-          </div>
-
-          <div className="flex items-center gap-3">
-            <Link
-              href="/sign-in"
-              className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-            >
-              Sign in
-            </Link>
-            <Link
-              href="/sign-up"
-              className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-            >
-              Get started
-            </Link>
-          </div>
-        </div>
-
-        <div className="mt-14 grid gap-10 lg:grid-cols-2 lg:items-center">
+        <div className="mt-10 grid gap-10 lg:grid-cols-2 lg:items-center">
           <div>
             <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">
               Instant photo quotes for service businesses.
