@@ -23,6 +23,9 @@ export const tenants = pgTable(
 
     // TEMP nullable to allow smooth migration
     ownerClerkUserId: text("owner_clerk_user_id"),
+    // ✅ portable owner reference (added by app_users migration)
+    ownerUserId: uuid("owner_user_id"),
+
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
@@ -172,6 +175,23 @@ export const quoteLogs = pgTable("quote_logs", {
 /**
  * Industries
  */
+export const appUsers = pgTable(
+  "app_users",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    authProvider: text("auth_provider").notNull(),
+    authSubject: text("auth_subject").notNull(),
+    email: text("email"),
+    name: text("name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    providerSubjectUq: uniqueIndex("app_users_provider_subject_uq").on(t.authProvider, t.authSubject),
+    emailIdx: uniqueIndex("app_users_email_idx").on(t.email), // if your DB index is non-unique, change this to index(...)
+  })
+);
+
 export const industries = pgTable(
   "industries",
   {
