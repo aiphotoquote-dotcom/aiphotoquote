@@ -1,15 +1,20 @@
 // src/app/admin/quotes/[id]/page.tsx
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { notFound, redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenants } from "@/lib/db/schema";
+import { quoteLogs } from "@/lib/db/schema";
 import CopyButton from "@/components/CopyButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+type PageProps = {
+  params: Promise<{ id?: string }>;
+};
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -47,7 +52,7 @@ function normalizeStage(v: any) {
   if (s === "read") return "read";
   if (s === "new") return "new";
   if (s === "estimate" || s === "estimated") return "estimate";
-  if (s === "closed" || s === "won" || s === "lost") return "closed";
+  if (s === "closed") return "closed";
   return s;
 }
 
@@ -63,72 +68,72 @@ function stageLabel(s: string) {
   return st.charAt(0).toUpperCase() + st.slice(1);
 }
 
+function chipBase() {
+  return "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
+}
+
 function stageChip(st: string) {
   const s = normalizeStage(st);
-  const base =
-    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
   if (s === "new")
     return cn(
-      base,
+      chipBase(),
       "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
     );
   if (s === "read")
     return cn(
-      base,
+      chipBase(),
       "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
     );
   if (s === "estimate")
     return cn(
-      base,
+      chipBase(),
       "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200"
     );
   if (s === "quoted")
     return cn(
-      base,
+      chipBase(),
       "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
     );
   if (s === "closed")
     return cn(
-      base,
+      chipBase(),
       "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
     );
   return cn(
-    base,
+    chipBase(),
     "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
   );
 }
 
 function renderChip(v: any) {
   const s = String(v ?? "").toLowerCase();
-  const base =
-    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
   if (!s || s === "not_requested")
     return cn(
-      base,
+      chipBase(),
       "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
     );
   if (s === "requested" || s === "queued")
     return cn(
-      base,
+      chipBase(),
       "border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-200"
     );
   if (s === "rendering" || s === "running")
     return cn(
-      base,
+      chipBase(),
       "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
     );
   if (s === "rendered" || s === "done")
     return cn(
-      base,
+      chipBase(),
       "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
     );
   if (s === "failed")
     return cn(
-      base,
+      chipBase(),
       "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
     );
   return cn(
-    base,
+    chipBase(),
     "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
   );
 }
@@ -210,11 +215,7 @@ function pickEstimate(output: any) {
     (output as any).inspection ??
     null;
 
-  const summary =
-    (output as any).summary ??
-    (output as any).notes ??
-    (output as any).message ??
-    null;
+  const summary = (output as any).summary ?? (output as any).notes ?? (output as any).message ?? null;
 
   const toNum = (v: any) => {
     const n = Number(v);
@@ -227,328 +228,359 @@ function pickEstimate(output: any) {
   return {
     low: L,
     high: H,
-    inspection: typeof inspection === "boolean" ? inspection : null,
+    inspectionRequired:
+      typeof inspection === "boolean"
+        ? inspection
+        : inspection == null
+          ? null
+          : String(inspection).toLowerCase() === "true",
     summary: summary ? String(summary) : null,
   };
 }
 
-async function userHasTenantAccess(args: {
-  userId: string;
-  tenantId: string;
-}): Promise<boolean> {
-  const { userId, tenantId } = args;
-
-  // 1) owner access
-  const ownerOk = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
-    .limit(1)
-    .then((r) => Boolean(r[0]));
-
-  if (ownerOk) return true;
-
-  // 2) member access (robust to column naming differences)
-  // Try common variants:
-  // - tenant_members.tenant_id + tenant_members.clerk_user_id
-  // - tenant_members.tenant_id + tenant_members.user_id
+function money(n: number | null) {
+  if (n == null) return null;
   try {
-    const r1 = await db.execute(sql`
-      select 1 as ok
-      from tenant_members
-      where tenant_id = ${tenantId}::uuid
-        and clerk_user_id = ${userId}
-      limit 1
-    `);
-    const ok = Array.isArray((r1 as any)?.rows) ? (r1 as any).rows.length > 0 : Array.isArray(r1) ? r1.length > 0 : false;
-    if (ok) return true;
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
   } catch {
-    // ignore and try next
+    return `$${n}`;
   }
-
-  try {
-    const r2 = await db.execute(sql`
-      select 1 as ok
-      from tenant_members
-      where tenant_id = ${tenantId}::uuid
-        and user_id = ${userId}
-      limit 1
-    `);
-    const ok = Array.isArray((r2 as any)?.rows) ? (r2 as any).rows.length > 0 : Array.isArray(r2) ? r2.length > 0 : false;
-    if (ok) return true;
-  } catch {
-    // ignore
-  }
-
-  return false;
 }
 
-export default async function AdminQuoteDetailPage({
-  params,
-}: {
-  params: Promise<{ id?: string }> | { id?: string };
-}) {
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+function getActiveTenantIdFromCookies() {
+  const c = cookies();
+  return (
+    c.get("activeTenantId")?.value ||
+    c.get("active_tenant_id")?.value ||
+    c.get("activeTenant")?.value ||
+    c.get("active_tenant")?.value ||
+    null
+  );
+}
+
+export default async function QuoteDetailPage(props: PageProps) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const resolved = await params;
-  const quoteId = resolved?.id ? String(resolved.id) : "";
-  if (!quoteId) notFound();
+  const p = await props.params;
+  const quoteId = String(p?.id ?? "").trim();
+  if (!quoteId || !isUuid(quoteId)) notFound();
 
-  // Load quote by ID only (avoids tenant-cookie mismatch)
-  const base = await db
-    .select({
-      id: quoteLogs.id,
-      tenantId: quoteLogs.tenantId,
-    })
-    .from(quoteLogs)
-    .where(eq(quoteLogs.id, quoteId))
-    .limit(1)
-    .then((r) => r[0] ?? null);
-
-  if (!base?.tenantId) notFound();
-  const quoteTenantId = base.tenantId;
-
-  // Authorize owner OR member
-  const allowed = await userHasTenantAccess({ userId, tenantId: quoteTenantId });
-  if (!allowed) {
-    return (
-      <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
-        <div className="mx-auto max-w-5xl px-6 py-10">
-          <h1 className="text-2xl font-semibold">Not authorized</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            This lead belongs to a tenant you don’t have access to.
-          </p>
-          <div className="mt-6">
-            <Link className="underline" href="/admin/quotes">
-              Back to leads
-            </Link>
-          </div>
-        </div>
-      </main>
-    );
+  const tenantId = getActiveTenantIdFromCookies();
+  if (!tenantId || !isUuid(tenantId)) {
+    // If we don't know what tenant we're in, route them back to quotes
+    redirect("/admin/quotes");
   }
 
-  // Server action: update stage
-  async function updateStage(formData: FormData) {
+  async function updateStageAction(formData: FormData) {
     "use server";
-    const next = normalizeStage(formData.get("stage"));
+    const next = String(formData.get("stage") ?? "").trim();
+    const qid = String(formData.get("quoteId") ?? "").trim();
+    const tid = String(formData.get("tenantId") ?? "").trim();
+
+    if (!qid || !isUuid(qid)) return;
+    if (!tid || !isUuid(tid)) return;
+    if (!next) return;
+
+    const normalized = normalizeStage(next);
     await db
       .update(quoteLogs)
-      .set({ stage: next, isRead: true })
-      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, quoteTenantId)));
+      .set({ stage: normalized, isRead: true })
+      .where(and(eq(quoteLogs.id, qid), eq(quoteLogs.tenantId, tid)));
 
-    redirect(`/admin/quotes/${quoteId}`);
+    redirect(`/admin/quotes/${qid}`);
   }
 
-  // Load the quote (scoped to quote's tenant)
-  const row = await db
-    .select({
-      id: quoteLogs.id,
-      tenantId: quoteLogs.tenantId,
-      createdAt: quoteLogs.createdAt,
-      input: quoteLogs.input,
-      output: quoteLogs.output,
-      renderOptIn: quoteLogs.renderOptIn,
-      renderStatus: quoteLogs.renderStatus,
-      renderImageUrl: quoteLogs.renderImageUrl,
-      renderPrompt: quoteLogs.renderPrompt,
-      renderError: quoteLogs.renderError,
-      renderedAt: quoteLogs.renderedAt,
-      isRead: quoteLogs.isRead,
-      stage: quoteLogs.stage,
-    })
-    .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, quoteTenantId)))
-    .limit(1)
-    .then((r) => r[0] ?? null);
+  const row =
+    (await db
+      .select({
+        id: quoteLogs.id,
+        tenantId: quoteLogs.tenantId,
+        createdAt: quoteLogs.createdAt,
+        input: quoteLogs.input,
+        output: quoteLogs.output,
+        renderOptIn: quoteLogs.renderOptIn,
+        renderStatus: quoteLogs.renderStatus,
+        renderImageUrl: quoteLogs.renderImageUrl,
+        isRead: quoteLogs.isRead,
+        stage: quoteLogs.stage,
+      })
+      .from(quoteLogs)
+      .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)))
+      .limit(1)
+      .then((r) => r[0] ?? null)) || null;
 
   if (!row) notFound();
 
-  // Mark as read on open (best-effort)
-  if (!row.isRead) {
-    try {
-      await db
-        .update(quoteLogs)
-        .set({
-          isRead: true,
-          stage: sql`case when ${quoteLogs.stage} = 'new' then 'read' else ${quoteLogs.stage} end`,
-        })
-        .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, quoteTenantId)));
+  const input = row.input as any;
+  const output = row.output as any;
 
-      row.isRead = true;
-      if (normalizeStage(row.stage) === "new") row.stage = "read";
-    } catch {
-      // ignore
-    }
-  }
+  const lead = pickLead(input);
+  const images = pickImages(input);
+  const estimate = pickEstimate(output);
 
-  const lead = pickLead(row.input);
-  const imgs = pickImages(row.input);
-  const est = pickEstimate(row.output);
+  const submittedAt =
+    (input?.createdAt ?? row.createdAt ?? null) as any;
 
   const stage = normalizeStage(row.stage);
-  const unread = !row.isRead;
+  const renderStatus = String(row.renderStatus ?? "not_requested");
+
+  const pageTitle = lead?.name ? `Lead • ${lead.name}` : "Lead";
 
   return (
-    <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
-      <div className="mx-auto max-w-5xl px-6 py-10 space-y-6">
+    <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold">Lead</h1>
-
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <span
-                className={cn(
-                  "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
-                  unread
-                    ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-                    : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
-                )}
-              >
-                {unread ? "Unread" : "Read"}
-              </span>
-
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-2xl font-semibold tracking-tight">{pageTitle}</h1>
               <span className={stageChip(stage)}>Stage: {stageLabel(stage)}</span>
-              <span className={renderChip(row.renderStatus)}>
-                Render: {String(row.renderStatus || "—")}
+              <span className={renderChip(renderStatus)}>
+                Render: {renderStatus.replaceAll("_", " ")}
               </span>
+              {!row.isRead ? (
+                <span className={cn(chipBase(), "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200")}>
+                  Unread
+                </span>
+              ) : null}
             </div>
 
-            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              Submitted: {prettyDate(row.createdAt)}
-            </div>
-
-            <div className="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <span className="font-mono">{row.id}</span>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-600 dark:text-gray-300">
+              <span>Submitted: {prettyDate(submittedAt)}</span>
+              <span className="text-gray-300 dark:text-gray-700">•</span>
+              <span className="font-mono text-xs">{row.id}</span>
               <CopyButton text={row.id} label="Copy" />
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <Link
               href="/admin/quotes"
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
             >
               Back to list
             </Link>
           </div>
         </div>
 
-        {/* Lead card */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Customer</div>
-              <div className="mt-2 text-lg font-semibold">{lead.name}</div>
-              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                {lead.phone ? <span className="font-mono">{lead.phone}</span> : <i>No phone</i>}
-                {lead.email ? (
-                  <>
-                    {" "}
-                    · <span className="font-mono">{lead.email}</span>
-                  </>
-                ) : null}
-              </div>
-            </div>
-
-            <form action={updateStage} className="flex items-center gap-2">
-              <label className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                Stage
-              </label>
-              <select
-                name="stage"
-                defaultValue={stage}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-              >
-                {STAGES.map((s) => (
-                  <option key={s} value={s}>
-                    {stageLabel(s)}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="submit"
-                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-              >
-                Save
-              </button>
-            </form>
-          </div>
-        </section>
-
-        {/* Estimate */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="font-semibold">Estimate</div>
-          {est ? (
-            <div className="mt-3 text-sm text-gray-700 dark:text-gray-300 space-y-1">
-              <div>
-                Range:{" "}
-                <b>
-                  {est.low != null ? `$${est.low.toLocaleString()}` : "—"} –{" "}
-                  {est.high != null ? `$${est.high.toLocaleString()}` : "—"}
-                </b>
-              </div>
-              <div>
-                Inspection required:{" "}
-                <b>{est.inspection == null ? "—" : est.inspection ? "Yes" : "No"}</b>
-              </div>
-              {est.summary ? <div className="mt-2">{est.summary}</div> : null}
-            </div>
-          ) : (
-            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              No structured estimate found.
-            </div>
-          )}
-        </section>
-
-        {/* Photos */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="font-semibold">Photos</div>
-          {imgs.length ? (
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              {imgs.map((p, idx) => (
-                <a
-                  key={`${p.url}-${idx}`}
-                  href={p.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="rounded-xl border border-gray-200 overflow-hidden hover:opacity-95 dark:border-gray-800"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.url} alt={`photo ${idx + 1}`} className="h-48 w-full object-cover" />
-                  <div className="p-3 text-xs text-gray-600 dark:text-gray-300">
-                    {p.shotType ? `Label: ${p.shotType}` : "Photo"}
+        {/* Layout */}
+        <div className="mt-6 grid gap-6 lg:grid-cols-3">
+          {/* Left column */}
+          <div className="space-y-6 lg:col-span-1">
+            {/* Customer card */}
+            <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Customer
                   </div>
-                </a>
-              ))}
-            </div>
-          ) : (
-            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              No photos on this lead.
-            </div>
-          )}
-        </section>
+                  <div className="mt-1 text-lg font-semibold">{lead.name}</div>
 
-        {/* Raw */}
-        <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="font-semibold">Raw</div>
-          <div className="mt-3 grid gap-4 lg:grid-cols-2">
-            <div>
-              <div className="text-xs text-gray-500">input</div>
-              <pre className="mt-2 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-100">
-                {JSON.stringify(row.input ?? null, null, 2)}
-              </pre>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500">output</div>
-              <pre className="mt-2 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-100">
-                {JSON.stringify(row.output ?? null, null, 2)}
-              </pre>
-            </div>
+                  <div className="mt-2 space-y-1 text-sm text-gray-700 dark:text-gray-200">
+                    {lead.phone ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-500 dark:text-gray-400">📞</span>
+                        <a className="underline decoration-gray-300 underline-offset-2" href={`tel:${lead.phoneDigits ?? ""}`}>
+                          {lead.phone}
+                        </a>
+                      </div>
+                    ) : null}
+
+                    {lead.email ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-500 dark:text-gray-400">✉️</span>
+                        <a className="underline decoration-gray-300 underline-offset-2" href={`mailto:${lead.email}`}>
+                          {lead.email}
+                        </a>
+                      </div>
+                    ) : null}
+
+                    {!lead.phone && !lead.email ? (
+                      <div className="text-sm text-gray-600 dark:text-gray-300">No contact info found in input.</div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+
+              <form action={updateStageAction} className="mt-4 flex items-center gap-2">
+                <input type="hidden" name="quoteId" value={row.id} />
+                <input type="hidden" name="tenantId" value={row.tenantId} />
+
+                <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">
+                  Stage
+                </label>
+
+                <select
+                  name="stage"
+                  defaultValue={stage}
+                  className="ml-1 flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                >
+                  {STAGES.map((s) => (
+                    <option key={s} value={s}>
+                      {stageLabel(s)}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="submit"
+                  className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                >
+                  Save
+                </button>
+              </form>
+
+              <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                Saving also marks the lead as read.
+              </p>
+            </section>
+
+            {/* Render card */}
+            <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                Render
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-gray-600 dark:text-gray-300">Opt-in:</span>
+                <span className="font-semibold">{row.renderOptIn ? "true" : "false"}</span>
+                <span className="text-gray-300 dark:text-gray-700">•</span>
+                <span className="text-gray-600 dark:text-gray-300">Status:</span>
+                <span className="font-semibold">{renderStatus}</span>
+              </div>
+
+              {row.renderImageUrl ? (
+                <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={row.renderImageUrl} alt="AI render" className="w-full object-cover" />
+                </div>
+              ) : (
+                <div className="mt-4 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+                  No render image available.
+                </div>
+              )}
+            </section>
           </div>
-        </section>
+
+          {/* Right column */}
+          <div className="space-y-6 lg:col-span-2">
+            {/* Estimate */}
+            <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    Estimate
+                  </div>
+                  <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+                    {estimate?.low != null || estimate?.high != null ? (
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="font-semibold">Range:</span>
+                        <span className="font-semibold">
+                          {money(estimate.low) ?? "—"} – {money(estimate.high) ?? "—"}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="text-gray-600 dark:text-gray-300">No structured estimate values found.</div>
+                    )}
+
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="font-semibold">Inspection required:</span>
+                      <span className="font-semibold">
+                        {estimate?.inspectionRequired == null ? "—" : estimate.inspectionRequired ? "Yes" : "No"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                  {images.length} photo{images.length === 1 ? "" : "s"}
+                </div>
+              </div>
+
+              {estimate?.summary ? (
+                <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                  {estimate.summary}
+                </div>
+              ) : null}
+            </section>
+
+            {/* Photos */}
+            <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                  Photos
+                </div>
+                <div className="text-xs text-gray-600 dark:text-gray-300">
+                  Tap to open
+                </div>
+              </div>
+
+              {images.length ? (
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {images.map((img, idx) => (
+                    <a
+                      key={`${img.url}-${idx}`}
+                      href={img.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="group overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={img.url}
+                        alt={`photo ${idx + 1}`}
+                        className="h-52 w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
+                      />
+                      <div className="flex items-center justify-between gap-2 p-3">
+                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          Photo {idx + 1}
+                        </div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">
+                          Label: {img.shotType ?? "—"}
+                        </div>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+                  No photos found in input.
+                </div>
+              )}
+            </section>
+
+            {/* Raw */}
+            <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+              <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                Developer
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <details className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+                  <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    Raw input
+                  </summary>
+                  <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
+                    {JSON.stringify(input ?? null, null, 2)}
+                  </pre>
+                </details>
+
+                <details className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+                  <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
+                    Raw output
+                  </summary>
+                  <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-4 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100">
+                    {JSON.stringify(output ?? null, null, 2)}
+                  </pre>
+                </details>
+              </div>
+            </section>
+          </div>
+        </div>
       </div>
     </main>
   );
