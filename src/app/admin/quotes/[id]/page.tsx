@@ -422,7 +422,7 @@ export default async function AdminQuoteDetailPage({
 
             <div className="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
               <span className="font-mono">{row.id}</span>
-              <CopyButton value={row.id} label="Copy" />
+              <CopyButton text={row.id} label="Copy" />
             </div>
           </div>
 
