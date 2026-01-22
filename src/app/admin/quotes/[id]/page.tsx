@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
@@ -147,16 +147,12 @@ export default async function QuoteReviewPage({ params }: PageProps) {
   if (!userId) redirect("/sign-in");
 
   const id = String(params?.id ?? "").trim();
-  if (!id) {
-    // This is the bug you hit: id was undefined.
-    // Hard fail safely.
-    redirect("/admin/quotes");
-  }
+  if (!id) redirect("/admin/quotes");
 
   const jar = await cookies();
-  let tenantId: string | null = getCookieTenantId(jar);
+  let tenantIdMaybe: string | null = getCookieTenantId(jar);
 
-  if (!tenantId) {
+  if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
       .from(tenants)
@@ -164,12 +160,14 @@ export default async function QuoteReviewPage({ params }: PageProps) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    tenantId = t?.id ?? null;
+    tenantIdMaybe = t?.id ?? null;
   }
 
-  if (!tenantId) redirect("/onboarding");
+  if (!tenantIdMaybe) redirect("/onboarding");
 
-  // Load quote
+  // ✅ CRITICAL: freeze as a guaranteed string for TS + server actions
+  const tenantIdStr: string = tenantIdMaybe;
+
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -181,7 +179,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
       renderImageUrl: (quoteLogs as any).renderImageUrl,
     })
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
+    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)))
     .limit(1)
     .then((r) => r[0] ?? null);
 
@@ -209,7 +207,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)));
     isRead = true;
   }
 
@@ -226,7 +224,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     await db
       .update(quoteLogs)
       .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)));
     redirect(`/admin/quotes/${id}`);
   }
 
@@ -239,7 +237,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     await db
       .update(quoteLogs)
       .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)));
 
     redirect(`/admin/quotes/${id}`);
   }
@@ -250,7 +248,10 @@ export default async function QuoteReviewPage({ params }: PageProps) {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
+            <Link
+              href="/admin/quotes"
+              className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300"
+            >
               ← Back
             </Link>
             <span className="text-gray-300 dark:text-gray-700">/</span>
@@ -276,7 +277,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
 
         <div className="flex flex-col items-end gap-2">
-          {/* Only allow toggling back to Unread (since viewing auto-marks Read) */}
+          {/* Only allow toggling back to Unread */}
           <form action={setUnread}>
             <button
               type="submit"
@@ -285,25 +286,15 @@ export default async function QuoteReviewPage({ params }: PageProps) {
               Mark Unread
             </button>
           </form>
-
-          <Link
-            href={`/admin/quotes#q-${id}`}
-            className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            Find in list
-          </Link>
         </div>
       </div>
 
-      {/* Main grid */}
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Left: details */}
+        {/* Left */}
         <section className="lg:col-span-1 space-y-6">
           <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
             <div className="text-sm font-semibold">Stage</div>
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Stages are separate from Read/Unread.
-            </p>
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Stages are separate from Read/Unread.</p>
 
             <form action={updateStage} className="mt-3 flex items-center gap-2">
               <select
@@ -329,9 +320,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
           {lead.notes ? (
             <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold">Customer notes</div>
-              <div className="mt-3 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-200">
-                {lead.notes}
-              </div>
+              <div className="mt-3 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-200">{lead.notes}</div>
             </div>
           ) : null}
 
@@ -341,17 +330,17 @@ export default async function QuoteReviewPage({ params }: PageProps) {
           </div>
         </section>
 
-        {/* Right: images */}
+        {/* Right */}
         <section className="lg:col-span-2 space-y-6">
           <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold">Photos</div>
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Click to open full size.
-                </div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Click to open full size.</div>
               </div>
-              <div className="flex items-center gap-2">{images.length ? pill(`${images.length} photo${images.length === 1 ? "" : "s"}`) : pill("No photos")}</div>
+              <div className="flex items-center gap-2">
+                {images.length ? pill(`${images.length} photo${images.length === 1 ? "" : "s"}`) : pill("No photos")}
+              </div>
             </div>
 
             {images.length ? (
