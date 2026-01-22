@@ -91,47 +91,20 @@ function pickCustomerNotes(input: any) {
 function pickPhotos(input: any): QuotePhoto[] {
   const out: QuotePhoto[] = [];
 
-  // 1) input.images: [{ url }]
   const images = Array.isArray(input?.images) ? input.images : null;
-  if (images) {
-    for (const it of images) {
-      const url = it?.url ?? it?.src ?? it?.href;
-      if (url) out.push({ url: String(url), label: it?.label ?? null });
-    }
-  }
+  if (images) for (const it of images) if (it?.url) out.push({ url: String(it.url), label: it?.label ?? null });
 
-  // 2) input.photos: [{ url }]
   const photos = Array.isArray(input?.photos) ? input.photos : null;
-  if (photos) {
-    for (const it of photos) {
-      const url = it?.url ?? it?.src ?? it?.href;
-      if (url) out.push({ url: String(url), label: it?.label ?? null });
-    }
-  }
+  if (photos) for (const it of photos) if (it?.url) out.push({ url: String(it.url), label: it?.label ?? null });
 
-  // 3) input.imageUrls: [string]
   const imageUrls = Array.isArray(input?.imageUrls) ? input.imageUrls : null;
-  if (imageUrls) {
-    for (const url of imageUrls) if (url) out.push({ url: String(url) });
-  }
+  if (imageUrls) for (const url of imageUrls) if (url) out.push({ url: String(url) });
 
-  // 4) input.customer_context.images: [{url}]
   const ccImages = Array.isArray(input?.customer_context?.images) ? input.customer_context.images : null;
-  if (ccImages) {
-    for (const it of ccImages) {
-      const url = it?.url ?? it?.src ?? it?.href;
-      if (url) out.push({ url: String(url), label: it?.label ?? null });
-    }
-  }
+  if (ccImages) for (const it of ccImages) if (it?.url) out.push({ url: String(it.url), label: it?.label ?? null });
 
-  // de-dupe by url, preserve order
   const seen = new Set<string>();
-  return out.filter((p) => {
-    if (!p.url) return false;
-    if (seen.has(p.url)) return false;
-    seen.add(p.url);
-    return true;
-  });
+  return out.filter((p) => (p?.url && !seen.has(p.url) ? (seen.add(p.url), true) : false));
 }
 
 const STAGES = [
@@ -149,7 +122,7 @@ type StageKey = (typeof STAGES)[number]["key"];
 
 function normalizeStage(s: unknown): StageKey | "read" {
   const v = String(s ?? "").toLowerCase().trim();
-  if (v === "read") return "read"; // legacy value
+  if (v === "read") return "read"; // legacy
   const hit = STAGES.find((x) => x.key === v)?.key;
   return (hit ?? "new") as StageKey;
 }
@@ -203,29 +176,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     tenantIdMaybe = t?.id ?? null;
   }
 
-  if (!tenantIdMaybe) {
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Quote</h1>
-          <Link
-            href="/admin/quotes"
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            Back to list
-          </Link>
-        </div>
-
-        <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-          No active tenant selected. Go to{" "}
-          <Link className="underline" href="/onboarding">
-            Settings
-          </Link>{" "}
-          and make sure your tenant is created/selected.
-        </div>
-      </div>
-    );
-  }
+  if (!tenantIdMaybe) redirect("/admin/quotes");
 
   const tenantId = tenantIdMaybe;
 
@@ -243,24 +194,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!row) {
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Quote not found</h1>
-          <Link
-            href="/admin/quotes"
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            Back to list
-          </Link>
-        </div>
-        <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-          That quote may not exist for the active tenant.
-        </p>
-      </div>
-    );
-  }
+  if (!row) redirect("/admin/quotes");
 
   // Auto-mark read when opened
   if (!row.isRead) {
@@ -292,16 +226,6 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     redirect(`/admin/quotes/${id}`);
   }
 
-  async function markUnread() {
-    "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
-
-    redirect(`/admin/quotes/${id}`);
-  }
-
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
       {/* Top row */}
@@ -320,7 +244,10 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         <div className="flex flex-wrap items-center gap-2">
           {chip("Read", "gray")}
           {renderChip(row.renderStatus)}
-          <form action={markUnread}>
+
+          {/* ✅ fixed: classic POST form to route handler */}
+          <form action={`/api/admin/quotes/${id}/read`} method="POST">
+            <input type="hidden" name="isRead" value="0" />
             <button
               type="submit"
               className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
@@ -361,11 +288,6 @@ export default async function QuoteReviewPage({ params }: PageProps) {
                 </a>
               ) : null}
             </div>
-
-            <div className="mt-4">
-              <div className="text-xs font-semibold tracking-wide text-gray-500">QUOTE ID</div>
-              <div className="mt-1 font-mono text-xs text-gray-600 dark:text-gray-300 break-all">{row.id}</div>
-            </div>
           </div>
 
           {/* Stage control */}
@@ -405,7 +327,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
       </section>
 
-      {/* Photos (new spectacular experience) */}
+      {/* Photos */}
       <QuotePhotoGallery photos={photos} />
 
       {/* Customer notes */}
@@ -416,7 +338,11 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
 
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? <div className="whitespace-pre-wrap leading-relaxed">{notes}</div> : <div className="italic text-gray-500">No notes provided.</div>}
+          {notes ? (
+            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
+          ) : (
+            <div className="italic text-gray-500">No notes provided.</div>
+          )}
         </div>
       </section>
 
