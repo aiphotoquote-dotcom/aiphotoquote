@@ -1,4 +1,3 @@
-// src/app/admin/quotes/[id]/page.tsx
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -7,6 +6,7 @@ import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
+import QuotePhotoGallery, { type QuotePhoto } from "@/components/admin/QuotePhotoGallery";
 
 export const runtime = "nodejs";
 
@@ -76,7 +76,6 @@ function pickLead(input: any) {
 }
 
 function pickCustomerNotes(input: any) {
-  // Common places notes show up in your payloads
   const notes =
     input?.customer_context?.notes ??
     input?.customer_context?.customer?.notes ??
@@ -87,6 +86,52 @@ function pickCustomerNotes(input: any) {
 
   const s = notes == null ? "" : String(notes).trim();
   return s || "";
+}
+
+function pickPhotos(input: any): QuotePhoto[] {
+  const out: QuotePhoto[] = [];
+
+  // 1) input.images: [{ url }]
+  const images = Array.isArray(input?.images) ? input.images : null;
+  if (images) {
+    for (const it of images) {
+      const url = it?.url ?? it?.src ?? it?.href;
+      if (url) out.push({ url: String(url), label: it?.label ?? null });
+    }
+  }
+
+  // 2) input.photos: [{ url }]
+  const photos = Array.isArray(input?.photos) ? input.photos : null;
+  if (photos) {
+    for (const it of photos) {
+      const url = it?.url ?? it?.src ?? it?.href;
+      if (url) out.push({ url: String(url), label: it?.label ?? null });
+    }
+  }
+
+  // 3) input.imageUrls: [string]
+  const imageUrls = Array.isArray(input?.imageUrls) ? input.imageUrls : null;
+  if (imageUrls) {
+    for (const url of imageUrls) if (url) out.push({ url: String(url) });
+  }
+
+  // 4) input.customer_context.images: [{url}]
+  const ccImages = Array.isArray(input?.customer_context?.images) ? input.customer_context.images : null;
+  if (ccImages) {
+    for (const it of ccImages) {
+      const url = it?.url ?? it?.src ?? it?.href;
+      if (url) out.push({ url: String(url), label: it?.label ?? null });
+    }
+  }
+
+  // de-dupe by url, preserve order
+  const seen = new Set<string>();
+  return out.filter((p) => {
+    if (!p.url) return false;
+    if (seen.has(p.url)) return false;
+    seen.add(p.url);
+    return true;
+  });
 }
 
 const STAGES = [
@@ -104,7 +149,7 @@ type StageKey = (typeof STAGES)[number]["key"];
 
 function normalizeStage(s: unknown): StageKey | "read" {
   const v = String(s ?? "").toLowerCase().trim();
-  if (v === "read") return "read"; // legacy value that may exist in DB
+  if (v === "read") return "read"; // legacy value
   const hit = STAGES.find((x) => x.key === v)?.key;
   return (hit ?? "new") as StageKey;
 }
@@ -128,7 +173,6 @@ function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" 
 function renderChip(renderStatusRaw: unknown) {
   const s = String(renderStatusRaw ?? "").toLowerCase().trim();
   if (!s) return null;
-
   if (s === "rendered") return chip("Rendered", "green");
   if (s === "failed") return chip("Render failed", "red");
   if (s === "queued" || s === "running") return chip(s === "queued" ? "Queued" : "Rendering…", "blue");
@@ -148,7 +192,6 @@ export default async function QuoteReviewPage({ params }: PageProps) {
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // Fallback: if cookie isn't set, use tenant owned by this user
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -184,9 +227,8 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     );
   }
 
-  const tenantId = tenantIdMaybe; // string
+  const tenantId = tenantIdMaybe;
 
-  // Load the quote
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -220,8 +262,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     );
   }
 
-  // Auto-mark read when opened (server-side).
-  // If you’re looking at it, it’s “read”.
+  // Auto-mark read when opened
   if (!row.isRead) {
     await db
       .update(quoteLogs)
@@ -231,6 +272,8 @@ export default async function QuoteReviewPage({ params }: PageProps) {
 
   const lead = pickLead(row.input);
   const notes = pickCustomerNotes(row.input);
+  const photos = pickPhotos(row.input);
+
   const stageNorm = normalizeStage(row.stage);
   const stageLabel =
     stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
@@ -239,10 +282,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     "use server";
     const next = String(formData.get("stage") ?? "").trim().toLowerCase();
     const allowed = new Set(STAGES.map((s) => s.key));
-
-    if (!allowed.has(next as any)) {
-      redirect(`/admin/quotes/${id}`);
-    }
+    if (!allowed.has(next as any)) redirect(`/admin/quotes/${id}`);
 
     await db
       .update(quoteLogs)
@@ -267,11 +307,10 @@ export default async function QuoteReviewPage({ params }: PageProps) {
       {/* Top row */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
-              ← Back to quotes
-            </Link>
-          </div>
+          <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
+            ← Back to quotes
+          </Link>
+
           <h1 className="mt-2 text-2xl font-semibold">Quote review</h1>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
             Submitted {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
@@ -333,9 +372,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
           <div className="w-full lg:w-[340px]">
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
               <div className="text-sm font-semibold">Stage</div>
-              <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                Stage is separate from read/unread.
-              </p>
+              <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">Stage is separate from read/unread.</p>
 
               <form action={setStage} className="mt-4 flex items-center gap-2">
                 <select
@@ -368,27 +405,22 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
       </section>
 
+      {/* Photos (new spectacular experience) */}
+      <QuotePhotoGallery photos={photos} />
+
       {/* Customer notes */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-lg font-semibold">Customer notes</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              What the customer told you when submitting.
-            </p>
-          </div>
+        <div>
+          <h3 className="text-lg font-semibold">Customer notes</h3>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What the customer told you when submitting.</p>
         </div>
 
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? (
-            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
-          ) : (
-            <div className="italic text-gray-500">No notes provided.</div>
-          )}
+          {notes ? <div className="whitespace-pre-wrap leading-relaxed">{notes}</div> : <div className="italic text-gray-500">No notes provided.</div>}
         </div>
       </section>
 
-      {/* Raw payload (optional but super useful) */}
+      {/* Raw payload */}
       <details className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold">Raw submission payload</summary>
         <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
