@@ -21,7 +21,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
   ].filter(Boolean) as string[];
-
   return candidates[0] || null;
 }
 
@@ -98,7 +97,6 @@ function normalizeStage(s: unknown): StageKey {
 function stageChip(stageRaw: unknown) {
   const st = normalizeStage(stageRaw);
   const label = STAGES.find((s) => s.key === st)?.label ?? "New";
-
   return (
     <span className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
       {label}
@@ -174,36 +172,60 @@ type PageProps = {
     | Record<string, string | string[] | undefined>;
 };
 
+type ViewMode = "all" | "unread" | "new" | "in_progress" | "custom";
+
 export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-   const sp = searchParams ? await searchParams : {};
+  const sp = searchParams ? await searchParams : {};
 
-  // ---------- view / filters from querystring ----------
+  // -------------------------
+  // view= (canonical) + legacy filters
+  // -------------------------
   const viewRaw = Array.isArray(sp.view) ? sp.view[0] : sp.view;
-  const viewNorm = viewRaw ? String(viewRaw).toLowerCase().trim() : null;
+  const viewNorm = String(viewRaw ?? "").toLowerCase().trim();
 
-  // legacy params still supported
-  const unreadLegacy =
+  const legacyUnread =
     sp.unread === "1" || (Array.isArray(sp.unread) && sp.unread.includes("1"));
 
-  const inProgressLegacy =
+  const legacyInProgress =
     sp.in_progress === "1" || (Array.isArray(sp.in_progress) && sp.in_progress.includes("1"));
 
   const stageParamRaw = Array.isArray(sp.stage) ? sp.stage[0] : sp.stage;
-  const stageLegacy = stageParamRaw ? normalizeStage(stageParamRaw) : null;
+  const legacyStage = stageParamRaw ? normalizeStage(stageParamRaw) : null;
 
-  // view= wins (canonical)
-  const unreadOnly = viewNorm === "unread" ? true : unreadLegacy;
+  let viewMode: ViewMode = "all";
+  let unreadOnly = false;
+  let inProgressOnly = false;
+  let stageParam: StageKey | null = null;
 
-  const inProgressOnly =
-    viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline"
-      ? true
-      : inProgressLegacy;
+  if (viewNorm) {
+    if (viewNorm === "unread") {
+      viewMode = "unread";
+      unreadOnly = true;
+    } else if (viewNorm === "new") {
+      viewMode = "new";
+      stageParam = "new";
+    } else if (
+      viewNorm === "in_progress" ||
+      viewNorm === "inprogress" ||
+      viewNorm === "pipeline"
+    ) {
+      viewMode = "in_progress";
+      inProgressOnly = true;
+    } else {
+      // unknown view => treat as custom, but don't crash
+      viewMode = "custom";
+    }
+  } else {
+    // no view=, fall back to legacy params
+    unreadOnly = legacyUnread;
+    inProgressOnly = legacyInProgress;
+    stageParam = legacyStage;
+    viewMode = unreadOnly || inProgressOnly || stageParam ? "custom" : "all";
+  }
 
-  const stageParam =
-    viewNorm === "new" ? ("new" as const) : stageLegacy;
   // pagination
   const page = clampInt(sp.page, 1, 1, 10_000);
   const pageSize = clampInt(sp.pageSize, 25, 5, 200);
@@ -212,15 +234,14 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   // delete confirm UI
   const deleteIdRaw = sp?.deleteId;
   const confirmDeleteRaw = sp?.confirmDelete;
-
   const deleteId = Array.isArray(deleteIdRaw) ? String(deleteIdRaw[0] ?? "") : String(deleteIdRaw ?? "");
   const confirmDelete =
     confirmDeleteRaw === "1" || (Array.isArray(confirmDeleteRaw) && confirmDeleteRaw.includes("1"));
 
+  // tenant
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // Fallback: if cookie isn't set, use tenant owned by this user
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -249,7 +270,9 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
   const tenantId = tenantIdMaybe;
 
-  // Build WHERE filters for BOTH count + rows
+  // -------------------------
+  // WHERE filters
+  // -------------------------
   const whereParts: any[] = [eq(quoteLogs.tenantId, tenantId)];
 
   if (unreadOnly) whereParts.push(eq(quoteLogs.isRead, false));
@@ -262,35 +285,49 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   if (stageParam) whereParts.push(eq(quoteLogs.stage, stageParam));
 
   const whereAll = and(...whereParts);
+  const hasFilters = unreadOnly || inProgressOnly || Boolean(stageParam) || viewMode !== "all";
 
-  // helper for preserving filters in links
-  const viewParam =
-    viewNorm === "unread"
-      ? "unread"
-      : viewNorm === "new"
-      ? "new"
-      : viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline"
-      ? "in_progress"
-      : null;
+  // -------------------------
+  // Preserve filter params in paging/delete links
+  // Use view= if present/known; otherwise use legacy
+  // -------------------------
+  const useView =
+    viewMode === "unread" || viewMode === "new" || viewMode === "in_progress";
 
-  // Prefer canonical "view=" if present, otherwise keep legacy params.
-  const filterParams = {
-    view: viewParam,
-    unread: !viewParam && unreadOnly ? 1 : null,
-    in_progress: !viewParam && inProgressOnly ? 1 : null,
-    stage: stageParam && !viewParam ? stageParam : null,
-  };
+  const filterParams: Record<string, string | number | null> = useView
+    ? {
+        view:
+          viewMode === "unread"
+            ? "unread"
+            : viewMode === "new"
+            ? "new"
+            : viewMode === "in_progress"
+            ? "in_progress"
+            : null,
+        unread: null,
+        in_progress: null,
+        stage: null,
+      }
+    : {
+        view: null,
+        unread: unreadOnly ? 1 : null,
+        in_progress: inProgressOnly ? 1 : null,
+        stage: stageParam ? stageParam : null,
+      };
 
   async function deleteLead(formData: FormData) {
     "use server";
     const id = String(formData.get("id") ?? "").trim();
     if (!id) return;
 
-    await db.delete(quoteLogs).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .delete(quoteLogs)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+
     redirect(`/admin/quotes${qs({ ...filterParams, page, pageSize })}`);
   }
 
-  // total count for paging controls (WITH filters)
+  // counts + rows
   const totalCount = await db
     .select({ c: sql<number>`count(*)` })
     .from(quoteLogs)
@@ -316,26 +353,22 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
   const totalPages = Math.max(1, Math.ceil(Number(totalCount) / pageSize));
   const safePage = Math.min(page, totalPages);
-
   const prevPage = safePage > 1 ? safePage - 1 : null;
   const nextPage = safePage < totalPages ? safePage + 1 : null;
 
-  const hasFilters = unreadOnly || inProgressOnly || Boolean(stageParam);
-
-  // ---------- persistent pill bar links ----------
-  const pillBase = { page: 1, pageSize }; // reset page on filter change
+  // -------------------------
+  // Pills (canonical view= links)
+  // -------------------------
+  const pillBase = { page: 1, pageSize };
   const hrefAll = `/admin/quotes${qs({ ...pillBase })}`;
   const hrefUnread = `/admin/quotes${qs({ ...pillBase, view: "unread" })}`;
   const hrefNew = `/admin/quotes${qs({ ...pillBase, view: "new" })}`;
   const hrefInProgress = `/admin/quotes${qs({ ...pillBase, view: "in_progress" })}`;
 
-  const activeAll = !viewNorm && !unreadOnly && !inProgressOnly && !stageParam;
-  const activeUnread = viewNorm === "unread" || (!viewNorm && unreadOnly);
-  const activeNew = viewNorm === "new" || (!viewNorm && stageParam === "new");
-  const activeInProgress =
-    viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline"
-      ? true
-      : (!viewNorm && inProgressOnly);
+  const activeAll = viewMode === "all" && !useView && !unreadOnly && !inProgressOnly && !stageParam;
+  const activeUnread = viewMode === "unread" || (!useView && unreadOnly);
+  const activeNew = viewMode === "new" || (!useView && stageParam === "new");
+  const activeInProgress = viewMode === "in_progress" || (!useView && inProgressOnly);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
@@ -343,6 +376,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Quotes</h1>
+
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
             {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page{" "}
             {safePage} / {totalPages}
@@ -356,7 +390,10 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
             {filterPill({ href: hrefInProgress, label: "In progress", active: activeInProgress })}
 
             {hasFilters ? (
-              <Link href="/admin/quotes" className="ml-2 text-xs font-semibold underline text-gray-600 dark:text-gray-300">
+              <Link
+                href="/admin/quotes"
+                className="ml-2 text-xs font-semibold underline text-gray-600 dark:text-gray-300"
+              >
                 Clear
               </Link>
             ) : null}
@@ -397,9 +434,10 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
         {/* page size selector (no JS) */}
         <form action="/admin/quotes" method="GET" className="flex items-center gap-2">
           {/* preserve filters */}
-          {unreadOnly ? <input type="hidden" name="unread" value="1" /> : null}
-          {inProgressOnly ? <input type="hidden" name="in_progress" value="1" /> : null}
-          {stageParam ? <input type="hidden" name="stage" value={stageParam} /> : null}
+          {filterParams.view ? <input type="hidden" name="view" value={String(filterParams.view)} /> : null}
+          {!filterParams.view && unreadOnly ? <input type="hidden" name="unread" value="1" /> : null}
+          {!filterParams.view && inProgressOnly ? <input type="hidden" name="in_progress" value="1" /> : null}
+          {!filterParams.view && stageParam ? <input type="hidden" name="stage" value={stageParam} /> : null}
 
           <input type="hidden" name="page" value="1" />
           <label className="text-sm text-gray-600 dark:text-gray-300">Rows:</label>
@@ -426,13 +464,20 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       {/* List */}
       <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
         {rows.length === 0 ? (
-          <div className="p-6 text-sm text-gray-700 dark:text-gray-300">No quotes match these filters.</div>
+          <div className="p-6 text-sm text-gray-700 dark:text-gray-300">
+            No quotes match these filters.
+          </div>
         ) : (
           <ul className="divide-y divide-gray-200 dark:divide-gray-800">
             {rows.map((r) => {
               const lead = pickLead(r.input);
               const st = normalizeStage(r.stage);
               const unread = !r.isRead;
+
+              const quoteId = String((r as any)?.id ?? "");
+              const quoteHref = quoteId
+                ? `/admin/quotes/${encodeURIComponent(quoteId)}`
+                : "/admin/quotes";
 
               const wantsConfirm = confirmDelete && deleteId && deleteId === r.id;
               const anchor = `q-${r.id}`;
@@ -454,7 +499,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Link href={`/admin/quotes/${r.id}`} className="text-base font-semibold hover:underline">
+                        <Link href={quoteHref} className="text-base font-semibold hover:underline">
                           {lead.name}
                         </Link>
 
@@ -473,7 +518,11 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                       </div>
 
                       <div className="mt-1 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
-                        {lead.phone ? <span className="font-mono">{lead.phone}</span> : <span className="italic">No phone</span>}
+                        {lead.phone ? (
+                          <span className="font-mono">{lead.phone}</span>
+                        ) : (
+                          <span className="italic">No phone</span>
+                        )}
                         {lead.email ? (
                           <>
                             <span>·</span>
@@ -490,7 +539,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                     <div className="flex flex-col items-end gap-2">
                       <div className="flex items-center gap-2">
                         <Link
-                          href={`/admin/quotes/${r.id}`}
+                          href={quoteHref}
                           className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
                         >
                           Open
