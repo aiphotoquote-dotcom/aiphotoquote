@@ -107,6 +107,49 @@ function pickPhotos(input: any): QuotePhoto[] {
   return out.filter((p) => (p?.url && !seen.has(p.url) ? (seen.add(p.url), true) : false));
 }
 
+function pickAiDetails(input: any) {
+  // We don’t know the exact shape, so we defensively look in common spots.
+  const candidates = [
+    input?.ai_output,
+    input?.ai,
+    input?.assessment,
+    input?.ai_assessment,
+    input?.aiAssessment,
+    input?.estimate,
+    input?.ai_estimate,
+    input?.aiEstimate,
+    input?.result,
+    input?.output,
+  ].filter(Boolean);
+
+  return candidates[0] ?? null;
+}
+
+function pickRenderUrls(input: any): string[] {
+  const urls: string[] = [];
+
+  const tryPush = (v: any) => {
+    if (!v) return;
+    if (typeof v === "string" && v.startsWith("http")) urls.push(v);
+  };
+
+  // common spots
+  tryPush(input?.renderUrl);
+  tryPush(input?.render_url);
+  tryPush(input?.renderedImageUrl);
+  tryPush(input?.rendered_image_url);
+  tryPush(input?.rendering?.url);
+  tryPush(input?.rendered?.url);
+  tryPush(input?.render?.url);
+
+  // arrays
+  if (Array.isArray(input?.renderedImages)) for (const x of input.renderedImages) tryPush(x?.url ?? x);
+  if (Array.isArray(input?.renderings)) for (const x of input.renderings) tryPush(x?.url ?? x);
+
+  // de-dupe
+  return Array.from(new Set(urls));
+}
+
 const STAGES = [
   { key: "new", label: "New" },
   { key: "estimate", label: "Estimate" },
@@ -152,15 +195,22 @@ function renderChip(renderStatusRaw: unknown) {
   return chip(s, "gray");
 }
 
-type PageProps = { params: Promise<{ id: string }> | { id: string } };
+type PageProps = {
+  params: Promise<{ id: string }> | { id: string };
+  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+};
 
-export default async function QuoteReviewPage({ params }: PageProps) {
+export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
   const p = await params;
   const id = String((p as any)?.id ?? "").trim();
   if (!id) redirect("/admin/quotes");
+
+  const sp = searchParams ? await searchParams : {};
+  const stayUnread =
+    sp.stay_unread === "1" || (Array.isArray(sp.stay_unread) && sp.stay_unread.includes("1"));
 
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
@@ -177,7 +227,6 @@ export default async function QuoteReviewPage({ params }: PageProps) {
   }
 
   if (!tenantIdMaybe) redirect("/admin/quotes");
-
   const tenantId = tenantIdMaybe;
 
   const row = await db
@@ -196,21 +245,25 @@ export default async function QuoteReviewPage({ params }: PageProps) {
 
   if (!row) redirect("/admin/quotes");
 
-  // Auto-mark read when opened
-  if (!row.isRead) {
+  // ✅ Auto-mark read ONLY when not explicitly staying unread
+  if (!stayUnread && !row.isRead) {
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
   }
 
+  const effectiveIsRead = stayUnread ? false : Boolean(row.isRead);
   const lead = pickLead(row.input);
   const notes = pickCustomerNotes(row.input);
-  const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
   const stageLabel =
     stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+
+  const photos = pickPhotos(row.input);
+  const aiDetails = pickAiDetails(row.input);
+  const renderUrls = pickRenderUrls(row.input);
 
   async function setStage(formData: FormData) {
     "use server";
@@ -242,23 +295,35 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {chip("Read", "gray")}
+          {effectiveIsRead ? chip("Read", "gray") : chip("Unread", "yellow")}
           {renderChip(row.renderStatus)}
 
-          {/* ✅ fixed: classic POST form to route handler */}
-          <form action={`/api/admin/quotes/${id}/read`} method="POST">
-            <input type="hidden" name="isRead" value="0" />
-            <button
-              type="submit"
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-            >
-              Mark unread
-            </button>
-          </form>
+          {/* ✅ Toggle button changes based on current effective state */}
+          {effectiveIsRead ? (
+            <form action={`/api/admin/quotes/${id}/read`} method="POST">
+              <input type="hidden" name="isRead" value="0" />
+              <button
+                type="submit"
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+              >
+                Mark unread
+              </button>
+            </form>
+          ) : (
+            <form action={`/api/admin/quotes/${id}/read`} method="POST">
+              <input type="hidden" name="isRead" value="1" />
+              <button
+                type="submit"
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Mark read
+              </button>
+            </form>
+          )}
         </div>
       </div>
 
-      {/* Lead card */}
+      {/* Lead + Stage card */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
@@ -290,7 +355,6 @@ export default async function QuoteReviewPage({ params }: PageProps) {
             </div>
           </div>
 
-          {/* Stage control */}
           <div className="w-full lg:w-[340px]">
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
               <div className="text-sm font-semibold">Stage</div>
@@ -327,7 +391,7 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
       </section>
 
-      {/* Photos */}
+      {/* Photos (submitted by customer) */}
       <QuotePhotoGallery photos={photos} />
 
       {/* Customer notes */}
@@ -346,7 +410,69 @@ export default async function QuoteReviewPage({ params }: PageProps) {
         </div>
       </section>
 
-      {/* Raw payload */}
+      {/* ✅ DETAILS (AI output first, then rendering if present) */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950 space-y-5">
+        <div>
+          <h3 className="text-lg font-semibold">Details</h3>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            AI output first. Rendering (if generated) appears below.
+          </p>
+        </div>
+
+        {/* AI output */}
+        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-semibold">AI output</div>
+            {chip("Auto-generated", "blue")}
+          </div>
+
+          <div className="mt-3">
+            {aiDetails ? (
+              <pre className="overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
+{typeof aiDetails === "string" ? aiDetails : JSON.stringify(aiDetails, null, 2)}
+              </pre>
+            ) : (
+              <div className="text-sm text-gray-600 dark:text-gray-300">
+                No AI output found in this submission payload.
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Rendering (only if renderStatus says rendered OR we find URLs) */}
+        {String(row.renderStatus ?? "").toLowerCase() === "rendered" || renderUrls.length ? (
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold">Rendering</div>
+              {chip(String(row.renderStatus || "rendered"), "green")}
+            </div>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {renderUrls.length ? (
+                renderUrls.map((u) => (
+                  <a
+                    key={u}
+                    href={u}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="group overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={u} alt="Rendered result" className="h-56 w-full object-cover transition group-hover:scale-[1.01]" />
+                    <div className="p-3 text-xs text-gray-600 dark:text-gray-300">Tap to open</div>
+                  </a>
+                ))
+              ) : (
+                <div className="text-sm text-gray-600 dark:text-gray-300">
+                  Marked as rendered, but no render URL was found in the payload.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      {/* Raw payload (optional) */}
       <details className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold">Raw submission payload</summary>
         <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">

@@ -19,7 +19,10 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   return candidates[0] || null;
 }
 
-export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> | { id: string } }) {
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> | { id: string } }
+) {
   const { userId } = await auth();
   if (!userId) return NextResponse.redirect(new URL("/sign-in", req.url));
 
@@ -30,7 +33,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // fallback: tenant owned by this user
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -42,13 +44,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     tenantIdMaybe = t?.id ?? null;
   }
 
-  if (!tenantIdMaybe) {
-    return NextResponse.redirect(new URL("/admin/quotes", req.url));
-  }
-
+  if (!tenantIdMaybe) return NextResponse.redirect(new URL("/admin/quotes", req.url));
   const tenantId = tenantIdMaybe;
 
-  // Accept either form POST or JSON
+  // Parse desired read state from form POST (preferred)
   let isRead: boolean | null = null;
 
   const contentType = req.headers.get("content-type") || "";
@@ -63,18 +62,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       if (v != null) isRead = String(v) === "1";
     }
   } catch {
-    // ignore parse errors
+    // ignore
   }
 
-  if (isRead === null) {
-    // default: mark unread when this endpoint is hit by the button
-    isRead = false;
-  }
+  // Default: if someone hits endpoint without payload, mark unread
+  if (isRead === null) isRead = false;
 
   await db
     .update(quoteLogs)
     .set({ isRead } as any)
     .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
-  return NextResponse.redirect(new URL(`/admin/quotes/${id}`, req.url));
+  // Key behavior:
+  // - If user explicitly marks unread, keep them on the page but prevent auto-read by adding stay_unread=1
+  // - If marks read, return to clean URL
+  const redirectUrl = new URL(`/admin/quotes/${id}`, req.url);
+  if (!isRead) redirectUrl.searchParams.set("stay_unread", "1");
+
+  return NextResponse.redirect(redirectUrl);
 }
