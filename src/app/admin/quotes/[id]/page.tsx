@@ -2,8 +2,8 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq } from "drizzle-orm";
-import { redirect } from "next/navigation";
+import { and, desc, eq } from "drizzle-orm";
+import { notFound, redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
@@ -22,7 +22,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
   ].filter(Boolean) as string[];
-
   return candidates[0] || null;
 }
 
@@ -38,12 +37,6 @@ function formatUSPhone(raw: string) {
   if (d.length <= 3) return a ? `(${a}` : "";
   if (d.length <= 6) return `(${a}) ${b}`;
   return `(${a}) ${b}-${c}`;
-}
-
-function fmtDate(iso: string) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
 }
 
 function pickLead(input: any) {
@@ -71,9 +64,6 @@ function pickLead(input: any) {
     null;
 
   const email = c?.email ?? input?.email ?? input?.customer_context?.email ?? null;
-  const notes = input?.customer_context?.notes ?? input?.notes ?? null;
-  const serviceType = input?.customer_context?.service_type ?? input?.service_type ?? null;
-  const category = input?.customer_context?.category ?? input?.category ?? null;
 
   const phoneDigits = phone ? digitsOnly(String(phone)) : "";
 
@@ -81,40 +71,29 @@ function pickLead(input: any) {
     name: String(name || "New customer"),
     phone: phoneDigits ? formatUSPhone(phoneDigits) : null,
     email: email ? String(email) : null,
-    notes: notes ? String(notes) : null,
-    serviceType: serviceType ? String(serviceType) : null,
-    category: category ? String(category) : null,
   };
 }
 
-type StageKey =
-  | "new"
-  | "estimate"
-  | "quoted"
-  | "contacted"
-  | "scheduled"
-  | "won"
-  | "lost"
-  | "archived";
-
-const STAGES: Array<{ key: StageKey; label: string }> = [
+const STAGES = [
   { key: "new", label: "New" },
   { key: "estimate", label: "Estimate" },
-  { key: "quoted", label: "Quoted" },
   { key: "contacted", label: "Contacted" },
   { key: "scheduled", label: "Scheduled" },
+  { key: "quoted", label: "Quoted" },
   { key: "won", label: "Won" },
   { key: "lost", label: "Lost" },
   { key: "archived", label: "Archived" },
-];
+] as const;
+
+type StageKey = (typeof STAGES)[number]["key"];
 
 function normalizeStage(s: unknown): StageKey {
   const v = String(s ?? "").toLowerCase().trim();
-  const hit = STAGES.find((x) => x.key === (v as StageKey))?.key;
+  const hit = STAGES.find((x) => x.key === v)?.key;
   return (hit ?? "new") as StageKey;
 }
 
-function pill(label: string, tone: "gray" | "yellow" | "blue" | "green" | "red" = "gray") {
+function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" = "gray") {
   const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
   const cls =
     tone === "green"
@@ -125,32 +104,31 @@ function pill(label: string, tone: "gray" | "yellow" | "blue" | "green" | "red" 
       ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
       : tone === "blue"
       ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
+      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
   return <span className={cn(base, cls)}>{label}</span>;
 }
 
-function renderStatusPill(statusRaw: unknown) {
-  const s = String(statusRaw ?? "").toLowerCase().trim();
-  if (!s) return null;
-  if (s === "rendered") return pill("Rendered", "green");
-  if (s === "failed") return pill("Render failed", "red");
-  if (s === "queued" || s === "running") return pill("Rendering", "blue");
-  return pill(s, "gray");
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
-type PageProps = {
-  params: { id?: string };
-};
-
-export default async function QuoteReviewPage({ params }: PageProps) {
+export default async function AdminQuoteDetailPage(props: {
+  params: { id: string } | Promise<{ id: string }>;
+}) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const id = String(params?.id ?? "").trim();
-  if (!id) redirect("/admin/quotes");
+  // Next can hand params as a Promise depending on compilation mode — handle both.
+  const p: any = (props as any).params;
+  const params = typeof p?.then === "function" ? await p : p;
+
+  const idRaw = params?.id ? String(params.id) : "";
+  const id = decodeURIComponent(idRaw || "").trim();
+
+  if (!id || !isUuid(id)) notFound();
 
   const jar = await cookies();
-  let tenantIdMaybe: string | null = getCookieTenantId(jar);
+  let tenantIdMaybe = getCookieTenantId(jar);
 
   if (!tenantIdMaybe) {
     const t = await db
@@ -163,10 +141,28 @@ export default async function QuoteReviewPage({ params }: PageProps) {
     tenantIdMaybe = t?.id ?? null;
   }
 
-  if (!tenantIdMaybe) redirect("/onboarding");
+  if (!tenantIdMaybe) {
+    return (
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        <div className="mb-6">
+          <Link href="/admin/quotes" className="text-sm font-semibold underline text-gray-600 dark:text-gray-300">
+            ← Back to Quotes
+          </Link>
+        </div>
 
-  // ✅ CRITICAL: freeze as a guaranteed string for TS + server actions
-  const tenantIdStr: string = tenantIdMaybe;
+        <h1 className="text-2xl font-semibold">Quote</h1>
+        <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
+          No active tenant selected. Go to{" "}
+          <Link className="underline" href="/onboarding">
+            Settings
+          </Link>{" "}
+          and make sure your tenant is created/selected.
+        </div>
+      </div>
+    );
+  }
+
+  const tenantId = tenantIdMaybe;
 
   const row = await db
     .select({
@@ -176,131 +172,93 @@ export default async function QuoteReviewPage({ params }: PageProps) {
       stage: quoteLogs.stage,
       isRead: quoteLogs.isRead,
       renderStatus: quoteLogs.renderStatus,
-      renderImageUrl: (quoteLogs as any).renderImageUrl,
     })
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)))
+    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!row) {
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-lg font-semibold">Quote not found</div>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            This quote doesn’t exist for the active tenant.
-          </p>
-          <div className="mt-4">
-            <Link className="underline" href="/admin/quotes">
-              Back to quotes
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (!row) notFound();
 
-  // Auto-mark read when opened
-  let isRead = Boolean(row.isRead);
-  if (!isRead) {
+  // Auto-mark read when opened (no redirect)
+  if (!row.isRead) {
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)));
-    isRead = true;
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    row.isRead = true;
   }
 
   const lead = pickLead(row.input);
   const stage = normalizeStage(row.stage);
 
-  const images: Array<{ url: string }> =
-    (row.input?.images && Array.isArray(row.input.images) ? row.input.images : [])
-      .filter((x: any) => x?.url)
-      .map((x: any) => ({ url: String(x.url) }));
+  async function setStage(formData: FormData) {
+    "use server";
+    const next = normalizeStage(formData.get("stage"));
+    await db
+      .update(quoteLogs)
+      .set({ stage: next } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+  }
 
-  async function setUnread() {
+  async function markUnread() {
     "use server";
     await db
       .update(quoteLogs)
       .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)));
-    redirect(`/admin/quotes/${id}`);
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
-  async function updateStage(formData: FormData) {
-    "use server";
-    const nextRaw = String(formData.get("stage") ?? "").toLowerCase().trim();
-    const next = STAGES.find((s) => s.key === (nextRaw as StageKey))?.key ?? null;
-    if (!next) redirect(`/admin/quotes/${id}`);
+  // images (best-effort)
+  const images: Array<{ url: string }> =
+    (row.input?.images && Array.isArray(row.input.images) ? row.input.images : []) ||
+    (row.input?.photos && Array.isArray(row.input.photos) ? row.input.photos : []);
 
-    await db
-      .update(quoteLogs)
-      .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdStr)));
-
-    redirect(`/admin/quotes/${id}`);
-  }
+  const createdLabel = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <Link
-              href="/admin/quotes"
-              className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300"
-            >
-              ← Back
-            </Link>
-            <span className="text-gray-300 dark:text-gray-700">/</span>
-            <h1 className="text-2xl font-semibold truncate">{lead.name}</h1>
-          </div>
+      {/* Top row */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link href="/admin/quotes" className="text-sm font-semibold underline text-gray-600 dark:text-gray-300">
+          ← Back to Quotes
+        </Link>
 
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {isRead ? pill("Read", "gray") : pill("Unread", "yellow")}
-            {pill(STAGES.find((s) => s.key === stage)?.label ?? stage, stage === "new" ? "blue" : "gray")}
-            {renderStatusPill(row.renderStatus)}
-          </div>
-
-          <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-            Submitted: <span className="font-semibold">{fmtDate(String(row.createdAt))}</span>
-          </div>
-
-          <div className="mt-2 flex flex-wrap gap-3 text-sm text-gray-700 dark:text-gray-200">
-            {lead.phone ? <span className="font-mono">{lead.phone}</span> : null}
-            {lead.email ? <span className="font-mono">{lead.email}</span> : null}
-            {lead.category ? <span>{pill(lead.category, "blue")}</span> : null}
-            {lead.serviceType ? <span>{pill(lead.serviceType, "gray")}</span> : null}
-          </div>
-        </div>
-
-        <div className="flex flex-col items-end gap-2">
-          {/* Only allow toggling back to Unread */}
-          <form action={setUnread}>
-            <button
-              type="submit"
-              className="rounded-lg border border-yellow-200 bg-yellow-50 px-4 py-2 text-sm font-semibold text-yellow-900 hover:bg-yellow-100 dark:border-yellow-900/50 dark:bg-yellow-950/30 dark:text-yellow-200"
-            >
-              Mark Unread
-            </button>
-          </form>
+        <div className="flex flex-wrap items-center gap-2">
+          {row.isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
+          {chip(`Stage: ${STAGES.find((s) => s.key === stage)?.label ?? stage}`, "blue")}
+          {row.renderStatus ? chip(`Render: ${String(row.renderStatus)}`, row.renderStatus === "rendered" ? "green" : "gray") : null}
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Left */}
-        <section className="lg:col-span-1 space-y-6">
-          <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-            <div className="text-sm font-semibold">Stage</div>
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Stages are separate from Read/Unread.</p>
+      {/* Header card */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-semibold">{lead.name}</h1>
+            <div className="mt-2 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
+              {lead.phone ? <span className="font-mono">{lead.phone}</span> : <span className="italic">No phone</span>}
+              {lead.email ? (
+                <>
+                  <span>·</span>
+                  <span className="font-mono">{lead.email}</span>
+                </>
+              ) : null}
+            </div>
+            <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Submitted: {createdLabel}</div>
+            <div className="mt-2 text-[10px] font-mono text-gray-400 dark:text-gray-600">{row.id}</div>
+          </div>
 
-            <form action={updateStage} className="mt-3 flex items-center gap-2">
+          <div className="flex flex-col gap-2 sm:items-end">
+            {/* Stage */}
+            <form action={setStage} className="flex items-center gap-2">
+              <label className="text-sm font-semibold text-gray-700 dark:text-gray-200">Stage</label>
               <select
                 name="stage"
                 defaultValue={stage}
-                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
               >
                 {STAGES.map((s) => (
                   <option key={s.key} value={s.key}>
@@ -315,81 +273,70 @@ export default async function QuoteReviewPage({ params }: PageProps) {
                 Save
               </button>
             </form>
+
+            {/* Read/unread (separate) */}
+            <form action={markUnread}>
+              <button
+                type="submit"
+                disabled={!row.isRead}
+                className={cn(
+                  "rounded-lg border px-4 py-2 text-sm font-semibold",
+                  row.isRead
+                    ? "border-yellow-200 bg-yellow-50 text-yellow-900 hover:bg-yellow-100 dark:border-yellow-900/50 dark:bg-yellow-950/20 dark:text-yellow-200 dark:hover:bg-yellow-950/40"
+                    : "border-gray-200 bg-white text-gray-400 opacity-60 cursor-not-allowed dark:border-gray-800 dark:bg-black dark:text-gray-600"
+                )}
+                title={row.isRead ? "Mark as unread" : "Already unread"}
+              >
+                Mark Unread
+              </button>
+            </form>
           </div>
+        </div>
+      </div>
 
-          {lead.notes ? (
-            <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-semibold">Customer notes</div>
-              <div className="mt-3 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-200">{lead.notes}</div>
-            </div>
-          ) : null}
+      {/* Photos */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Photos</h2>
+          <div className="text-sm text-gray-600 dark:text-gray-300">{images.length} files</div>
+        </div>
 
-          <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-            <div className="text-sm font-semibold">Quote ID</div>
-            <div className="mt-2 font-mono text-xs text-gray-600 dark:text-gray-300 break-all">{id}</div>
-          </div>
-        </section>
-
-        {/* Right */}
-        <section className="lg:col-span-2 space-y-6">
-          <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold">Photos</div>
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Click to open full size.</div>
-              </div>
-              <div className="flex items-center gap-2">
-                {images.length ? pill(`${images.length} photo${images.length === 1 ? "" : "s"}`) : pill("No photos")}
-              </div>
-            </div>
-
-            {images.length ? (
-              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-                {images.map((img, idx) => (
-                  <a
-                    key={img.url + idx}
-                    href={img.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="group overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={img.url}
-                      alt={`Photo ${idx + 1}`}
-                      className="h-40 w-full object-cover transition group-hover:scale-[1.02]"
-                      loading="lazy"
-                    />
-                  </a>
-                ))}
-              </div>
-            ) : (
-              <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-                No images were submitted for this quote.
-              </div>
-            )}
-          </div>
-
-          {row.renderImageUrl ? (
-            <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-              <div className="text-sm font-semibold">AI Render</div>
-              <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={String(row.renderImageUrl)} alt="AI render" className="w-full object-cover" />
-              </div>
-              <div className="mt-3">
+        {images.length === 0 ? (
+          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">No images found on this quote.</div>
+        ) : (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {images.map((img, idx) => {
+              const url = String((img as any)?.url ?? "");
+              if (!url) return null;
+              return (
                 <a
-                  href={String(row.renderImageUrl)}
+                  key={`${url}-${idx}`}
+                  href={url}
                   target="_blank"
                   rel="noreferrer"
-                  className="text-sm font-semibold underline text-gray-700 dark:text-gray-200"
+                  className="group overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black"
                 >
-                  Open render
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={url}
+                    alt={`Photo ${idx + 1}`}
+                    className="h-56 w-full object-cover transition group-hover:scale-[1.01]"
+                  />
                 </a>
-              </div>
-            </div>
-          ) : null}
-        </section>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Raw input (for now) */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <h2 className="text-lg font-semibold">Details</h2>
+        <div className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-black">
+          <pre className="whitespace-pre-wrap break-words text-gray-800 dark:text-gray-200">
+            {JSON.stringify(row.input ?? {}, null, 2)}
+          </pre>
+        </div>
       </div>
     </div>
   );
