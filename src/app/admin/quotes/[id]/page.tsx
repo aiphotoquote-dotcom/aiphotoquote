@@ -40,6 +40,19 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   return candidates[0] || null;
 }
 
+function safeJson(v: any) {
+  if (!v) return null;
+  if (typeof v === "object") return v;
+  if (typeof v === "string") {
+    try {
+      return JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function pickLead(input: any) {
   const c =
     input?.customer ??
@@ -79,29 +92,69 @@ function pickLead(input: any) {
   return {
     name: String(name || "New customer"),
     phone: phoneDigits ? formatUSPhone(phoneDigits) : null,
-    phoneDigits: phoneDigits || null,
     email: email ? String(email) : null,
     notes: notes ? String(notes) : null,
   };
 }
 
-const STAGES = [
-  { key: "new", label: "New" },
-  { key: "estimate", label: "Estimate" },
-  { key: "quoted", label: "Quoted" },
-  { key: "contacted", label: "Contacted" },
-  { key: "scheduled", label: "Scheduled" },
-  { key: "won", label: "Won" },
-  { key: "lost", label: "Lost" },
-  { key: "archived", label: "Archived" },
-] as const;
+/**
+ * IMPORTANT:
+ * - Submitted photos come from input.images[].url
+ * - Rendered photo must come from an explicit render field, NOT from submitted images
+ */
+function getSubmittedImages(input: any): string[] {
+  const imgs = Array.isArray(input?.images) ? input.images : [];
+  return imgs.map((x: any) => x?.url).filter(Boolean);
+}
 
-type StageKey = (typeof STAGES)[number]["key"];
+function extractAiOutput(row: any, input: any) {
+  const candidates = [
+    row?.output,
+    row?.aiOutput,
+    row?.ai_output,
+    row?.assessment,
+    row?.aiAssessment,
+    row?.ai_assessment,
+    input?.ai,
+    input?.assessment,
+    input?.ai_assessment,
+    input?.ai_output,
+  ];
 
-function normalizeStage(s: unknown): StageKey {
-  const v = String(s ?? "").toLowerCase().trim();
-  const hit = STAGES.find((x) => x.key === v)?.key;
-  return (hit ?? "new") as StageKey;
+  for (const c of candidates) {
+    if (!c) continue;
+    if (typeof c === "object") return c;
+    if (typeof c === "string") {
+      const parsed = safeJson(c);
+      if (parsed && typeof parsed === "object") return parsed;
+    }
+  }
+  return null;
+}
+
+/**
+ * Render URL extraction:
+ * ONLY accept explicit render fields (never fall back to input.images)
+ */
+function extractRenderImageUrl(row: any, input: any): string | null {
+  const candidates = [
+    row?.renderImageUrl,
+    row?.render_image_url,
+    row?.renderUrl,
+    row?.render_url,
+    row?.renderedImageUrl,
+    row?.rendered_image_url,
+    input?.render_image_url,
+    input?.renderImageUrl,
+    input?.render?.imageUrl,
+    input?.render?.image_url,
+    input?.render_result?.image_url,
+    input?.render_result?.imageUrl,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.startsWith("http")) return c;
+  }
+  return null;
 }
 
 function badge(label: string, tone: "gray" | "yellow" | "blue" | "green" | "red" = "gray") {
@@ -132,66 +185,23 @@ function renderStatusBadge(renderStatusRaw: unknown) {
   return badge(s, "gray");
 }
 
-function extractRenderImageUrl(row: any, input: any) {
-  // Try common places without assuming schema
-  return (
-    row?.renderImageUrl ??
-    row?.render_image_url ??
-    row?.renderUrl ??
-    row?.render_url ??
-    input?.render_image_url ??
-    input?.renderImageUrl ??
-    input?.render?.imageUrl ??
-    input?.render?.image_url ??
-    null
-  );
-}
+const STAGES = [
+  { key: "new", label: "New" },
+  { key: "estimate", label: "Estimate" },
+  { key: "quoted", label: "Quoted" },
+  { key: "contacted", label: "Contacted" },
+  { key: "scheduled", label: "Scheduled" },
+  { key: "won", label: "Won" },
+  { key: "lost", label: "Lost" },
+  { key: "archived", label: "Archived" },
+] as const;
 
-function extractAiOutput(row: any, input: any) {
-  // Try common column names or embedded output fields
-  const candidates = [
-    row?.output,
-    row?.aiOutput,
-    row?.ai_output,
-    row?.assessment,
-    row?.aiAssessment,
-    row?.ai_assessment,
-    input?.ai,
-    input?.assessment,
-    input?.ai_assessment,
-    input?.ai_output,
-  ];
-  for (const c of candidates) {
-    if (c && typeof c === "object") return c;
-    if (typeof c === "string") {
-      // if it is JSON text, parse safely
-      try {
-        const parsed = JSON.parse(c);
-        if (parsed && typeof parsed === "object") return parsed;
-      } catch {}
-    }
-  }
-  return null;
-}
+type StageKey = (typeof STAGES)[number]["key"];
 
-async function trySelectQuote(tenantIdSafe: string, id: string) {
-  // Primary: typed selection (safe)
-  const base = await db
-    .select({
-      id: quoteLogs.id,
-      createdAt: quoteLogs.createdAt,
-      input: quoteLogs.input,
-      stage: quoteLogs.stage,
-      isRead: quoteLogs.isRead,
-      renderStatus: quoteLogs.renderStatus,
-      tenantId: quoteLogs.tenantId,
-    })
-    .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdSafe)))
-    .limit(1)
-    .then((r) => r[0] ?? null);
-
-  return base;
+function normalizeStage(s: unknown): StageKey {
+  const v = String(s ?? "").toLowerCase().trim();
+  const hit = STAGES.find((x) => x.key === v)?.key;
+  return (hit ?? "new") as StageKey;
 }
 
 type PageProps = {
@@ -216,7 +226,6 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
   const jar = await cookies();
   let tenantId = getCookieTenantId(jar);
 
-  // fallback: tenant owned by user
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -244,38 +253,43 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
     );
   }
 
-  // ✅ critical: capture as non-null const for actions & where clauses
   const tenantIdSafe = tenantId;
 
-  // Load the quote
-  const q = await trySelectQuote(tenantIdSafe, id);
+  const q = await db
+    .select({
+      id: quoteLogs.id,
+      createdAt: quoteLogs.createdAt,
+      input: quoteLogs.input,
+      stage: quoteLogs.stage,
+      isRead: quoteLogs.isRead,
+      renderStatus: quoteLogs.renderStatus,
+      tenantId: quoteLogs.tenantId,
+    })
+    .from(quoteLogs)
+    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdSafe)))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
   if (!q) notFound();
 
-  // Parse input safely
-  const inputObj = (() => {
-    try {
-      return typeof q.input === "string" ? JSON.parse(q.input) : q.input;
-    } catch {
-      return q.input;
-    }
-  })();
-
+  const inputObj = safeJson(q.input) ?? q.input ?? {};
   const lead = pickLead(inputObj);
 
-  // Auto-mark read on open (unless we’re intentionally skipping it after toggles)
+  // Auto-mark read on open (unless explicitly skipping right after toggling)
   if (!skipAutoRead && q.isRead === false) {
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdSafe)));
-    // refresh local view state
     q.isRead = true as any;
   }
 
   const currentStage = normalizeStage(q.stage);
   const aiOut = extractAiOutput(q as any, inputObj);
+  const submittedImages = getSubmittedImages(inputObj);
   const renderImageUrl = extractRenderImageUrl(q as any, inputObj);
   const renderBadge = renderStatusBadge(q.renderStatus);
+  const renderStatusLower = String(q.renderStatus ?? "").toLowerCase().trim();
 
   async function toggleRead(formData: FormData) {
     "use server";
@@ -287,7 +301,6 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
       .set({ isRead: toUnread ? false : true } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantIdSafe)));
 
-    // Important: keep user on detail page, and prevent auto-read from immediately flipping unread back to read.
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
@@ -307,7 +320,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
   return (
     <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
       <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-        {/* Top row */}
+        {/* Header */}
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -329,7 +342,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
               {renderBadge}
             </div>
 
-            <div className="mt-3 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
+            <div className="mt- hag̃ua flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
               {lead.phone ? <span className="font-mono">{lead.phone}</span> : <span className="italic">No phone</span>}
               {lead.email ? (
                 <>
@@ -344,13 +357,13 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
             </div>
           </div>
 
-          {/* Controls */}
+          {/* Actions */}
           <div className="w-full sm:w-auto">
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Actions</div>
 
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {/* Read toggle */}
+                {/* Only show the opposite action */}
                 <form action={toggleRead}>
                   <input type="hidden" name="next" value={q.isRead ? "unread" : "read"} />
                   <button
@@ -366,7 +379,6 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
                   </button>
                 </form>
 
-                {/* Stage selector */}
                 <form action={updateStage} className="flex items-center gap-2">
                   <select
                     name="stage"
@@ -398,15 +410,11 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
           </div>
         </div>
 
-        {/* DETAIL SECTION (per your clarification): AI output first */}
+        {/* DETAILS: AI output first */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">AI output</h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Assessment + estimate payload captured for this submission.
-              </p>
-            </div>
+          <div>
+            <h2 className="text-lg font-semibold">AI output</h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Assessment + estimate payload captured.</p>
           </div>
 
           {aiOut ? (
@@ -420,46 +428,88 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
               No structured AI output found on this quote yet.
             </div>
           )}
-
-          {/* input images quick view */}
-          {Array.isArray(inputObj?.images) && inputObj.images.length ? (
-            <div className="mt-5">
-              <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Submitted photos</div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {inputObj.images
-                  .map((x: any) => x?.url)
-                  .filter(Boolean)
-                  .slice(0, 12)
-                  .map((url: string) => (
-                    <a
-                      key={url}
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="group overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-black"
-                      title="Open image"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={url}
-                        alt="Submitted"
-                        className="h-44 w-full object-cover transition group-hover:scale-[1.02]"
-                      />
-                    </a>
-                  ))}
-              </div>
-            </div>
-          ) : null}
         </section>
 
-        {/* Rendering section below (only if a render happened OR we have an image URL) */}
-        {String(q.renderStatus ?? "").toLowerCase() === "rendered" || renderImageUrl ? (
+        {/* PHOTOS GALLERY (Submitted) */}
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Photos</h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                {submittedImages.length} submitted
+              </p>
+            </div>
+            {submittedImages.length ? (
+              <a
+                href={submittedImages[0]}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm font-semibold underline text-gray-600 dark:text-gray-300"
+              >
+                Open first
+              </a>
+            ) : null}
+          </div>
+
+          {submittedImages.length === 0 ? (
+            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+              No submitted photos found.
+            </div>
+          ) : (
+            <>
+              {/* Thumb strip */}
+              <div className="mt-4 flex gap-3 overflow-x-auto pb-2">
+                {submittedImages.map((url, i) => (
+                  <a
+                    key={url}
+                    href={`#photo-${i}`}
+                    className="shrink-0 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-black"
+                    title={`Jump to photo ${i + 1}`}
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={url} alt={`Thumb ${i + 1}`} className="h-20 w-28 object-cover" />
+                  </a>
+                ))}
+              </div>
+
+              {/* Full gallery list */}
+              <div className="mt-5 grid gap-4">
+                {submittedImages.map((url, i) => (
+                  <div
+                    key={`${url}-${i}`}
+                    id={`photo-${i}`}
+                    className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-black"
+                  >
+                    <div className="flex items-center justify-between px-4 py-3">
+                      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                        Photo {i + 1}
+                      </div>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm font-semibold underline text-gray-600 dark:text-gray-300"
+                      >
+                        Open
+                      </a>
+                    </div>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={url} alt={`Submitted ${i + 1}`} className="w-full object-contain bg-white dark:bg-black" />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+
+        {/* RENDERING (only if explicit render url OR status says something render-related) */}
+        {(renderImageUrl || ["rendered", "failed", "queued", "running"].includes(renderStatusLower)) ? (
           <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">Rendering</h2>
                 <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                  Final visual output (if generated).
+                  Final visual output (separate from customer-submitted photos).
                 </p>
               </div>
               {renderStatusBadge(q.renderStatus)}
@@ -468,23 +518,18 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
             {renderImageUrl ? (
               <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={renderImageUrl}
-                  alt="Rendered output"
-                  className="w-full object-contain bg-white dark:bg-black"
-                />
+                <img src={renderImageUrl} alt="Rendered output" className="w-full object-contain bg-white dark:bg-black" />
               </div>
             ) : (
               <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-                Render is marked as rendered, but no render image URL was found.
+                Render status is <span className="font-semibold">{String(q.renderStatus ?? "unknown")}</span>, but no render image URL is available yet.
               </div>
             )}
           </section>
         ) : null}
 
-        {/* Footer helper (no quote id shown) */}
         <div className="text-xs text-gray-500 dark:text-gray-600">
-          Tip: marking unread won’t flip back to read unless you reopen without the skip flag.
+          Tip: “Mark unread” returns you here without auto-flipping back to read.
         </div>
       </div>
     </main>
