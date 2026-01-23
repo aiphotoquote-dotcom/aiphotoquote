@@ -8,6 +8,12 @@ import { db } from "@/lib/db/client";
 import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
+import { sendEmail } from "@/lib/email";
+import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
+import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
+import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
+import { sql } from "drizzle-orm"; // you already import eq; add sql too
+
 export const runtime = "nodejs";
 
 const CustomerSchema = z.object({
@@ -289,7 +295,7 @@ export async function POST(req: Request) {
       };
     }
 
-    // Save quote log
+       // Save quote log
     const inserted = await db
       .insert(quoteLogs)
       .values({
@@ -301,15 +307,119 @@ export async function POST(req: Request) {
       .returning({ id: quoteLogs.id })
       .then((r) => r[0] ?? null);
 
-    return NextResponse.json({
-      ok: true,
-      quoteLogId: inserted?.id ?? null,
-      output,
-    });
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
-  }
-}
+    const quoteLogId = inserted?.id ? String(inserted.id) : null;
+
+    // -------------------------
+    // Email (best effort)
+    // -------------------------
+    let emailResult: any = null;
+
+    if (quoteLogId) {
+      try {
+        const cfg = await getTenantEmailConfig(tenant.id);
+
+        const configured = Boolean(
+          process.env.RESEND_API_KEY?.trim() &&
+          cfg.businessName &&
+          cfg.leadToEmail &&
+          cfg.fromEmail
+        );
+
+        emailResult = {
+          configured,
+          mode: cfg.sendMode ?? "standard",
+          lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+          customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+          missing: {
+            RESEND_API_KEY: !Boolean(process.env.RESEND_API_KEY?.trim()),
+            business_name: !cfg.businessName,
+            lead_to_email: !cfg.leadToEmail,
+            resend_from_email: !cfg.fromEmail,
+          },
+        };
+
+        if (configured) {
+          // Lead: New submission
+          try {
+            emailResult.lead_new.attempted = true;
+
+            const leadHtml = renderLeadNewEmailHTML({
+              businessName: cfg.businessName!,
+              tenantSlug,
+              quoteLogId,
+              customer,
+              notes,
+              imageUrls: images.map((x) => x.url),
+            });
+
+            const r1 = await sendEmail({
+              tenantId: tenant.id,
+              context: { type: "lead_new", quoteLogId },
+              message: {
+                from: cfg.fromEmail!,
+                to: [cfg.leadToEmail!],
+                replyTo: [cfg.leadToEmail!],
+                subject: `New Photo Quote — ${customer.name}`,
+                html: leadHtml,
+              },
+            });
+
+            emailResult.lead_new.ok = r1.ok;
+            emailResult.lead_new.id = r1.providerMessageId ?? null;
+            emailResult.lead_new.error = r1.error ?? null;
+          } catch (e: any) {
+            emailResult.lead_new.error = e?.message ?? String(e);
+          }
+
+          // Customer: Receipt
+          try {
+            emailResult.customer_receipt.attempted = true;
+
+            const custHtml = renderCustomerReceiptEmailHTML({
+              businessName: cfg.businessName!,
+              quoteLogId,
+              customerName: customer.name,
+              summary: output.summary ?? "",
+              estimateLow: output.estimate_low ?? 0,
+              estimateHigh: output.estimate_high ?? 0,
+              questions: output.questions ?? [],
+            });
+
+            const r2 = await sendEmail({
+              tenantId: tenant.id,
+              context: { type: "customer_receipt", quoteLogId },
+              message: {
+                from: cfg.fromEmail!,
+                to: [customer.email],
+                replyTo: [cfg.leadToEmail!], // replies go to tenant
+                subject: `Your AI Photo Quote — ${cfg.businessName}`,
+                html: custHtml,
+              },
+            });
+
+            emailResult.customer_receipt.ok = r2.ok;
+            emailResult.customer_receipt.id = r2.providerMessageId ?? null;
+            emailResult.customer_receipt.error = r2.error ?? null;
+          } catch (e: any) {
+            emailResult.customer_receipt.error = e?.message ?? String(e);
+          }
+        }
+
+        // Persist email result into quote_logs.output.email (best effort)
+        try {
+          const nextOutput = { ...(output ?? {}), email: emailResult };
+          await db.execute(sql`
+            update quote_logs
+            set output = ${JSON.stringify(nextOutput)}::jsonb
+            where id = ${quoteLogId}::uuid
+          `);
+          output = nextOutput; // so API response includes it too
+        } catch {
+          // ignore
+        }
+      } catch (e: any) {
+        // If config read fails, don't kill the quote
+        emailResult = { configured: false, error: e?.message ?? String(e) };
+        output = { ...(output ?? {}), email: emailResult };
+      }
+    }
