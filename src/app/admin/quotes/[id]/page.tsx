@@ -90,14 +90,18 @@ function pickCustomerNotes(input: any) {
   return s || "";
 }
 
-function pickPhotos(input: any): QuotePhoto[] {
+/**
+ * IMPORTANT: Customer-submitted photos come from input.images/photos/etc.
+ * Render images should NOT come from input.* (or you’ll confuse the two).
+ */
+function pickSubmittedPhotos(input: any): QuotePhoto[] {
   const out: QuotePhoto[] = [];
 
   const images = Array.isArray(input?.images) ? input.images : null;
   if (images) {
     for (const it of images) {
       const url = it?.url ?? it?.src ?? it?.href;
-      if (url) out.push({ url: String(url), label: it?.label ?? null });
+      if (url) out.push({ url: String(url), label: it?.shotType ?? it?.label ?? null });
     }
   }
 
@@ -176,30 +180,45 @@ function renderChip(renderStatusRaw: unknown) {
   return chip(s, "gray");
 }
 
-function pickRenderUrl(input: any): string | null {
-  const candidates = [
-    input?.render?.url,
-    input?.render_url,
-    input?.rendered?.url,
-    input?.render_result?.url,
-    input?.ai_render?.url,
-    input?.renderOutput?.url,
-    input?.render_image_url,
-  ];
+function pickRenderUrlFromAnywhere(row: any): string | null {
+  // Prefer DB column (most correct)
+  const direct =
+    row?.renderImageUrl ??
+    row?.render_image_url ??
+    row?.renderUrl ??
+    row?.render_url ??
+    null;
 
-  for (const c of candidates) {
-    if (typeof c === "string" && c.startsWith("http")) return c;
-  }
+  if (typeof direct === "string" && direct.startsWith("http")) return direct;
+
+  // Sometimes render is stored inside output
+  const fromOutput =
+    row?.output?.render_image_url ??
+    row?.output?.renderImageUrl ??
+    row?.output?.render?.url ??
+    row?.output?.rendered?.url ??
+    row?.output?.render_result?.url ??
+    null;
+
+  if (typeof fromOutput === "string" && fromOutput.startsWith("http")) return fromOutput;
+
   return null;
 }
 
-function pickAiOutput(input: any): any {
+function normalizeAiOutput(row: any): any {
+  // New path (your submit route): quoteLogs.output
+  if (row?.output && typeof row.output === "object") return row.output;
+
+  // Fallback legacy paths:
+  const input = row?.input ?? null;
   return input?.ai_output ?? input?.ai_assessment ?? input?.assessment ?? input?.ai ?? input?.result ?? null;
 }
 
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
-  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+  searchParams?:
+    | Promise<Record<string, string | string[] | undefined>>
+    | Record<string, string | string[] | undefined>;
 };
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
@@ -229,17 +248,21 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   }
 
   if (!tenantIdMaybe) redirect("/admin/quotes");
-
   const tenantId = tenantIdMaybe;
 
+  // ✅ SELECT output + render image url if available in schema
+  // Using "as any" so this compiles even if your drizzle schema types lag behind.
   const row = await db
     .select({
       id: quoteLogs.id,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
+      output: (quoteLogs as any).output,
       stage: quoteLogs.stage,
       isRead: quoteLogs.isRead,
-      renderStatus: quoteLogs.renderStatus,
+      renderStatus: (quoteLogs as any).renderStatus,
+      renderImageUrl: (quoteLogs as any).renderImageUrl,
+      renderOptIn: (quoteLogs as any).renderOptIn,
     })
     .from(quoteLogs)
     .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
@@ -249,7 +272,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   if (!row) redirect("/admin/quotes");
 
   // Track UI-state for read/unread (because we update DB after fetch)
-  let isRead = Boolean(row.isRead);
+  let isRead = Boolean((row as any).isRead);
 
   // Auto-mark read on open (unless user explicitly marked unread and we redirected back with skip flag)
   if (!skipAutoRead && !isRead) {
@@ -260,16 +283,19 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     isRead = true;
   }
 
-  const lead = pickLead(row.input);
-  const notes = pickCustomerNotes(row.input);
-  const photos = pickPhotos(row.input);
+  const lead = pickLead((row as any).input);
+  const notes = pickCustomerNotes((row as any).input);
+  const photos = pickSubmittedPhotos((row as any).input);
 
-  const stageNorm = normalizeStage(row.stage);
+  const stageNorm = normalizeStage((row as any).stage);
   const stageLabel =
     stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  const aiOutput = pickAiOutput(row.input);
-  const renderUrl = pickRenderUrl(row.input);
+  // ✅ AI output comes from DB "output" (new behavior)
+  const aiOutput = normalizeAiOutput(row);
+
+  // ✅ Render URL should come from DB first, then output fallback
+  const renderUrl = pickRenderUrlFromAnywhere(row);
 
   async function setStage(formData: FormData) {
     "use server";
@@ -303,7 +329,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       .set({ isRead: true } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
-    // return to clean URL (and read state stays)
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -318,13 +343,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
           <h1 className="mt-2 text-2xl font-semibold">Quote review</h1>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Submitted {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
+            Submitted {(row as any).createdAt ? new Date((row as any).createdAt).toLocaleString() : "—"}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
-          {renderChip(row.renderStatus)}
+          {renderChip((row as any).renderStatus)}
 
           {isRead ? (
             <form action={markUnread}>
@@ -414,7 +439,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* ✅ Customer notes moved up (between contact card + photos) */}
+      {/* Customer notes */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div>
           <h3 className="text-lg font-semibold">Customer notes</h3>
@@ -430,10 +455,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* Photos gallery */}
+      {/* Submitted photos gallery */}
       <QuotePhotoGallery photos={photos} />
 
-      {/* Details section (AI output first, then render) */}
+      {/* Details section (AI output first, then rendering) */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <h3 className="text-lg font-semibold">Details</h3>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -442,7 +467,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-            <div className="text-sm font-semibold">AI output</div>
+            <div className="text-sm font-semibold">AI output (from DB output)</div>
+
             <div className="mt-3">
               {aiOutput ? (
                 <pre className="overflow-auto rounded-lg bg-black p-3 text-xs text-white dark:bg-gray-950">
@@ -450,7 +476,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                 </pre>
               ) : (
                 <div className="text-sm text-gray-600 dark:text-gray-300 italic">
-                  No AI output found in payload yet.
+                  No AI output found on this quote yet.
                 </div>
               )}
             </div>
@@ -458,6 +484,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
           <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
             <div className="text-sm font-semibold">Rendering</div>
+
             <div className="mt-3">
               {renderUrl ? (
                 <a href={renderUrl} target="_blank" rel="noreferrer" className="block">
@@ -484,7 +511,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       <details className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold">Raw submission payload</summary>
         <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
-{JSON.stringify(row.input ?? {}, null, 2)}
+{JSON.stringify((row as any).input ?? {}, null, 2)}
         </pre>
       </details>
     </div>
