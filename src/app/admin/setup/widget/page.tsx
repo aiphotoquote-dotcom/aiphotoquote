@@ -7,6 +7,7 @@ import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
+import CopyButtonClient from "@/components/admin/CopyButtonClient";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
 }
 
 async function getBaseUrl() {
-  const h = await headers(); // ✅ async in your Next.js
+  const h = await headers();
   const proto = h.get("x-forwarded-proto") ?? "https";
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
   return host ? `${proto}://${host}` : "";
@@ -88,7 +89,7 @@ export default async function WidgetSetupPage() {
 
   let tenantId = getCookieTenantId(jar);
 
-  // Fallback: first tenant owned by user (back-compat: ownerClerkUserId)
+  // fallback: first tenant owned by this user (back-compat)
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -115,6 +116,7 @@ export default async function WidgetSetupPage() {
             </Link>
           }
         />
+
         <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
           No active tenant selected. Go to{" "}
           <Link className="underline" href="/onboarding">
@@ -142,10 +144,8 @@ export default async function WidgetSetupPage() {
     ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}`
     : `/q/${encodeURIComponent(tenantSlug)}`;
 
-  // 1) Direct link
   const directLinkHtml = `<a href="${quoteUrl}" target="_blank" rel="noopener">Get a Photo Quote</a>`;
 
-  // 2) Iframe embed
   const iframeHtml = `<iframe
   src="${quoteUrl}"
   style="width:100%;max-width:980px;height:900px;border:0;border-radius:16px;overflow:hidden;"
@@ -153,7 +153,6 @@ export default async function WidgetSetupPage() {
   referrerpolicy="no-referrer-when-downgrade"
 ></iframe>`;
 
-  // 3) Popup button
   const popupScript = `<!-- AI Photo Quote Popup Widget -->
 <div id="apq-root"></div>
 <script>
@@ -246,7 +245,7 @@ ${iframeHtml}`;
         </div>
       </div>
 
-      <div className="grid gap-6">
+      <div className={cn("grid gap-6")}>
         <CodeBlock
           title="Option 1: Simple link"
           description="Best if you want a button/link in your nav or footer."
@@ -288,38 +287,5 @@ ${iframeHtml}`;
         Tip: If the iframe height is too tall/short, change <span className="font-mono">height:900px</span>.
       </div>
     </div>
-  );
-}
-
-/** Client copy button */
-function CopyButtonClient({ text }: { text: string }) {
-  "use client";
-
-  const React = require("react") as typeof import("react");
-  const [copied, setCopied] = React.useState(false);
-
-  async function onCopy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 900);
-    } catch {
-      // ignore
-    }
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={onCopy}
-      className={cn(
-        "rounded-lg border px-3 py-2 text-xs font-semibold transition",
-        copied
-          ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
-          : "border-gray-200 bg-white text-gray-800 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-900"
-      )}
-    >
-      {copied ? "Copied" : "Copy"}
-    </button>
   );
 }
