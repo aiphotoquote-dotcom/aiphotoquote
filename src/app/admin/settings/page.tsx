@@ -163,6 +163,28 @@ export default function AdminTenantSettingsPage() {
     }
   }
 
+const [testEmailRes, setTestEmailRes] = useState<any>(null);
+const [testingEmail, setTestingEmail] = useState(false);
+
+async function sendTestEmail() {
+  setTestingEmail(true);
+  setTestEmailRes(null);
+  setErr(null);
+  setMsg(null);
+
+  try {
+    const res = await fetch("/api/admin/email/test", { method: "POST" });
+    const data = await safeJson<any>(res);
+    setTestEmailRes(data);
+    if (data?.ok) setMsg("Test email sent.");
+    else setErr(data?.error || data?.message || "Test email failed.");
+  } catch (e: any) {
+    setErr(e?.message ?? String(e));
+  } finally {
+    setTestingEmail(false);
+  }
+}
+
   async function save() {
     setErr(null);
     setMsg(null);
@@ -371,7 +393,28 @@ export default function AdminTenantSettingsPage() {
                 <span className="font-mono">Name &lt;email@domain.com&gt;</span>
               </p>
             </div>
+<div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
+  <div className="text-sm font-semibold text-gray-900">Send Test Email</div>
+  <p className="mt-1 text-sm text-gray-600">
+    Sends a test message to <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
+  </p>
 
+  <div className="mt-3 flex items-center gap-3">
+    <button
+      onClick={sendTestEmail}
+      disabled={!canEdit || testingEmail || !leadToEmail.trim()}
+      className="rounded-md bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+    >
+      {testingEmail ? "Sending…" : "Send test email"}
+    </button>
+  </div>
+
+  {testEmailRes ? (
+    <pre className="mt-3 overflow-auto rounded-md bg-white border border-gray-200 p-3 text-xs">
+{JSON.stringify(testEmailRes, null, 2)}
+    </pre>
+  ) : null}
+</div>
             <div className="flex items-center gap-4">
               <button
                 onClick={save}

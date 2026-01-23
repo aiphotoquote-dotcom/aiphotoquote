@@ -1,20 +1,25 @@
 // src/lib/email/index.ts
-import type { EmailContextType, EmailSendResult } from "./types";
+import type { EmailContextType, EmailSendResult, EmailMessage } from "./types";
 import { makeResendProvider } from "./providers/resend";
-import type { EmailMessage } from "./types";
 
 /**
  * Standard mode only (Resend) for now.
- * Later: add Gmail/Microsoft OAuth providers and route based on tenant_settings.email_send_mode/email_provider.
+ * Later: add Gmail/Microsoft OAuth providers and route based on tenant_settings.email_mode/email_provider.
  */
-const provider = makeResendProvider();
+
+async function getProviderForTenant(_tenantId: string) {
+  // TODO: read tenant_settings once we add email_mode/email_provider fields.
+  return makeResendProvider();
+}
 
 export async function sendEmail(args: {
   tenantId: string;
   context: { type: EmailContextType; quoteLogId?: string };
   message: EmailMessage;
 }): Promise<EmailSendResult> {
-  // One choke point for future: logging, retries, rate limits, provider selection
+  const provider = await getProviderForTenant(args.tenantId);
+
+  // future choke point: logging, retries, rate limits, provider selection
   return provider.send({
     tenantId: args.tenantId,
     context: args.context,
