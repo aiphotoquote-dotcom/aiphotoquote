@@ -1,6 +1,5 @@
 import Link from "next/link";
 import Image from "next/image";
-import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { and, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
@@ -13,16 +12,6 @@ export const dynamic = "force-dynamic";
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
-}
-
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-  return candidates[0] || null;
 }
 
 function digitsOnly(s: string) {
@@ -40,13 +29,7 @@ function formatUSPhone(raw: string) {
 }
 
 function pickLead(input: any) {
-  const c =
-    input?.customer ??
-    input?.contact ??
-    input?.customer_context ??
-    input?.customer_context?.customer ??
-    input?.lead ??
-    {};
+  const c = input?.customer ?? input?.contact ?? input?.customer_context ?? input?.lead ?? {};
 
   const name =
     c?.name ??
@@ -56,37 +39,21 @@ function pickLead(input: any) {
     input?.customer_context?.name ??
     "New customer";
 
-  const phone =
-    c?.phone ??
-    c?.phoneNumber ??
-    input?.phone ??
-    input?.customer_context?.phone ??
-    null;
-
-  const email =
-    c?.email ??
-    input?.email ??
-    input?.customer_context?.email ??
-    null;
-
-  const notes =
-    c?.notes ??
-    input?.notes ??
-    input?.customer_context?.notes ??
-    null;
+  const phone = c?.phone ?? c?.phoneNumber ?? input?.phone ?? input?.customer_context?.phone ?? null;
+  const email = c?.email ?? input?.email ?? input?.customer_context?.email ?? null;
+  const notes = c?.notes ?? input?.notes ?? input?.customer_context?.notes ?? null;
 
   const phoneDigits = phone ? digitsOnly(String(phone)) : "";
 
   return {
     name: String(name || "New customer"),
     phone: phoneDigits ? formatUSPhone(phoneDigits) : null,
-    phoneDigits: phoneDigits || null,
     email: email ? String(email) : null,
     notes: notes ? String(notes) : null,
   };
 }
 
-// Stage list EXCLUDES read/unread completely
+// Stage list excludes read/unread completely
 const STAGES = [
   { key: "new", label: "New" },
   { key: "estimate", label: "Estimate" },
@@ -114,22 +81,17 @@ function prettyJson(x: any) {
   }
 }
 
-// Pull submitted photos from input safely
 function getSubmittedImages(input: any): string[] {
   const imgs = input?.images;
-  if (Array.isArray(imgs)) {
-    return imgs.map((x: any) => x?.url).filter(Boolean);
-  }
+  if (Array.isArray(imgs)) return imgs.map((x: any) => x?.url).filter(Boolean);
   return [];
 }
 
-// Pull rendered images WITHOUT confusing them with submitted images.
-// We only show render section if status is rendered AND we find a distinct URL list.
+// Render images: only show if status rendered and we find explicit render URLs
 function getRenderImages(row: any): string[] {
   const status = String(row?.renderStatus ?? "").toLowerCase();
   if (status !== "rendered") return [];
 
-  // Try common shapes (adjusted to be defensive)
   const candidates: any[] = [
     row?.renderedImages,
     row?.render_images,
@@ -138,9 +100,6 @@ function getRenderImages(row: any): string[] {
     row?.render_urls,
     row?.output?.rendering?.images,
     row?.output?.rendered?.images,
-    row?.output?.renderImages,
-    row?.output?.render_urls,
-    row?.output?.render_urls?.images,
   ];
 
   for (const c of candidates) {
@@ -150,14 +109,8 @@ function getRenderImages(row: any): string[] {
     }
   }
 
-  const maybeOne =
-    row?.renderUrl ??
-    row?.render_url ??
-    row?.output?.renderUrl ??
-    row?.output?.render_url ??
-    null;
-
-  return maybeOne ? [String(maybeOne)] : [];
+  const one = row?.renderUrl ?? row?.render_url ?? row?.output?.renderUrl ?? row?.output?.render_url ?? null;
+  return one ? [String(one)] : [];
 }
 
 type PageProps = {
@@ -173,51 +126,57 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
   const id = String(rawId || "").trim();
   if (!id) redirect("/admin/quotes");
 
-  const jar = await cookies();
-  let tenantIdMaybe = getCookieTenantId(jar);
-
-  // fallback: tenant owned by user
-  if (!tenantIdMaybe) {
-    const t = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    tenantIdMaybe = t?.id ?? null;
-  }
-
-  if (!tenantIdMaybe) {
-    redirect("/onboarding");
-  }
-
-  const tenantId = tenantIdMaybe; // now non-null
-
-  // Load quote (include output if your schema has it; "as any" keeps TS calm if not)
+  // 1) Load quote by ID FIRST (do not depend on tenant cookie)
   const row = await db
     .select({
       id: quoteLogs.id,
+      tenantId: quoteLogs.tenantId,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
       stage: quoteLogs.stage,
       isRead: quoteLogs.isRead,
       renderStatus: quoteLogs.renderStatus,
-      // optional columns if present in schema (won't break runtime if undefined)
       output: (quoteLogs as any).output,
       renderedImages: (quoteLogs as any).renderedImages,
       renderUrl: (quoteLogs as any).renderUrl,
     })
     .from(quoteLogs)
-    .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
+    .where(eq(quoteLogs.id, id))
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!row) {
-    redirect("/admin/quotes");
+  if (!row) redirect("/admin/quotes");
+
+  const tenantId = row.tenantId;
+
+  // 2) Enforce ownership (simple + safe)
+  const tenant = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  if (!tenant) {
+    // Don’t bounce to list instantly; show a clear access issue instead
+    return (
+      <main className="min-h-screen bg-white text-gray-900 dark:bg-black dark:text-gray-100">
+        <div className="mx-auto max-w-3xl px-6 py-12">
+          <h1 className="text-2xl font-semibold">Access denied</h1>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            This quote doesn’t belong to your active tenant / account.
+          </p>
+          <div className="mt-6">
+            <Link className="underline" href="/admin/quotes">
+              Back to quotes
+            </Link>
+          </div>
+        </div>
+      </main>
+    );
   }
 
-  // AUTO MARK READ (unless explicitly skipping because user just marked unread)
+  // 3) Auto-mark read unless skipAutoRead=1
   const skipAutoRead =
     searchParams?.skipAutoRead === "1" ||
     (Array.isArray(searchParams?.skipAutoRead) && searchParams?.skipAutoRead.includes("1"));
@@ -230,7 +189,6 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
     row.isRead = true;
   }
 
-  // Server actions (no API route dependency, no tenantId null type issues)
   async function markUnread() {
     "use server";
     await db
@@ -238,7 +196,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
       .set({ isRead: false } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
-    // IMPORTANT: prevent the very next render from auto-marking read again
+    // prevent auto-read flipping it back immediately
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
@@ -259,14 +217,9 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
   const stage = normalizeStage(row.stage);
   const stageLabel = STAGES.find((s) => s.key === stage)?.label ?? "New";
 
-  // AI output section tries to show friendly fields first, then JSON fallback
   const ai = (row as any)?.output ?? null;
   const aiSummary =
-    ai?.assessment?.summary ??
-    ai?.summary ??
-    ai?.assessment?.damage ??
-    ai?.assessment?.recommendation ??
-    null;
+    ai?.assessment?.summary ?? ai?.summary ?? ai?.assessment?.damage ?? ai?.assessment?.recommendation ?? null;
 
   const aiScope = ai?.assessment?.visible_scope ?? ai?.visible_scope ?? null;
   const aiAssumptions = ai?.assessment?.assumptions ?? ai?.assumptions ?? null;
@@ -302,7 +255,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {/* Read status pill (display) */}
+            {/* Read status pill */}
             <span
               className={cn(
                 "rounded-full border px-3 py-1.5 text-xs font-semibold",
@@ -314,7 +267,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
               {isRead ? "Read" : "Unread"}
             </span>
 
-            {/* Only allow changing back to Unread (per your rule) */}
+            {/* Only allow changing back to unread */}
             <form action={markUnread}>
               <button
                 type="submit"
@@ -325,7 +278,6 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
                     ? "border-yellow-200 bg-yellow-50 text-yellow-900 hover:bg-yellow-100 dark:border-yellow-900/50 dark:bg-yellow-950/30 dark:text-yellow-200 dark:hover:bg-yellow-950/50"
                     : "border-gray-200 bg-white text-gray-500 opacity-50 cursor-not-allowed dark:border-gray-800 dark:bg-black dark:text-gray-500"
                 )}
-                title={isRead ? "Mark as unread" : "Already unread"}
               >
                 Mark unread
               </button>
@@ -374,16 +326,10 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
           ) : null}
         </div>
 
-        {/* Photos (submitted) */}
+        {/* Submitted photos */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex items-end justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Photo gallery</h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Customer-submitted photos.
-              </p>
-            </div>
-          </div>
+          <h2 className="text-lg font-semibold">Photo gallery</h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Customer-submitted photos.</p>
 
           {submittedImages.length === 0 ? (
             <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">No photos attached.</div>
@@ -413,19 +359,15 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
           )}
         </section>
 
-        {/* Details (AI output first) */}
+        {/* Details layout */}
         <section className="grid gap-4 lg:grid-cols-3">
           {/* AI output */}
           <div className="lg:col-span-2 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
             <h2 className="text-lg font-semibold">AI assessment</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              What the system inferred from the photos + notes.
-            </p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI output first.</p>
 
             {!ai ? (
-              <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-                No AI output saved on this quote yet.
-              </div>
+              <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">No AI output saved yet.</div>
             ) : (
               <div className="mt-4 space-y-4">
                 {aiSummary ? (
@@ -470,7 +412,6 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
                   </div>
                 ) : null}
 
-                {/* Raw JSON fallback (collapsed-looking block) */}
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
                   <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Raw output</div>
                   <pre className="mt-2 max-h-[360px] overflow-auto rounded-lg bg-white p-3 text-[11px] text-gray-800 dark:bg-gray-950 dark:text-gray-200">
@@ -481,7 +422,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
             )}
           </div>
 
-          {/* Customer notes / context */}
+          {/* Customer details */}
           <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
             <h2 className="text-lg font-semibold">Customer details</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What they submitted.</p>
@@ -489,9 +430,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
             <div className="mt-4 space-y-3 text-sm">
               <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">Notes</div>
-                <div className="mt-2 whitespace-pre-wrap text-gray-900 dark:text-gray-100">
-                  {lead.notes || "—"}
-                </div>
+                <div className="mt-2 whitespace-pre-wrap text-gray-900 dark:text-gray-100">{lead.notes || "—"}</div>
               </div>
 
               <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
@@ -513,14 +452,12 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
           </div>
         </section>
 
-        {/* Render section (ONLY if we have real render images) */}
+        {/* Rendering section */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-end justify-between gap-3">
             <div>
               <h2 className="text-lg font-semibold">Rendering</h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                Generated images (only shown when a render exists).
-              </p>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Only shows when render images exist.</p>
             </div>
             <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-xs font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
               Status: {String(row.renderStatus ?? "—")}
@@ -528,9 +465,7 @@ export default async function AdminQuoteDetailPage({ params, searchParams }: Pag
           </div>
 
           {renderImages.length === 0 ? (
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">
-              No render images available for this quote.
-            </div>
+            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">No render images available.</div>
           ) : (
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {renderImages.map((url, idx) => (
