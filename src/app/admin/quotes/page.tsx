@@ -1,4 +1,3 @@
-// src/app/admin/quotes/page.tsx
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -9,6 +8,7 @@ import { db } from "@/lib/db/client";
 import { quoteLogs, tenants } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -134,6 +134,94 @@ function renderChip(renderStatusRaw: unknown) {
   );
 }
 
+function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" = "gray") {
+  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold";
+  const cls =
+    tone === "green"
+      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+      : tone === "yellow"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+      : tone === "red"
+      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+      : tone === "blue"
+      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
+
+  return <span className={cn(base, cls)}>{label}</span>;
+}
+
+function safeParseMaybeJson(v: any) {
+  if (v == null) return null;
+  if (typeof v === "object") return v;
+  if (typeof v !== "string") return { value: v };
+
+  const s = v.trim();
+  if (!s) return null;
+
+  if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return { raw: v };
+    }
+  }
+  return { raw: v };
+}
+
+function normalizeAiOutput(outputRaw: any) {
+  const root = safeParseMaybeJson(outputRaw) ?? null;
+  const assessment = root?.assessment && typeof root.assessment === "object" ? root.assessment : null;
+  const out = root?.output && typeof root.output === "object" ? root.output : null;
+
+  const merged = {
+    ...(typeof root === "object" ? root : {}),
+    ...(out ?? {}),
+    ...(assessment ?? {}),
+  };
+
+  const est = merged?.estimate && typeof merged.estimate === "object" ? merged.estimate : null;
+
+  const estimateLow =
+    est?.low ?? merged?.estimateLow ?? merged?.estimate_low ?? root?.estimate?.low ?? null;
+  const estimateHigh =
+    est?.high ?? merged?.estimateHigh ?? merged?.estimate_high ?? root?.estimate?.high ?? null;
+
+  return {
+    summary: merged?.summary ?? null,
+    confidence: merged?.confidence ?? null,
+    inspectionRequired:
+      typeof merged?.inspection_required === "boolean"
+        ? merged.inspection_required
+        : typeof merged?.inspectionRequired === "boolean"
+        ? merged.inspectionRequired
+        : null,
+    estimateLow,
+    estimateHigh,
+  };
+}
+
+function asNumber(x: any): number | null {
+  if (typeof x === "number" && Number.isFinite(x)) return x;
+  if (typeof x === "string") {
+    const n = Number(x.replace(/[^0-9.\-]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function money(n: number | null): string {
+  if (n == null) return "—";
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    }).format(n);
+  } catch {
+    return `$${Math.round(n).toString()}`;
+  }
+}
+
 function clampInt(v: unknown, fallback: number, min: number, max: number) {
   const n = Number(Array.isArray(v) ? v[0] : v);
   if (!Number.isFinite(n)) return fallback;
@@ -186,9 +274,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const viewRaw = Array.isArray(sp.view) ? sp.view[0] : sp.view;
   const viewNorm = String(viewRaw ?? "").toLowerCase().trim();
 
-  const legacyUnread =
-    sp.unread === "1" || (Array.isArray(sp.unread) && sp.unread.includes("1"));
-
+  const legacyUnread = sp.unread === "1" || (Array.isArray(sp.unread) && sp.unread.includes("1"));
   const legacyInProgress =
     sp.in_progress === "1" || (Array.isArray(sp.in_progress) && sp.in_progress.includes("1"));
 
@@ -207,19 +293,13 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
     } else if (viewNorm === "new") {
       viewMode = "new";
       stageParam = "new";
-    } else if (
-      viewNorm === "in_progress" ||
-      viewNorm === "inprogress" ||
-      viewNorm === "pipeline"
-    ) {
+    } else if (viewNorm === "in_progress" || viewNorm === "inprogress" || viewNorm === "pipeline") {
       viewMode = "in_progress";
       inProgressOnly = true;
     } else {
-      // unknown view => treat as custom, but don't crash
       viewMode = "custom";
     }
   } else {
-    // no view=, fall back to legacy params
     unreadOnly = legacyUnread;
     inProgressOnly = legacyInProgress;
     stageParam = legacyStage;
@@ -291,8 +371,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   // Preserve filter params in paging/delete links
   // Use view= if present/known; otherwise use legacy
   // -------------------------
-  const useView =
-    viewMode === "unread" || viewMode === "new" || viewMode === "in_progress";
+  const useView = viewMode === "unread" || viewMode === "new" || viewMode === "in_progress";
 
   const filterParams: Record<string, string | number | null> = useView
     ? {
@@ -320,9 +399,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
     const id = String(formData.get("id") ?? "").trim();
     if (!id) return;
 
-    await db
-      .delete(quoteLogs)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.delete(quoteLogs).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes${qs({ ...filterParams, page, pageSize })}`);
   }
@@ -339,6 +416,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       id: quoteLogs.id,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
+      output: (quoteLogs as any).output, // ✅ pull AI results
       renderStatus: quoteLogs.renderStatus,
       isRead: quoteLogs.isRead,
       stage: quoteLogs.stage,
@@ -382,7 +460,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
             {safePage} / {totalPages}
           </p>
 
-          {/* Always-visible filter pills */}
           <div className="mt-4 flex flex-wrap items-center gap-2">
             {filterPill({ href: hrefAll, label: "All", active: activeAll })}
             {filterPill({ href: hrefUnread, label: "Unread", active: activeUnread })}
@@ -390,10 +467,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
             {filterPill({ href: hrefInProgress, label: "In progress", active: activeInProgress })}
 
             {hasFilters ? (
-              <Link
-                href="/admin/quotes"
-                className="ml-2 text-xs font-semibold underline text-gray-600 dark:text-gray-300"
-              >
+              <Link href="/admin/quotes" className="ml-2 text-xs font-semibold underline text-gray-600 dark:text-gray-300">
                 Clear
               </Link>
             ) : null}
@@ -433,7 +507,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
         {/* page size selector (no JS) */}
         <form action="/admin/quotes" method="GET" className="flex items-center gap-2">
-          {/* preserve filters */}
           {filterParams.view ? <input type="hidden" name="view" value={String(filterParams.view)} /> : null}
           {!filterParams.view && unreadOnly ? <input type="hidden" name="unread" value="1" /> : null}
           {!filterParams.view && inProgressOnly ? <input type="hidden" name="in_progress" value="1" /> : null}
@@ -464,9 +537,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       {/* List */}
       <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
         {rows.length === 0 ? (
-          <div className="p-6 text-sm text-gray-700 dark:text-gray-300">
-            No quotes match these filters.
-          </div>
+          <div className="p-6 text-sm text-gray-700 dark:text-gray-300">No quotes match these filters.</div>
         ) : (
           <ul className="divide-y divide-gray-200 dark:divide-gray-800">
             {rows.map((r) => {
@@ -474,10 +545,18 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
               const st = normalizeStage(r.stage);
               const unread = !r.isRead;
 
+              const ai = normalizeAiOutput(r.output);
+              const estLow = asNumber(ai.estimateLow);
+              const estHigh = asNumber(ai.estimateHigh);
+
+              const conf = String(ai.confidence ?? "").toLowerCase().trim();
+              const confTone = conf === "high" ? "green" : conf === "medium" ? "yellow" : conf === "low" ? "red" : "gray";
+
+              const inspTone =
+                ai.inspectionRequired === true ? "yellow" : ai.inspectionRequired === false ? "green" : "gray";
+
               const quoteId = String((r as any)?.id ?? "");
-              const quoteHref = quoteId
-                ? `/admin/quotes/${encodeURIComponent(quoteId)}`
-                : "/admin/quotes";
+              const quoteHref = quoteId ? `/admin/quotes/${encodeURIComponent(quoteId)}` : "/admin/quotes";
 
               const wantsConfirm = confirmDelete && deleteId && deleteId === r.id;
               const anchor = `q-${r.id}`;
@@ -515,20 +594,43 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
                         {stageChip(st)}
                         {renderChip(r.renderStatus)}
+
+                        {/* ✅ AI badges */}
+                        {ai.confidence ? chip(`Confidence: ${String(ai.confidence)}`, confTone as any) : null}
+                        {ai.inspectionRequired != null
+                          ? chip(ai.inspectionRequired ? "Inspection" : "No inspection", inspTone as any)
+                          : null}
                       </div>
 
                       <div className="mt-1 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
-                        {lead.phone ? (
-                          <span className="font-mono">{lead.phone}</span>
-                        ) : (
-                          <span className="italic">No phone</span>
-                        )}
+                        {lead.phone ? <span className="font-mono">{lead.phone}</span> : <span className="italic">No phone</span>}
                         {lead.email ? (
                           <>
                             <span>·</span>
                             <span className="font-mono">{lead.email}</span>
                           </>
                         ) : null}
+                      </div>
+
+                      {/* ✅ Presentable AI preview */}
+                      <div className="mt-3 grid gap-2">
+                        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          {estLow == null && estHigh == null ? (
+                            <span className="text-gray-500 dark:text-gray-400">No estimate yet</span>
+                          ) : (
+                            <>
+                              {money(estLow)} – {money(estHigh)}
+                            </>
+                          )}
+                        </div>
+
+                        {ai.summary ? (
+                          <div className="text-sm text-gray-700 dark:text-gray-200 line-clamp-2">
+                            {String(ai.summary)}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-gray-500 dark:text-gray-400 italic">No AI summary yet.</div>
+                        )}
                       </div>
 
                       <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
