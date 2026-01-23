@@ -11,15 +11,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Save tenant settings (industry, URLs, rendering settings, reporting prefs, etc.)
+ * Save tenant settings (industry, URLs, rendering settings, reporting prefs, email prefs, etc.)
  *
- * IMPORTANT:
- * - Clerk auth() is async in this repo setup -> must await.
- * - Do NOT use db.query.* (db isn't typed with schema generics). Use select/from/where.
- *
- * DB columns (confirmed):
- * tenant_settings.reporting_timezone (text)
- * tenant_settings.week_starts_on (integer)   // 1=Monday ... 7=Sunday (we'll use 1 default)
+ * Goals:
+ * - Allow PARTIAL updates (setup wizard pages shouldn't need to send every field).
+ * - Require industryKey ONLY when creating tenant_settings for the first time.
+ * - Preserve existing values when fields are omitted.
  */
 
 const Body = z.object({
@@ -69,11 +66,11 @@ const Body = z.object({
   aiRenderingEnabled: z.boolean().optional().nullable(),
   ai_rendering_enabled: z.boolean().optional().nullable(),
 
-  // reporting prefs (NEW)
+  // reporting prefs
   reportingTimezone: z.string().optional().nullable(),
   reporting_timezone: z.string().optional().nullable(),
 
-  // 1..7 (Monday..Sunday). We'll default to 1
+  // 1..7 (Monday..Sunday)
   weekStartsOn: z.number().int().min(1).max(7).optional().nullable(),
   week_starts_on: z.number().int().min(1).max(7).optional().nullable(),
 });
@@ -93,14 +90,22 @@ function pick<T>(obj: any, camel: string, snake: string): T | undefined {
   return undefined;
 }
 
+function normalizeEmail(v: string | null | undefined) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s ? s : null;
+}
+
+function looksLikeEmail(v: string | null) {
+  if (!v) return true; // allow null/empty
+  // lightweight validation; real validation happens at send-time too
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
     if (!userId) {
-      return NextResponse.json(
-        { ok: false, error: "UNAUTHENTICATED" },
-        { status: 401 }
-      );
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
     const json = await req.json().catch(() => null);
@@ -114,18 +119,7 @@ export async function POST(req: Request) {
     }
 
     const data: any = parsed.data;
-
     const tenantSlug = String(data.tenantSlug).trim();
-
-    const industryKey =
-      pick<string>(data, "industryKey", "industry_key")?.trim() ?? "";
-
-    if (!industryKey) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_INDUSTRY_KEY" },
-        { status: 400 }
-      );
-    }
 
     // Resolve tenant owned by this user (slug is unique)
     const tenantRows = await db
@@ -140,53 +134,129 @@ export async function POST(req: Request) {
 
     const tenant = tenantRows[0] ?? null;
     if (!tenant) {
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
+    }
+
+    // Load existing settings (so we can merge partial updates safely)
+    const existing = await db
+      .select({
+        tenantId: tenantSettings.tenantId,
+        industryKey: tenantSettings.industryKey,
+        redirectUrl: tenantSettings.redirectUrl,
+        thankYouUrl: tenantSettings.thankYouUrl,
+
+        businessName: tenantSettings.businessName,
+        leadToEmail: tenantSettings.leadToEmail,
+        resendFromEmail: tenantSettings.resendFromEmail,
+
+        aiMode: tenantSettings.aiMode,
+        pricingEnabled: tenantSettings.pricingEnabled,
+        renderingEnabled: tenantSettings.renderingEnabled,
+        renderingStyle: tenantSettings.renderingStyle,
+        renderingNotes: tenantSettings.renderingNotes,
+        renderingMaxPerDay: tenantSettings.renderingMaxPerDay,
+        renderingCustomerOptInRequired: tenantSettings.renderingCustomerOptInRequired,
+        aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
+
+        reportingTimezone: tenantSettings.reportingTimezone,
+        weekStartsOn: tenantSettings.weekStartsOn,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenant.id))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    // Industry key: only required on FIRST insert (no existing row)
+    const incomingIndustryKey = pick<string>(data, "industryKey", "industry_key")?.trim();
+    const industryKey = incomingIndustryKey ?? existing?.industryKey ?? "";
+
+    if (!industryKey) {
       return NextResponse.json(
-        { ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" },
-        { status: 404 }
+        { ok: false, error: "MISSING_INDUSTRY_KEY", message: "industryKey is required the first time settings are saved." },
+        { status: 400 }
       );
     }
 
     const redirectUrlRaw = pick<string | null>(data, "redirectUrl", "redirect_url");
     const thankYouUrlRaw = pick<string | null>(data, "thankYouUrl", "thank_you_url");
 
-    const redirectUrl = normalizeUrl(redirectUrlRaw ?? null);
-    const thankYouUrl = normalizeUrl(thankYouUrlRaw ?? null);
+    const redirectUrl =
+      redirectUrlRaw !== undefined ? normalizeUrl(redirectUrlRaw) : existing?.redirectUrl ?? null;
 
-    const businessName = pick<string | null>(data, "businessName", "business_name") ?? null;
-    const leadToEmail = pick<string | null>(data, "leadToEmail", "lead_to_email") ?? null;
+    const thankYouUrl =
+      thankYouUrlRaw !== undefined ? normalizeUrl(thankYouUrlRaw) : existing?.thankYouUrl ?? null;
+
+    const businessNameRaw = pick<string | null>(data, "businessName", "business_name");
+    const businessName =
+      businessNameRaw !== undefined ? (String(businessNameRaw ?? "").trim() || null) : existing?.businessName ?? null;
+
+    const leadToEmailRaw = pick<string | null>(data, "leadToEmail", "lead_to_email");
+    const leadToEmail =
+      leadToEmailRaw !== undefined ? normalizeEmail(leadToEmailRaw) : existing?.leadToEmail ?? null;
+
+    const resendFromEmailRaw = pick<string | null>(data, "resendFromEmail", "resend_from_email");
     const resendFromEmail =
-      pick<string | null>(data, "resendFromEmail", "resend_from_email") ?? null;
+      resendFromEmailRaw !== undefined ? normalizeEmail(resendFromEmailRaw) : existing?.resendFromEmail ?? null;
 
-    const aiMode = pick<string | null>(data, "aiMode", "ai_mode") ?? null;
+    if (!looksLikeEmail(leadToEmail)) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." },
+        { status: 400 }
+      );
+    }
+    if (!looksLikeEmail(resendFromEmail)) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." },
+        { status: 400 }
+      );
+    }
 
+    const aiModeRaw = pick<string | null>(data, "aiMode", "ai_mode");
+    const aiMode = aiModeRaw !== undefined ? (aiModeRaw ?? null) : existing?.aiMode ?? null;
+
+    const pricingEnabledRaw = pick<boolean | null>(data, "pricingEnabled", "pricing_enabled");
     const pricingEnabled =
-      pick<boolean | null>(data, "pricingEnabled", "pricing_enabled") ?? null;
+      pricingEnabledRaw !== undefined ? pricingEnabledRaw : existing?.pricingEnabled ?? null;
 
+    const renderingEnabledRaw = pick<boolean | null>(data, "renderingEnabled", "rendering_enabled");
     const renderingEnabled =
-      pick<boolean | null>(data, "renderingEnabled", "rendering_enabled") ?? null;
+      renderingEnabledRaw !== undefined ? renderingEnabledRaw : existing?.renderingEnabled ?? null;
 
-    const renderingStyle = pick<string | null>(data, "renderingStyle", "rendering_style") ?? null;
-    const renderingNotes = pick<string | null>(data, "renderingNotes", "rendering_notes") ?? null;
+    const renderingStyleRaw = pick<string | null>(data, "renderingStyle", "rendering_style");
+    const renderingStyle =
+      renderingStyleRaw !== undefined ? (renderingStyleRaw ?? null) : existing?.renderingStyle ?? null;
 
+    const renderingNotesRaw = pick<string | null>(data, "renderingNotes", "rendering_notes");
+    const renderingNotes =
+      renderingNotesRaw !== undefined ? (renderingNotesRaw ?? null) : existing?.renderingNotes ?? null;
+
+    const renderingMaxPerDayRaw = pick<number | null>(data, "renderingMaxPerDay", "rendering_max_per_day");
     const renderingMaxPerDay =
-      pick<number | null>(data, "renderingMaxPerDay", "rendering_max_per_day") ?? null;
+      renderingMaxPerDayRaw !== undefined ? renderingMaxPerDayRaw : existing?.renderingMaxPerDay ?? null;
 
+    const renderingCustomerOptInRequiredRaw = pick<boolean | null>(
+      data,
+      "renderingCustomerOptInRequired",
+      "rendering_customer_opt_in_required"
+    );
     const renderingCustomerOptInRequired =
-      pick<boolean | null>(
-        data,
-        "renderingCustomerOptInRequired",
-        "rendering_customer_opt_in_required"
-      ) ?? null;
+      renderingCustomerOptInRequiredRaw !== undefined
+        ? renderingCustomerOptInRequiredRaw
+        : existing?.renderingCustomerOptInRequired ?? null;
 
+    const aiRenderingEnabledRaw = pick<boolean | null>(data, "aiRenderingEnabled", "ai_rendering_enabled");
     const aiRenderingEnabled =
-      pick<boolean | null>(data, "aiRenderingEnabled", "ai_rendering_enabled") ?? null;
+      aiRenderingEnabledRaw !== undefined ? aiRenderingEnabledRaw : existing?.aiRenderingEnabled ?? null;
 
+    const reportingTimezoneRaw = pick<string | null>(data, "reportingTimezone", "reporting_timezone");
     const reportingTimezone =
-      pick<string | null>(data, "reportingTimezone", "reporting_timezone") ??
-      "America/New_York";
+      reportingTimezoneRaw !== undefined
+        ? (String(reportingTimezoneRaw ?? "").trim() || null)
+        : existing?.reportingTimezone ?? "America/New_York";
 
+    const weekStartsOnRaw = pick<number | null>(data, "weekStartsOn", "week_starts_on");
     const weekStartsOn =
-      pick<number | null>(data, "weekStartsOn", "week_starts_on") ?? 1; // Monday default
+      weekStartsOnRaw !== undefined ? (weekStartsOnRaw ?? null) : existing?.weekStartsOn ?? 1;
 
     // Upsert tenant_settings (tenant_id is PK)
     await db
