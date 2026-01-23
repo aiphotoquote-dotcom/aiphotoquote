@@ -44,11 +44,13 @@ function SectionHeader({
 }) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-      <div>
+      <div className="min-w-0">
         <h1 className="text-2xl font-semibold">{title}</h1>
-        {subtitle ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{subtitle}</p> : null}
+        {subtitle ? (
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{subtitle}</p>
+        ) : null}
       </div>
-      {right ? <div>{right}</div> : null}
+      {right ? <div className="shrink-0">{right}</div> : null}
     </div>
   );
 }
@@ -70,12 +72,99 @@ function CodeBlock({
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{description}</div>
         </div>
 
-        <CopyButtonClient text={code} />
+        <div className="shrink-0">
+          <CopyButtonClient text={code} />
+        </div>
       </div>
 
-      <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
+      {/* Critical: contain overflow HERE, never on the page */}
+      <div className="mt-4 overflow-x-auto rounded-xl border border-gray-200 bg-black dark:border-gray-800">
+        <pre className="min-w-full p-4 text-xs text-white whitespace-pre">
 {code}
-      </pre>
+        </pre>
+      </div>
+
+      <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+        Tip: If this looks cut off in your editor, scroll horizontally inside the code box (not the whole page).
+      </div>
+    </div>
+  );
+}
+
+function ButtonOptions({
+  quoteUrl,
+}: {
+  quoteUrl: string;
+}) {
+  const label = "Get an AI Photo Quote";
+
+  const btnPrimary = `<a href="${quoteUrl}" target="_blank" rel="noopener"
+  style="display:inline-block;background:#111;color:#fff;padding:12px 16px;border-radius:12px;text-decoration:none;font-weight:700;">
+  ${label}
+</a>`;
+
+  const btnOutline = `<a href="${quoteUrl}" target="_blank" rel="noopener"
+  style="display:inline-block;background:transparent;color:#111;padding:12px 16px;border-radius:12px;text-decoration:none;font-weight:700;border:2px solid #111;">
+  ${label}
+</a>`;
+
+  const btnDarkPill = `<a href="${quoteUrl}" target="_blank" rel="noopener"
+  style="display:inline-flex;align-items:center;gap:10px;background:#0b0b0b;color:#fff;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:800;letter-spacing:.2px;">
+  <span style="display:inline-block;width:10px;height:10px;border-radius:999px;background:#22c55e;"></span>
+  ${label}
+</a>`;
+
+  const btnSoft = `<a href="${quoteUrl}" target="_blank" rel="noopener"
+  style="display:inline-block;background:#f3f4f6;color:#111;padding:12px 16px;border-radius:12px;text-decoration:none;font-weight:800;border:1px solid rgba(0,0,0,.12);">
+  ${label}
+</a>`;
+
+  const btnCompact = `<a href="${quoteUrl}" target="_blank" rel="noopener"
+  style="display:inline-block;background:#111;color:#fff;padding:10px 12px;border-radius:10px;text-decoration:none;font-weight:800;font-size:14px;">
+  ${label}
+</a>`;
+
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="text-lg font-semibold">Button options</div>
+          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            Pick one button style and paste into your site. These are plain HTML + inline CSS, so they work almost everywhere.
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        <CodeBlock
+          title="Primary (recommended)"
+          description="Clean, bold button. Works on light backgrounds."
+          code={btnPrimary}
+        />
+        <CodeBlock
+          title="Outline"
+          description="Great if you already have a dark background section."
+          code={btnOutline}
+        />
+        <CodeBlock
+          title="Dark pill"
+          description="Sticky/floating CTA feel with a green dot."
+          code={btnDarkPill}
+        />
+        <CodeBlock
+          title="Soft"
+          description="Subtle style for sidebars or secondary CTAs."
+          code={btnSoft}
+        />
+      </div>
+
+      <div className="mt-4">
+        <CodeBlock
+          title="Compact"
+          description="Smaller size for nav bars / tight layouts."
+          code={btnCompact}
+        />
+      </div>
     </div>
   );
 }
@@ -144,7 +233,9 @@ export default async function WidgetSetupPage() {
     ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}`
     : `/q/${encodeURIComponent(tenantSlug)}`;
 
-  const directLinkHtml = `<a href="${quoteUrl}" target="_blank" rel="noopener">Get a Photo Quote</a>`;
+  const linkText = "Get an AI Photo Quote";
+
+  const directLinkHtml = `<a href="${quoteUrl}" target="_blank" rel="noopener">${linkText}</a>`;
 
   const iframeHtml = `<iframe
   src="${quoteUrl}"
@@ -162,8 +253,8 @@ export default async function WidgetSetupPage() {
   if (!root) return;
 
   var btn = document.createElement("button");
-  btn.innerText = "Get a Photo Quote";
-  btn.style.cssText = "position:fixed;right:20px;bottom:20px;z-index:999999;padding:12px 16px;border-radius:999px;border:0;background:#111;color:#fff;font-weight:700;cursor:pointer;box-shadow:0 10px 30px rgba(0,0,0,.2);";
+  btn.innerText = ${JSON.stringify(linkText)};
+  btn.style.cssText = "position:fixed;right:20px;bottom:20px;z-index:999999;padding:12px 16px;border-radius:999px;border:0;background:#111;color:#fff;font-weight:800;cursor:pointer;box-shadow:0 10px 30px rgba(0,0,0,.2);";
   root.appendChild(btn);
 
   var overlay = document.createElement("div");
@@ -177,7 +268,7 @@ export default async function WidgetSetupPage() {
 
   var close = document.createElement("button");
   close.innerText = "Close";
-  close.style.cssText = "position:absolute;top:10px;right:10px;z-index:2;padding:8px 10px;border-radius:10px;border:1px solid rgba(0,0,0,.15);background:rgba(255,255,255,.9);font-weight:700;cursor:pointer;";
+  close.style.cssText = "position:absolute;top:10px;right:10px;z-index:2;padding:8px 10px;border-radius:10px;border:1px solid rgba(0,0,0,.15);background:rgba(255,255,255,.9);font-weight:800;cursor:pointer;";
   close.addEventListener("click", function () { overlay.style.display = "none"; });
 
   var iframe = document.createElement("iframe");
@@ -221,9 +312,10 @@ ${iframeHtml}`;
         }
       />
 
+      {/* Public URL */}
       <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
+          <div className="min-w-0">
             <div className="text-sm font-semibold">Your public quote URL</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
               This is the page your embeds point to.
@@ -233,7 +325,7 @@ ${iframeHtml}`;
           <Link
             href={`/q/${encodeURIComponent(tenantSlug)}`}
             target="_blank"
-            className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+            className="shrink-0 rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
           >
             Preview
           </Link>
@@ -241,20 +333,26 @@ ${iframeHtml}`;
 
         <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
           <div className="min-w-0 truncate font-mono text-xs text-gray-700 dark:text-gray-200">{quoteUrl}</div>
-          <CopyButtonClient text={quoteUrl} />
+          <div className="shrink-0">
+            <CopyButtonClient text={quoteUrl} />
+          </div>
         </div>
       </div>
 
-      <div className={cn("grid gap-6")}>
+      {/* Button options */}
+      <ButtonOptions quoteUrl={quoteUrl} />
+
+      {/* Embed options */}
+      <div className="grid gap-6">
         <CodeBlock
           title="Option 1: Simple link"
-          description="Best if you want a button/link in your nav or footer."
+          description="Best if you want a basic hyperlink in your nav, footer, or body text."
           code={directLinkHtml}
         />
 
         <CodeBlock
           title="Option 2: Embed inline (iframe)"
-          description="Best universal option. Use on any page where you want the form embedded."
+          description="Best universal option. Put this on any page where you want the form embedded."
           code={iframeHtml}
         />
 
