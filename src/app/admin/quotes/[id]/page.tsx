@@ -23,7 +23,6 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
   ].filter(Boolean) as string[];
-
   return candidates[0] || null;
 }
 
@@ -42,8 +41,10 @@ function formatUSPhone(raw: string) {
 }
 
 function pickLead(input: any) {
+  // New normalized shape (preferred)
   const c =
     input?.customer ??
+    // back-compat shapes
     input?.contact ??
     input?.customer_context?.customer ??
     input?.customer_context ??
@@ -90,13 +91,10 @@ function pickCustomerNotes(input: any) {
   return s || "";
 }
 
-/**
- * IMPORTANT: Customer-submitted photos come from input.images/photos/etc.
- * Render images should NOT come from input.* (or you’ll confuse the two).
- */
-function pickSubmittedPhotos(input: any): QuotePhoto[] {
+function pickPhotos(input: any): QuotePhoto[] {
   const out: QuotePhoto[] = [];
 
+  // 1) input.images: [{ url, shotType? }]
   const images = Array.isArray(input?.images) ? input.images : null;
   if (images) {
     for (const it of images) {
@@ -105,6 +103,7 @@ function pickSubmittedPhotos(input: any): QuotePhoto[] {
     }
   }
 
+  // 2) input.photos: [{ url }]
   const photos = Array.isArray(input?.photos) ? input.photos : null;
   if (photos) {
     for (const it of photos) {
@@ -113,11 +112,13 @@ function pickSubmittedPhotos(input: any): QuotePhoto[] {
     }
   }
 
+  // 3) input.imageUrls: [string]
   const imageUrls = Array.isArray(input?.imageUrls) ? input.imageUrls : null;
   if (imageUrls) {
     for (const url of imageUrls) if (url) out.push({ url: String(url) });
   }
 
+  // 4) input.customer_context.images: [{url}]
   const ccImages = Array.isArray(input?.customer_context?.images) ? input.customer_context.images : null;
   if (ccImages) {
     for (const it of ccImages) {
@@ -126,6 +127,7 @@ function pickSubmittedPhotos(input: any): QuotePhoto[] {
     }
   }
 
+  // de-dupe by url, preserve order
   const seen = new Set<string>();
   return out.filter((p) => {
     if (!p.url) return false;
@@ -150,7 +152,7 @@ type StageKey = (typeof STAGES)[number]["key"];
 
 function normalizeStage(s: unknown): StageKey | "read" {
   const v = String(s ?? "").toLowerCase().trim();
-  if (v === "read") return "read"; // legacy value
+  if (v === "read") return "read"; // legacy value that may exist in DB
   const hit = STAGES.find((x) => x.key === v)?.key;
   return (hit ?? "new") as StageKey;
 }
@@ -167,7 +169,6 @@ function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" 
       : tone === "blue"
       ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
       : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
-
   return <span className={cn(base, cls)}>{label}</span>;
 }
 
@@ -177,41 +178,18 @@ function renderChip(renderStatusRaw: unknown) {
   if (s === "rendered") return chip("Rendered", "green");
   if (s === "failed") return chip("Render failed", "red");
   if (s === "queued" || s === "running") return chip(s === "queued" ? "Queued" : "Rendering…", "blue");
+  if (s === "not_requested") return chip("No render requested", "gray");
   return chip(s, "gray");
 }
 
-function pickRenderUrlFromAnywhere(row: any): string | null {
-  // Prefer DB column (most correct)
-  const direct =
-    row?.renderImageUrl ??
-    row?.render_image_url ??
-    row?.renderUrl ??
-    row?.render_url ??
-    null;
-
-  if (typeof direct === "string" && direct.startsWith("http")) return direct;
-
-  // Sometimes render is stored inside output
-  const fromOutput =
-    row?.output?.render_image_url ??
-    row?.output?.renderImageUrl ??
-    row?.output?.render?.url ??
-    row?.output?.rendered?.url ??
-    row?.output?.render_result?.url ??
-    null;
-
-  if (typeof fromOutput === "string" && fromOutput.startsWith("http")) return fromOutput;
-
-  return null;
+function safeMoney(n: any) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  return v;
 }
 
-function normalizeAiOutput(row: any): any {
-  // New path (your submit route): quoteLogs.output
-  if (row?.output && typeof row.output === "object") return row.output;
-
-  // Fallback legacy paths:
-  const input = row?.input ?? null;
-  return input?.ai_output ?? input?.ai_assessment ?? input?.assessment ?? input?.ai ?? input?.result ?? null;
+function formatUSD(n: number) {
+  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 }
 
 type PageProps = {
@@ -236,6 +214,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
+  // fallback tenant (owner)
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -250,19 +229,21 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId = tenantIdMaybe;
 
-  // ✅ SELECT output + render image url if available in schema
-  // Using "as any" so this compiles even if your drizzle schema types lag behind.
+  // ✅ IMPORTANT: include output + renderImageUrl (latest results live in output)
   const row = await db
     .select({
       id: quoteLogs.id,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
-      output: (quoteLogs as any).output,
+      output: quoteLogs.output,
       stage: quoteLogs.stage,
       isRead: quoteLogs.isRead,
-      renderStatus: (quoteLogs as any).renderStatus,
-      renderImageUrl: (quoteLogs as any).renderImageUrl,
-      renderOptIn: (quoteLogs as any).renderOptIn,
+      renderOptIn: quoteLogs.renderOptIn,
+      renderStatus: quoteLogs.renderStatus,
+      renderImageUrl: quoteLogs.renderImageUrl,
+      renderError: quoteLogs.renderError,
+      renderPrompt: quoteLogs.renderPrompt,
+      renderedAt: quoteLogs.renderedAt,
     })
     .from(quoteLogs)
     .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
@@ -272,7 +253,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   if (!row) redirect("/admin/quotes");
 
   // Track UI-state for read/unread (because we update DB after fetch)
-  let isRead = Boolean((row as any).isRead);
+  let isRead = Boolean(row.isRead);
 
   // Auto-mark read on open (unless user explicitly marked unread and we redirected back with skip flag)
   if (!skipAutoRead && !isRead) {
@@ -283,19 +264,57 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     isRead = true;
   }
 
-  const lead = pickLead((row as any).input);
-  const notes = pickCustomerNotes((row as any).input);
-  const photos = pickSubmittedPhotos((row as any).input);
+  const lead = pickLead(row.input);
+  const notes = pickCustomerNotes(row.input);
+  const photos = pickPhotos(row.input);
 
-  const stageNorm = normalizeStage((row as any).stage);
+  const stageNorm = normalizeStage(row.stage);
   const stageLabel =
     stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  // ✅ AI output comes from DB "output" (new behavior)
-  const aiOutput = normalizeAiOutput(row);
+  // ✅ Latest AI output is stored in quote_logs.output
+  const ai = (row.output ?? null) as any;
 
-  // ✅ Render URL should come from DB first, then output fallback
-  const renderUrl = pickRenderUrlFromAnywhere(row);
+  // Try a few common shapes (based on the payload you pasted)
+  const aiAssessment = ai?.assessment ?? ai?.output?.assessment ?? ai?.output ?? ai ?? null;
+  const aiEstimate =
+    ai?.estimate ??
+    ai?.output?.estimate ??
+    aiAssessment?.estimate ??
+    null;
+
+  const estLow = safeMoney(aiEstimate?.low ?? aiAssessment?.estimate?.low);
+  const estHigh = safeMoney(aiEstimate?.high ?? aiAssessment?.estimate?.high);
+
+  const confidence =
+    aiAssessment?.confidence ?? ai?.output?.confidence ?? ai?.confidence ?? null;
+
+  const inspectionRequired =
+    typeof aiAssessment?.inspection_required === "boolean"
+      ? aiAssessment.inspection_required
+      : typeof ai?.output?.inspection_required === "boolean"
+      ? ai.output.inspection_required
+      : typeof ai?.inspection_required === "boolean"
+      ? ai.inspection_required
+      : null;
+
+  const summary =
+    aiAssessment?.summary ??
+    ai?.output?.summary ??
+    ai?.summary ??
+    "";
+
+  const questions: string[] = Array.isArray(aiAssessment?.questions)
+    ? aiAssessment.questions.map((x: any) => String(x))
+    : [];
+
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
+    ? aiAssessment.assumptions.map((x: any) => String(x))
+    : [];
+
+  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
+    ? aiAssessment.visible_scope.map((x: any) => String(x))
+    : [];
 
   async function setStage(formData: FormData) {
     "use server";
@@ -334,59 +353,69 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-      {/* Top row */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
             ← Back to quotes
           </Link>
-
           <h1 className="mt-2 text-2xl font-semibold">Quote review</h1>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Submitted {(row as any).createdAt ? new Date((row as any).createdAt).toLocaleString() : "—"}
+            Submitted {row.createdAt ? new Date(row.createdAt).toLocaleString() : "—"}
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
-          {renderChip((row as any).renderStatus)}
+        {/* ✅ Presentable “circles” area (grouped status bar) */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Primary status */}
+            {isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
+            {chip(`Stage: ${stageLabel}`, stageNorm === "new" ? "blue" : "gray")}
+            {renderChip(row.renderStatus)}
+            {confidence ? chip(`Confidence: ${String(confidence)}`, "gray") : null}
+            {inspectionRequired === true ? chip("Inspection required", "yellow") : null}
+          </div>
 
-          {isRead ? (
-            <form action={markUnread}>
-              <button
-                type="submit"
-                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-              >
-                Mark unread
-              </button>
-            </form>
-          ) : (
-            <form action={markRead}>
-              <button
-                type="submit"
-                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-              >
-                Mark read
-              </button>
-            </form>
-          )}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {isRead ? (
+              <form action={markUnread}>
+                <button
+                  type="submit"
+                  className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                >
+                  Mark unread
+                </button>
+              </form>
+            ) : (
+              <form action={markRead}>
+                <button
+                  type="submit"
+                  className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                >
+                  Mark read
+                </button>
+              </form>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Lead card */}
+      {/* Lead / Contact card */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-semibold">{lead.name}</h2>
-              {chip(stageLabel, stageNorm === "new" ? "blue" : "gray")}
             </div>
 
-            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-700 dark:text-gray-200">
+            <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-gray-700 dark:text-gray-200">
               {lead.phone ? (
-                <span className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-sm dark:border-gray-800 dark:bg-black">
+                <a
+                  href={`tel:${lead.phoneDigits ?? digitsOnly(lead.phone)}`}
+                  className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 font-mono text-sm hover:bg-white dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
+                >
                   {lead.phone}
-                </span>
+                </a>
               ) : (
                 <span className="italic text-gray-500">No phone</span>
               )}
@@ -439,7 +468,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* Customer notes */}
+      {/* ✅ Customer notes between contact + photos */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div>
           <h3 className="text-lg font-semibold">Customer notes</h3>
@@ -447,71 +476,149 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
 
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? (
-            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
-          ) : (
-            <div className="italic text-gray-500">No notes provided.</div>
-          )}
+          {notes ? <div className="whitespace-pre-wrap leading-relaxed">{notes}</div> : <div className="italic text-gray-500">No notes provided.</div>}
         </div>
       </section>
 
-      {/* Submitted photos gallery */}
+      {/* Customer submitted photos */}
       <QuotePhotoGallery photos={photos} />
 
-      {/* Details section (AI output first, then rendering) */}
+      {/* ✅ Details: AI output first, then render below */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <h3 className="text-lg font-semibold">Details</h3>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-          AI output first. If a rendering exists, it’s shown below.
-        </p>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-lg font-semibold">Details</h3>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              AI assessment first. If a render exists, it’s shown below.
+            </p>
+          </div>
+          {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
+        </div>
 
-        <div className="mt-4 grid gap-4 lg:grid-cols-2">
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-            <div className="text-sm font-semibold">AI output (from DB output)</div>
-
-            <div className="mt-3">
-              {aiOutput ? (
-                <pre className="overflow-auto rounded-lg bg-black p-3 text-xs text-white dark:bg-gray-950">
-{JSON.stringify(aiOutput, null, 2)}
-                </pre>
-              ) : (
-                <div className="text-sm text-gray-600 dark:text-gray-300 italic">
-                  No AI output found on this quote yet.
-                </div>
-              )}
+        <div className="mt-5 grid gap-4">
+          {/* AI Assessment (pretty, not raw JSON) */}
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm font-semibold">AI assessment</div>
+              <div className="flex flex-wrap items-center gap-2">
+                {estLow != null && estHigh != null ? chip(`${formatUSD(estLow)} – ${formatUSD(estHigh)}`, "green") : null}
+                {confidence ? chip(`Confidence: ${String(confidence)}`, "gray") : null}
+                {inspectionRequired === true ? chip("Inspection required", "yellow") : null}
+              </div>
             </div>
+
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div>
+                <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">SUMMARY</div>
+                <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
+                  {summary ? summary : <span className="italic text-gray-500">No summary found.</span>}
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                {questions.length ? (
+                  <div>
+                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">QUESTIONS</div>
+                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                      {questions.slice(0, 8).map((q, i) => (
+                        <li key={i}>{q}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {visibleScope.length ? (
+                  <div>
+                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">VISIBLE SCOPE</div>
+                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                      {visibleScope.slice(0, 8).map((q, i) => (
+                        <li key={i}>{q}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {assumptions.length ? (
+                  <div>
+                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">ASSUMPTIONS</div>
+                    <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
+                      {assumptions.slice(0, 8).map((q, i) => (
+                        <li key={i}>{q}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {!aiAssessment ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">
+                    No AI output found yet (quoteLogs.output is empty).
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {/* Optional raw AI JSON */}
+            <details className="mt-4">
+              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                Raw AI JSON (debug)
+              </summary>
+              <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
+{JSON.stringify(row.output ?? {}, null, 2)}
+              </pre>
+            </details>
           </div>
 
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-            <div className="text-sm font-semibold">Rendering</div>
+          {/* Render section */}
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm font-semibold">Rendering</div>
+              <div className="flex flex-wrap items-center gap-2">
+                {renderChip(row.renderStatus)}
+                {row.renderedAt ? chip(new Date(row.renderedAt).toLocaleString(), "gray") : null}
+              </div>
+            </div>
 
-            <div className="mt-3">
-              {renderUrl ? (
-                <a href={renderUrl} target="_blank" rel="noreferrer" className="block">
+            <div className="mt-4">
+              {row.renderImageUrl ? (
+                <a href={row.renderImageUrl} target="_blank" rel="noreferrer" className="block">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={renderUrl}
+                    src={row.renderImageUrl}
                     alt="AI render"
-                    className="w-full rounded-lg border border-gray-200 object-contain dark:border-gray-800"
+                    className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                   />
-                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
-                    Click to open original
-                  </div>
+                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
                 </a>
               ) : (
-                <div className="text-sm text-gray-600 dark:text-gray-300 italic">
-                  No render available for this quote.
-                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-300 italic">No render available for this quote.</div>
               )}
+
+              {row.renderError ? (
+                <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                  {row.renderError}
+                </div>
+              ) : null}
+
+              {row.renderPrompt ? (
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    Render prompt (debug)
+                  </summary>
+                  <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
+{String(row.renderPrompt)}
+                  </pre>
+                </details>
+              ) : null}
             </div>
           </div>
         </div>
       </section>
 
-      {/* Raw payload (admin-only debug) */}
+      {/* Raw submission payload (admin-only debug) */}
       <details className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold">Raw submission payload</summary>
         <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
-{JSON.stringify((row as any).input ?? {}, null, 2)}
+{JSON.stringify(row.input ?? {}, null, 2)}
         </pre>
       </details>
     </div>
