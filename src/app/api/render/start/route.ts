@@ -3,12 +3,14 @@ import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import crypto from "crypto";
-import { Resend } from "resend";
 import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
+
+import { sendEmail } from "@/lib/email";
+import { buildRenderReadyEmail } from "@/lib/email/templates/renderReady";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,14 +54,7 @@ function safeJsonParse(v: any) {
   }
 }
 
-function esc(s: unknown) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
+// ---- DB helpers ----
 
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
@@ -112,19 +107,14 @@ async function getTenantEmailSettings(tenantId: string) {
 function pickRenderOptInFromRecord(args: { row: any; renderingCols: boolean }) {
   const { row, renderingCols } = args;
 
-  // Prefer explicit column if it exists
   if (renderingCols && typeof row?.render_opt_in === "boolean") return row.render_opt_in;
 
-  // Fall back to input JSON stored in quote_logs.input
   const input = safeJsonParse(row?.input) ?? {};
   if (typeof input?.render_opt_in === "boolean") return input.render_opt_in;
   if (typeof input?.customer_context?.render_opt_in === "boolean") return input.customer_context.render_opt_in;
 
-  // Fall back to output meta
   const output = safeJsonParse(row?.output) ?? {};
   if (typeof output?.meta?.render_opt_in === "boolean") return output.meta.render_opt_in;
-
-  // Fall back to normalized output shape
   if (typeof output?.output?.render_opt_in === "boolean") return output.output.render_opt_in;
 
   return false;
@@ -169,7 +159,6 @@ async function storeRenderResultBestEffort(args: {
   const { quoteLogId, imageUrl, error, prompt } = args;
   const renderedAtIso = new Date().toISOString();
 
-  // First try dedicated columns if present
   try {
     await db.execute(sql`
       update quote_logs
@@ -189,7 +178,6 @@ async function storeRenderResultBestEffort(args: {
     if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
   }
 
-  // Fallback: merge into output.rendering
   try {
     const r = await db.execute(sql`
       select output
@@ -219,49 +207,24 @@ async function storeRenderResultBestEffort(args: {
   }
 }
 
-function renderRenderEmailHTML(args: {
-  businessName: string;
-  quoteLogId: string;
-  tenantSlug: string;
-  renderImageUrl: string;
-}) {
-  const { businessName, quoteLogId, tenantSlug, renderImageUrl } = args;
-
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
-    <h2 style="margin:0 0 8px;">AI Rendering Ready</h2>
-
-    <div style="margin:0 0 10px;color:#374151;">
-      <div><b>Tenant</b>: ${esc(tenantSlug)}</div>
-      <div><b>Quote ID</b>: ${esc(quoteLogId)}</div>
-    </div>
-
-    <div style="margin:14px 0;">
-      <img src="${esc(renderImageUrl)}" alt="AI concept rendering"
-        style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb" />
-    </div>
-
-    <div style="margin-top:10px;color:#6b7280;">
-      — ${esc(businessName)}
-    </div>
-  </div>`;
-}
-
-async function sendRenderEmailsIfConfigured(args: {
+// NEW: provider-agnostic email send (Standard mode via Resend adapter)
+async function sendRenderEmailsViaAbstraction(args: {
+  tenantId: string;
   tenantSlug: string;
   quoteLogId: string;
   customerEmail: string | null;
-  tenantEmailSettings: { businessName: string | null; leadToEmail: string | null; resendFromEmail: string | null };
   renderImageUrl: string;
 }) {
-  const resendKey = process.env.RESEND_API_KEY || "";
-  const { businessName, leadToEmail, resendFromEmail } = args.tenantEmailSettings;
+  const { businessName, leadToEmail, resendFromEmail } = await getTenantEmailSettings(args.tenantId);
+  const resendKeyPresent = !!process.env.RESEND_API_KEY?.trim();
+
+  const configured = Boolean(resendKeyPresent && businessName && leadToEmail && resendFromEmail);
 
   const result = {
-    configured: Boolean(resendKey && businessName && leadToEmail && resendFromEmail),
+    configured,
     lead: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
     customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    missingEnv: { RESEND_API_KEY: !resendKey },
+    missingEnv: { RESEND_API_KEY: !resendKeyPresent },
     missingTenant: {
       business_name: !businessName,
       lead_to_email: !leadToEmail,
@@ -269,52 +232,54 @@ async function sendRenderEmailsIfConfigured(args: {
     },
   };
 
-  if (!result.configured) return result;
+  if (!configured) return result;
 
-  const resend = new Resend(resendKey);
-
-  const html = renderRenderEmailHTML({
+  const tpl = buildRenderReadyEmail({
     businessName: businessName!,
-    quoteLogId: args.quoteLogId,
     tenantSlug: args.tenantSlug,
+    quoteLogId: args.quoteLogId,
     renderImageUrl: args.renderImageUrl,
   });
 
-  // Lead email
+  // Lead
   try {
     result.lead.attempted = true;
-
-    const leadRes = await resend.emails.send({
-      from: resendFromEmail!,
-      to: [leadToEmail!],
-      subject: `AI Rendering Ready — Quote ${args.quoteLogId}`,
-      html,
+    const r = await sendEmail({
+      tenantId: args.tenantId,
+      context: { type: "lead_render", quoteLogId: args.quoteLogId },
+      message: {
+        from: resendFromEmail!,
+        to: [leadToEmail!],
+        subject: tpl.subjectLead,
+        html: tpl.html,
+      },
     });
 
-    const leadId = (leadRes as any)?.data?.id ?? null;
-    if ((leadRes as any)?.error) throw new Error((leadRes as any).error?.message ?? "Resend error");
+    if (!r.ok) throw new Error(r.error || "Send failed");
     result.lead.sent = true;
-    result.lead.id = leadId;
+    result.lead.id = r.providerMessageId ?? null;
   } catch (e: any) {
     result.lead.error = e?.message ?? String(e);
   }
 
-  // Customer receipt (only if we have a customer email)
+  // Customer
   if (args.customerEmail) {
     try {
       result.customer.attempted = true;
-
-      const custRes = await resend.emails.send({
-        from: resendFromEmail!,
-        to: [args.customerEmail],
-        subject: `Your AI Rendering Preview — Quote ${args.quoteLogId}`,
-        html,
+      const r = await sendEmail({
+        tenantId: args.tenantId,
+        context: { type: "customer_render", quoteLogId: args.quoteLogId },
+        message: {
+          from: resendFromEmail!,
+          to: [args.customerEmail],
+          subject: tpl.subjectCustomer,
+          html: tpl.html,
+        },
       });
 
-      const custId = (custRes as any)?.data?.id ?? null;
-      if ((custRes as any)?.error) throw new Error((custRes as any).error?.message ?? "Resend error");
+      if (!r.ok) throw new Error(r.error || "Send failed");
       result.customer.sent = true;
-      result.customer.id = custId;
+      result.customer.id = r.providerMessageId ?? null;
     } catch (e: any) {
       result.customer.error = e?.message ?? String(e);
     }
@@ -346,7 +311,6 @@ export async function POST(req: Request) {
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
     const tenantId = (tenant as any).id as string;
 
-    // Tenant gating (best-effort; if unknown treat as disabled)
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
@@ -398,86 +362,51 @@ export async function POST(req: Request) {
       return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
     }
 
-    // Idempotency: if already rendered, return stored url
+    // Idempotency
     if (renderingCols) {
       const status = String(quoteRow.render_status ?? "");
       const url = quoteRow.render_image_url ? String(quoteRow.render_image_url) : null;
       if (status === "rendered" && url) {
         return json(
-          {
-            ok: true,
-            quoteLogId,
-            skipped: true,
-            reason: "already_rendered",
-            imageUrl: url,
-            durationMs: Date.now() - startedAt,
-          },
+          { ok: true, quoteLogId, skipped: true, reason: "already_rendered", imageUrl: url, durationMs: Date.now() - startedAt },
           200,
           debugId
         );
       }
       if (status === "queued" && !url) {
         return json(
-          {
-            ok: true,
-            quoteLogId,
-            skipped: true,
-            reason: "already_queued",
-            durationMs: Date.now() - startedAt,
-          },
+          { ok: true, quoteLogId, skipped: true, reason: "already_queued", durationMs: Date.now() - startedAt },
           200,
           debugId
         );
       }
     } else {
-      // If we don't have columns, check output.rendering
       const out = safeJsonParse(quoteRow.output) ?? {};
       const r = out?.rendering ?? null;
       if (r?.status === "rendered" && r?.imageUrl) {
         return json(
-          {
-            ok: true,
-            quoteLogId,
-            skipped: true,
-            reason: "already_rendered",
-            imageUrl: String(r.imageUrl),
-            durationMs: Date.now() - startedAt,
-          },
+          { ok: true, quoteLogId, skipped: true, reason: "already_rendered", imageUrl: String(r.imageUrl), durationMs: Date.now() - startedAt },
           200,
           debugId
         );
       }
       if (r?.status === "queued") {
         return json(
-          {
-            ok: true,
-            quoteLogId,
-            skipped: true,
-            reason: "already_queued",
-            durationMs: Date.now() - startedAt,
-          },
+          { ok: true, quoteLogId, skipped: true, reason: "already_queued", durationMs: Date.now() - startedAt },
           200,
           debugId
         );
       }
     }
 
-    // Customer opt-in required
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
-      return json(
-        { ok: false, error: "NOT_OPTED_IN", message: "Customer did not opt in to AI rendering." },
-        400,
-        debugId
-      );
+      return json({ ok: false, error: "NOT_OPTED_IN", message: "Customer did not opt in to AI rendering." }, 400, debugId);
     }
 
-    // Pull images + context from stored input
+    // Pull images + context
     const input = safeJsonParse(quoteRow.input) ?? {};
-    const images: string[] = Array.isArray(input?.images)
-      ? input.images.map((x: any) => x?.url).filter(Boolean)
-      : [];
-
+    const images: string[] = Array.isArray(input?.images) ? input.images.map((x: any) => x?.url).filter(Boolean) : [];
     if (!images.length) {
       return json({ ok: false, error: "NO_IMAGES", message: "No images stored on quote log input." }, 400, debugId);
     }
@@ -499,29 +428,21 @@ export async function POST(req: Request) {
       category ? `Category: ${category}` : "",
       serviceType ? `Service type: ${serviceType}` : "",
       notes ? `Customer notes: ${notes}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    ].filter(Boolean).join("\n");
 
-    // mark queued (best-effort)
     const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
 
     const openai = new OpenAI({ apiKey: openAiKey });
 
     const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
     if (!blobToken) {
-      return json(
-        { ok: false, error: "BLOB_TOKEN_MISSING", message: "Missing BLOB_READ_WRITE_TOKEN env var." },
-        500,
-        debugId
-      );
+      return json({ ok: false, error: "BLOB_TOKEN_MISSING", message: "Missing BLOB_READ_WRITE_TOKEN env var." }, 500, debugId);
     }
 
     let finalImageUrl: string | null = null;
     let renderError: string | null = null;
 
     try {
-      // Generate (we upload ourselves via @vercel/blob put to avoid 413 + baseUrl issues)
       const img = await openai.images.generate({
         model: "gpt-image-1",
         prompt,
@@ -549,12 +470,7 @@ export async function POST(req: Request) {
       }
 
       const pathname = `renders/render-${quoteLogId}.png`;
-      const putRes = await put(pathname, bytes, {
-        access: "public",
-        contentType,
-        token: blobToken,
-      });
-
+      const putRes = await put(pathname, bytes, { access: "public", contentType, token: blobToken });
       finalImageUrl = putRes.url;
     } catch (e: any) {
       renderError = e?.message ?? "Render generation failed.";
@@ -567,67 +483,41 @@ export async function POST(req: Request) {
       prompt,
     });
 
-    // Send render emails AFTER we have a stable blob URL (best effort)
+    // NEW: emails via abstraction
     let renderEmail: any = null;
     if (!renderError && finalImageUrl) {
       try {
-        const tenantEmailSettings = await getTenantEmailSettings(tenantId);
-        renderEmail = await sendRenderEmailsIfConfigured({
+        renderEmail = await sendRenderEmailsViaAbstraction({
+          tenantId,
           tenantSlug,
           quoteLogId,
           customerEmail,
-          tenantEmailSettings,
           renderImageUrl: finalImageUrl,
         });
 
-        // Persist email render result into output JSON (best effort)
+        // Persist into output JSON (best effort)
         try {
           const cur = safeJsonParse(quoteRow.output) ?? {};
-          const next = {
-            ...cur,
-            email: {
-              ...(cur?.email ?? {}),
-              render: renderEmail,
-            },
-          };
+          const next = { ...cur, email: { ...(cur?.email ?? {}), render: renderEmail } };
           await updateQuoteLogOutput(quoteLogId, next);
         } catch {
           // ignore
         }
       } catch (e: any) {
-        renderEmail = {
-          configured: false,
-          error: e?.message ?? String(e),
-        };
+        renderEmail = { configured: false, error: e?.message ?? String(e) };
       }
     }
 
     if (renderError) {
       return json(
-        {
-          ok: false,
-          error: "RENDER_FAILED",
-          message: renderError,
-          quoteLogId,
-          stored,
-          queuedMark,
-          durationMs: Date.now() - startedAt,
-        },
+        { ok: false, error: "RENDER_FAILED", message: renderError, quoteLogId, stored, queuedMark, durationMs: Date.now() - startedAt },
         500,
         debugId
       );
     }
 
     return json(
-      {
-        ok: true,
-        quoteLogId,
-        imageUrl: finalImageUrl,
-        stored,
-        queuedMark,
-        renderEmail,
-        durationMs: Date.now() - startedAt,
-      },
+      { ok: true, quoteLogId, imageUrl: finalImageUrl, stored, queuedMark, renderEmail, durationMs: Date.now() - startedAt },
       200,
       debugId
     );
