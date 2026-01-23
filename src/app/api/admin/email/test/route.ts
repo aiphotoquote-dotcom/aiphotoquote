@@ -51,7 +51,7 @@ export async function POST() {
           </div>
         </div>
       `,
-      text: `Test email: tenant=${business} from=${from} replyTo=${replyTo?.[0] || ""} provider=${res.provider}`,
+     text: `Test email: tenant=${business} from=${from} replyTo=${replyTo?.[0] || ""} provider=resend`,
     },
   });
 
