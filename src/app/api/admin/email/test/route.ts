@@ -46,7 +46,8 @@ export async function POST() {
             <div><b>Tenant</b>: ${escapeHtml(business)}</div>
             <div><b>From used</b>: ${escapeHtml(from)}</div>
             <div><b>Reply-To</b>: ${escapeHtml(replyTo?.[0] || "(none)")}</div>
-            <div><b>Provider</b>: ${escapeHtml(res.provider)}</div>
+            <div><b>Provider</b>: ${escapeHtml("resend")}</div>
+
           </div>
         </div>
       `,
