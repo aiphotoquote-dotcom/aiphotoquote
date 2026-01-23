@@ -295,7 +295,7 @@ export async function POST(req: Request) {
       };
     }
 
-       // Save quote log
+           // Save quote log
     const inserted = await db
       .insert(quoteLogs)
       .values({
@@ -320,16 +320,28 @@ export async function POST(req: Request) {
 
         const configured = Boolean(
           process.env.RESEND_API_KEY?.trim() &&
-          cfg.businessName &&
-          cfg.leadToEmail &&
-          cfg.fromEmail
+            cfg.businessName &&
+            cfg.leadToEmail &&
+            cfg.fromEmail
         );
 
         emailResult = {
           configured,
           mode: cfg.sendMode ?? "standard",
-          lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-          customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+          lead_new: {
+            attempted: false,
+            ok: false,
+            provider: "resend",
+            id: null as string | null,
+            error: null as string | null,
+          },
+          customer_receipt: {
+            attempted: false,
+            ok: false,
+            provider: "resend",
+            id: null as string | null,
+            error: null as string | null,
+          },
           missing: {
             RESEND_API_KEY: !Boolean(process.env.RESEND_API_KEY?.trim()),
             business_name: !cfg.businessName,
@@ -391,7 +403,7 @@ export async function POST(req: Request) {
               message: {
                 from: cfg.fromEmail!,
                 to: [customer.email],
-                replyTo: [cfg.leadToEmail!], // replies go to tenant
+                replyTo: [cfg.leadToEmail!],
                 subject: `Your AI Photo Quote — ${cfg.businessName}`,
                 html: custHtml,
               },
@@ -405,7 +417,7 @@ export async function POST(req: Request) {
           }
         }
 
-        // Persist email result into quote_logs.output.email (best effort)
+        // Persist into quote_logs.output.email (best effort)
         try {
           const nextOutput = { ...(output ?? {}), email: emailResult };
           await db.execute(sql`
@@ -413,13 +425,25 @@ export async function POST(req: Request) {
             set output = ${JSON.stringify(nextOutput)}::jsonb
             where id = ${quoteLogId}::uuid
           `);
-          output = nextOutput; // so API response includes it too
+          output = nextOutput;
         } catch {
           // ignore
         }
       } catch (e: any) {
-        // If config read fails, don't kill the quote
         emailResult = { configured: false, error: e?.message ?? String(e) };
         output = { ...(output ?? {}), email: emailResult };
       }
     }
+
+    return NextResponse.json({
+      ok: true,
+      quoteLogId,
+      output,
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
+    );
+  }
+}
