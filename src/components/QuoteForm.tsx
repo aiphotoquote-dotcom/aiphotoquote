@@ -8,14 +8,8 @@ type ShotType = "wide" | "closeup" | "extra";
 type PhotoItem = {
   id: string;
   shotType: ShotType;
-
-  // Always used for UI preview (<img src=...>)
   previewSrc: string;
-
-  // If photo already lives in Blob (Upload Photos OR previously uploaded camera photo)
   uploadedUrl?: string;
-
-  // If photo is from camera capture and not yet uploaded
   file?: File;
 };
 
@@ -29,12 +23,6 @@ function digitsOnlyRaw(s: string) {
   return (s || "").replace(/\D/g, "");
 }
 
-/**
- * Normalize US phone digits:
- * - strips non-digits
- * - if 11 digits starting with "1", drop the leading 1
- * - returns max 10 digits
- */
 function normalizeUSPhoneDigits(input: string) {
   const d = digitsOnlyRaw(input);
   if (d.length === 11 && d.startsWith("1")) return d.slice(1);
@@ -60,10 +48,7 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function compressImage(
-  file: File,
-  opts?: { maxDim?: number; quality?: number }
-): Promise<File> {
+async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
   const maxDim = opts?.maxDim ?? 1600;
   const quality = opts?.quality ?? 0.78;
 
@@ -100,11 +85,7 @@ async function compressImage(
   ctx.drawImage(img, 0, 0, outW, outH);
 
   const blob: Blob = await new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("Compression failed"))),
-      "image/jpeg",
-      quality
-    );
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Compression failed"))), "image/jpeg", quality);
   });
 
   const baseName = file.name.replace(/\.[^/.]+$/, "");
@@ -112,21 +93,11 @@ async function compressImage(
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-function ProgressBar({
-  title,
-  label,
-  active,
-}: {
-  title: string;
-  label: string;
-  active: boolean;
-}) {
+function ProgressBar({ title, label, active }: { title: string; label: string; active: boolean }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="flex items-center justify-between gap-4">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-          {title}
-        </div>
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
         <div className="text-xs text-gray-700 dark:text-gray-200">{label}</div>
       </div>
       <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
@@ -147,9 +118,7 @@ type StepperStep = { key: string; label: string; state: StepState };
 function Stepper({ steps }: { steps: StepperStep[] }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-        Progress
-      </div>
+      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Progress</div>
 
       <div className="mt-3 grid gap-2">
         {steps.map((s) => {
@@ -173,11 +142,7 @@ function Stepper({ steps }: { steps: StepperStep[] }) {
               <span className={cn("text-xs font-semibold", text)}>{s.label}</span>
 
               <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-400">
-                {s.state === "done"
-                  ? "Done"
-                  : s.state === "active"
-                  ? "In progress"
-                  : "Pending"}
+                {s.state === "done" ? "Done" : s.state === "active" ? "In progress" : "Pending"}
               </span>
             </div>
           );
@@ -213,11 +178,7 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
   }
 
   if (!res.ok || !j?.ok) {
-    throw new Error(
-      j?.error?.message ||
-        j?.message ||
-        `Blob upload failed (HTTP ${res.status})`
-    );
+    throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
   }
 
   const urls: string[] = Array.isArray(j?.urls)
@@ -228,6 +189,28 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
 
   if (!urls.length) throw new Error("Blob upload returned no file urls.");
   return urls;
+}
+
+function money(n: any) {
+  const num = Number(n);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
+
+function toneBadge(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
+  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
+  const cls =
+    tone === "green"
+      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
+      : tone === "yellow"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+      : tone === "red"
+      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+      : tone === "blue"
+      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
+
+  return <span className={cn(base, cls)}>{label}</span>;
 }
 
 export default function QuoteForm({
@@ -241,40 +224,27 @@ export default function QuoteForm({
   const RECOMMENDED_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
-  // contact + notes
   const [customerName, setCustomerName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [notes, setNotes] = useState("");
 
-  // photos unified (camera + uploaded)
   const [photos, setPhotos] = useState<PhotoItem[]>([]);
-
-  // rendering opt-in (only if tenant allows)
   const [renderOptIn, setRenderOptIn] = useState(false);
 
-  // submission lifecycle
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<
-    "idle" | "compressing" | "uploading" | "analyzing"
-  >("idle");
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
-  // results
   const [result, setResult] = useState<any>(null);
   const [quoteLogId, setQuoteLogId] = useState<string | null>(null);
 
-  // errors
   const [error, setError] = useState<string | null>(null);
 
-  // rendering lifecycle (step 2)
   const [renderStatus, setRenderStatus] = useState<RenderStatus>("idle");
   const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
-  // guard against multiple auto-renders per quote
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
-
-  // scroll to results
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -289,7 +259,6 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) setRenderOptIn(false);
   }, [aiRenderingEnabled]);
 
-  // cleanup object URLs on unmount
   useEffect(() => {
     return () => {
       photos.forEach((p) => {
@@ -308,9 +277,12 @@ export default function QuoteForm({
 
   const photoCount = photos.length;
 
-  const canSubmit = useMemo(() => {
-    return !working && photoCount >= MIN_PHOTOS && contactOk;
-  }, [working, photoCount, contactOk]);
+  const canSubmit = useMemo(() => !working && photoCount >= MIN_PHOTOS && contactOk, [
+    working,
+    photoCount,
+    contactOk,
+    MIN_PHOTOS,
+  ]);
 
   const disabledReason = useMemo(() => {
     if (working) return null;
@@ -348,11 +320,7 @@ export default function QuoteForm({
 
     const photosState: StepState = photosOk ? "done" : "active";
 
-    const contactState: StepState = !photosOk
-      ? "todo"
-      : contactOk
-      ? "done"
-      : "active";
+    const contactState: StepState = !photosOk ? "todo" : contactOk ? "done" : "active";
 
     const optimizeState: StepState =
       working && phase === "compressing"
@@ -369,11 +337,7 @@ export default function QuoteForm({
         : "todo";
 
     const inspectState: StepState =
-      working && phase === "analyzing"
-        ? "active"
-        : hasResult
-        ? "done"
-        : "todo";
+      working && phase === "analyzing" ? "active" : hasResult ? "done" : "todo";
 
     const estimateState: StepState = hasResult ? "done" : "todo";
 
@@ -509,18 +473,9 @@ export default function QuoteForm({
       return;
     }
 
-    if (!customerName.trim()) {
-      setError("Please enter your name.");
-      return;
-    }
-    if (!isValidEmail(email)) {
-      setError("Please enter a valid email address.");
-      return;
-    }
-    if (normalizeUSPhoneDigits(phone).length !== 10) {
-      setError("Please enter a valid 10-digit phone number.");
-      return;
-    }
+    if (!customerName.trim()) return setError("Please enter your name.");
+    if (!isValidEmail(email)) return setError("Please enter a valid email address.");
+    if (normalizeUSPhoneDigits(phone).length !== 10) return setError("Please enter a valid 10-digit phone number.");
 
     setWorking(true);
 
@@ -530,9 +485,7 @@ export default function QuoteForm({
       const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
       if (needUpload.length) {
         setPhase("compressing");
-        const compressed = await Promise.all(
-          needUpload.map((p) => compressImage(p.file!))
-        );
+        const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
 
         setPhase("uploading");
         const urls = await uploadToBlob(compressed);
@@ -562,9 +515,7 @@ export default function QuoteForm({
       }
 
       const urls = currentPhotos.map((p) => p.uploadedUrl).filter(Boolean) as string[];
-      if (urls.length !== currentPhotos.length) {
-        throw new Error("Some photos are not uploaded yet. Please try again.");
-      }
+      if (urls.length !== currentPhotos.length) throw new Error("Some photos are not uploaded yet. Please try again.");
 
       setPhase("analyzing");
 
@@ -573,23 +524,17 @@ export default function QuoteForm({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tenantSlug,
-          images: currentPhotos.map((p) => ({
-            url: p.uploadedUrl!,
-            shotType: p.shotType,
-          })),
-
+          images: currentPhotos.map((p) => ({ url: p.uploadedUrl!, shotType: p.shotType })),
           customer: {
             name: customerName.trim(),
             email: email.trim(),
             phone: normalizeUSPhoneDigits(phone),
           },
-
           customer_context: {
             notes: notes?.trim() || undefined,
             category: "service",
             service_type: "upholstery",
           },
-
           render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
         }),
       });
@@ -603,15 +548,12 @@ export default function QuoteForm({
       }
 
       if (!json?.ok) {
-        const dbg = json?.debugId ? `\ndebugId: ${json.debugId}` : "";
         const code = json?.error ? `\ncode: ${json.error}` : "";
         const msg = json?.message ? `\nmessage: ${json.message}` : "";
         const issues = json?.issues
-          ? `\nissues:\n${json.issues
-              .map((i: any) => `- ${i.path?.join(".")}: ${i.message}`)
-              .join("\n")}`
+          ? `\nissues:\n${json.issues.map((i: any) => `- ${i.path?.join(".")}: ${i.message}`).join("\n")}`
           : "";
-        throw new Error(`Quote failed\nHTTP ${res.status}${dbg}${code}${msg}${issues}`.trim());
+        throw new Error(`Quote failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
       }
 
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
@@ -652,9 +594,7 @@ export default function QuoteForm({
         throw new Error(`Render returned non-JSON (HTTP ${res.status}).`);
       }
 
-      if (!res.ok || !j?.ok) {
-        throw new Error(j?.message || j?.error || `Render failed (HTTP ${res.status})`);
-      }
+      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Render failed (HTTP ${res.status})`);
 
       const url = (j?.imageUrl ?? j?.render_image_url ?? j?.url ?? null) as string | null;
       if (!url) throw new Error("Render completed but no imageUrl returned.");
@@ -685,6 +625,19 @@ export default function QuoteForm({
 
   const hasEstimate = Boolean(result);
 
+  // --- structured result helpers ---
+  const estLow = money(result?.estimate_low ?? result?.estimateLow);
+  const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
+  const summary = String(result?.summary ?? "").trim();
+  const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
+  const confidence = String(result?.confidence ?? "").toLowerCase();
+  const scope: string[] = Array.isArray(result?.visible_scope) ? result.visible_scope : Array.isArray(result?.visibleScope) ? result.visibleScope : [];
+  const assumptions: string[] = Array.isArray(result?.assumptions) ? result.assumptions : [];
+  const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
+
+  const confidenceTone =
+    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
+
   return (
     <div className="space-y-6">
       {/* Progress */}
@@ -707,7 +660,6 @@ export default function QuoteForm({
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
-          {/* Take Photo */}
           <label className="block">
             <input
               className="hidden"
@@ -732,7 +684,6 @@ export default function QuoteForm({
             </div>
           </label>
 
-          {/* Upload Photos */}
           <label className="block">
             <input
               className="hidden"
@@ -781,50 +732,27 @@ export default function QuoteForm({
                   <div className="p-3 flex flex-wrap items-center gap-2">
                     <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
 
-                    <button
-                      type="button"
-                      className={cn(
-                        "rounded-md px-2 py-1 text-xs font-semibold border",
-                        p.shotType === "wide"
-                          ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-                          : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
-                      )}
-                      onClick={() => setShotType(p.id, "wide")}
-                      disabled={working}
-                    >
-                      Wide
-                    </button>
-
-                    <button
-                      type="button"
-                      className={cn(
-                        "rounded-md px-2 py-1 text-xs font-semibold border",
-                        p.shotType === "closeup"
-                          ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-                          : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
-                      )}
-                      onClick={() => setShotType(p.id, "closeup")}
-                      disabled={working}
-                    >
-                      Close-up
-                    </button>
-
-                    <button
-                      type="button"
-                      className={cn(
-                        "rounded-md px-2 py-1 text-xs font-semibold border",
-                        p.shotType === "extra"
-                          ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-                          : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
-                      )}
-                      onClick={() => setShotType(p.id, "extra")}
-                      disabled={working}
-                    >
-                      Extra
-                    </button>
+                    {(["wide", "closeup", "extra"] as ShotType[]).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={cn(
+                          "rounded-md px-2 py-1 text-xs font-semibold border",
+                          p.shotType === t
+                            ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                            : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
+                        )}
+                        onClick={() => setShotType(p.id, t)}
+                        disabled={working}
+                      >
+                        {t === "wide" ? "Wide" : t === "closeup" ? "Close-up" : "Extra"}
+                      </button>
+                    ))}
 
                     {!p.uploadedUrl && p.file ? (
-                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">Camera photo (uploads on submit)</span>
+                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">
+                        Camera photo (uploads on submit)
+                      </span>
                     ) : null}
                   </div>
                 </div>
@@ -841,9 +769,7 @@ export default function QuoteForm({
           {photoCount >= MIN_PHOTOS ? (
             <>
               ✅ {photoCount} photo{photoCount === 1 ? "" : "s"} added{" "}
-              {!recommendedOk ? (
-                <span className="text-gray-500 dark:text-gray-400">· Add 1+ more for best results</span>
-              ) : null}
+              {!recommendedOk ? <span className="text-gray-500 dark:text-gray-400">· Add 1+ more for best results</span> : null}
             </>
           ) : (
             `Add ${MIN_PHOTOS} photo (you have ${photoCount})`
@@ -855,9 +781,7 @@ export default function QuoteForm({
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Required so we can send your estimate and follow up if needed.
-          </p>
+          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">Required so we can send your estimate and follow up if needed.</p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -904,9 +828,7 @@ export default function QuoteForm({
             inputMode="tel"
             autoComplete="tel"
           />
-          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-            Tip: if you type a leading “1”, we’ll normalize it automatically.
-          </div>
+          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">Tip: if you type a leading “1”, we’ll normalize it automatically.</div>
         </label>
 
         <label className="block">
@@ -933,12 +855,8 @@ export default function QuoteForm({
                 disabled={working}
               />
               <label htmlFor="renderOptIn" className="cursor-pointer">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  Optional: AI rendering preview
-                </div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we’ll generate a visual “after” concept as a second step after your estimate.
-                </div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Optional: AI rendering preview</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">If selected, we’ll generate a visual “after” concept as a second step after your estimate.</div>
               </label>
             </div>
           </div>
@@ -952,9 +870,7 @@ export default function QuoteForm({
           {working ? "Working…" : "Get Estimate"}
         </button>
 
-        {disabledReason ? (
-          <div className="text-xs text-gray-600 dark:text-gray-300">{disabledReason}</div>
-        ) : null}
+        {disabledReason ? <div className="text-xs text-gray-600 dark:text-gray-300">{disabledReason}</div> : null}
 
         <button
           type="button"
@@ -978,20 +894,89 @@ export default function QuoteForm({
           ref={resultsRef}
           className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
         >
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Result</h2>
-            {quoteLogId ? <div className="text-xs text-gray-600 dark:text-gray-300">Quote ID: {quoteLogId}</div> : null}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Your estimate</h2>
+              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                This is a fast estimate range based on your photos + notes. Final pricing may change after inspection.
+              </p>
+            </div>
+            {quoteLogId ? <div className="text-xs text-gray-500 dark:text-gray-400">Ref: {quoteLogId.slice(0, 8)}</div> : null}
           </div>
 
-          <pre className="overflow-auto rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(result, null, 2)}
-          </pre>
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-950">
+            <div className="flex flex-wrap items-center gap-2">
+              {toneBadge(
+                confidence ? `Confidence: ${confidence}` : "Confidence: unknown",
+                confidenceTone as any
+              )}
+              {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
+              {aiRenderingEnabled && renderOptIn ? toneBadge("Rendering requested", "blue") : null}
+            </div>
+
+            <div className="mt-4 flex flex-col gap-2">
+              <div className="text-xs font-semibold tracking-wide text-gray-600 dark:text-gray-300">ESTIMATE RANGE</div>
+              <div className="text-3xl font-semibold text-gray-900 dark:text-gray-100">
+                {estLow && estHigh ? `$${estLow} – $${estHigh}` : "We need a bit more info"}
+              </div>
+              {summary ? (
+                <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{summary}</div>
+              ) : (
+                <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+                  We’ll follow up if we need any clarifications.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {(scope.length || assumptions.length || questions.length) ? (
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Visible scope</div>
+                <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+                  {scope.length ? (
+                    <ul className="list-disc pl-5 space-y-1">
+                      {scope.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
+                    </ul>
+                  ) : (
+                    <div className="text-gray-500 dark:text-gray-400 italic">Not enough detail yet.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Assumptions</div>
+                <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+                  {assumptions.length ? (
+                    <ul className="list-disc pl-5 space-y-1">
+                      {assumptions.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
+                    </ul>
+                  ) : (
+                    <div className="text-gray-500 dark:text-gray-400 italic">None.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Questions</div>
+                <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+                  {questions.length ? (
+                    <ul className="list-disc pl-5 space-y-1">
+                      {questions.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
+                    </ul>
+                  ) : (
+                    <div className="text-gray-500 dark:text-gray-400 italic">No follow-ups needed.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {aiRenderingEnabled && renderOptIn ? (
             <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900">
               <div className="flex items-center justify-between">
                 <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering preview</div>
                   <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
                 </div>
 
@@ -1016,9 +1001,20 @@ export default function QuoteForm({
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
                 </div>
-              ) : null}
+              ) : (
+                <div className="text-sm text-gray-600 dark:text-gray-300">
+                  If enabled, your visual concept will appear here when ready.
+                </div>
+              )}
             </div>
           ) : null}
+
+          <details className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+            <summary className="cursor-pointer text-sm font-semibold">Raw result (debug)</summary>
+            <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
+{JSON.stringify(result, null, 2)}
+            </pre>
+          </details>
         </section>
       ) : null}
 
