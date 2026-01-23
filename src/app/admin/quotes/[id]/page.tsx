@@ -177,7 +177,6 @@ function renderChip(renderStatusRaw: unknown) {
 }
 
 function pickRenderUrl(input: any): string | null {
-  // try several likely locations, only return a string URL
   const candidates = [
     input?.render?.url,
     input?.render_url,
@@ -195,15 +194,7 @@ function pickRenderUrl(input: any): string | null {
 }
 
 function pickAiOutput(input: any): any {
-  // best-effort: show AI output if present, otherwise null
-  return (
-    input?.ai_output ??
-    input?.ai_assessment ??
-    input?.assessment ??
-    input?.ai ??
-    input?.result ??
-    null
-  );
+  return input?.ai_output ?? input?.ai_assessment ?? input?.assessment ?? input?.ai ?? input?.result ?? null;
 }
 
 type PageProps = {
@@ -237,31 +228,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     tenantIdMaybe = t?.id ?? null;
   }
 
-  if (!tenantIdMaybe) {
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Quote</h1>
-          <Link
-            href="/admin/quotes"
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            Back to list
-          </Link>
-        </div>
+  if (!tenantIdMaybe) redirect("/admin/quotes");
 
-        <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-5 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-          No active tenant selected. Go to{" "}
-          <Link className="underline" href="/onboarding">
-            Settings
-          </Link>{" "}
-          and make sure your tenant is created/selected.
-        </div>
-      </div>
-    );
-  }
-
-  const tenantId = tenantIdMaybe; // string
+  const tenantId = tenantIdMaybe;
 
   const row = await db
     .select({
@@ -279,12 +248,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   if (!row) redirect("/admin/quotes");
 
-  // Auto-mark read when opened, unless user just explicitly marked unread
-  if (!skipAutoRead && !row.isRead) {
+  // Track UI-state for read/unread (because we update DB after fetch)
+  let isRead = Boolean(row.isRead);
+
+  // Auto-mark read on open (unless user explicitly marked unread and we redirected back with skip flag)
+  if (!skipAutoRead && !isRead) {
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    isRead = true;
   }
 
   const lead = pickLead(row.input);
@@ -319,8 +292,19 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       .set({ isRead: false } as any)
       .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
-    // IMPORTANT: prevent auto-read from flipping it right back
+    // prevent auto-read from flipping back immediately
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
+  }
+
+  async function markRead() {
+    "use server";
+    await db
+      .update(quoteLogs)
+      .set({ isRead: true } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+
+    // return to clean URL (and read state stays)
+    redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   return (
@@ -339,18 +323,28 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* If skipAutoRead=1, show Unread pill so it feels correct */}
-          {skipAutoRead ? chip("Unread", "yellow") : chip("Read", "gray")}
+          {isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
           {renderChip(row.renderStatus)}
 
-          <form action={markUnread}>
-            <button
-              type="submit"
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-            >
-              Mark unread
-            </button>
-          </form>
+          {isRead ? (
+            <form action={markUnread}>
+              <button
+                type="submit"
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+              >
+                Mark unread
+              </button>
+            </form>
+          ) : (
+            <form action={markRead}>
+              <button
+                type="submit"
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+              >
+                Mark read
+              </button>
+            </form>
+          )}
         </div>
       </div>
 
@@ -412,7 +406,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
               {stageNorm === "read" ? (
                 <div className="mt-3 text-xs text-yellow-900 dark:text-yellow-200">
-                  Note: this quote has a legacy stage value <span className="font-mono">read</span>. Saving will normalize it.
+                  Note: legacy stage value <span className="font-mono">read</span>. Saving will normalize it.
                 </div>
               ) : null}
             </div>
@@ -420,7 +414,23 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* Photos gallery (the good stuff) */}
+      {/* ✅ Customer notes moved up (between contact card + photos) */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div>
+          <h3 className="text-lg font-semibold">Customer notes</h3>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What the customer told you when submitting.</p>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+          {notes ? (
+            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
+          ) : (
+            <div className="italic text-gray-500">No notes provided.</div>
+          )}
+        </div>
+      </section>
+
+      {/* Photos gallery */}
       <QuotePhotoGallery photos={photos} />
 
       {/* Details section (AI output first, then render) */}
@@ -467,22 +477,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               )}
             </div>
           </div>
-        </div>
-      </section>
-
-      {/* Customer notes */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div>
-          <h3 className="text-lg font-semibold">Customer notes</h3>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What the customer told you when submitting.</p>
-        </div>
-
-        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? (
-            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
-          ) : (
-            <div className="italic text-gray-500">No notes provided.</div>
-          )}
         </div>
       </section>
 
