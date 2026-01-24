@@ -1,4 +1,3 @@
-// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -31,6 +30,19 @@ function verifyState(stateB64Url: string) {
 
 function firstRow(r: any) {
   return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+}
+
+function errShape(e: any) {
+  // drizzle/postgres often puts useful info on these fields
+  return {
+    message: e?.message ?? String(e),
+    code: e?.code ?? e?.cause?.code ?? null,
+    detail: e?.detail ?? e?.cause?.detail ?? null,
+    constraint: e?.constraint ?? e?.cause?.constraint ?? null,
+    table: e?.table ?? e?.cause?.table ?? null,
+    column: e?.column ?? e?.cause?.column ?? null,
+    schema: e?.schema ?? e?.cause?.schema ?? null,
+  };
 }
 
 export async function GET(req: Request) {
@@ -111,25 +123,40 @@ export async function GET(req: Request) {
       returning id
     `);
 
-    const row = firstRow(up);
-    const emailIdentityId = row?.id ? String(row.id) : null;
+    const upRow = firstRow(up);
+    const emailIdentityId = upRow?.id ? String(upRow.id) : null;
 
     if (!emailIdentityId) {
-      return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" },
+        { status: 500 }
+      );
     }
 
-    // 4) Link tenant_settings to identity + switch to enterprise mode
-    // IMPORTANT: do NOT cast identity id. This works whether tenant_settings.email_identity_id is uuid OR text.
-    await db.execute(sql`
-      insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
-      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId})
-      on conflict (tenant_id)
-      do update set
-        email_send_mode = 'enterprise',
-        email_identity_id = excluded.email_identity_id
-    `);
+    // 4) Upsert tenant_settings (capture real DB failure)
+    try {
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
+        values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId})
+        on conflict (tenant_id)
+        do update set
+          email_send_mode = 'enterprise',
+          email_identity_id = excluded.email_identity_id
+      `);
+    } catch (e: any) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "TENANT_SETTINGS_UPSERT_FAILED",
+          tenantId,
+          emailIdentityId,
+          dbError: errShape(e),
+        },
+        { status: 500 }
+      );
+    }
 
-    // Confirm for debug
+    // Confirm state
     const check = await db.execute(sql`
       select tenant_id, email_send_mode, email_identity_id
       from tenant_settings
@@ -149,18 +176,17 @@ export async function GET(req: Request) {
       });
     }
 
-    // 5) Redirect back (absolute)
+    // Absolute redirect (avoid middleware-relative-url error)
     const dest = new URL("/admin/settings", url.origin);
     dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
-
     return NextResponse.redirect(dest);
   } catch (e: any) {
     return NextResponse.json(
       {
         ok: false,
         error: "OAUTH_CALLBACK_FAILED",
-        message: e?.message ?? String(e),
+        dbError: errShape(e),
       },
       { status: 500 }
     );
