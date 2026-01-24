@@ -1,3 +1,4 @@
+// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -34,8 +35,12 @@ export async function GET(req: Request) {
   const state = url.searchParams.get("state") || "";
   const debug = url.searchParams.get("debug") === "1";
 
-  if (!code) return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
-  if (!state) return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
+  if (!code) {
+    return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
+  }
+  if (!state) {
+    return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
+  }
 
   const { t: tenantId } = verifyState(state);
 
@@ -74,6 +79,7 @@ export async function GET(req: Request) {
   const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+
   const meJson: any = await meRes.json();
   if (!meRes.ok) {
     return NextResponse.json(
@@ -88,7 +94,7 @@ export async function GET(req: Request) {
   }
 
   const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-  const fromEmail = emailAddress;
+  const fromEmail = emailAddress; // you said mailbox From is fine
 
   // 3) Upsert email_identities
   const up = await db.execute(sql`
@@ -113,7 +119,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
   }
 
-  // 4) ✅ Upsert tenant_settings and flip to enterprise
+  // 4) Upsert tenant_settings and flip to enterprise
   await db.execute(sql`
     insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id, updated_at)
     values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid, now())
@@ -124,7 +130,7 @@ export async function GET(req: Request) {
       updated_at = now()
   `);
 
-  // Confirm what the DB now says
+  // Confirm what the DB now says (useful for debug mode)
   const check = await db.execute(sql`
     select tenant_id, email_send_mode, email_identity_id
     from tenant_settings
@@ -136,7 +142,6 @@ export async function GET(req: Request) {
     (check as any)?.rows?.[0] ?? (Array.isArray(check) ? (check as any)[0] : null);
 
   if (debug) {
-    // proves callback executed and what it wrote
     return NextResponse.json({
       ok: true,
       tenantId,
@@ -147,7 +152,8 @@ export async function GET(req: Request) {
     });
   }
 
-  const dest = new URL(`/admin/settings?oauth=google_connected`, req.url);
+  // 5) Redirect back (ABSOLUTE URL to satisfy Next)
+  const dest = new URL("/admin/settings?oauth=google_connected", req.url);
   if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
   return NextResponse.redirect(dest);
 }
