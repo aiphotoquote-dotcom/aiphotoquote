@@ -249,15 +249,18 @@ export default function AdminTenantSettingsPage() {
   const statusMode = emailStatus?.ok ? (emailStatus.tenant.email_send_mode ?? "standard") : "standard";
   const enterpriseIdentityPresent = emailStatus?.ok ? Boolean(emailStatus.tenant.email_identity_id_present) : false;
 
-  const testEmailDisabledReason =
-    emailSendMode === "enterprise"
-      ? "Test email is only available in Standard mode until Enterprise OAuth is wired up."
-      : !leadToEmail.trim()
-        ? "Set Lead To Email first."
+    const testEmailDisabledReason =
+    !leadToEmail.trim()
+      ? "Set Lead To Email first."
+      : emailSendMode === "enterprise" && !emailIdentityId.trim()
+        ? "Connect Google first (no Email Identity linked yet)."
         : null;
 
-  const canSendTestEmail =
-    canEdit && !testingEmail && emailSendMode === "standard" && !!leadToEmail.trim();
+   const canSendTestEmail =
+    canEdit &&
+    !testingEmail &&
+    !!leadToEmail.trim() &&
+    (emailSendMode === "standard" || (emailSendMode === "enterprise" && !!emailIdentityId.trim()));
 
   return (
     <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
@@ -491,11 +494,12 @@ export default function AdminTenantSettingsPage() {
                       {testingEmail ? "Sending…" : "Send test email"}
                     </button>
 
-                    {emailSendMode === "enterprise" ? (
+                                      {emailSendMode === "enterprise" ? (
                       <span className="text-xs text-gray-600">
-                        Enterprise mode selected — test email will be enabled after OAuth connect.
+                        Enterprise mode selected — this will send via your connected mailbox.
                       </span>
                     ) : null}
+
                   </div>
 
                   {testEmailRes ? (
