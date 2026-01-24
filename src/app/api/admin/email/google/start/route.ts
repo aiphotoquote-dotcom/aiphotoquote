@@ -40,7 +40,10 @@ export async function GET() {
   params.set("response_type", "code");
   params.set("access_type", "offline"); // refresh_token
   params.set("prompt", "consent");      // force refresh_token issuance in many cases
-  params.set("scope", "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email");
+  params.set(
+  "scope",
+  "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.send"
+);
   params.set("include_granted_scopes", "true");
   params.set("state", state);
 
