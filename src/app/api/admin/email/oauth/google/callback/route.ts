@@ -1,4 +1,3 @@
-// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -39,7 +38,6 @@ async function safeJson(res: Response) {
 }
 
 function pickErr(e: any) {
-  // Drizzle/Postgres wrappers often hide the real pg error on .cause / .originalError / etc.
   const inner =
     e?.cause ||
     e?.originalError ||
@@ -64,53 +62,13 @@ function pickErr(e: any) {
   };
 }
 
-async function introspectTenantEmailIdentities() {
-  // These reads are safe and massively speed up debugging schema drift.
-  const cols = await db.execute(sql`
-    select
-      column_name,
-      data_type,
-      is_nullable,
-      column_default
-    from information_schema.columns
-    where table_schema = 'public'
-      and table_name = 'tenant_email_identities'
-    order by ordinal_position
-  `);
-
-  const checksAndFks = await db.execute(sql`
-    select
-      conname,
-      contype,
-      pg_get_constraintdef(c.oid) as def
-    from pg_constraint c
-    where c.conrelid = 'public.tenant_email_identities'::regclass
-    order by contype, conname
-  `);
-
-  const idx = await db.execute(sql`
-    select indexname, indexdef
-    from pg_indexes
-    where schemaname = 'public'
-      and tablename = 'tenant_email_identities'
-    order by indexname
-  `);
-
-  const toRows = (r: any) => (r as any)?.rows ?? (Array.isArray(r) ? r : []);
-  return {
-    columns: toRows(cols),
-    constraints: toRows(checksAndFks),
-    indexes: toRows(idx),
-  };
-}
-
 export async function GET(req: Request) {
-  const url = new URL(req.url);
+  const incoming = new URL(req.url);
 
   try {
-    const code = url.searchParams.get("code") || "";
-    const state = url.searchParams.get("state") || "";
-    const debug = url.searchParams.get("debug") === "1";
+    const code = incoming.searchParams.get("code") || "";
+    const state = incoming.searchParams.get("state") || "";
+    const debug = incoming.searchParams.get("debug") === "1";
 
     if (!code) return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
     if (!state) return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
@@ -144,6 +102,8 @@ export async function GET(req: Request) {
 
     const accessToken = String((tj.json as any).access_token || "");
     const refreshToken = String((tj.json as any).refresh_token || "");
+    const scopeStr = String((tj.json as any).scope || "");
+
     if (!accessToken) {
       return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
     }
@@ -166,17 +126,33 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, { status: 500 });
     }
 
+    // Your table supports these
+    const displayName = email;
+    const status = "active";
+    const scopes = (scopeStr || "")
+      .split(" ")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // These columns are added by migration 0009
     const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-    const fromEmail = email;
+    const fromEmail = email; // mailbox “From” is fine (your call)
 
     // 3) Upsert identity
     let emailIdentityId: string | null = null;
     try {
       const up = await db.execute(sql`
-        insert into tenant_email_identities (tenant_id, provider, email, from_email, refresh_token_enc)
-        values (${tenantId}::uuid, 'gmail_oauth', ${email}, ${fromEmail}, ${refreshTokenEnc})
+        insert into tenant_email_identities
+          (tenant_id, provider, email, display_name, status, scopes, last_error, from_email, refresh_token_enc)
+        values
+          (${tenantId}::uuid, 'gmail_oauth', ${email}, ${displayName}, ${status},
+           ${JSON.stringify(scopes)}::jsonb, null, ${fromEmail}, ${refreshTokenEnc})
         on conflict (tenant_id, provider, email)
         do update set
+          display_name = excluded.display_name,
+          status = excluded.status,
+          scopes = excluded.scopes,
+          last_error = null,
           from_email = excluded.from_email,
           refresh_token_enc = case
             when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
@@ -186,18 +162,9 @@ export async function GET(req: Request) {
         returning id
       `);
 
-      const row: any =
-        (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
-
+      const row: any = (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
       emailIdentityId = row?.id ? String(row.id) : null;
     } catch (e: any) {
-      let schema: any = null;
-      try {
-        schema = await introspectTenantEmailIdentities();
-      } catch {
-        // ignore schema introspection errors
-      }
-
       return NextResponse.json(
         {
           ok: false,
@@ -205,7 +172,6 @@ export async function GET(req: Request) {
           tenantId,
           email,
           dbError: pickErr(e),
-          schema,
         },
         { status: 500 }
       );
@@ -215,7 +181,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_ID_MISSING" }, { status: 500 });
     }
 
-    // 4) Upsert tenant_settings (flip enterprise)
+    // 4) Flip tenant_settings into enterprise + link identity
     try {
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
@@ -260,10 +226,9 @@ export async function GET(req: Request) {
     }
 
     // 5) Redirect back absolute
-    const dest = new URL("/admin/settings", url.origin);
+    const dest = new URL("/admin/settings", incoming.origin);
     dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
-
     return NextResponse.redirect(dest);
   } catch (e: any) {
     return NextResponse.json(
