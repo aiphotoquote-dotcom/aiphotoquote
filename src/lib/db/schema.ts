@@ -40,7 +40,8 @@ export const tenantEmailIdentities = pgTable(
     tenantId: uuid("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
-
+fromEmail: text("from_email"),
+refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
     provider: text("provider").notNull(),
     email: text("email").notNull(),
 

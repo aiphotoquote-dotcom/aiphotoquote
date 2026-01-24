@@ -50,6 +50,13 @@
       "when": 1769228324203,
       "tag": "0006_mixed_shadow_king",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1769278392078,
+      "tag": "0007_add_from_email_refresh_token_enc",
+      "breakpoints": true
     }
   ]
 }
