@@ -1,8 +1,7 @@
 // src/lib/email/index.ts
-import type { EmailContextType, EmailSendResult, EmailMessage } from "./types";
+import type { EmailContextType, EmailMessage } from "./types";
 import { makeResendProvider } from "./providers/resend";
-import { db } from "@/lib/db/client";
-import { sql } from "drizzle-orm";
+import { getTenantEmailConfig } from "./resolve";
 
 /**
  * Email provider routing based on tenant_settings.
@@ -21,26 +20,9 @@ async function getTenantEmailMode(tenantId: string): Promise<{
   emailIdentityId: string | null;
 }> {
   try {
-    const r = await db.execute(sql`
-      select email_send_mode, email_identity_id
-      from tenant_settings
-      where tenant_id = ${tenantId}::uuid
-      limit 1
-    `);
-
-    const row: any =
-      (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-
-    const rawMode = (row?.email_send_mode ?? "standard")
-      .toString()
-      .trim()
-      .toLowerCase();
-    const mode: EmailSendMode = rawMode === "enterprise" ? "enterprise" : "standard";
-
-    const emailIdentityId = row?.email_identity_id
-      ? String(row.email_identity_id)
-      : null;
-
+    const cfg = await getTenantEmailConfig(tenantId);
+    const mode: EmailSendMode = cfg.emailSendMode === "enterprise" ? "enterprise" : "standard";
+    const emailIdentityId = cfg.emailIdentityId ? String(cfg.emailIdentityId) : null;
     return { mode, emailIdentityId };
   } catch {
     // safest default
@@ -73,7 +55,7 @@ export async function sendEmail(args: {
   tenantId: string;
   context: { type: EmailContextType; quoteLogId?: string };
   message: EmailMessage;
-}): Promise<EmailSendResult> {
+}) {
   const routed = await getProviderForTenant(args.tenantId);
 
   if (!routed.ok) {
@@ -87,9 +69,7 @@ export async function sendEmail(args: {
       provider,
       providerMessageId: null,
       error: routed.error,
-      meta: {
-        mode: routed.mode,
-      },
+      meta: { mode: routed.mode },
     };
   }
 

@@ -19,7 +19,13 @@ type SettingsResp =
       ok: true;
       tenantId: string;
       role: "owner" | "admin" | "member";
-      settings: { business_name: string; lead_to_email: string; resend_from_email: string };
+      settings: {
+        business_name: string;
+        lead_to_email: string;
+        resend_from_email: string;
+        email_send_mode?: string | null;
+        email_identity_id?: string | null;
+      };
     }
   | { ok: false; error: string; message?: string; issues?: any };
 
@@ -32,6 +38,10 @@ type EmailStatusResp =
         business_name_present: boolean;
         lead_to_email_present: boolean;
         resend_from_email_present: boolean;
+
+        // NEW (enterprise readiness)
+        email_send_mode?: "standard" | "enterprise";
+        email_identity_id_present?: boolean;
       };
       notes: string[];
     }
@@ -60,6 +70,10 @@ export default function AdminTenantSettingsPage() {
   const [businessName, setBusinessName] = useState("");
   const [leadToEmail, setLeadToEmail] = useState("");
   const [fromEmail, setFromEmail] = useState("");
+
+  // NEW: email send mode + identity (Enterprise OAuth placeholder)
+  const [emailSendMode, setEmailSendMode] = useState<"standard" | "enterprise">("standard");
+  const [emailIdentityId, setEmailIdentityId] = useState<string>("");
 
   const [emailStatus, setEmailStatus] = useState<EmailStatusResp | null>(null);
 
@@ -106,6 +120,12 @@ export default function AdminTenantSettingsPage() {
     setBusinessName(data.settings.business_name || "");
     setLeadToEmail(data.settings.lead_to_email || "");
     setFromEmail(data.settings.resend_from_email || "");
+
+    const modeRaw = (data.settings.email_send_mode ?? "").toString().trim().toLowerCase();
+    const mode = modeRaw === "enterprise" ? "enterprise" : "standard";
+    setEmailSendMode(mode);
+
+    setEmailIdentityId((data.settings.email_identity_id ?? "").toString());
   }
 
   async function loadEmailStatus() {
@@ -163,27 +183,27 @@ export default function AdminTenantSettingsPage() {
     }
   }
 
-const [testEmailRes, setTestEmailRes] = useState<any>(null);
-const [testingEmail, setTestingEmail] = useState(false);
+  const [testEmailRes, setTestEmailRes] = useState<any>(null);
+  const [testingEmail, setTestingEmail] = useState(false);
 
-async function sendTestEmail() {
-  setTestingEmail(true);
-  setTestEmailRes(null);
-  setErr(null);
-  setMsg(null);
+  async function sendTestEmail() {
+    setTestingEmail(true);
+    setTestEmailRes(null);
+    setErr(null);
+    setMsg(null);
 
-  try {
-    const res = await fetch("/api/admin/email/test", { method: "POST" });
-    const data = await safeJson<any>(res);
-    setTestEmailRes(data);
-    if (data?.ok) setMsg("Test email sent.");
-    else setErr(data?.error || data?.message || "Test email failed.");
-  } catch (e: any) {
-    setErr(e?.message ?? String(e));
-  } finally {
-    setTestingEmail(false);
+    try {
+      const res = await fetch("/api/admin/email/test", { method: "POST" });
+      const data = await safeJson<any>(res);
+      setTestEmailRes(data);
+      if (data?.ok) setMsg("Test email sent.");
+      else setErr(data?.error || data?.message || "Test email failed.");
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setTestingEmail(false);
+    }
   }
-}
 
   async function save() {
     setErr(null);
@@ -198,6 +218,10 @@ async function sendTestEmail() {
           business_name: businessName.trim(),
           lead_to_email: leadToEmail.trim(),
           resend_from_email: fromEmail.trim(),
+
+          // NEW
+          email_send_mode: emailSendMode,
+          email_identity_id: emailIdentityId.trim() || null,
         }),
       });
 
@@ -221,6 +245,19 @@ async function sendTestEmail() {
     bootstrap();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const statusMode = emailStatus?.ok ? (emailStatus.tenant.email_send_mode ?? "standard") : "standard";
+  const enterpriseIdentityPresent = emailStatus?.ok ? Boolean(emailStatus.tenant.email_identity_id_present) : false;
+
+  const testEmailDisabledReason =
+    emailSendMode === "enterprise"
+      ? "Test email is only available in Standard mode until Enterprise OAuth is wired up."
+      : !leadToEmail.trim()
+        ? "Set Lead To Email first."
+        : null;
+
+  const canSendTestEmail =
+    canEdit && !testingEmail && emailSendMode === "standard" && !!leadToEmail.trim();
 
   return (
     <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
@@ -298,7 +335,7 @@ async function sendTestEmail() {
       <div className="mb-5 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
         <div className="text-sm font-semibold text-gray-900">Email Status</div>
         <p className="mt-1 text-sm text-gray-600">
-          This shows whether email is configured (domain verification may still be required).
+          This shows whether email is configured (domain verification / token validity may still be required).
         </p>
 
         {emailStatus?.ok ? (
@@ -309,7 +346,16 @@ async function sendTestEmail() {
                 emailStatus.enabled ? "border-green-200 bg-green-50" : "border-yellow-200 bg-yellow-50",
               ].join(" ")}
             >
-              <div className="font-medium text-gray-900">{emailStatus.enabled ? "Configured" : "Needs setup"}</div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-medium text-gray-900">
+                  {emailStatus.enabled ? "Configured" : "Needs setup"}
+                </div>
+
+                <span className="rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-800">
+                  Mode: <span className="font-mono">{statusMode}</span>
+                </span>
+              </div>
+
               <ul className="mt-1 list-disc pl-5 text-gray-700 space-y-1">
                 {emailStatus.notes.map((n, i) => (
                   <li key={i}>{n}</li>
@@ -324,6 +370,7 @@ async function sendTestEmail() {
                   {emailStatus.platform.resend_key_present ? "present" : "missing"}
                 </span>
               </div>
+
               <div>
                 Tenant: business_name{" "}
                 <span className={emailStatus.tenant.business_name_present ? "text-green-700" : "text-red-700"}>
@@ -337,11 +384,17 @@ async function sendTestEmail() {
                 <span className={emailStatus.tenant.resend_from_email_present ? "text-green-700" : "text-red-700"}>
                   {emailStatus.tenant.resend_from_email_present ? "set" : "missing"}
                 </span>
+                {" · "}email_identity_id{" "}
+                <span className={enterpriseIdentityPresent ? "text-green-700" : "text-red-700"}>
+                  {enterpriseIdentityPresent ? "set" : "missing"}
+                </span>
               </div>
             </div>
           </div>
         ) : emailStatus ? (
-          <div className="mt-3 text-sm text-red-700">{emailStatus.message || emailStatus.error || "Failed to load email status."}</div>
+          <div className="mt-3 text-sm text-red-700">
+            {emailStatus.message || emailStatus.error || "Failed to load email status."}
+          </div>
         ) : (
           <div className="mt-3 text-sm text-gray-700">Loading status…</div>
         )}
@@ -360,61 +413,169 @@ async function sendTestEmail() {
               </div>
             ) : null}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-800">Business Name</label>
-              <input
-                value={businessName}
-                onChange={(e) => setBusinessName(e.target.value)}
-                disabled={!canEdit}
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-              />
+            {/* Standard mode */}
+            <div className="rounded-lg border border-gray-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Standard (Recommended)</div>
+                  <p className="mt-1 text-sm text-gray-600">
+                    Platform email with tenant domain verification. “From” looks like your business.
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="email_send_mode"
+                    checked={emailSendMode === "standard"}
+                    onChange={() => {
+                      setEmailSendMode("standard");
+                      // optional UX: clear prior test result/errors when switching modes
+                      setTestEmailRes(null);
+                    }}
+                    disabled={!canEdit}
+                  />
+                  <span className="text-gray-800">Use Standard</span>
+                </label>
+              </div>
+
+              <div className="mt-4 grid gap-5">
+                <div>
+                  <label className="block text-sm font-medium text-gray-800">Business Name</label>
+                  <input
+                    value={businessName}
+                    onChange={(e) => setBusinessName(e.target.value)}
+                    disabled={!canEdit}
+                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-800">Lead To Email</label>
+                  <input
+                    value={leadToEmail}
+                    onChange={(e) => setLeadToEmail(e.target.value)}
+                    disabled={!canEdit}
+                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-800">Resend From Email</label>
+                  <input
+                    value={fromEmail}
+                    onChange={(e) => setFromEmail(e.target.value)}
+                    disabled={!canEdit}
+                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Must be a verified sending domain in Resend. Format:{" "}
+                    <span className="font-mono">Name &lt;email@domain.com&gt;</span>
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                  <div className="text-sm font-semibold text-gray-900">Send Test Email</div>
+                  <p className="mt-1 text-sm text-gray-600">
+                    Sends a test message to{" "}
+                    <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
+                  </p>
+
+                  <div className="mt-3 flex items-center gap-3">
+                    <button
+                      onClick={sendTestEmail}
+                      disabled={!canSendTestEmail}
+                      className="rounded-md bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                      title={testEmailDisabledReason ?? undefined}
+                    >
+                      {testingEmail ? "Sending…" : "Send test email"}
+                    </button>
+
+                    {emailSendMode === "enterprise" ? (
+                      <span className="text-xs text-gray-600">
+                        Enterprise mode selected — test email will be enabled after OAuth connect.
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {testEmailRes ? (
+                    <pre className="mt-3 overflow-auto rounded-md bg-white border border-gray-200 p-3 text-xs">
+                      {JSON.stringify(testEmailRes, null, 2)}
+                    </pre>
+                  ) : null}
+                </div>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-800">Lead To Email</label>
-              <input
-                value={leadToEmail}
-                onChange={(e) => setLeadToEmail(e.target.value)}
-                disabled={!canEdit}
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-              />
+            {/* Enterprise mode (OAuth) */}
+            <div className="rounded-lg border border-gray-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Enterprise (OAuth)</div>
+                  <p className="mt-1 text-sm text-gray-600">
+                    Send email using a mailbox-native provider (Google / Microsoft) with OAuth “send as”.
+                    Best for strict IT policies.
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name="email_send_mode"
+                    checked={emailSendMode === "enterprise"}
+                    onChange={() => {
+                      setEmailSendMode("enterprise");
+                      // optional UX: clear prior test result/errors when switching modes
+                      setTestEmailRes(null);
+                    }}
+                    disabled={!canEdit}
+                  />
+                  <span className="text-gray-800">Use Enterprise</span>
+                </label>
+              </div>
+
+              <div className="mt-4 grid gap-3">
+                <div className="rounded-md border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">
+                  Enterprise OAuth is not wired up yet. This section is here so we can store the mode + identity id
+                  now, and implement Google/Microsoft linking next.
+                </div>
+
+                <div className="grid gap-2">
+                  <label className="block text-sm font-medium text-gray-800">Connected Email Identity ID</label>
+                  <input
+                    value={emailIdentityId}
+                    onChange={(e) => setEmailIdentityId(e.target.value)}
+                    disabled={!canEdit}
+                    placeholder="(auto-populated after OAuth connect)"
+                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                  />
+                  <p className="text-xs text-gray-500">
+                    This will reference a future <span className="font-mono">email_identities</span> table row
+                    (encrypted refresh token + provider metadata).
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled
+                    className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
+                    title="Coming soon"
+                  >
+                    Connect Google (coming soon)
+                  </button>
+                  <button
+                    type="button"
+                    disabled
+                    className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
+                    title="Coming soon"
+                  >
+                    Connect Microsoft (coming soon)
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-800">Resend From Email</label>
-              <input
-                value={fromEmail}
-                onChange={(e) => setFromEmail(e.target.value)}
-                disabled={!canEdit}
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-              />
-              <p className="mt-1 text-xs text-gray-500">
-                Must be a verified sending domain in Resend. Format:{" "}
-                <span className="font-mono">Name &lt;email@domain.com&gt;</span>
-              </p>
-            </div>
-<div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-4">
-  <div className="text-sm font-semibold text-gray-900">Send Test Email</div>
-  <p className="mt-1 text-sm text-gray-600">
-    Sends a test message to <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
-  </p>
-
-  <div className="mt-3 flex items-center gap-3">
-    <button
-      onClick={sendTestEmail}
-      disabled={!canEdit || testingEmail || !leadToEmail.trim()}
-      className="rounded-md bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-    >
-      {testingEmail ? "Sending…" : "Send test email"}
-    </button>
-  </div>
-
-  {testEmailRes ? (
-    <pre className="mt-3 overflow-auto rounded-md bg-white border border-gray-200 p-3 text-xs">
-{JSON.stringify(testEmailRes, null, 2)}
-    </pre>
-  ) : null}
-</div>
             <div className="flex items-center gap-4">
               <button
                 onClick={save}

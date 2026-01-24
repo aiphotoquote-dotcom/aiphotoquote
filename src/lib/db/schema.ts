@@ -26,7 +26,10 @@ export const appUsers = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    providerSubjectUq: uniqueIndex("app_users_provider_subject_uq").on(t.authProvider, t.authSubject),
+    providerSubjectUq: uniqueIndex("app_users_provider_subject_uq").on(
+      t.authProvider,
+      t.authSubject
+    ),
   })
 );
 
@@ -72,6 +75,13 @@ export const tenantSettings = pgTable("tenant_settings", {
   businessName: text("business_name"),
   leadToEmail: text("lead_to_email"),
   resendFromEmail: text("resend_from_email"),
+
+  // NEW: email sending mode + identity pointer (OAuth identity record)
+  // - emailSendMode: "standard" | "enterprise"
+  // - emailIdentityId: UUID referencing your future email_identities table
+  emailSendMode: text("email_send_mode"),
+  emailIdentityId: uuid("email_identity_id"),
+
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
   renderingEnabled: boolean("rendering_enabled"),

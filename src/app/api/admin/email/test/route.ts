@@ -2,7 +2,11 @@
 import { NextResponse } from "next/server";
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { sendEmail } from "@/lib/email";
-import { getTenantEmailConfig, resolveFromAndReplyTo } from "@/lib/email/resolve";
+import {
+  getTenantEmailConfig,
+  resolveFromAndReplyTo,
+  resolveEmailHeadersForDisplay,
+} from "@/lib/email/resolve";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,9 +28,28 @@ export async function POST() {
     );
   }
 
-  const { from, replyTo } = resolveFromAndReplyTo(cfg);
+  const headers = resolveEmailHeadersForDisplay(cfg);
 
+  // If tenant selected Enterprise mode, don't attempt provider send yet
+  if (headers.mode === "enterprise") {
+    return json(
+      {
+        ok: false,
+        error: "ENTERPRISE_OAUTH_NOT_IMPLEMENTED",
+        message:
+          "Enterprise (OAuth) email is not wired up yet. Switch to Standard mode for now, or wait for OAuth connect.",
+        mode: headers.mode,
+        providerLabel: headers.providerLabel,
+        fromUsed: headers.fromUsed,
+        replyToUsed: headers.replyToUsed,
+      },
+      400
+    );
+  }
+
+  const { from, replyTo } = resolveFromAndReplyTo(cfg);
   const business = cfg.businessName?.trim() || "your business";
+  const replyToFirst = replyTo?.[0] || "";
 
   const res = await sendEmail({
     tenantId: gate.tenantId,
@@ -44,25 +67,32 @@ export async function POST() {
           </p>
           <div style="font-size:13px;color:#6b7280;">
             <div><b>Tenant</b>: ${escapeHtml(business)}</div>
+            <div><b>Mode</b>: ${escapeHtml(headers.mode)}</div>
+            <div><b>Provider label</b>: ${escapeHtml(headers.providerLabel)}</div>
             <div><b>From used</b>: ${escapeHtml(from)}</div>
-            <div><b>Reply-To</b>: ${escapeHtml(replyTo?.[0] || "(none)")}</div>
-            <div><b>Provider</b>: ${escapeHtml("resend")}</div>
-
+            <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
+            <div><b>sendEmail() provider</b>: ${escapeHtml(res.provider)}</div>
+            ${res.ok ? "" : `<div><b>Error</b>: ${escapeHtml(res.error || "(unknown)")}</div>`}
           </div>
         </div>
       `,
-     text: `Test email: tenant=${business} from=${from} replyTo=${replyTo?.[0] || ""} provider=resend`,
+      text: `Test email: tenant=${business} mode=${headers.mode} providerLabel=${headers.providerLabel} from=${from} replyTo=${replyToFirst} sendEmailProvider=${res.provider} ok=${res.ok} error=${res.error || ""}`,
     },
   });
 
-  return json({
-    ok: res.ok,
-    provider: res.provider,
-    providerMessageId: res.providerMessageId ?? null,
-    fromUsed: from,
-    replyToUsed: replyTo?.[0] ?? null,
-    error: res.error ?? null,
-  }, res.ok ? 200 : 500);
+  return json(
+    {
+      ok: res.ok,
+      mode: headers.mode,
+      providerLabel: headers.providerLabel,
+      provider: res.provider,
+      providerMessageId: res.providerMessageId ?? null,
+      fromUsed: from,
+      replyToUsed: replyToFirst || null,
+      error: res.error ?? null,
+    },
+    res.ok ? 200 : 500
+  );
 }
 
 function escapeHtml(s: string) {
