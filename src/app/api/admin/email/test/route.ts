@@ -51,6 +51,10 @@ export async function POST() {
   const business = cfg.businessName?.trim() || "your business";
   const replyToFirst = replyTo?.[0] || "";
 
+  // IMPORTANT:
+  // You cannot include `res.provider` inside the email body in a single send,
+  // because `res` doesn't exist until AFTER sendEmail() returns.
+  // So we show mode/providerLabel in the email, and return the actual provider in the API response.
   const res = await sendEmail({
     tenantId: gate.tenantId,
     context: { type: "lead_new" },
@@ -71,12 +75,10 @@ export async function POST() {
             <div><b>Provider label</b>: ${escapeHtml(headers.providerLabel)}</div>
             <div><b>From used</b>: ${escapeHtml(from)}</div>
             <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
-            <div><b>sendEmail() provider</b>: ${escapeHtml(res.provider)}</div>
-            ${res.ok ? "" : `<div><b>Error</b>: ${escapeHtml(res.error || "(unknown)")}</div>`}
           </div>
         </div>
       `,
-      text: `Test email: tenant=${business} mode=${headers.mode} providerLabel=${headers.providerLabel} from=${from} replyTo=${replyToFirst} sendEmailProvider=${res.provider} ok=${res.ok} error=${res.error || ""}`,
+      text: `Test email: tenant=${business} mode=${headers.mode} providerLabel=${headers.providerLabel} from=${from} replyTo=${replyToFirst}`,
     },
   });
 
