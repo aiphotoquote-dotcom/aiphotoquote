@@ -40,12 +40,8 @@ export async function GET(req: Request) {
     const state = url.searchParams.get("state") || "";
     const debug = url.searchParams.get("debug") === "1";
 
-    if (!code) {
-      return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
-    }
-    if (!state) {
-      return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
-    }
+    if (!code) return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
+    if (!state) return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
 
     const { t: tenantId } = verifyState(state);
 
@@ -80,7 +76,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
     }
 
-    // 2) Fetch user email (identity)
+    // 2) Fetch user email
     const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
@@ -123,17 +119,17 @@ export async function GET(req: Request) {
     }
 
     // 4) Link tenant_settings to identity + switch to enterprise mode
-    // IMPORTANT: do NOT write updated_at here unless you're 100% sure prod has it.
+    // IMPORTANT: do NOT cast identity id. This works whether tenant_settings.email_identity_id is uuid OR text.
     await db.execute(sql`
       insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
-      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
+      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId})
       on conflict (tenant_id)
       do update set
         email_send_mode = 'enterprise',
         email_identity_id = excluded.email_identity_id
     `);
 
-    // Optional: confirm what DB now says (useful for debug=1)
+    // Confirm for debug
     const check = await db.execute(sql`
       select tenant_id, email_send_mode, email_identity_id
       from tenant_settings
@@ -153,7 +149,7 @@ export async function GET(req: Request) {
       });
     }
 
-    // 5) Redirect back (MUST be absolute for Next redirect)
+    // 5) Redirect back (absolute)
     const dest = new URL("/admin/settings", url.origin);
     dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
