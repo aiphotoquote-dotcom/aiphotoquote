@@ -1,4 +1,3 @@
-// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -33,6 +32,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
+  const debug = url.searchParams.get("debug") === "1";
 
   if (!code) return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
   if (!state) return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
@@ -65,12 +65,12 @@ export async function GET(req: Request) {
   }
 
   const accessToken = String(tokenJson.access_token || "");
-  const refreshToken = String(tokenJson.refresh_token || ""); // can be empty sometimes
+  const refreshToken = String(tokenJson.refresh_token || "");
   if (!accessToken) {
     return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
   }
 
-  // 2) Fetch user email (identity)
+  // 2) Fetch user email
   const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
@@ -87,15 +87,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, { status: 500 });
   }
 
-  // 3) Persist identity
-  // NOTE: if refresh token is missing, we can't send later.
-  // We still store identity row, but mark missing token as error.
   const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
+  const fromEmail = emailAddress;
 
-  // Choose from_email. You said: "from is fine for mailbox".
-  const fromEmail = `${emailAddress}`;
-
-  // Upsert email_identities row (unique tenant+provider+email)
+  // 3) Upsert email_identities
   const up = await db.execute(sql`
     insert into email_identities (tenant_id, provider, email_address, from_email, refresh_token_enc)
     values (${tenantId}::uuid, 'gmail_oauth', ${emailAddress}, ${fromEmail}, ${refreshTokenEnc})
@@ -110,26 +105,49 @@ export async function GET(req: Request) {
     returning id
   `);
 
-  const row: any = (up as any)?.rows?.[0] ?? null;
+  const row: any =
+    (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
+
   const emailIdentityId = row?.id ? String(row.id) : null;
   if (!emailIdentityId) {
     return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
   }
 
-  // Link tenant_settings to identity + switch to enterprise mode
+  // 4) ✅ Upsert tenant_settings and flip to enterprise
   await db.execute(sql`
-    update tenant_settings
-    set email_send_mode = 'enterprise',
-        email_identity_id = ${emailIdentityId}::uuid,
-        updated_at = now()
-    where tenant_id = ${tenantId}::uuid
+    insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id, updated_at)
+    values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid, now())
+    on conflict (tenant_id)
+    do update set
+      email_send_mode = 'enterprise',
+      email_identity_id = excluded.email_identity_id,
+      updated_at = now()
   `);
 
-  // 4) Redirect back (ABSOLUTE)
+  // Confirm what the DB now says
+  const check = await db.execute(sql`
+    select tenant_id, email_send_mode, email_identity_id
+    from tenant_settings
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+
+  const checkRow: any =
+    (check as any)?.rows?.[0] ?? (Array.isArray(check) ? (check as any)[0] : null);
+
+  if (debug) {
+    // proves callback executed and what it wrote
+    return NextResponse.json({
+      ok: true,
+      tenantId,
+      emailAddress,
+      refreshTokenReturned: !!refreshToken,
+      emailIdentityId,
+      tenantSettings: checkRow ?? null,
+    });
+  }
+
   const dest = new URL(`/admin/settings?oauth=google_connected`, req.url);
-
-  // If refresh token missing, hint the UI
   if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
-
   return NextResponse.redirect(dest);
 }
