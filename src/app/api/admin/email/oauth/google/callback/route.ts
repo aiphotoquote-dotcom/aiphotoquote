@@ -1,3 +1,4 @@
+// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -28,16 +29,13 @@ function verifyState(stateB64Url: string) {
   return JSON.parse(json) as { t: string; ts: number; nonce: string };
 }
 
-function pgErr(e: any) {
-  return {
-    message: e?.message ?? String(e),
-    code: e?.code ?? null,
-    detail: e?.detail ?? null,
-    constraint: e?.constraint ?? null,
-    table: e?.table ?? null,
-    column: e?.column ?? null,
-    schema: e?.schema ?? null,
-  };
+async function safeJson(res: Response) {
+  const text = await res.text();
+  try {
+    return { ok: res.ok, json: JSON.parse(text) };
+  } catch {
+    return { ok: res.ok, json: { raw: text } };
+  }
 }
 
 export async function GET(req: Request) {
@@ -69,16 +67,16 @@ export async function GET(req: Request) {
       }),
     });
 
-    const tokenJson: any = await tokenRes.json();
-    if (!tokenRes.ok) {
+    const tj = await safeJson(tokenRes);
+    if (!tj.ok) {
       return NextResponse.json(
-        { ok: false, error: "GOOGLE_TOKEN_EXCHANGE_FAILED", detail: tokenJson },
+        { ok: false, error: "GOOGLE_TOKEN_EXCHANGE_FAILED", detail: tj.json },
         { status: 500 }
       );
     }
 
-    const accessToken = String(tokenJson.access_token || "");
-    const refreshToken = String(tokenJson.refresh_token || "");
+    const accessToken = String((tj.json as any).access_token || "");
+    const refreshToken = String((tj.json as any).refresh_token || "");
     if (!accessToken) {
       return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
     }
@@ -87,101 +85,86 @@ export async function GET(req: Request) {
     const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    const meJson: any = await meRes.json();
-    if (!meRes.ok) {
+
+    const mj = await safeJson(meRes);
+    if (!mj.ok) {
       return NextResponse.json(
-        { ok: false, error: "GOOGLE_USERINFO_FAILED", detail: meJson },
+        { ok: false, error: "GOOGLE_USERINFO_FAILED", detail: mj.json },
         { status: 500 }
       );
     }
 
-    const emailAddress = String(meJson.email || "").trim().toLowerCase();
-    if (!emailAddress) {
+    const email = String((mj.json as any).email || "").trim().toLowerCase();
+    if (!email) {
       return NextResponse.json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, { status: 500 });
     }
 
     const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-    const fromEmail = emailAddress;
+    const fromEmail = email; // per your note: mailbox From is fine
 
-    // 3) Upsert tenant_email_identities
-    let emailIdentityId: string | null = null;
+    // 3) Upsert into EXISTING schema:
+    // tenant_email_identities columns are: tenant_id, provider, email, from_email, refresh_token_enc
+    const up = await db.execute(sql`
+      insert into tenant_email_identities (tenant_id, provider, email, from_email, refresh_token_enc)
+      values (${tenantId}::uuid, 'gmail_oauth', ${email}, ${fromEmail}, ${refreshTokenEnc})
+      on conflict (tenant_id, provider, email)
+      do update set
+        from_email = excluded.from_email,
+        refresh_token_enc = case
+          when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
+          else tenant_email_identities.refresh_token_enc
+        end,
+        updated_at = now()
+      returning id
+    `);
 
-    try {
-      const up = await db.execute(sql`
-        insert into tenant_email_identities (tenant_id, provider, email_address, from_email, refresh_token_enc)
-        values (${tenantId}::uuid, 'gmail_oauth', ${emailAddress}, ${fromEmail}, ${refreshTokenEnc})
-        on conflict (tenant_id, provider, email_address)
-        do update set
-          from_email = excluded.from_email,
-          refresh_token_enc = case
-            when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
-            else tenant_email_identities.refresh_token_enc
-          end,
-          updated_at = now()
-        returning id
-      `);
+    const row: any =
+      (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
 
-      const row: any =
-        (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
-
-      emailIdentityId = row?.id ? String(row.id) : null;
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "EMAIL_IDENTITY_UPSERT_FAILED",
-          tenantId,
-          emailAddress,
-          dbError: pgErr(e),
-        },
-        { status: 500 }
-      );
-    }
-
+    const emailIdentityId = row?.id ? String(row.id) : null;
     if (!emailIdentityId) {
-      return NextResponse.json(
-        { ok: false, error: "EMAIL_IDENTITY_ID_MISSING_AFTER_UPSERT", tenantId, emailAddress },
-        { status: 500 }
-      );
+      return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
     }
 
-    // 4) Upsert tenant_settings and flip to enterprise
-    try {
-      await db.execute(sql`
-        insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
-        values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
-        on conflict (tenant_id)
-        do update set
-          email_send_mode = 'enterprise',
-          email_identity_id = excluded.email_identity_id,
-          updated_at = now()
-      `);
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "TENANT_SETTINGS_UPSERT_FAILED",
-          tenantId,
-          emailIdentityId,
-          dbError: pgErr(e),
-        },
-        { status: 500 }
-      );
-    }
+    // 4) Upsert tenant_settings + flip to enterprise
+    // NOTE: if you have a CHECK constraint on email_send_mode, it must allow 'enterprise'
+    await db.execute(sql`
+      insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
+      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
+      on conflict (tenant_id)
+      do update set
+        email_send_mode = 'enterprise',
+        email_identity_id = excluded.email_identity_id,
+        updated_at = now()
+    `);
 
+    // Debug mode: prove what we wrote
     if (debug) {
+      const check = await db.execute(sql`
+        select tenant_id, email_send_mode, email_identity_id
+        from tenant_settings
+        where tenant_id = ${tenantId}::uuid
+        limit 1
+      `);
+
+      const checkRow: any =
+        (check as any)?.rows?.[0] ?? (Array.isArray(check) ? (check as any)[0] : null);
+
       return NextResponse.json({
         ok: true,
         tenantId,
-        emailAddress,
+        email,
         refreshTokenReturned: !!refreshToken,
         emailIdentityId,
+        tenantSettings: checkRow ?? null,
       });
     }
 
-    // 5) Redirect back (ABSOLUTE)
-    const dest = new URL("/admin/settings?oauth=google_connected", url.origin);
+    // 5) Redirect back ABSOLUTE
+    const dest = new URL("/admin/settings", url.origin);
+    dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
+
     return NextResponse.redirect(dest);
   } catch (e: any) {
     return NextResponse.json(
