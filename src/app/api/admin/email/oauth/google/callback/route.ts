@@ -1,3 +1,4 @@
+// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -28,50 +29,19 @@ function verifyState(stateB64Url: string) {
   return JSON.parse(json) as { t: string; ts: number; nonce: string };
 }
 
-async function safeJson(res: Response) {
-  const text = await res.text();
-  try {
-    return { ok: res.ok, json: JSON.parse(text) };
-  } catch {
-    return { ok: res.ok, json: { raw: text } };
-  }
-}
-
-function pickErr(e: any) {
-  const inner =
-    e?.cause ||
-    e?.originalError ||
-    e?.original ||
-    e?.queryError ||
-    e?.error ||
-    null;
-
-  const base = e ?? {};
-  const best = inner ?? base;
-
-  return {
-    topMessage: base?.message ?? String(base),
-    innerMessage: best?.message ?? null,
-    code: best?.code ?? null,
-    detail: best?.detail ?? null,
-    constraint: best?.constraint ?? null,
-    table: best?.table ?? null,
-    column: best?.column ?? null,
-    schema: best?.schema ?? null,
-    hint: best?.hint ?? null,
-  };
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
 }
 
 export async function GET(req: Request) {
-  const incoming = new URL(req.url);
-
   try {
-    const code = incoming.searchParams.get("code") || "";
-    const state = incoming.searchParams.get("state") || "";
-    const debug = incoming.searchParams.get("debug") === "1";
+    const url = new URL(req.url);
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const debug = url.searchParams.get("debug") === "1";
 
-    if (!code) return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
-    if (!state) return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
+    if (!code) return json({ ok: false, error: "MISSING_CODE" }, 400);
+    if (!state) return json({ ok: false, error: "MISSING_STATE" }, 400);
 
     const { t: tenantId } = verifyState(state);
 
@@ -92,118 +62,76 @@ export async function GET(req: Request) {
       }),
     });
 
-    const tj = await safeJson(tokenRes);
-    if (!tj.ok) {
-      return NextResponse.json(
-        { ok: false, error: "GOOGLE_TOKEN_EXCHANGE_FAILED", detail: tj.json },
-        { status: 500 }
-      );
+    const tokenJson: any = await tokenRes.json();
+    if (!tokenRes.ok) {
+      return json({ ok: false, error: "GOOGLE_TOKEN_EXCHANGE_FAILED", detail: tokenJson }, 500);
     }
 
-    const accessToken = String((tj.json as any).access_token || "");
-    const refreshToken = String((tj.json as any).refresh_token || "");
-    const scopeStr = String((tj.json as any).scope || "");
+    const accessToken = String(tokenJson.access_token || "");
+    const refreshToken = String(tokenJson.refresh_token || "");
+    const scopeStr = String(tokenJson.scope || "");
 
-    if (!accessToken) {
-      return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
-    }
+    if (!accessToken) return json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, 500);
 
     // 2) Fetch user email
     const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-
-    const mj = await safeJson(meRes);
-    if (!mj.ok) {
-      return NextResponse.json(
-        { ok: false, error: "GOOGLE_USERINFO_FAILED", detail: mj.json },
-        { status: 500 }
-      );
+    const meJson: any = await meRes.json();
+    if (!meRes.ok) {
+      return json({ ok: false, error: "GOOGLE_USERINFO_FAILED", detail: meJson }, 500);
     }
 
-    const email = String((mj.json as any).email || "").trim().toLowerCase();
-    if (!email) {
-      return NextResponse.json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, { status: 500 });
-    }
+    const email = String(meJson.email || "").trim().toLowerCase();
+    if (!email) return json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, 500);
 
-    // Your table supports these
-    const displayName = email;
-    const status = "active";
-    const scopes = (scopeStr || "")
-      .split(" ")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // These columns are added by migration 0009
+    // 3) Persist identity
     const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-    const fromEmail = email; // mailbox “From” is fine (your call)
+    const provider = "gmail_oauth";
+    const displayName = email; // keep it simple for now
+    const status = refreshToken ? "active" : "needs_reconnect";
+    const scopes = scopeStr
+      ? scopeStr.split(" ").filter(Boolean)
+      : ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/gmail.send"];
 
-    // 3) Upsert identity
-    let emailIdentityId: string | null = null;
-    try {
-      const up = await db.execute(sql`
-        insert into tenant_email_identities
-          (tenant_id, provider, email, display_name, status, scopes, last_error, from_email, refresh_token_enc)
-        values
-          (${tenantId}::uuid, 'gmail_oauth', ${email}, ${displayName}, ${status},
-           ${JSON.stringify(scopes)}::jsonb, null, ${fromEmail}, ${refreshTokenEnc})
-        on conflict (tenant_id, provider, email)
-        do update set
-          display_name = excluded.display_name,
-          status = excluded.status,
-          scopes = excluded.scopes,
-          last_error = null,
-          from_email = excluded.from_email,
-          refresh_token_enc = case
-            when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
-            else tenant_email_identities.refresh_token_enc
-          end,
-          updated_at = now()
-        returning id
-      `);
+    // This is what the Gmail provider will use as "From"
+    const fromEmail = email;
 
-      const row: any = (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
-      emailIdentityId = row?.id ? String(row.id) : null;
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "EMAIL_IDENTITY_UPSERT_FAILED",
-          tenantId,
-          email,
-          dbError: pickErr(e),
-        },
-        { status: 500 }
-      );
-    }
+    const up = await db.execute(sql`
+      insert into tenant_email_identities
+        (tenant_id, provider, email, display_name, status, scopes, last_error, from_email, refresh_token_enc)
+      values
+        (${tenantId}::uuid, ${provider}, ${email}, ${displayName}, ${status},
+         ${JSON.stringify(scopes)}::jsonb, null, ${fromEmail}, ${refreshTokenEnc})
+      on conflict (tenant_id, provider, email)
+      do update set
+        display_name = excluded.display_name,
+        status = excluded.status,
+        scopes = excluded.scopes,
+        last_error = null,
+        from_email = excluded.from_email,
+        refresh_token_enc = case
+          when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
+          else tenant_email_identities.refresh_token_enc
+        end,
+        updated_at = now()
+      returning id
+    `);
 
-    if (!emailIdentityId) {
-      return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_ID_MISSING" }, { status: 500 });
-    }
+    const row: any = (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
+    const emailIdentityId = row?.id ? String(row.id) : null;
+    if (!emailIdentityId) return json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, 500);
 
-    // 4) Flip tenant_settings into enterprise + link identity
-    try {
-      await db.execute(sql`
-        insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
-        values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
-        on conflict (tenant_id)
-        do update set
-          email_send_mode = 'enterprise',
-          email_identity_id = excluded.email_identity_id,
-          updated_at = now()
-      `);
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "TENANT_SETTINGS_UPSERT_FAILED",
-          tenantId,
-          emailIdentityId,
-          dbError: pickErr(e),
-        },
-        { status: 500 }
-      );
-    }
+    // 4) Upsert tenant_settings and flip to enterprise
+    await db.execute(sql`
+      insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id, updated_at)
+      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid, now())
+      on conflict (tenant_id)
+      do update set
+        email_send_mode = 'enterprise',
+        email_identity_id = excluded.email_identity_id,
+        updated_at = now()
+    `);
 
     if (debug) {
       const check = await db.execute(sql`
@@ -215,7 +143,7 @@ export async function GET(req: Request) {
       const checkRow: any =
         (check as any)?.rows?.[0] ?? (Array.isArray(check) ? (check as any)[0] : null);
 
-      return NextResponse.json({
+      return json({
         ok: true,
         tenantId,
         email,
@@ -225,10 +153,13 @@ export async function GET(req: Request) {
       });
     }
 
-    // 5) Redirect back absolute
-    const dest = new URL("/admin/settings", incoming.origin);
+    // 5) Redirect back (ABSOLUTE)
+    const dest = new URL(req.url);
+    dest.pathname = "/admin/settings";
+    dest.search = "";
     dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
+
     return NextResponse.redirect(dest);
   } catch (e: any) {
     return NextResponse.json(
