@@ -19,13 +19,9 @@ async function getTenantEmailMode(tenantId: string): Promise<{
       limit 1
     `);
 
-    const row: any =
-      (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
-    const rawMode = (row?.email_send_mode ?? "standard")
-      .toString()
-      .trim()
-      .toLowerCase();
+    const rawMode = (row?.email_send_mode ?? "standard").toString().trim().toLowerCase();
     const mode: EmailSendMode = rawMode === "enterprise" ? "enterprise" : "standard";
 
     const emailIdentityId = row?.email_identity_id ? String(row.email_identity_id) : null;
@@ -36,28 +32,38 @@ async function getTenantEmailMode(tenantId: string): Promise<{
   }
 }
 
-async function getGmailIdentity(emailIdentityId: string): Promise<{
-  refreshTokenEnc: string;
+async function getTenantEmailIdentity(emailIdentityId: string): Promise<{
+  provider: string;
+  email: string;
   fromEmail: string;
+  refreshTokenEnc: string;
+  status: string;
 }> {
+  // ✅ IMPORTANT: your DB table is tenant_email_identities (NOT email_identities)
   const r = await db.execute(sql`
-    select refresh_token_enc, from_email
-    from email_identities
+    select provider, email, from_email, refresh_token_enc, status
+    from tenant_email_identities
     where id = ${emailIdentityId}::uuid
     limit 1
   `);
 
-  const row: any =
-    (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
-  const refreshTokenEnc = (row?.refresh_token_enc ?? "").toString();
-  const fromEmail = (row?.from_email ?? "").toString();
+  const provider = String(row?.provider ?? "").trim();
+  const email = String(row?.email ?? "").trim().toLowerCase();
 
-  if (!refreshTokenEnc || !fromEmail) {
-    throw new Error("EMAIL_IDENTITY_NOT_FOUND");
-  }
+  // from_email may be null/blank; fallback to mailbox email
+  const fromEmailRaw = String(row?.from_email ?? "").trim();
+  const fromEmail = fromEmailRaw || email;
 
-  return { refreshTokenEnc, fromEmail };
+  const refreshTokenEnc = String(row?.refresh_token_enc ?? "").trim();
+  const status = String(row?.status ?? "active").trim();
+
+  if (!provider || !email) throw new Error("EMAIL_IDENTITY_NOT_FOUND");
+  if (!refreshTokenEnc) throw new Error("MISSING_REFRESH_TOKEN");
+  if (status && status !== "active") throw new Error(`EMAIL_IDENTITY_NOT_ACTIVE:${status}`);
+
+  return { provider, email, fromEmail, refreshTokenEnc, status };
 }
 
 export async function sendEmail(args: {
@@ -88,10 +94,22 @@ export async function sendEmail(args: {
   }
 
   try {
-    const id = await getGmailIdentity(emailIdentityId);
+    const ident = await getTenantEmailIdentity(emailIdentityId);
+
+    // For now we only support Google first
+    if (ident.provider !== "gmail_oauth") {
+      return {
+        ok: false,
+        provider: "gmail_oauth",
+        providerMessageId: null,
+        error: `UNSUPPORTED_EMAIL_PROVIDER:${ident.provider}`,
+        meta: { mode },
+      };
+    }
+
     const provider = makeGmailOAuthProvider({
-      refreshTokenEnc: id.refreshTokenEnc,
-      fromEmail: id.fromEmail,
+      refreshTokenEnc: ident.refreshTokenEnc,
+      fromEmail: ident.fromEmail,
     });
 
     return provider.send({
