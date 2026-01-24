@@ -85,5 +85,5 @@ export async function GET(req: Request) {
   // ✅ From here: exchange code -> tokens, encrypt refresh token, upsert email_identities, update tenant_settings.email_identity_id
   // I’m not rewriting your whole token/db section since you already have it — just keep using `tenantId` from state.
 
-  return NextResponse.redirect("/admin/settings?oauth=google_connected");
+  return NextResponse.redirect(new URL("/admin/settings?oauth=google_connected", req.url));
 }
