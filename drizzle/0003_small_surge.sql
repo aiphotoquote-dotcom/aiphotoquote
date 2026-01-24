@@ -1,0 +1,4 @@
+-- This migration file was missing locally but referenced in drizzle.__drizzle_migrations.
+-- No-op placeholder to allow migrator to continue.
+
+-- Intentionally blank.
