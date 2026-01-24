@@ -1,3 +1,4 @@
+// src/lib/email/providers/gmailOauth.ts
 import type { EmailProvider } from "./base";
 import { decryptToken } from "@/lib/crypto/emailTokens";
 
@@ -24,7 +25,7 @@ export function makeGmailOAuthProvider(args: {
           };
         }
 
-        // refresh access token
+        // Refresh access token
         const body = new URLSearchParams();
         body.set("client_id", clientId);
         body.set("client_secret", clientSecret);
@@ -37,35 +38,51 @@ export function makeGmailOAuthProvider(args: {
           body,
         });
 
-        const tj = await tr.json();
+        const tj: any = await tr.json().catch(() => ({}));
         if (!tr.ok) {
           return {
             ok: false,
             provider: "gmail_oauth",
             providerMessageId: null,
-            error: tj?.error_description || "Google refresh failed",
+            error: tj?.error_description || tj?.error || "Google refresh failed",
             meta: { tenantId, context, tj },
           };
         }
 
-        const accessToken = tj.access_token as string;
+        const accessToken = String(tj.access_token || "");
+        if (!accessToken) {
+          return {
+            ok: false,
+            provider: "gmail_oauth",
+            providerMessageId: null,
+            error: "Missing access token from Google refresh",
+            meta: { tenantId, context, tj },
+          };
+        }
 
-        // RFC2822 raw email (HTML)
-        const toLine = message.to.join(", ");
-        const replyTo = Array.isArray(message.replyTo) ? message.replyTo[0] : message.replyTo;
+        // Build RFC2822 raw email (HTML)
+        const toLine = (message.to || []).join(", ");
+        const replyTo =
+          message.replyTo == null
+            ? ""
+            : Array.isArray(message.replyTo)
+            ? message.replyTo[0] || ""
+            : String(message.replyTo);
+
+        const subject = message.subject || "(no subject)";
 
         const headers = [
           `From: ${args.fromEmail}`,
           `To: ${toLine}`,
           replyTo ? `Reply-To: ${replyTo}` : null,
-          `Subject: ${message.subject}`,
+          `Subject: ${subject}`,
           `MIME-Version: 1.0`,
           `Content-Type: text/html; charset=UTF-8`,
         ]
           .filter(Boolean)
           .join("\r\n");
 
-        const raw = Buffer.from(`${headers}\r\n\r\n${message.html}`, "utf8")
+        const raw = Buffer.from(`${headers}\r\n\r\n${message.html || ""}`, "utf8")
           .toString("base64")
           .replace(/\+/g, "-")
           .replace(/\//g, "_")
@@ -80,7 +97,7 @@ export function makeGmailOAuthProvider(args: {
           body: JSON.stringify({ raw }),
         });
 
-        const sj = await sr.json();
+        const sj: any = await sr.json().catch(() => ({}));
         if (!sr.ok) {
           return {
             ok: false,
