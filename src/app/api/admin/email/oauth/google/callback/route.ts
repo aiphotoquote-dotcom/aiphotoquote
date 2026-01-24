@@ -29,34 +29,30 @@ function verifyState(stateB64Url: string) {
   return JSON.parse(json) as { t: string; ts: number; nonce: string };
 }
 
-function pickRow(r: any) {
+function firstRow(r: any) {
   return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 }
 
 export async function GET(req: Request) {
-  const url = new URL(req.url);
-  const code = url.searchParams.get("code") || "";
-  const state = url.searchParams.get("state") || "";
-  const debug = url.searchParams.get("debug") === "1";
-
-  if (!code) return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
-  if (!state) return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
-
-  let tenantId = "";
   try {
-    tenantId = verifyState(state).t;
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "OAUTH_STATE_INVALID" },
-      { status: 400 }
-    );
-  }
+    const url = new URL(req.url);
+    const code = url.searchParams.get("code") || "";
+    const state = url.searchParams.get("state") || "";
+    const debug = url.searchParams.get("debug") === "1";
 
-  const clientId = mustEnv("GOOGLE_OAUTH_CLIENT_ID");
-  const clientSecret = mustEnv("GOOGLE_OAUTH_CLIENT_SECRET");
-  const redirectUri = mustEnv("GOOGLE_OAUTH_REDIRECT_URI");
+    if (!code) {
+      return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
+    }
+    if (!state) {
+      return NextResponse.json({ ok: false, error: "MISSING_STATE" }, { status: 400 });
+    }
 
-  try {
+    const { t: tenantId } = verifyState(state);
+
+    const clientId = mustEnv("GOOGLE_OAUTH_CLIENT_ID");
+    const clientSecret = mustEnv("GOOGLE_OAUTH_CLIENT_SECRET");
+    const redirectUri = mustEnv("GOOGLE_OAUTH_REDIRECT_URI");
+
     // 1) Exchange code -> tokens
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
@@ -84,10 +80,11 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
     }
 
-    // 2) Fetch user email
+    // 2) Fetch user email (identity)
     const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
+
     const meJson: any = await meRes.json();
     if (!meRes.ok) {
       return NextResponse.json(
@@ -101,11 +98,11 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, { status: 500 });
     }
 
+    // 3) Upsert email_identities
     const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-    const fromEmail = emailAddress; // mailbox-native "From" is fine
+    const fromEmail = emailAddress;
 
-    // 3) Upsert email_identities (DO NOT RELY ON RETURNING PARSE)
-    await db.execute(sql`
+    const up = await db.execute(sql`
       insert into email_identities (tenant_id, provider, email_address, from_email, refresh_token_enc)
       values (${tenantId}::uuid, 'gmail_oauth', ${emailAddress}, ${fromEmail}, ${refreshTokenEnc})
       on conflict (tenant_id, provider, email_address)
@@ -114,68 +111,53 @@ export async function GET(req: Request) {
         refresh_token_enc = case
           when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
           else email_identities.refresh_token_enc
-        end,
-        updated_at = now()
+        end
+      returning id
     `);
 
-    const idRes = await db.execute(sql`
-      select id
-      from email_identities
-      where tenant_id = ${tenantId}::uuid
-        and provider = 'gmail_oauth'
-        and email_address = ${emailAddress}
-      limit 1
-    `);
-
-    const idRow: any = pickRow(idRes);
-    const emailIdentityId = idRow?.id ? String(idRow.id) : null;
+    const row = firstRow(up);
+    const emailIdentityId = row?.id ? String(row.id) : null;
 
     if (!emailIdentityId) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "EMAIL_IDENTITY_UPSERT_FAILED",
-          message: "Upsert completed but could not find identity row by lookup.",
-          tenantId,
-          emailAddress,
-        },
-        { status: 500 }
-      );
+      return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
     }
 
-    // 4) Upsert tenant_settings and flip to enterprise
+    // 4) Link tenant_settings to identity + switch to enterprise mode
+    // IMPORTANT: do NOT write updated_at here unless you're 100% sure prod has it.
     await db.execute(sql`
-      insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id, updated_at)
-      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid, now())
+      insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
+      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
       on conflict (tenant_id)
       do update set
         email_send_mode = 'enterprise',
-        email_identity_id = excluded.email_identity_id,
-        updated_at = now()
+        email_identity_id = excluded.email_identity_id
     `);
 
-    if (debug) {
-      const check = await db.execute(sql`
-        select tenant_id, email_send_mode, email_identity_id
-        from tenant_settings
-        where tenant_id = ${tenantId}::uuid
-        limit 1
-      `);
+    // Optional: confirm what DB now says (useful for debug=1)
+    const check = await db.execute(sql`
+      select tenant_id, email_send_mode, email_identity_id
+      from tenant_settings
+      where tenant_id = ${tenantId}::uuid
+      limit 1
+    `);
+    const checkRow = firstRow(check);
 
+    if (debug) {
       return NextResponse.json({
         ok: true,
         tenantId,
         emailAddress,
         refreshTokenReturned: !!refreshToken,
         emailIdentityId,
-        tenantSettings: pickRow(check),
+        tenantSettings: checkRow ?? null,
       });
     }
 
-    // 5) Redirect back (ABSOLUTE)
-    const dest = new URL("/admin/settings", req.url);
+    // 5) Redirect back (MUST be absolute for Next redirect)
+    const dest = new URL("/admin/settings", url.origin);
     dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
+
     return NextResponse.redirect(dest);
   } catch (e: any) {
     return NextResponse.json(
@@ -183,9 +165,6 @@ export async function GET(req: Request) {
         ok: false,
         error: "OAUTH_CALLBACK_FAILED",
         message: e?.message ?? String(e),
-        code: e?.code,
-        detail: e?.detail,
-        hint: e?.hint,
       },
       { status: 500 }
     );
