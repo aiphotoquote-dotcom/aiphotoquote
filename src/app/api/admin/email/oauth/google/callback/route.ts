@@ -38,15 +38,69 @@ async function safeJson(res: Response) {
   }
 }
 
-function dbErr(e: any) {
+function pickErr(e: any) {
+  // Drizzle/Postgres wrappers often hide the real pg error on .cause / .originalError / etc.
+  const inner =
+    e?.cause ||
+    e?.originalError ||
+    e?.original ||
+    e?.queryError ||
+    e?.error ||
+    null;
+
+  const base = e ?? {};
+  const best = inner ?? base;
+
   return {
-    message: e?.message ?? String(e),
-    code: e?.code ?? null,
-    detail: e?.detail ?? null,
-    constraint: e?.constraint ?? null,
-    table: e?.table ?? null,
-    column: e?.column ?? null,
-    schema: e?.schema ?? null,
+    topMessage: base?.message ?? String(base),
+    innerMessage: best?.message ?? null,
+    code: best?.code ?? null,
+    detail: best?.detail ?? null,
+    constraint: best?.constraint ?? null,
+    table: best?.table ?? null,
+    column: best?.column ?? null,
+    schema: best?.schema ?? null,
+    hint: best?.hint ?? null,
+  };
+}
+
+async function introspectTenantEmailIdentities() {
+  // These reads are safe and massively speed up debugging schema drift.
+  const cols = await db.execute(sql`
+    select
+      column_name,
+      data_type,
+      is_nullable,
+      column_default
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'tenant_email_identities'
+    order by ordinal_position
+  `);
+
+  const checksAndFks = await db.execute(sql`
+    select
+      conname,
+      contype,
+      pg_get_constraintdef(c.oid) as def
+    from pg_constraint c
+    where c.conrelid = 'public.tenant_email_identities'::regclass
+    order by contype, conname
+  `);
+
+  const idx = await db.execute(sql`
+    select indexname, indexdef
+    from pg_indexes
+    where schemaname = 'public'
+      and tablename = 'tenant_email_identities'
+    order by indexname
+  `);
+
+  const toRows = (r: any) => (r as any)?.rows ?? (Array.isArray(r) ? r : []);
+  return {
+    columns: toRows(cols),
+    constraints: toRows(checksAndFks),
+    indexes: toRows(idx),
   };
 }
 
@@ -137,13 +191,21 @@ export async function GET(req: Request) {
 
       emailIdentityId = row?.id ? String(row.id) : null;
     } catch (e: any) {
+      let schema: any = null;
+      try {
+        schema = await introspectTenantEmailIdentities();
+      } catch {
+        // ignore schema introspection errors
+      }
+
       return NextResponse.json(
         {
           ok: false,
           error: "EMAIL_IDENTITY_UPSERT_FAILED",
           tenantId,
           email,
-          dbError: dbErr(e),
+          dbError: pickErr(e),
+          schema,
         },
         { status: 500 }
       );
@@ -171,7 +233,7 @@ export async function GET(req: Request) {
           error: "TENANT_SETTINGS_UPSERT_FAILED",
           tenantId,
           emailIdentityId,
-          dbError: dbErr(e),
+          dbError: pickErr(e),
         },
         { status: 500 }
       );
@@ -197,7 +259,7 @@ export async function GET(req: Request) {
       });
     }
 
-    // 5) Redirect back ABSOLUTE
+    // 5) Redirect back absolute
     const dest = new URL("/admin/settings", url.origin);
     dest.searchParams.set("oauth", "google_connected");
     if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
