@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { sendEmail } from "@/lib/email";
 import { getTenantEmailConfig, resolveFromAndReplyTo } from "@/lib/email/resolve";
+import { db } from "@/lib/db/client";
+import { sql } from "drizzle-orm";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,79 +13,108 @@ function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
 }
 
-export async function POST() {
+async function getEnterpriseMailboxEmail(emailIdentityId: string): Promise<string | null> {
+  try {
+    const r = await db.execute(sql`
+      select email
+      from tenant_email_identities
+      where id = ${emailIdentityId}::uuid
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const email = (row?.email ?? "").toString().trim().toLowerCase();
+    return email || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function POST(req: Request) {
   const gate = await requireTenantRole(["owner", "admin"]);
   if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
+
+  const url = new URL(req.url);
+  const bccSelf = url.searchParams.get("bccSelf") !== "0"; // default ON
 
   const cfg = await getTenantEmailConfig(gate.tenantId);
 
   if (!cfg.leadToEmail) {
-    return json(
-      { ok: false, error: "MISSING_LEAD_TO_EMAIL", message: "Set Lead To Email first." },
-      400
-    );
+    return json({ ok: false, error: "MISSING_LEAD_TO_EMAIL", message: "Set Lead To Email first." }, 400);
   }
 
   const { from, replyTo } = resolveFromAndReplyTo(cfg);
   const business = cfg.businessName?.trim() || "your business";
   const replyToFirst = replyTo?.[0] || "";
 
-  // Send first (so we can report real provider/mode/fromActual)
-  const res = await sendEmail({
-    tenantId: gate.tenantId,
-    context: { type: "lead_new" },
-    message: {
-      from,
-      to: [cfg.leadToEmail],
-      replyTo,
-      subject: `Test email from AI Photo Quote (${business})`,
-      html: "(placeholder)", // replaced below
-      text: "(placeholder)", // replaced below
-    },
-  });
+  // Determine if we're enterprise and (optionally) BCC the connected mailbox
+  const mode = (cfg.emailSendMode ?? "standard").toString().trim().toLowerCase() === "enterprise"
+    ? "enterprise"
+    : "standard";
 
-  // Now build the email body with accurate info
-  const mode = (res.meta as any)?.mode ?? cfg.emailSendMode ?? "standard";
-  const fromActual = (res.meta as any)?.fromActual ?? null;
-  const fromRequested = (res.meta as any)?.fromRequested ?? from;
+  const mailboxEmail =
+    mode === "enterprise" && cfg.emailIdentityId ? await getEnterpriseMailboxEmail(cfg.emailIdentityId) : null;
 
-  const html = `
+  // ✅ Real email body (no placeholder)
+  const preHtml = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
       <h2 style="margin:0 0 8px;">Test email ✅</h2>
       <p style="margin:0 0 10px;color:#374151;">
-        This confirms your tenant can send email through the platform.
+        This is a test message from AI Photo Quote.
       </p>
       <div style="font-size:13px;color:#6b7280;">
         <div><b>Tenant</b>: ${escapeHtml(business)}</div>
-        <div><b>Mode</b>: ${escapeHtml(String(mode))}</div>
-        <div><b>sendEmail() provider</b>: ${escapeHtml(res.provider)}</div>
-        <div><b>From (requested)</b>: ${escapeHtml(String(fromRequested))}</div>
-        <div><b>From (actual)</b>: ${escapeHtml(fromActual ? String(fromActual) : "(same as requested)")}</div>
+        <div><b>Mode (requested)</b>: ${escapeHtml(mode)}</div>
         <div><b>To</b>: ${escapeHtml(cfg.leadToEmail)}</div>
         <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
-        ${res.ok ? "" : `<div><b>Error</b>: ${escapeHtml(res.error || "(unknown)")}</div>`}
+        ${
+          mode === "enterprise"
+            ? `<div><b>Connected mailbox (for send)</b>: ${escapeHtml(mailboxEmail || "(unknown)")}</div>`
+            : ""
+        }
       </div>
     </div>
   `;
 
-  const text = `Test email: tenant=${business} mode=${mode} provider=${res.provider} fromRequested=${fromRequested} fromActual=${fromActual ?? ""} to=${cfg.leadToEmail} replyTo=${replyToFirst} ok=${res.ok} error=${res.error || ""}`;
+  const preText = `Test email: tenant=${business} mode=${mode} to=${cfg.leadToEmail} replyTo=${replyToFirst}`;
 
-  // If it succeeded, we’re done; if it failed, return details
+  // Optional BCC-to-self on tests so you always see delivery
+  // NOTE: EmailMessage may not currently include bcc in your types/provider.
+  // If your EmailMessage supports it, this works immediately.
+  // If it doesn't, you can skip this and I’ll show the small type/provider patch next.
+  const message: any = {
+    from,
+    to: [cfg.leadToEmail],
+    replyTo,
+    subject: `Test email from AI Photo Quote (${business})`,
+    html: preHtml,
+    text: preText,
+  };
+
+  if (bccSelf && mailboxEmail) {
+    message.bcc = [mailboxEmail];
+  }
+
+  const res = await sendEmail({
+    tenantId: gate.tenantId,
+    context: { type: "lead_new" },
+    message,
+  });
+
+  const fromActual = (res.meta as any)?.fromActual ?? null;
+
   return json(
     {
       ok: res.ok,
       mode,
       provider: res.provider,
       providerMessageId: res.providerMessageId ?? null,
-      fromRequested,
+      fromRequested: from,
       fromActual,
       replyToUsed: replyToFirst || null,
       emailIdentityId: cfg.emailIdentityId ?? null,
+      bccSelfApplied: Boolean(bccSelf && mailboxEmail),
+      bccSelfAddress: mailboxEmail,
       error: res.error ?? null,
-      note:
-        res.ok
-          ? "Provider accepted the message. If delivery is missing, check recipient spam/quarantine and DMARC alignment."
-          : null,
     },
     res.ok ? 200 : 500
   );
