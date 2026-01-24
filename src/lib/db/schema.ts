@@ -7,12 +7,13 @@ import {
   boolean,
   uuid,
   uniqueIndex,
+  index,
   jsonb,
 } from "drizzle-orm/pg-core";
 
 /**
  * Portable internal users.
- * This is the anchor for mobility: swap auth providers later without rewriting tenant ownership.
+ * Anchor for mobility: swap auth providers later without rewriting tenant ownership.
  */
 export const appUsers = pgTable(
   "app_users",
@@ -26,39 +27,7 @@ export const appUsers = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    providerSubjectUq: uniqueIndex("app_users_provider_subject_uq").on(
-      t.authProvider,
-      t.authSubject
-    ),
-  })
-);
-
-export const tenantEmailIdentities = pgTable(
-  "tenant_email_identities",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-fromEmail: text("from_email"),
-refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
-    provider: text("provider").notNull(),
-    email: text("email").notNull(),
-
-    displayName: text("display_name"),
-    status: text("status").notNull().default("active"),
-    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
-    lastError: text("last_error"),
-
-    // ✅ NEW columns required by OAuth provider
-    fromEmail: text("from_email"),
-    refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
-
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    tenantProviderEmailUq: uniqueIndex("tenant_email_identities_uq").on(t.tenantId, t.provider, t.email),
+    providerSubjectUq: uniqueIndex("app_users_provider_subject_uq").on(t.authProvider, t.authSubject),
   })
 );
 
@@ -88,6 +57,31 @@ export const tenants = pgTable(
 );
 
 /**
+ * Tenant members / RBAC
+ */
+export const tenantMembers = pgTable(
+  "tenant_members",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    userId: uuid("user_id").references(() => appUsers.id, { onDelete: "cascade" }),
+
+    // "owner" | "admin" | "member"
+    role: text("role").notNull().default("member"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantUserUq: uniqueIndex("tenant_members_tenant_user_uq").on(t.tenantId, t.userId),
+    tenantIdx: index("tenant_members_tenant_id_idx").on(t.tenantId),
+  })
+);
+
+/**
  * Tenant settings (non-sensitive)
  */
 export const tenantSettings = pgTable("tenant_settings", {
@@ -107,7 +101,7 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   // NEW: email sending mode + identity pointer (OAuth identity record)
   // - emailSendMode: "standard" | "enterprise"
-  // - emailIdentityId: UUID referencing email_identities.id
+  // - emailIdentityId: UUID referencing tenant_email_identities.id
   emailSendMode: text("email_send_mode"),
   emailIdentityId: uuid("email_identity_id"),
 
@@ -123,6 +117,49 @@ export const tenantSettings = pgTable("tenant_settings", {
   weekStartsOn: integer("week_starts_on"),
   updatedAt: timestamp("updated_at", { withTimezone: true }),
 });
+
+/**
+ * Tenant email identities (OAuth mailboxes)
+ *
+ * NOTE: Your DB currently shows these base columns:
+ * id, tenant_id, provider, email, display_name, status, scopes, last_error, created_at, updated_at
+ *
+ * If you are adding from_email + refresh_token_enc via migration, keep them here ONCE each.
+ * (The TypeScript error you hit happens when these keys get duplicated.)
+ */
+export const tenantEmailIdentities = pgTable(
+  "tenant_email_identities",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    // "gmail_oauth" | "microsoft_oauth"
+    provider: text("provider").notNull(),
+
+    // mailbox email (your DB uses column name "email")
+    email: text("email").notNull(),
+
+    displayName: text("display_name"),
+    status: text("status").notNull().default("active"),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+
+    lastError: text("last_error"),
+
+    // ✅ If/when your migration adds these columns, they belong here exactly once each:
+    fromEmail: text("from_email"),
+    refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantIdx: index("tenant_email_identities_tenant_id_idx").on(t.tenantId),
+    tenantProviderEmailUq: uniqueIndex("tenant_email_identities_uq").on(t.tenantId, t.provider, t.email),
+  })
+);
 
 /**
  * Tenant pricing guardrails
@@ -198,37 +235,5 @@ export const industries = pgTable(
   },
   (t) => ({
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
-  })
-);
-
-/**
- * Email identities (OAuth mailbox connections)
- */
-export const emailIdentities = pgTable(
-  "email_identities",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-
-    // "gmail_oauth" | "microsoft_oauth" (we’re doing gmail first)
-    provider: text("provider").notNull(),
-
-    emailAddress: text("email_address").notNull(),
-    fromEmail: text("from_email").notNull(),
-
-    // encrypted refresh token
-    refreshTokenEnc: text("refresh_token_enc").notNull(),
-
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    tenantProviderEmailUq: uniqueIndex("email_identities_tenant_provider_email_uq").on(
-      t.tenantId,
-      t.provider,
-      t.emailAddress
-    ),
   })
 );
