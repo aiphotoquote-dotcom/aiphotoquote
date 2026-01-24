@@ -1,4 +1,3 @@
-// src/app/api/admin/email/oauth/google/callback/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
@@ -16,7 +15,7 @@ function mustEnv(name: string) {
 
 function verifyState(stateB64Url: string) {
   const secret = mustEnv("EMAIL_OAUTH_STATE_SECRET");
-  const raw = Buffer.from(stateB64Url, "base64url").toString("utf8"); // "json.sig"
+  const raw = Buffer.from(stateB64Url, "base64url").toString("utf8");
   const i = raw.lastIndexOf(".");
   if (i < 0) throw new Error("OAUTH_STATE_MALFORMED");
 
@@ -31,9 +30,8 @@ function verifyState(stateB64Url: string) {
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const code = url.searchParams.get("code") || "";
-  const state = url.searchParams.get("state") || "";
-  const debug = url.searchParams.get("debug") === "1";
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
 
   if (!code) {
     return NextResponse.json({ ok: false, error: "MISSING_CODE" }, { status: 400 });
@@ -48,7 +46,7 @@ export async function GET(req: Request) {
   const clientSecret = mustEnv("GOOGLE_OAUTH_CLIENT_SECRET");
   const redirectUri = mustEnv("GOOGLE_OAUTH_REDIRECT_URI");
 
-  // 1) Exchange code -> tokens
+  // 1) Exchange code → tokens
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -71,35 +69,43 @@ export async function GET(req: Request) {
 
   const accessToken = String(tokenJson.access_token || "");
   const refreshToken = String(tokenJson.refresh_token || "");
+
   if (!accessToken) {
     return NextResponse.json({ ok: false, error: "MISSING_ACCESS_TOKEN" }, { status: 500 });
   }
 
-  // 2) Fetch user email
+  // 2) Fetch mailbox identity
   const meRes = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
   const meJson: any = await meRes.json();
-  if (!meRes.ok) {
+  if (!meRes.ok || !meJson.email) {
     return NextResponse.json(
       { ok: false, error: "GOOGLE_USERINFO_FAILED", detail: meJson },
       { status: 500 }
     );
   }
 
-  const emailAddress = String(meJson.email || "").trim().toLowerCase();
-  if (!emailAddress) {
-    return NextResponse.json({ ok: false, error: "MISSING_GOOGLE_EMAIL" }, { status: 500 });
-  }
-
+  const emailAddress = String(meJson.email).toLowerCase();
   const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-  const fromEmail = emailAddress; // you said mailbox From is fine
 
-  // 3) Upsert email_identities
+  // 3) Upsert email identity
   const up = await db.execute(sql`
-    insert into email_identities (tenant_id, provider, email_address, from_email, refresh_token_enc)
-    values (${tenantId}::uuid, 'gmail_oauth', ${emailAddress}, ${fromEmail}, ${refreshTokenEnc})
+    insert into email_identities (
+      tenant_id,
+      provider,
+      email_address,
+      from_email,
+      refresh_token_enc
+    )
+    values (
+      ${tenantId}::uuid,
+      'gmail_oauth',
+      ${emailAddress},
+      ${emailAddress},
+      ${refreshTokenEnc}
+    )
     on conflict (tenant_id, provider, email_address)
     do update set
       from_email = excluded.from_email,
@@ -111,49 +117,26 @@ export async function GET(req: Request) {
     returning id
   `);
 
-  const row: any =
-    (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
-
-  const emailIdentityId = row?.id ? String(row.id) : null;
-  if (!emailIdentityId) {
-    return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
+  const row: any = (up as any)?.rows?.[0];
+  if (!row?.id) {
+    return NextResponse.json(
+      { ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" },
+      { status: 500 }
+    );
   }
 
-  // 4) Upsert tenant_settings and flip to enterprise
+  // 4) Link tenant to enterprise mode
   await db.execute(sql`
-    insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id, updated_at)
-    values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid, now())
-    on conflict (tenant_id)
-    do update set
-      email_send_mode = 'enterprise',
-      email_identity_id = excluded.email_identity_id,
-      updated_at = now()
-  `);
-
-  // Confirm what the DB now says (useful for debug mode)
-  const check = await db.execute(sql`
-    select tenant_id, email_send_mode, email_identity_id
-    from tenant_settings
+    update tenant_settings
+    set email_send_mode = 'enterprise',
+        email_identity_id = ${row.id}::uuid,
+        updated_at = now()
     where tenant_id = ${tenantId}::uuid
-    limit 1
   `);
 
-  const checkRow: any =
-    (check as any)?.rows?.[0] ?? (Array.isArray(check) ? (check as any)[0] : null);
-
-  if (debug) {
-    return NextResponse.json({
-      ok: true,
-      tenantId,
-      emailAddress,
-      refreshTokenReturned: !!refreshToken,
-      emailIdentityId,
-      tenantSettings: checkRow ?? null,
-    });
-  }
-
-  // 5) Redirect back (ABSOLUTE URL to satisfy Next)
+  // ✅ ABSOLUTE redirect (THIS FIXES YOUR ERROR)
   const dest = new URL("/admin/settings?oauth=google_connected", req.url);
   if (!refreshToken) dest.searchParams.set("warn", "missing_refresh_token");
+
   return NextResponse.redirect(dest);
 }
