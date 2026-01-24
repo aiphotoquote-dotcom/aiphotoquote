@@ -23,7 +23,6 @@ async function getTenantEmailMode(tenantId: string): Promise<{
 
     const rawMode = (row?.email_send_mode ?? "standard").toString().trim().toLowerCase();
     const mode: EmailSendMode = rawMode === "enterprise" ? "enterprise" : "standard";
-
     const emailIdentityId = row?.email_identity_id ? String(row.email_identity_id) : null;
 
     return { mode, emailIdentityId };
@@ -32,16 +31,13 @@ async function getTenantEmailMode(tenantId: string): Promise<{
   }
 }
 
-async function getTenantEmailIdentity(emailIdentityId: string): Promise<{
-  provider: string;
-  email: string;
-  fromEmail: string;
+async function getGmailIdentity(emailIdentityId: string): Promise<{
   refreshTokenEnc: string;
-  status: string;
+  mailboxEmail: string;
 }> {
-  // ✅ IMPORTANT: your DB table is tenant_email_identities (NOT email_identities)
+  // NOTE: your DB table is tenant_email_identities and the column is `email`
   const r = await db.execute(sql`
-    select provider, email, from_email, refresh_token_enc, status
+    select refresh_token_enc, email
     from tenant_email_identities
     where id = ${emailIdentityId}::uuid
     limit 1
@@ -49,21 +45,13 @@ async function getTenantEmailIdentity(emailIdentityId: string): Promise<{
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
-  const provider = String(row?.provider ?? "").trim();
-  const email = String(row?.email ?? "").trim().toLowerCase();
+  const refreshTokenEnc = (row?.refresh_token_enc ?? "").toString();
+  const mailboxEmail = (row?.email ?? "").toString();
 
-  // from_email may be null/blank; fallback to mailbox email
-  const fromEmailRaw = String(row?.from_email ?? "").trim();
-  const fromEmail = fromEmailRaw || email;
+  if (!refreshTokenEnc) throw new Error("EMAIL_IDENTITY_MISSING_REFRESH_TOKEN");
+  if (!mailboxEmail) throw new Error("EMAIL_IDENTITY_MISSING_EMAIL");
 
-  const refreshTokenEnc = String(row?.refresh_token_enc ?? "").trim();
-  const status = String(row?.status ?? "active").trim();
-
-  if (!provider || !email) throw new Error("EMAIL_IDENTITY_NOT_FOUND");
-  if (!refreshTokenEnc) throw new Error("MISSING_REFRESH_TOKEN");
-  if (status && status !== "active") throw new Error(`EMAIL_IDENTITY_NOT_ACTIVE:${status}`);
-
-  return { provider, email, fromEmail, refreshTokenEnc, status };
+  return { refreshTokenEnc, mailboxEmail };
 }
 
 export async function sendEmail(args: {
@@ -94,36 +82,37 @@ export async function sendEmail(args: {
   }
 
   try {
-    const ident = await getTenantEmailIdentity(emailIdentityId);
+    const identity = await getGmailIdentity(emailIdentityId);
 
-    // For now we only support Google first
-    if (ident.provider !== "gmail_oauth") {
-      return {
-        ok: false,
-        provider: "gmail_oauth",
-        providerMessageId: null,
-        error: `UNSUPPORTED_EMAIL_PROVIDER:${ident.provider}`,
-        meta: { mode },
-      };
-    }
-
+    // ✅ Enterprise rule: send "From" as the connected mailbox (deliverability + DMARC alignment)
     const provider = makeGmailOAuthProvider({
-      refreshTokenEnc: ident.refreshTokenEnc,
-      fromEmail: ident.fromEmail,
+      refreshTokenEnc: identity.refreshTokenEnc,
+      fromEmail: identity.mailboxEmail,
     });
 
-    return provider.send({
+    const res = await provider.send({
       tenantId: args.tenantId,
       context: args.context,
       message: args.message,
     });
+
+    return {
+      ...res,
+      meta: {
+        ...(res.meta || {}),
+        mode,
+        emailIdentityId,
+        fromRequested: args.message.from,
+        fromActual: identity.mailboxEmail,
+      },
+    };
   } catch (e: any) {
     return {
       ok: false,
       provider: "gmail_oauth",
       providerMessageId: null,
       error: e?.message ?? String(e),
-      meta: { mode },
+      meta: { mode, emailIdentityId },
     };
   }
 }

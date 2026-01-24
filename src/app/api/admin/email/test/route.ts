@@ -17,44 +17,18 @@ export async function POST() {
 
   const cfg = await getTenantEmailConfig(gate.tenantId);
 
-  if (!cfg.leadToEmail?.trim()) {
+  if (!cfg.leadToEmail) {
     return json(
       { ok: false, error: "MISSING_LEAD_TO_EMAIL", message: "Set Lead To Email first." },
       400
     );
   }
 
-  const mode = cfg.emailSendMode === "enterprise" ? "enterprise" : "standard";
-  const emailIdentityId = cfg.emailIdentityId || null;
-
   const { from, replyTo } = resolveFromAndReplyTo(cfg);
   const business = cfg.businessName?.trim() || "your business";
   const replyToFirst = replyTo?.[0] || "";
 
-  // IMPORTANT: You cannot reference `res` inside this HTML, because `res` is created AFTER sendEmail() returns.
-  const html = `
-    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
-      <h2 style="margin:0 0 8px;">Test email ✅</h2>
-      <p style="margin:0 0 10px;color:#374151;">
-        This confirms your tenant can send email through the platform.
-      </p>
-
-      <div style="font-size:13px;color:#6b7280;">
-        <div><b>Tenant</b>: ${escapeHtml(business)}</div>
-        <div><b>Mode</b>: ${escapeHtml(mode)}</div>
-        <div><b>Email Identity ID</b>: ${escapeHtml(emailIdentityId || "(none)")}</div>
-        <div><b>From (requested)</b>: ${escapeHtml(from)}</div>
-        <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
-      </div>
-
-      <p style="margin:12px 0 0;color:#6b7280;font-size:12px;">
-        Provider details are returned in the API response (not embedded in the email body).
-      </p>
-    </div>
-  `;
-
-  const text = `Test email: tenant=${business} mode=${mode} emailIdentityId=${emailIdentityId || ""} from=${from} replyTo=${replyToFirst}`;
-
+  // Send first (so we can report real provider/mode/fromActual)
   const res = await sendEmail({
     tenantId: gate.tenantId,
     context: { type: "lead_new" },
@@ -63,21 +37,53 @@ export async function POST() {
       to: [cfg.leadToEmail],
       replyTo,
       subject: `Test email from AI Photo Quote (${business})`,
-      html,
-      text,
+      html: "(placeholder)", // replaced below
+      text: "(placeholder)", // replaced below
     },
   });
 
+  // Now build the email body with accurate info
+  const mode = (res.meta as any)?.mode ?? cfg.emailSendMode ?? "standard";
+  const fromActual = (res.meta as any)?.fromActual ?? null;
+  const fromRequested = (res.meta as any)?.fromRequested ?? from;
+
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
+      <h2 style="margin:0 0 8px;">Test email ✅</h2>
+      <p style="margin:0 0 10px;color:#374151;">
+        This confirms your tenant can send email through the platform.
+      </p>
+      <div style="font-size:13px;color:#6b7280;">
+        <div><b>Tenant</b>: ${escapeHtml(business)}</div>
+        <div><b>Mode</b>: ${escapeHtml(String(mode))}</div>
+        <div><b>sendEmail() provider</b>: ${escapeHtml(res.provider)}</div>
+        <div><b>From (requested)</b>: ${escapeHtml(String(fromRequested))}</div>
+        <div><b>From (actual)</b>: ${escapeHtml(fromActual ? String(fromActual) : "(same as requested)")}</div>
+        <div><b>To</b>: ${escapeHtml(cfg.leadToEmail)}</div>
+        <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
+        ${res.ok ? "" : `<div><b>Error</b>: ${escapeHtml(res.error || "(unknown)")}</div>`}
+      </div>
+    </div>
+  `;
+
+  const text = `Test email: tenant=${business} mode=${mode} provider=${res.provider} fromRequested=${fromRequested} fromActual=${fromActual ?? ""} to=${cfg.leadToEmail} replyTo=${replyToFirst} ok=${res.ok} error=${res.error || ""}`;
+
+  // If it succeeded, we’re done; if it failed, return details
   return json(
     {
       ok: res.ok,
       mode,
       provider: res.provider,
       providerMessageId: res.providerMessageId ?? null,
-      fromUsed: from,
+      fromRequested,
+      fromActual,
       replyToUsed: replyToFirst || null,
-      emailIdentityId,
+      emailIdentityId: cfg.emailIdentityId ?? null,
       error: res.error ?? null,
+      note:
+        res.ok
+          ? "Provider accepted the message. If delivery is missing, check recipient spam/quarantine and DMARC alignment."
+          : null,
     },
     res.ok ? 200 : 500
   );
