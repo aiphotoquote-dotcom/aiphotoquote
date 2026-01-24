@@ -38,9 +38,22 @@ async function safeJson(res: Response) {
   }
 }
 
+function dbErr(e: any) {
+  return {
+    message: e?.message ?? String(e),
+    code: e?.code ?? null,
+    detail: e?.detail ?? null,
+    constraint: e?.constraint ?? null,
+    table: e?.table ?? null,
+    column: e?.column ?? null,
+    schema: e?.schema ?? null,
+  };
+}
+
 export async function GET(req: Request) {
+  const url = new URL(req.url);
+
   try {
-    const url = new URL(req.url);
     const code = url.searchParams.get("code") || "";
     const state = url.searchParams.get("state") || "";
     const debug = url.searchParams.get("debug") === "1";
@@ -100,45 +113,70 @@ export async function GET(req: Request) {
     }
 
     const refreshTokenEnc = refreshToken ? encryptToken(refreshToken) : "";
-    const fromEmail = email; // per your note: mailbox From is fine
+    const fromEmail = email;
 
-    // 3) Upsert into EXISTING schema:
-    // tenant_email_identities columns are: tenant_id, provider, email, from_email, refresh_token_enc
-    const up = await db.execute(sql`
-      insert into tenant_email_identities (tenant_id, provider, email, from_email, refresh_token_enc)
-      values (${tenantId}::uuid, 'gmail_oauth', ${email}, ${fromEmail}, ${refreshTokenEnc})
-      on conflict (tenant_id, provider, email)
-      do update set
-        from_email = excluded.from_email,
-        refresh_token_enc = case
-          when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
-          else tenant_email_identities.refresh_token_enc
-        end,
-        updated_at = now()
-      returning id
-    `);
+    // 3) Upsert identity
+    let emailIdentityId: string | null = null;
+    try {
+      const up = await db.execute(sql`
+        insert into tenant_email_identities (tenant_id, provider, email, from_email, refresh_token_enc)
+        values (${tenantId}::uuid, 'gmail_oauth', ${email}, ${fromEmail}, ${refreshTokenEnc})
+        on conflict (tenant_id, provider, email)
+        do update set
+          from_email = excluded.from_email,
+          refresh_token_enc = case
+            when excluded.refresh_token_enc <> '' then excluded.refresh_token_enc
+            else tenant_email_identities.refresh_token_enc
+          end,
+          updated_at = now()
+        returning id
+      `);
 
-    const row: any =
-      (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
+      const row: any =
+        (up as any)?.rows?.[0] ?? (Array.isArray(up) ? (up as any)[0] : null);
 
-    const emailIdentityId = row?.id ? String(row.id) : null;
-    if (!emailIdentityId) {
-      return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_UPSERT_FAILED" }, { status: 500 });
+      emailIdentityId = row?.id ? String(row.id) : null;
+    } catch (e: any) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "EMAIL_IDENTITY_UPSERT_FAILED",
+          tenantId,
+          email,
+          dbError: dbErr(e),
+        },
+        { status: 500 }
+      );
     }
 
-    // 4) Upsert tenant_settings + flip to enterprise
-    // NOTE: if you have a CHECK constraint on email_send_mode, it must allow 'enterprise'
-    await db.execute(sql`
-      insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
-      values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
-      on conflict (tenant_id)
-      do update set
-        email_send_mode = 'enterprise',
-        email_identity_id = excluded.email_identity_id,
-        updated_at = now()
-    `);
+    if (!emailIdentityId) {
+      return NextResponse.json({ ok: false, error: "EMAIL_IDENTITY_ID_MISSING" }, { status: 500 });
+    }
 
-    // Debug mode: prove what we wrote
+    // 4) Upsert tenant_settings (flip enterprise)
+    try {
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, industry_key, email_send_mode, email_identity_id)
+        values (${tenantId}::uuid, 'auto', 'enterprise', ${emailIdentityId}::uuid)
+        on conflict (tenant_id)
+        do update set
+          email_send_mode = 'enterprise',
+          email_identity_id = excluded.email_identity_id,
+          updated_at = now()
+      `);
+    } catch (e: any) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "TENANT_SETTINGS_UPSERT_FAILED",
+          tenantId,
+          emailIdentityId,
+          dbError: dbErr(e),
+        },
+        { status: 500 }
+      );
+    }
+
     if (debug) {
       const check = await db.execute(sql`
         select tenant_id, email_send_mode, email_identity_id
@@ -146,7 +184,6 @@ export async function GET(req: Request) {
         where tenant_id = ${tenantId}::uuid
         limit 1
       `);
-
       const checkRow: any =
         (check as any)?.rows?.[0] ?? (Array.isArray(check) ? (check as any)[0] : null);
 
