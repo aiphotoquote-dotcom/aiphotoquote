@@ -29,6 +29,27 @@
       "when": 1768251357691,
       "tag": "0003_small_surge",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1769223825815,
+      "tag": "0004_handy_lionheart",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1769228165201,
+      "tag": "0005_daffy_argent",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1769228324203,
+      "tag": "0006_mixed_shadow_king",
+      "breakpoints": true
     }
   ]
 }

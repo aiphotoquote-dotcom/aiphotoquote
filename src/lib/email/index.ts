@@ -1,17 +1,9 @@
 // src/lib/email/index.ts
-import type { EmailContextType, EmailMessage } from "./types";
+import type { EmailContextType, EmailSendResult, EmailMessage } from "./types";
 import { makeResendProvider } from "./providers/resend";
-import { getTenantEmailConfig } from "./resolve";
-
-/**
- * Email provider routing based on tenant_settings.
- *
- * Modes:
- * - standard   -> Resend (platform email)
- * - enterprise -> OAuth mailbox (Google/Microsoft) [not implemented yet]
- *
- * NOTE: We only *route* here. OAuth token acquisition + storage will live elsewhere.
- */
+import { makeGmailOAuthProvider } from "./providers/gmailOAuth";
+import { db } from "@/lib/db/client";
+import { sql } from "drizzle-orm";
 
 type EmailSendMode = "standard" | "enterprise";
 
@@ -20,63 +12,100 @@ async function getTenantEmailMode(tenantId: string): Promise<{
   emailIdentityId: string | null;
 }> {
   try {
-    const cfg = await getTenantEmailConfig(tenantId);
-    const mode: EmailSendMode = cfg.emailSendMode === "enterprise" ? "enterprise" : "standard";
-    const emailIdentityId = cfg.emailIdentityId ? String(cfg.emailIdentityId) : null;
+    const r = await db.execute(sql`
+      select email_send_mode, email_identity_id
+      from tenant_settings
+      where tenant_id = ${tenantId}::uuid
+      limit 1
+    `);
+
+    const row: any =
+      (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+    const rawMode = (row?.email_send_mode ?? "standard")
+      .toString()
+      .trim()
+      .toLowerCase();
+    const mode: EmailSendMode = rawMode === "enterprise" ? "enterprise" : "standard";
+
+    const emailIdentityId = row?.email_identity_id ? String(row.email_identity_id) : null;
+
     return { mode, emailIdentityId };
   } catch {
-    // safest default
     return { mode: "standard", emailIdentityId: null };
   }
 }
 
-async function getProviderForTenant(
-  tenantId: string
-): Promise<
-  | { ok: true; mode: EmailSendMode; provider: ReturnType<typeof makeResendProvider> }
-  | { ok: false; mode: EmailSendMode; error: string }
-> {
-  const { mode, emailIdentityId } = await getTenantEmailMode(tenantId);
+async function getGmailIdentity(emailIdentityId: string): Promise<{
+  refreshTokenEnc: string;
+  fromEmail: string;
+}> {
+  const r = await db.execute(sql`
+    select refresh_token_enc, from_email
+    from email_identities
+    where id = ${emailIdentityId}::uuid
+    limit 1
+  `);
 
-  if (mode === "standard") {
-    return { ok: true, mode, provider: makeResendProvider() };
+  const row: any =
+    (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+  const refreshTokenEnc = (row?.refresh_token_enc ?? "").toString();
+  const fromEmail = (row?.from_email ?? "").toString();
+
+  if (!refreshTokenEnc || !fromEmail) {
+    throw new Error("EMAIL_IDENTITY_NOT_FOUND");
   }
 
-  // Enterprise mode selected
-  if (!emailIdentityId) {
-    return { ok: false, mode, error: "MISSING_EMAIL_IDENTITY" };
-  }
-
-  // Placeholder until we implement Google/Microsoft providers + email_identities table
-  return { ok: false, mode, error: "ENTERPRISE_OAUTH_NOT_IMPLEMENTED" };
+  return { refreshTokenEnc, fromEmail };
 }
 
 export async function sendEmail(args: {
   tenantId: string;
   context: { type: EmailContextType; quoteLogId?: string };
   message: EmailMessage;
-}) {
-  const routed = await getProviderForTenant(args.tenantId);
+}): Promise<EmailSendResult> {
+  const { mode, emailIdentityId } = await getTenantEmailMode(args.tenantId);
 
-  if (!routed.ok) {
-    // Return a structured, provider-shaped failure.
-    // In enterprise mode we report "gmail_oauth" as a neutral "OAuth mailbox" placeholder
-    // until we add email_identities.provider and can return google vs microsoft precisely.
-    const provider = routed.mode === "enterprise" ? "gmail_oauth" : "resend";
+  if (mode === "standard") {
+    const provider = makeResendProvider();
+    return provider.send({
+      tenantId: args.tenantId,
+      context: args.context,
+      message: args.message,
+    });
+  }
 
+  // enterprise
+  if (!emailIdentityId) {
     return {
       ok: false,
-      provider,
+      provider: "gmail_oauth",
       providerMessageId: null,
-      error: routed.error,
-      meta: { mode: routed.mode },
+      error: "MISSING_EMAIL_IDENTITY",
+      meta: { mode },
     };
   }
 
-  // future choke point: logging, retries, rate limits, provider selection
-  return routed.provider.send({
-    tenantId: args.tenantId,
-    context: args.context,
-    message: args.message,
-  });
+  try {
+    const id = await getGmailIdentity(emailIdentityId);
+    const provider = makeGmailOAuthProvider({
+      refreshTokenEnc: id.refreshTokenEnc,
+      fromEmail: id.fromEmail,
+    });
+
+    return provider.send({
+      tenantId: args.tenantId,
+      context: args.context,
+      message: args.message,
+    });
+  } catch (e: any) {
+    return {
+      ok: false,
+      provider: "gmail_oauth",
+      providerMessageId: null,
+      error: e?.message ?? String(e),
+      meta: { mode },
+    };
+  }
 }

@@ -14,7 +14,6 @@ export function makeGmailOAuthProvider(args: {
 
         const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() || "";
         const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() || "";
-
         if (!clientId || !clientSecret) {
           return {
             ok: false,
@@ -51,7 +50,7 @@ export function makeGmailOAuthProvider(args: {
 
         const accessToken = tj.access_token as string;
 
-        // Build RFC2822 raw email; Gmail requires base64url encoded "raw"
+        // RFC2822 raw email (HTML)
         const toLine = message.to.join(", ");
         const replyTo = Array.isArray(message.replyTo) ? message.replyTo[0] : message.replyTo;
 

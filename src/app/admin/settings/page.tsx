@@ -556,14 +556,16 @@ export default function AdminTenantSettingsPage() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled
-                    className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 disabled:opacity-50"
-                    title="Coming soon"
-                  >
-                    Connect Google (coming soon)
-                  </button>
+<a
+  href="/api/admin/email/google/start"
+  className={[
+    "rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50",
+    !canEdit ? "pointer-events-none opacity-50" : "",
+  ].join(" ")}
+>
+  Connect Google
+</a>
+
                   <button
                     type="button"
                     disabled

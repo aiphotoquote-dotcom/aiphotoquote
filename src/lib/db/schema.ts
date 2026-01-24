@@ -78,7 +78,7 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   // NEW: email sending mode + identity pointer (OAuth identity record)
   // - emailSendMode: "standard" | "enterprise"
-  // - emailIdentityId: UUID referencing your future email_identities table
+  // - emailIdentityId: UUID referencing email_identities.id
   emailSendMode: text("email_send_mode"),
   emailIdentityId: uuid("email_identity_id"),
 
@@ -169,5 +169,37 @@ export const industries = pgTable(
   },
   (t) => ({
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
+  })
+);
+
+/**
+ * Email identities (OAuth mailbox connections)
+ */
+export const emailIdentities = pgTable(
+  "email_identities",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    // "gmail_oauth" | "microsoft_oauth" (we’re doing gmail first)
+    provider: text("provider").notNull(),
+
+    emailAddress: text("email_address").notNull(),
+    fromEmail: text("from_email").notNull(),
+
+    // encrypted refresh token
+    refreshTokenEnc: text("refresh_token_enc").notNull(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantProviderEmailUq: uniqueIndex("email_identities_tenant_provider_email_uq").on(
+      t.tenantId,
+      t.provider,
+      t.emailAddress
+    ),
   })
 );
