@@ -2,11 +2,7 @@
 import { NextResponse } from "next/server";
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { sendEmail } from "@/lib/email";
-import {
-  getTenantEmailConfig,
-  resolveFromAndReplyTo,
-  resolveEmailHeadersForDisplay,
-} from "@/lib/email/resolve";
+import { getTenantEmailConfig, resolveFromAndReplyTo } from "@/lib/email/resolve";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,40 +17,44 @@ export async function POST() {
 
   const cfg = await getTenantEmailConfig(gate.tenantId);
 
-  if (!cfg.leadToEmail) {
+  if (!cfg.leadToEmail?.trim()) {
     return json(
       { ok: false, error: "MISSING_LEAD_TO_EMAIL", message: "Set Lead To Email first." },
       400
     );
   }
 
-  const headers = resolveEmailHeadersForDisplay(cfg);
-
-  // If tenant selected Enterprise mode, don't attempt provider send yet
-  if (headers.mode === "enterprise") {
-    return json(
-      {
-        ok: false,
-        error: "ENTERPRISE_OAUTH_NOT_IMPLEMENTED",
-        message:
-          "Enterprise (OAuth) email is not wired up yet. Switch to Standard mode for now, or wait for OAuth connect.",
-        mode: headers.mode,
-        providerLabel: headers.providerLabel,
-        fromUsed: headers.fromUsed,
-        replyToUsed: headers.replyToUsed,
-      },
-      400
-    );
-  }
+  const mode = cfg.emailSendMode === "enterprise" ? "enterprise" : "standard";
+  const emailIdentityId = cfg.emailIdentityId || null;
 
   const { from, replyTo } = resolveFromAndReplyTo(cfg);
   const business = cfg.businessName?.trim() || "your business";
   const replyToFirst = replyTo?.[0] || "";
 
-  // IMPORTANT:
-  // You cannot include `res.provider` inside the email body in a single send,
-  // because `res` doesn't exist until AFTER sendEmail() returns.
-  // So we show mode/providerLabel in the email, and return the actual provider in the API response.
+  // IMPORTANT: You cannot reference `res` inside this HTML, because `res` is created AFTER sendEmail() returns.
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
+      <h2 style="margin:0 0 8px;">Test email ✅</h2>
+      <p style="margin:0 0 10px;color:#374151;">
+        This confirms your tenant can send email through the platform.
+      </p>
+
+      <div style="font-size:13px;color:#6b7280;">
+        <div><b>Tenant</b>: ${escapeHtml(business)}</div>
+        <div><b>Mode</b>: ${escapeHtml(mode)}</div>
+        <div><b>Email Identity ID</b>: ${escapeHtml(emailIdentityId || "(none)")}</div>
+        <div><b>From (requested)</b>: ${escapeHtml(from)}</div>
+        <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
+      </div>
+
+      <p style="margin:12px 0 0;color:#6b7280;font-size:12px;">
+        Provider details are returned in the API response (not embedded in the email body).
+      </p>
+    </div>
+  `;
+
+  const text = `Test email: tenant=${business} mode=${mode} emailIdentityId=${emailIdentityId || ""} from=${from} replyTo=${replyToFirst}`;
+
   const res = await sendEmail({
     tenantId: gate.tenantId,
     context: { type: "lead_new" },
@@ -63,34 +63,20 @@ export async function POST() {
       to: [cfg.leadToEmail],
       replyTo,
       subject: `Test email from AI Photo Quote (${business})`,
-      html: `
-        <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
-          <h2 style="margin:0 0 8px;">Test email ✅</h2>
-          <p style="margin:0 0 10px;color:#374151;">
-            This confirms your tenant can send email through the platform.
-          </p>
-          <div style="font-size:13px;color:#6b7280;">
-            <div><b>Tenant</b>: ${escapeHtml(business)}</div>
-            <div><b>Mode</b>: ${escapeHtml(headers.mode)}</div>
-            <div><b>Provider label</b>: ${escapeHtml(headers.providerLabel)}</div>
-            <div><b>From used</b>: ${escapeHtml(from)}</div>
-            <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
-          </div>
-        </div>
-      `,
-      text: `Test email: tenant=${business} mode=${headers.mode} providerLabel=${headers.providerLabel} from=${from} replyTo=${replyToFirst}`,
+      html,
+      text,
     },
   });
 
   return json(
     {
       ok: res.ok,
-      mode: headers.mode,
-      providerLabel: headers.providerLabel,
+      mode,
       provider: res.provider,
       providerMessageId: res.providerMessageId ?? null,
       fromUsed: from,
       replyToUsed: replyToFirst || null,
+      emailIdentityId,
       error: res.error ?? null,
     },
     res.ok ? 200 : 500
