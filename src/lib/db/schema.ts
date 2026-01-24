@@ -33,6 +33,34 @@ export const appUsers = pgTable(
   })
 );
 
+export const tenantEmailIdentities = pgTable(
+  "tenant_email_identities",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    provider: text("provider").notNull(),
+    email: text("email").notNull(),
+
+    displayName: text("display_name"),
+    status: text("status").notNull().default("active"),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+    lastError: text("last_error"),
+
+    // ✅ NEW columns required by OAuth provider
+    fromEmail: text("from_email"),
+    refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantProviderEmailUq: uniqueIndex("tenant_email_identities_uq").on(t.tenantId, t.provider, t.email),
+  })
+);
+
 /**
  * Tenants
  * Back-compat: ownerClerkUserId stays while we transition.
