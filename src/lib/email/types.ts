@@ -1,39 +1,37 @@
 // src/lib/email/types.ts
 
-export type EmailProviderKey = "resend" | "gmail_oauth" | "microsoft_oauth";
+// Keep this union broad enough to cover what exists today + what you're adding next.
+export type EmailProviderKey =
+  | "resend"
+  | "gmail_oauth"
+  | "microsoft_oauth";
 
+// What kinds of emails we send (must match all call sites)
 export type EmailContextType =
   | "lead_new"
   | "customer_receipt"
+  | "lead_customer_receipt"
   | "lead_render"
-  | "customer_render";
+  | "customer_render"
+  | "admin_notice";
 
+// Basic email payload used by providers
 export type EmailMessage = {
-  from: string;            // "Name <email@domain>" OR "email@domain"
-  to: string[];            // required
+  from: string;
+  to: string[];
   cc?: string[];
   bcc?: string[];
-
-  // ergonomic + matches most SDKs
-  replyTo?: string | string[];
-
+  replyTo?: string[]; // match your usage: replyTo as array
   subject: string;
   html: string;
   text?: string;
-
-  // provider-agnostic headers (some providers whitelist these)
-  headers?: Record<string, string>;
-
-  // optional future-proofing (safe to ignore in providers that don't support)
-  tags?: string[];         // e.g. ["lead", "render"]
 };
 
+// Result shape returned by providers and sendEmail()
 export type EmailSendResult = {
   ok: boolean;
   provider: EmailProviderKey;
-  providerMessageId?: string | null;
-  error?: string | null;
-
-  // optional debug/meta you can persist in email_deliveries
-  meta?: Record<string, any>;
+  providerMessageId: string | null;
+  error: string | null;
+  meta?: any;
 };
