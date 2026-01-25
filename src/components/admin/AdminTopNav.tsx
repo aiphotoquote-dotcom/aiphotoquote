@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { UserButton } from "@clerk/nextjs";
 
 function cn(...xs: Array<string | false | null | undefined>) {
@@ -56,6 +56,8 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
   const active = useMemo(
     () => ctx.tenants.find((t) => t.tenantId === ctx.activeTenantId) || null,
     [ctx]
@@ -77,6 +79,27 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
   useEffect(() => {
     load();
   }, []);
+
+  // Close on click outside
+  useEffect(() => {
+    function onDocMouseDown(e: MouseEvent) {
+      if (!open) return;
+      const el = rootRef.current;
+      if (!el) return;
+      if (!el.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  // Close on Escape
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    if (open) window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
 
   async function switchTenant(tenantId: string) {
     setErr(null);
@@ -101,10 +124,12 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
   // If only 0–1 tenants, don’t show the switch UI
   if ((ctx.tenants?.length || 0) <= 1) {
     return compact ? null : (
-      <div className="hidden md:block text-xs text-gray-500 dark:text-gray-400">
+      <div className="hidden md:flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+        <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500/80" />
         {active ? (
           <span>
-            Tenant: <span className="font-mono">{active.slug}</span>
+            Tenant <span className="text-gray-400 dark:text-gray-500">•</span>{" "}
+            <span className="font-mono">{active.slug}</span>
           </span>
         ) : (
           <span>No tenant</span>
@@ -114,48 +139,49 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
   }
 
   const buttonCls =
-    "inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900";
+    "inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm backdrop-blur hover:bg-white dark:border-gray-800 dark:bg-black/40 dark:text-gray-100 dark:hover:bg-black/60";
   const panelCls =
-    "absolute right-0 mt-2 w-[min(420px,calc(100vw-2rem))] rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-800 dark:bg-black";
+    "absolute right-0 mt-2 w-[min(460px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl ring-1 ring-black/5 dark:border-gray-800 dark:bg-neutral-950 dark:ring-white/10";
 
   return (
-    <div className={cn("relative", compact ? "w-full" : "")}>
+    <div ref={rootRef} className={cn("relative", compact ? "w-full" : "")}>
       <button
         type="button"
         className={cn(buttonCls, compact ? "w-full justify-between" : "")}
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        aria-haspopup="dialog"
       >
-        <span className="truncate">
+        <span className="min-w-0 truncate">
           {active ? (
             <>
-              <span className="text-gray-500 dark:text-gray-400">Tenant:</span>{" "}
+              <span className="text-gray-500 dark:text-gray-400">Tenant</span>{" "}
+              <span className="text-gray-400 dark:text-gray-500">•</span>{" "}
               <span className="font-mono">{active.slug}</span>
             </>
           ) : (
             "Select tenant"
           )}
         </span>
-        <span className="text-gray-500 dark:text-gray-400">{open ? "▲" : "▼"}</span>
+        <span className="shrink-0 text-gray-500 dark:text-gray-400">{open ? "▲" : "▼"}</span>
       </button>
 
       {open ? (
         <div className={panelCls} role="dialog" aria-label="Tenant switcher">
-          <div className="px-2 py-2">
-            <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-              Switch tenant
-            </div>
+          <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-900">
+            <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Switch tenant</div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Changes apply immediately after reload.
             </div>
+
             {err ? (
-              <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+              <div className="mt-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
                 {err}
               </div>
             ) : null}
           </div>
 
-          <div className="max-h-72 overflow-auto">
+          <div className="max-h-80 overflow-auto p-2">
             {ctx.tenants.map((t) => {
               const isActive = t.tenantId === ctx.activeTenantId;
               const isBusy = busyId === t.tenantId;
@@ -167,26 +193,32 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
                   disabled={isBusy}
                   onClick={() => switchTenant(t.tenantId)}
                   className={cn(
-                    "w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                    "w-full rounded-xl border px-3 py-2 text-left text-sm transition-colors",
                     isActive
                       ? "border-blue-300 bg-blue-50 dark:border-blue-900/50 dark:bg-blue-950/30"
-                      : "border-transparent hover:border-gray-200 hover:bg-gray-50 dark:hover:border-gray-800 dark:hover:bg-gray-950"
+                      : "border-transparent hover:border-gray-200 hover:bg-gray-50 dark:hover:border-gray-800 dark:hover:bg-white/5"
                   )}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <div className="truncate font-semibold text-gray-900 dark:text-gray-100">
                         {t.name || t.slug}{" "}
-                        <span className="font-normal text-gray-500 dark:text-gray-400">
-                          ({t.slug})
-                        </span>
+                        <span className="font-normal text-gray-500 dark:text-gray-400">({t.slug})</span>
                       </div>
                       <div className="mt-0.5 truncate text-xs font-mono text-gray-500 dark:text-gray-400">
                         {t.tenantId}
                       </div>
                     </div>
-                    <div className="shrink-0 text-xs font-mono text-gray-600 dark:text-gray-300">
-                      {isBusy ? "…" : t.role}
+
+                    <div className="shrink-0 flex items-center gap-2">
+                      {isActive ? (
+                        <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
+                          Active
+                        </span>
+                      ) : null}
+                      <span className="text-xs font-mono text-gray-600 dark:text-gray-300">
+                        {isBusy ? "…" : t.role}
+                      </span>
                     </div>
                   </div>
                 </button>
@@ -194,11 +226,11 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
             })}
           </div>
 
-          <div className="flex justify-end px-2 py-2">
+          <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-900">
             <button
               type="button"
               onClick={() => setOpen(false)}
-              className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-neutral-950 dark:text-gray-100 dark:hover:bg-white/5"
             >
               Close
             </button>
@@ -216,10 +248,11 @@ export default function AdminTopNav() {
   const activeKey = useMemo(() => activeFromPath(pathname), [pathname]);
 
   const linkBase =
-    "inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors";
+    "inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-colors";
   const linkIdle =
-    "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-gray-900 dark:hover:text-white";
-  const linkActive = "bg-black text-white dark:bg-white dark:text-black";
+    "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-white/5 dark:hover:text-white";
+  const linkActive =
+    "bg-gray-900 text-white shadow-sm dark:bg-white dark:text-black";
 
   const links: Array<{ key: NavKey; href: string; label: string }> = [
     { key: "dashboard", href: "/admin", label: "Dashboard" },
@@ -229,15 +262,17 @@ export default function AdminTopNav() {
   ];
 
   return (
-    <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/60">
+    <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/70 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/70">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
         <div className="flex items-center gap-3">
           <Link
             href="/admin"
-            className="flex items-center gap-2 rounded-lg px-2 py-1 font-semibold text-gray-900 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-gray-900"
+            className="group flex items-center gap-2 rounded-xl px-2 py-1 font-semibold text-gray-900 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-white/5"
           >
-            <span className="inline-block h-2.5 w-2.5 rounded-full bg-black dark:bg-white" />
-            <span>AI Photo Quote</span>
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-900 shadow-sm dark:border-gray-800 dark:bg-neutral-950 dark:text-gray-100">
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-900 dark:bg-white" />
+            </span>
+            <span className="tracking-tight">AI Photo Quote</span>
           </Link>
 
           <nav className="hidden md:flex items-center gap-1">
@@ -256,8 +291,7 @@ export default function AdminTopNav() {
         {/* Right side: tenant switcher + account */}
         <div className="hidden md:flex items-center gap-3">
           <TenantSwitcher />
-          <div className="rounded-lg border border-gray-200 bg-white px-2 py-1 dark:border-gray-800 dark:bg-black">
-            {/* UserButton handles sign out + account switching */}
+          <div className="rounded-xl border border-gray-200 bg-white/70 px-2 py-1 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
             <UserButton afterSignOutUrl="/" />
           </div>
         </div>
@@ -266,7 +300,7 @@ export default function AdminTopNav() {
         <div className="flex items-center gap-2 md:hidden">
           <button
             type="button"
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
+            className="rounded-xl border border-gray-200 bg-white/70 px-3 py-2 text-sm font-semibold text-gray-800 shadow-sm backdrop-blur hover:bg-white dark:border-gray-800 dark:bg-black/30 dark:text-gray-200 dark:hover:bg-black/50"
             onClick={() => setMobileOpen((v) => !v)}
             aria-expanded={mobileOpen}
             aria-label="Toggle navigation"
@@ -278,11 +312,11 @@ export default function AdminTopNav() {
 
       {/* Mobile drawer */}
       {mobileOpen ? (
-        <div className="md:hidden border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
+        <div className="md:hidden border-t border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/80">
           <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-2">
             <TenantSwitcher compact />
 
-            <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
+            <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white/70 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Account</div>
               <UserButton afterSignOutUrl="/" />
             </div>
