@@ -142,8 +142,11 @@ export default function AdminTenantSettingsPage() {
   const [leadToEmail, setLeadToEmail] = useState("");
   const [fromEmail, setFromEmail] = useState("");
 
-  const [brandLogoUrl, setBrandLogoUrl] = useState<string>("");
+const [brandLogoUrl, setBrandLogoUrl] = useState<string>("");
 
+const brandLogoUrlStr = brandLogoUrl;
+const hasBrandLogo = brandLogoUrl.trim().length > 0;
+  
   const [emailSendMode, setEmailSendMode] = useState<"standard" | "enterprise">("standard");
   const [emailIdentityId, setEmailIdentityId] = useState<string>("");
 
@@ -190,8 +193,9 @@ export default function AdminTenantSettingsPage() {
     setBusinessName(data.settings.business_name || "");
     setLeadToEmail(data.settings.lead_to_email || "");
     setFromEmail(data.settings.resend_from_email || "");
+setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
-    setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
+    
 
     const modeRaw = (data.settings.email_send_mode ?? "").toString().trim().toLowerCase();
     const mode = modeRaw === "enterprise" ? "enterprise" : "standard";
@@ -334,7 +338,7 @@ export default function AdminTenantSettingsPage() {
           lead_to_email: leadToEmail.trim(),
           resend_from_email: fromEmail.trim(),
 
-          brand_logo_url: brandLogoUrl.trim() || null,
+          brand_logo_url: brandLogoUrl.trim() ? brandLogoUrl.trim() : null,
 
           email_send_mode: emailSendMode,
           email_identity_id: emailIdentityId.trim() || null,
@@ -411,9 +415,10 @@ export default function AdminTenantSettingsPage() {
                 <Pill>Standard mode</Pill>
               )}
 
-              <Pill tone={brandLogoUrl.trim() ? "good" : "neutral"}>
-                Logo: <span className="ml-1 font-mono">{brandLogoUrl.trim() ? "set" : "not set"}</span>
-              </Pill>
+             <Pill tone={(brandLogoUrl ?? "").trim() ? "good" : "neutral"}>
+  Logo:{" "}
+  <span className="ml-1 font-mono">{(brandLogoUrl ?? "").trim() ? "set" : "not set"}</span>
+</Pill>
             </div>
 
             {msg ? <div className="mt-2 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
@@ -465,12 +470,12 @@ export default function AdminTenantSettingsPage() {
             title="Branding"
             subtitle="Upload a logo or paste a URL. This will be reused on customer-facing pages and emails."
             right={
-              brandLogoUrl.trim() ? (
-                <Pill tone="good">Logo set</Pill>
-              ) : (
-                <Pill tone="neutral">No logo</Pill>
-              )
-            }
+  (brandLogoUrl ?? "").trim() ? (
+    <Pill tone="good">Logo set</Pill>
+  ) : (
+    <Pill tone="neutral">No logo</Pill>
+  )
+}
           >
             <div className="grid gap-4">
               <div className="grid gap-4 md:grid-cols-2">
@@ -503,10 +508,10 @@ export default function AdminTenantSettingsPage() {
                       {uploadingLogo ? "Uploading…" : "Choose file"}
                     </button>
 
-                    {brandLogoUrl.trim() ? (
+                   {hasBrandLogo ? (
                       <button
                         type="button"
-                        onClick={() => setBrandLogoUrl("")}
+                      onClick={() => setBrandLogoUrl("")}
                         disabled={!canEdit || uploadingLogo}
                         className={cx(
                           "rounded-lg border px-3 py-2 text-sm font-semibold transition",
@@ -535,9 +540,9 @@ export default function AdminTenantSettingsPage() {
 
                   <div className="mt-3">
                     <Field
-                      label="brand_logo_url"
-                      value={brandLogoUrl}
-                      onChange={setBrandLogoUrl}
+  label="brand_logo_url"
+  value={brandLogoUrl}
+  onChange={(v) => setBrandLogoUrl(v)}
                       disabled={!canEdit}
                       placeholder="https://..."
                       hint="Tip: leave blank to remove."
@@ -555,9 +560,9 @@ export default function AdminTenantSettingsPage() {
                       This is how the logo will render in the UI (emails may scale it differently).
                     </div>
                   </div>
-                  {brandLogoUrl.trim() ? (
+                  {hasBrandLogo ? (
                     <a
-                      href={brandLogoUrl.trim()}
+                      href={brandLogoUrlStr.trim()}
                       target="_blank"
                       rel="noreferrer"
                       className={cx(
@@ -572,10 +577,10 @@ export default function AdminTenantSettingsPage() {
                 </div>
 
                 <div className="mt-3 flex items-center justify-center rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 dark:border-white/10 dark:bg-black/30">
-                  {brandLogoUrl.trim() ? (
+                  {hasBrandLogo ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={brandLogoUrl.trim()}
+                     src={brandLogoUrlStr.trim()}
                       alt="Tenant logo"
                       className="max-h-24 max-w-[280px] object-contain"
                       onError={() => setLogoErr("Logo preview failed to load. Check the URL or upload again.")}

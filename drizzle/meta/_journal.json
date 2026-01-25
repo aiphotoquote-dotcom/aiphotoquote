@@ -57,6 +57,13 @@
       "when": 1769278392078,
       "tag": "0007_add_from_email_refresh_token_enc",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1769364968691,
+      "tag": "0008_eager_zaran",
+      "breakpoints": true
     }
   ]
 }
