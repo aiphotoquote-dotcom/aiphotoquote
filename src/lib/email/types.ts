@@ -2,10 +2,16 @@
 
 export type EmailSendMode = "standard" | "enterprise";
 
-// ✅ Add the two new context types here
+/**
+ * EmailContextType is a strict union so we can tag emails consistently.
+ * Add new types here whenever a new email flow is introduced.
+ */
 export type EmailContextType =
   | "lead_new"
   | "customer_receipt"
+  // render flow (start + complete)
+  | "lead_render"
+  | "customer_render"
   | "lead_render_complete"
   | "customer_render_complete";
 
