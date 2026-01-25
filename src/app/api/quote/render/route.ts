@@ -1,7 +1,7 @@
 // src/app/api/quote/render/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import { put } from "@vercel/blob";
 
@@ -9,7 +9,10 @@ import { db } from "@/lib/db/client";
 import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
-import { buildRenderPrompt } from "@/lib/ai/prompts/build";
+import { sendEmail } from "@/lib/email";
+import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
+import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteCustomer";
+import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
 
 export const runtime = "nodejs";
 
@@ -24,9 +27,10 @@ function safeErr(e: unknown) {
   return msg.slice(0, 2000);
 }
 
-function normStr(v: unknown) {
-  const s = typeof v === "string" ? v.trim() : "";
-  return s || null;
+function getBaseUrlFromHeaders(h: Headers) {
+  const proto = h.get("x-forwarded-proto") ?? "https";
+  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
+  return host ? `${proto}://${host}` : "";
 }
 
 export async function POST(req: Request) {
@@ -45,13 +49,13 @@ export async function POST(req: Request) {
     const { tenantSlug, quoteLogId } = parsed.data;
 
     // 1) Resolve tenant
-    const tenant = await db
+    const tenantRows = await db
       .select({ id: tenants.id })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+      .limit(1);
 
+    const tenant = tenantRows[0];
     if (!tenant) {
       return NextResponse.json(
         { ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link.", debugId },
@@ -60,7 +64,7 @@ export async function POST(req: Request) {
     }
 
     // 2) Load quote log (must match tenant)
-    const q = await db
+    const qRows = await db
       .select({
         id: quoteLogs.id,
         tenantId: quoteLogs.tenantId,
@@ -69,13 +73,12 @@ export async function POST(req: Request) {
         renderOptIn: quoteLogs.renderOptIn,
         renderStatus: quoteLogs.renderStatus,
         renderImageUrl: quoteLogs.renderImageUrl,
-        renderPrompt: quoteLogs.renderPrompt,
       })
       .from(quoteLogs)
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+      .limit(1);
 
+    const q = qRows[0];
     if (!q) {
       return NextResponse.json(
         { ok: false, error: "QUOTE_NOT_FOUND", message: "Quote not found for this tenant.", debugId },
@@ -94,24 +97,13 @@ export async function POST(req: Request) {
       });
     }
 
-    // 4) Idempotency: if already rendered, return it
+    // 4) If already rendered and has URL, return it (idempotent)
     if (q.renderStatus === "rendered" && q.renderImageUrl) {
       return NextResponse.json({
         ok: true,
         quoteLogId,
         status: "rendered",
         imageUrl: q.renderImageUrl,
-        debugId,
-      });
-    }
-
-    // Optional: if already running, don't kick another render
-    if (q.renderStatus === "running") {
-      return NextResponse.json({
-        ok: true,
-        quoteLogId,
-        status: "running",
-        imageUrl: q.renderImageUrl ?? null,
         debugId,
       });
     }
@@ -125,14 +117,14 @@ export async function POST(req: Request) {
       })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    // 5) Fetch tenant OpenAI key (tenant-owned, not platform)
-    const sec = await db
+    // 5) Fetch tenant OpenAI key
+    const secRows = await db
       .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
       .from(tenantSecrets)
       .where(eq(tenantSecrets.tenantId, tenant.id))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+      .limit(1);
 
+    const sec = secRows[0];
     if (!sec?.openaiKeyEnc) {
       await db
         .update(quoteLogs)
@@ -166,47 +158,33 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey });
 
-    // 6) Determine prompt (SOURCE OF TRUTH = stored render_prompt if present)
-    const storedPrompt = normStr(q.renderPrompt);
+    // 6) Build prompt (simple + consistent)
+    const outAny: any = q.output ?? {};
+    const summary = typeof outAny?.summary === "string" ? outAny.summary : "";
 
-    let prompt = storedPrompt;
+    const inputAny: any = q.input ?? {};
+    const serviceType =
+      inputAny?.customer_context?.service_type ||
+      inputAny?.customer_context?.category ||
+      "";
 
-    if (!prompt) {
-      // Pull context from input/settings and rebuild deterministically
-      const inAny: any = q.input ?? {};
-      const ctx: any = inAny?.customer_context ?? {};
+    const prompt = [
+      "Generate a realistic 'after' concept rendering based on the customer's photos.",
+      "Do NOT add text or watermarks.",
+      "Style: realistic, clean lighting, product photography feel.",
+      serviceType ? `Service type: ${serviceType}` : "",
+      summary ? `Estimate summary context: ${summary}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
 
-      // sub-industry is stored today in customer_context.category (back-compat)
-      const subIndustryKey = normStr(ctx?.category);
-      const serviceType = normStr(ctx?.service_type);
-      const notes = normStr(ctx?.notes);
+    // Persist prompt (best-effort)
+    await db
+      .update(quoteLogs)
+      .set({ renderPrompt: prompt })
+      .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-      // tenant_settings.industry_key (best effort)
-      const settings = await db
-        .select({ industryKey: tenantSettings.industryKey })
-        .from(tenantSettings)
-        .where(eq(tenantSettings.tenantId, tenant.id))
-        .limit(1)
-        .then((r) => r[0] ?? null);
-
-      const industryKey = settings?.industryKey ?? "service";
-
-      prompt = buildRenderPrompt({
-        industryKey,
-        subIndustryKey,
-        serviceType,
-        notes,
-      });
-
-      // Persist prompt ONLY if it was empty (best-effort)
-      await db
-        .update(quoteLogs)
-        .set({ renderPrompt: prompt })
-        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
-    }
-
-    // 7) Generate image (OpenAI Images API returns base64, not URL)
-    // NOTE: gpt-image-1 returns data[0].b64_json
+    // 7) Generate image
     const imgResp: any = await openai.images.generate({
       model: "gpt-image-1",
       prompt,
@@ -214,9 +192,7 @@ export async function POST(req: Request) {
     });
 
     const b64: string | undefined = imgResp?.data?.[0]?.b64_json;
-    if (!b64) {
-      throw new Error("Image generation returned no b64_json.");
-    }
+    if (!b64) throw new Error("Image generation returned no b64_json.");
 
     const bytes = Buffer.from(b64, "base64");
 
@@ -228,9 +204,7 @@ export async function POST(req: Request) {
     });
 
     const imageUrl = blob?.url;
-    if (!imageUrl) {
-      throw new Error("Blob upload returned no url.");
-    }
+    if (!imageUrl) throw new Error("Blob upload returned no url.");
 
     // 9) Save to DB + mark rendered
     await db
@@ -242,6 +216,145 @@ export async function POST(req: Request) {
         renderedAt: new Date(),
       })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+    // 10) Send render-complete emails (best-effort; do NOT fail request)
+    // Pull email config + branding
+    let renderEmailResult: any = null;
+    try {
+      const cfg = await getTenantEmailConfig(tenant.id);
+
+      const branding = await db
+        .select({
+          businessName: tenantSettings.businessName,
+          brandLogoUrl: tenantSettings.brandLogoUrl,
+          leadToEmail: tenantSettings.leadToEmail,
+        })
+        .from(tenantSettings)
+        .where(eq(tenantSettings.tenantId, tenant.id))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      const businessName = (cfg.businessName || branding?.businessName || "Your Business").trim();
+      const brandLogoUrl = branding?.brandLogoUrl ?? null;
+
+      const inputAny2: any = q.input ?? {};
+      const customer = inputAny2?.customer ?? inputAny2?.contact ?? null;
+
+      const customerName = String(customer?.name ?? "Customer").trim();
+      const customerEmail = String(customer?.email ?? "").trim().toLowerCase();
+      const customerPhone = String(customer?.phone ?? "").trim();
+
+      const outAny2: any = q.output ?? {};
+      const estimateLow = typeof outAny2?.estimate_low === "number" ? outAny2.estimate_low : null;
+      const estimateHigh = typeof outAny2?.estimate_high === "number" ? outAny2.estimate_high : null;
+      const summary2 = typeof outAny2?.summary === "string" ? outAny2.summary : "";
+
+      const baseUrl = getBaseUrlFromHeaders(req.headers);
+      const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
+      const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
+
+      const configured = Boolean(
+        cfg.fromEmail && cfg.leadToEmail && businessName && customerEmail
+      );
+
+      renderEmailResult = {
+        configured,
+        lead_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
+        customer_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
+      };
+
+      // Tenant (lead) render email
+      if (cfg.fromEmail && cfg.leadToEmail) {
+        try {
+          renderEmailResult.lead_render.attempted = true;
+
+          const htmlLead = renderLeadRenderCompleteEmailHTML({
+            businessName,
+            brandLogoUrl,
+            quoteLogId,
+            tenantSlug,
+            customerName,
+            customerEmail,
+            customerPhone,
+            renderImageUrl: imageUrl,
+            estimateLow,
+            estimateHigh,
+            summary: summary2,
+            adminQuoteUrl,
+          });
+
+          const r1 = await sendEmail({
+            tenantId: tenant.id,
+            context: { type: "lead_render_complete", quoteLogId },
+            message: {
+              from: cfg.fromEmail,
+              to: [cfg.leadToEmail],
+              replyTo: [cfg.leadToEmail],
+              subject: `Render complete — ${customerName}`,
+              html: htmlLead,
+            },
+          });
+
+          renderEmailResult.lead_render.ok = r1.ok;
+          renderEmailResult.lead_render.id = r1.providerMessageId ?? null;
+          renderEmailResult.lead_render.error = r1.error ?? null;
+        } catch (e: any) {
+          renderEmailResult.lead_render.error = e?.message ?? String(e);
+        }
+      }
+
+      // Customer render email
+      if (cfg.fromEmail && customerEmail) {
+        try {
+          renderEmailResult.customer_render.attempted = true;
+
+          const htmlCust = renderCustomerRenderCompleteEmailHTML({
+            businessName,
+            brandLogoUrl,
+            customerName,
+            quoteLogId,
+            renderImageUrl: imageUrl,
+            estimateLow,
+            estimateHigh,
+            summary: summary2,
+            publicQuoteUrl,
+            replyToEmail: cfg.leadToEmail ?? null,
+          });
+
+          const r2 = await sendEmail({
+            tenantId: tenant.id,
+            context: { type: "customer_render_complete", quoteLogId },
+            message: {
+              from: cfg.fromEmail,
+              to: [customerEmail],
+              replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
+              subject: `Your concept render is ready — ${businessName}`,
+              html: htmlCust,
+            },
+          });
+
+          renderEmailResult.customer_render.ok = r2.ok;
+          renderEmailResult.customer_render.id = r2.providerMessageId ?? null;
+          renderEmailResult.customer_render.error = r2.error ?? null;
+        } catch (e: any) {
+          renderEmailResult.customer_render.error = e?.message ?? String(e);
+        }
+      }
+
+      // Persist email result into output.render_email (best-effort)
+      try {
+        const nextOutput = { ...(outAny2 ?? {}), render_email: renderEmailResult };
+        await db.execute(sql`
+          update quote_logs
+          set output = ${JSON.stringify(nextOutput)}::jsonb
+          where id = ${quoteLogId}::uuid
+        `);
+      } catch {
+        // ignore
+      }
+    } catch {
+      // ignore; render still succeeds
+    }
 
     return NextResponse.json({
       ok: true,
@@ -260,13 +373,13 @@ export async function POST(req: Request) {
       if (parsed.success) {
         const { tenantSlug, quoteLogId } = parsed.data;
 
-        const tenant = await db
+        const tenantRows = await db
           .select({ id: tenants.id })
           .from(tenants)
           .where(eq(tenants.slug, tenantSlug))
-          .limit(1)
-          .then((r) => r[0] ?? null);
+          .limit(1);
 
+        const tenant = tenantRows[0];
         if (tenant) {
           await db
             .update(quoteLogs)
