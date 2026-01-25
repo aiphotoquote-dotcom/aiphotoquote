@@ -21,7 +21,6 @@ const Req = z.object({
   quoteLogId: z.string().uuid(),
 });
 
-// small helper: avoid leaking huge errors to client
 function safeErr(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
   return msg.slice(0, 2000);
@@ -49,13 +48,13 @@ export async function POST(req: Request) {
     const { tenantSlug, quoteLogId } = parsed.data;
 
     // 1) Resolve tenant
-    const tenantRows = await db
+    const tenant = await db
       .select({ id: tenants.id })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const tenant = tenantRows[0];
     if (!tenant) {
       return NextResponse.json(
         { ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link.", debugId },
@@ -64,7 +63,7 @@ export async function POST(req: Request) {
     }
 
     // 2) Load quote log (must match tenant)
-    const qRows = await db
+    const q = await db
       .select({
         id: quoteLogs.id,
         tenantId: quoteLogs.tenantId,
@@ -76,9 +75,9 @@ export async function POST(req: Request) {
       })
       .from(quoteLogs)
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const q = qRows[0];
     if (!q) {
       return NextResponse.json(
         { ok: false, error: "QUOTE_NOT_FOUND", message: "Quote not found for this tenant.", debugId },
@@ -108,30 +107,24 @@ export async function POST(req: Request) {
       });
     }
 
-    // Mark running (best-effort)
+    // Mark running
     await db
       .update(quoteLogs)
-      .set({
-        renderStatus: "running",
-        renderError: null,
-      })
+      .set({ renderStatus: "running", renderError: null })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
     // 5) Fetch tenant OpenAI key
-    const secRows = await db
+    const sec = await db
       .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
       .from(tenantSecrets)
       .where(eq(tenantSecrets.tenantId, tenant.id))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const sec = secRows[0];
     if (!sec?.openaiKeyEnc) {
       await db
         .update(quoteLogs)
-        .set({
-          renderStatus: "failed",
-          renderError: "Missing tenant OpenAI key (tenant_secrets).",
-        })
+        .set({ renderStatus: "failed", renderError: "Missing tenant OpenAI key (tenant_secrets)." })
         .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
       return NextResponse.json(
@@ -144,10 +137,7 @@ export async function POST(req: Request) {
     if (!apiKey) {
       await db
         .update(quoteLogs)
-        .set({
-          renderStatus: "failed",
-          renderError: "Unable to decrypt tenant OpenAI key.",
-        })
+        .set({ renderStatus: "failed", renderError: "Unable to decrypt tenant OpenAI key." })
         .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
       return NextResponse.json(
@@ -158,15 +148,11 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey });
 
-    // 6) Build prompt (simple + consistent)
+    // 6) Build prompt
     const outAny: any = q.output ?? {};
     const summary = typeof outAny?.summary === "string" ? outAny.summary : "";
-
     const inputAny: any = q.input ?? {};
-    const serviceType =
-      inputAny?.customer_context?.service_type ||
-      inputAny?.customer_context?.category ||
-      "";
+    const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
 
     const prompt = [
       "Generate a realistic 'after' concept rendering based on the customer's photos.",
@@ -178,7 +164,6 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .join("\n");
 
-    // Persist prompt (best-effort)
     await db
       .update(quoteLogs)
       .set({ renderPrompt: prompt })
@@ -198,11 +183,7 @@ export async function POST(req: Request) {
 
     // 8) Upload to Vercel Blob
     const key = `renders/${tenantSlug}/${quoteLogId}-${Date.now()}.png`;
-    const blob = await put(key, bytes, {
-      access: "public",
-      contentType: "image/png",
-    });
-
+    const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
     const imageUrl = blob?.url;
     if (!imageUrl) throw new Error("Blob upload returned no url.");
 
@@ -217,9 +198,7 @@ export async function POST(req: Request) {
       })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    // 10) Send render-complete emails (best-effort; do NOT fail request)
-    // Pull email config + branding
-    let renderEmailResult: any = null;
+    // 10) Send render-complete emails (best-effort)
     try {
       const cfg = await getTenantEmailConfig(tenant.id);
 
@@ -253,17 +232,11 @@ export async function POST(req: Request) {
       const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
       const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
 
-      const configured = Boolean(
-        cfg.fromEmail && cfg.leadToEmail && businessName && customerEmail
-      );
-
-      renderEmailResult = {
-        configured,
+      const renderEmailResult: any = {
         lead_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
         customer_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
       };
 
-      // Tenant (lead) render email
       if (cfg.fromEmail && cfg.leadToEmail) {
         try {
           renderEmailResult.lead_render.attempted = true;
@@ -303,7 +276,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // Customer render email
       if (cfg.fromEmail && customerEmail) {
         try {
           renderEmailResult.customer_render.attempted = true;
@@ -341,7 +313,7 @@ export async function POST(req: Request) {
         }
       }
 
-      // Persist email result into output.render_email (best-effort)
+      // Persist into output.render_email (best effort)
       try {
         const nextOutput = { ...(outAny2 ?? {}), render_email: renderEmailResult };
         await db.execute(sql`
@@ -353,7 +325,7 @@ export async function POST(req: Request) {
         // ignore
       }
     } catch {
-      // ignore; render still succeeds
+      // ignore
     }
 
     return NextResponse.json({
@@ -366,27 +338,23 @@ export async function POST(req: Request) {
   } catch (e) {
     const msg = safeErr(e);
 
-    // Best-effort: mark failed if we can infer quoteLogId/tenantSlug from body
     try {
       const body = await req.clone().json().catch(() => null);
       const parsed = Req.safeParse(body);
       if (parsed.success) {
         const { tenantSlug, quoteLogId } = parsed.data;
 
-        const tenantRows = await db
+        const tenant = await db
           .select({ id: tenants.id })
           .from(tenants)
           .where(eq(tenants.slug, tenantSlug))
-          .limit(1);
+          .limit(1)
+          .then((r) => r[0] ?? null);
 
-        const tenant = tenantRows[0];
         if (tenant) {
           await db
             .update(quoteLogs)
-            .set({
-              renderStatus: "failed",
-              renderError: msg,
-            })
+            .set({ renderStatus: "failed", renderError: msg })
             .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
         }
       }
@@ -395,12 +363,7 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json(
-      {
-        ok: false,
-        error: "REQUEST_FAILED",
-        message: msg,
-        debugId: `dbg_${Math.random().toString(36).slice(2, 10)}`,
-      },
+      { ok: false, error: "REQUEST_FAILED", message: msg, debugId: `dbg_${Math.random().toString(36).slice(2, 10)}` },
       { status: 500 }
     );
   }

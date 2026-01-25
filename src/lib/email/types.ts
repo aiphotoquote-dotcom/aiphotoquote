@@ -1,39 +1,36 @@
 // src/lib/email/types.ts
 
-export type EmailProviderKey =
-  | "resend"
-  | "gmail_oauth"
-  | "microsoft_oauth";
+export type EmailSendMode = "standard" | "enterprise";
 
-// What kinds of emails we send (must match all call sites)
+// ✅ Add the two new context types here
 export type EmailContextType =
   | "lead_new"
   | "customer_receipt"
-  | "lead_customer_receipt"
-  | "lead_render"
-  | "customer_render"
-  | "admin_notice";
+  | "lead_render_complete"
+  | "customer_render_complete";
 
-// Basic email payload used by providers
-export type EmailMessage = {
-  from: string;
-  to: string[];
-  cc?: string[];
-  bcc?: string[];
-  replyTo?: string[]; // you use replyTo as array in multiple places
-  subject: string;
-  html: string;
-  text?: string;
-
-  // ✅ Needed by Resend provider (custom headers, e.g. for threading/metadata)
-  headers?: Record<string, string>;
+export type EmailContext = {
+  type: EmailContextType;
+  quoteLogId?: string | null;
 };
 
-// Result shape returned by providers and sendEmail()
-export type EmailSendResult = {
+export type SendEmailMessage = {
+  from: string;
+  to: string[];
+  subject: string;
+  html: string;
+  replyTo?: string[];
+};
+
+export type SendEmailResult = {
   ok: boolean;
-  provider: EmailProviderKey;
-  providerMessageId: string | null;
-  error: string | null;
-  meta?: any;
+  provider: "resend";
+  providerMessageId?: string | null;
+  error?: string | null;
+};
+
+export type SendEmailArgs = {
+  tenantId: string;
+  context: EmailContext;
+  message: SendEmailMessage;
 };
