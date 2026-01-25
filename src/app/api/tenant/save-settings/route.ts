@@ -131,47 +131,49 @@ export async function POST(req: Request) {
     }
 
     const data: any = parsed.data;
-    const tenantSlug = String(data.tenantSlug).trim();
-// Update tenant slug if changed
-if (tenantSlug && tenantSlug !== tenant.slug) {
-  await db.update(tenants).set({ slug: tenantSlug }).where(eq(tenants.id, tenant.id));
-}
 
-    // Resolve tenant owned by this user (slug is unique)
-   const jar = await cookies();
-let tenantId = getCookieTenantId(jar);
+    // "desired slug" is what the client wants. We'll update tenant.slug if it differs.
+    const desiredSlug = String(data.tenantSlug).trim();
 
-// fallback: first tenant owned by user
-if (!tenantId) {
-  const t = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.ownerClerkUserId, userId))
-    .limit(1)
-    .then((r) => r[0] ?? null);
+    // Resolve tenant by cookie (active tenant) with fallback to first owned tenant
+    const jar = await cookies();
+    let tenantId = getCookieTenantId(jar);
 
-  tenantId = t?.id ?? null;
-}
+    if (!tenantId) {
+      const t = await db
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.ownerClerkUserId, userId))
+        .limit(1)
+        .then((r) => r[0] ?? null);
 
-if (!tenantId) {
-  return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
-}
+      tenantId = t?.id ?? null;
+    }
 
-// resolve tenant by id + ownership
-const tenant = await db
-  .select({
-    id: tenants.id,
-    slug: tenants.slug,
-    ownerClerkUserId: tenants.ownerClerkUserId,
-  })
-  .from(tenants)
-  .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
-  .limit(1)
-  .then((r) => r[0] ?? null);
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
+    }
 
-if (!tenant) {
-  return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
-}
+    // Resolve tenant by id + ownership
+    const tenant = await db
+      .select({
+        id: tenants.id,
+        slug: tenants.slug,
+        ownerClerkUserId: tenants.ownerClerkUserId,
+      })
+      .from(tenants)
+      .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!tenant) {
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
+    }
+
+    // ✅ Update tenant slug if changed (NOW tenant is defined)
+    if (desiredSlug && desiredSlug !== tenant.slug) {
+      await db.update(tenants).set({ slug: desiredSlug }).where(eq(tenants.id, tenant.id));
+    }
 
     // Load existing settings (so we can merge partial updates safely)
     const existing = await db
@@ -208,7 +210,11 @@ if (!tenant) {
 
     if (!industryKey) {
       return NextResponse.json(
-        { ok: false, error: "MISSING_INDUSTRY_KEY", message: "industryKey is required the first time settings are saved." },
+        {
+          ok: false,
+          error: "MISSING_INDUSTRY_KEY",
+          message: "industryKey is required the first time settings are saved.",
+        },
         { status: 400 }
       );
     }
@@ -224,7 +230,9 @@ if (!tenant) {
 
     const businessNameRaw = pick<string | null>(data, "businessName", "business_name");
     const businessName =
-      businessNameRaw !== undefined ? (String(businessNameRaw ?? "").trim() || null) : existing?.businessName ?? null;
+      businessNameRaw !== undefined
+        ? (String(businessNameRaw ?? "").trim() || null)
+        : existing?.businessName ?? null;
 
     const leadToEmailRaw = pick<string | null>(data, "leadToEmail", "lead_to_email");
     const leadToEmail =
@@ -377,7 +385,7 @@ if (!tenant) {
 
     return NextResponse.json({
       ok: true,
-      tenant: { id: tenant.id, slug: tenantSlug || tenant.slug },
+      tenant: { id: tenant.id, slug: desiredSlug || tenant.slug },
       settings: settingsRows[0] ?? null,
     });
   } catch (e: any) {
