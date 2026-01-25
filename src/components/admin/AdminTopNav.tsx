@@ -10,15 +10,16 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-type NavKey = "dashboard" | "quotes" | "settings" | "setup";
+type NavKey = "dashboard" | "quotes" | "settings" | "setup" | "widgets";
 
 function activeFromPath(pathname: string): NavKey {
   const p = (pathname || "").toLowerCase();
 
   if (p === "/admin" || p.startsWith("/admin/")) {
-    if (p.startsWith("/admin/quotes")) return "quotes";
+       if (p.startsWith("/admin/quotes")) return "quotes";
     if (p.startsWith("/admin/settings")) return "settings";
     if (p.startsWith("/admin/setup")) return "setup";
+    if (p.startsWith("/admin/widgets")) return "widgets";
     return "dashboard";
   }
 
@@ -258,7 +259,8 @@ export default function AdminTopNav() {
     { key: "dashboard", href: "/admin", label: "Dashboard" },
     { key: "quotes", href: "/admin/quotes", label: "Quotes" },
     { key: "settings", href: "/admin/settings", label: "Settings" },
-    { key: "setup", href: "/admin/setup", label: "Setup" },
+    { key: "setup", href: "/admin/setup", label: "AI Setup" },
+    { key: "widgets", href: "/admin/widgets", label: "Widgets" },
   ];
 
   return (
