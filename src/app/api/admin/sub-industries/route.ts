@@ -1,4 +1,5 @@
 // src/app/api/admin/sub-industries/route.ts
+import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -49,7 +50,7 @@ export async function GET() {
     if (!tenantId) return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
 
     const tenant = await db
-      .select({ id: tenants.id, ownerClerkUserId: tenants.ownerClerkUserId })
+      .select({ id: tenants.id })
       .from(tenants)
       .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
       .limit(1)
@@ -73,7 +74,12 @@ export async function GET() {
     const merged = mergeSubIndustries(settings?.industryKey ?? null, tenantCustom);
 
     return NextResponse.json(
-      { ok: true, industry_key: settings?.industryKey ?? null, sub_industries: merged, tenant_custom: tenantCustom },
+      {
+        ok: true,
+        industry_key: settings?.industryKey ?? null,
+        sub_industries: merged,
+        tenant_custom: tenantCustom,
+      },
       { headers: { "cache-control": "no-store, max-age=0" } }
     );
   } catch (e: any) {
@@ -102,7 +108,7 @@ export async function POST(req: Request) {
     if (!tenantId) return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
 
     const tenant = await db
-      .select({ id: tenants.id, ownerClerkUserId: tenants.ownerClerkUserId })
+      .select({ id: tenants.id })
       .from(tenants)
       .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
       .limit(1)

@@ -31,6 +31,27 @@ export const appUsers = pgTable(
   })
 );
 
+// --- tenant sub-industries (per-tenant override/extension) ---
+export const tenantSubIndustries = pgTable(
+  "tenant_sub_industries",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    key: text("key").notNull(),     // normalized key, e.g. "marine", "commercial"
+    label: text("label").notNull(), // display label
+
+    updatedAt: timestamp("updated_at", { withTimezone: false }).notNull(),
+  },
+  (t) => ({
+    // ensures one key per tenant (and enables our onConflictDoUpdate target)
+    tenantKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_key_uq").on(t.tenantId, t.key),
+    tenantIdx: index("tenant_sub_industries_tenant_id_idx").on(t.tenantId),
+  })
+);
+
 /**
  * Tenants
  * Back-compat: ownerClerkUserId stays while we transition.
