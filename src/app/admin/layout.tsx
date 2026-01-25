@@ -13,7 +13,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   if (!userId) redirect("/sign-in");
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-black dark:text-gray-100">
+    <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-neutral-950 dark:text-gray-100">
       <AdminTopNav />
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">{children}</div>
     </div>
