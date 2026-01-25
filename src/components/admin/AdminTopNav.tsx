@@ -18,8 +18,9 @@ function activeFromPath(pathname: string): NavKey {
   if (p === "/admin" || p.startsWith("/admin/")) {
        if (p.startsWith("/admin/quotes")) return "quotes";
     if (p.startsWith("/admin/settings")) return "settings";
-    if (p.startsWith("/admin/setup")) return "setup";
-    if (p.startsWith("/admin/setup/widget")) return "widgets";
+ if (p.startsWith("/admin/setup/widget")) return "widgets";   
+ if (p.startsWith("/admin/setup")) return "setup";
+   
     return "dashboard";
   }
 
