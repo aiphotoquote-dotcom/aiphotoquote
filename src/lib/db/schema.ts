@@ -95,9 +95,15 @@ export const tenantSettings = pgTable("tenant_settings", {
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
 
+
+
   businessName: text("business_name"),
   leadToEmail: text("lead_to_email"),
   resendFromEmail: text("resend_from_email"),
+
+  // NEW: tenant branding (logo URL stored as canonical string)
+  // Can be a Vercel Blob URL or a user-provided https URL
+  brandLogoUrl: text("brand_logo_url"),
 
   // NEW: email sending mode + identity pointer (OAuth identity record)
   // - emailSendMode: "standard" | "enterprise"
