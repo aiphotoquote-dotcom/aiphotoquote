@@ -6,8 +6,10 @@ import OpenAI from "openai";
 import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, quoteLogs } from "@/lib/db/schema";
+import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
+
+import { buildRenderPrompt } from "@/lib/ai/prompts/build";
 
 export const runtime = "nodejs";
 
@@ -20,6 +22,11 @@ const Req = z.object({
 function safeErr(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
   return msg.slice(0, 2000);
+}
+
+function normStr(v: unknown) {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s || null;
 }
 
 export async function POST(req: Request) {
@@ -38,13 +45,13 @@ export async function POST(req: Request) {
     const { tenantSlug, quoteLogId } = parsed.data;
 
     // 1) Resolve tenant
-    const tenantRows = await db
+    const tenant = await db
       .select({ id: tenants.id })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const tenant = tenantRows[0];
     if (!tenant) {
       return NextResponse.json(
         { ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link.", debugId },
@@ -53,7 +60,7 @@ export async function POST(req: Request) {
     }
 
     // 2) Load quote log (must match tenant)
-    const qRows = await db
+    const q = await db
       .select({
         id: quoteLogs.id,
         tenantId: quoteLogs.tenantId,
@@ -62,12 +69,13 @@ export async function POST(req: Request) {
         renderOptIn: quoteLogs.renderOptIn,
         renderStatus: quoteLogs.renderStatus,
         renderImageUrl: quoteLogs.renderImageUrl,
+        renderPrompt: quoteLogs.renderPrompt,
       })
       .from(quoteLogs)
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const q = qRows[0];
     if (!q) {
       return NextResponse.json(
         { ok: false, error: "QUOTE_NOT_FOUND", message: "Quote not found for this tenant.", debugId },
@@ -86,7 +94,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 4) If already rendered and has URL, return it (idempotent)
+    // 4) Idempotency: if already rendered, return it
     if (q.renderStatus === "rendered" && q.renderImageUrl) {
       return NextResponse.json({
         ok: true,
@@ -97,7 +105,18 @@ export async function POST(req: Request) {
       });
     }
 
-    // Mark queued/running (best-effort)
+    // Optional: if already running, don't kick another render
+    if (q.renderStatus === "running") {
+      return NextResponse.json({
+        ok: true,
+        quoteLogId,
+        status: "running",
+        imageUrl: q.renderImageUrl ?? null,
+        debugId,
+      });
+    }
+
+    // Mark running (best-effort)
     await db
       .update(quoteLogs)
       .set({
@@ -107,13 +126,13 @@ export async function POST(req: Request) {
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
     // 5) Fetch tenant OpenAI key (tenant-owned, not platform)
-    const secRows = await db
+    const sec = await db
       .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
       .from(tenantSecrets)
       .where(eq(tenantSecrets.tenantId, tenant.id))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const sec = secRows[0];
     if (!sec?.openaiKeyEnc) {
       await db
         .update(quoteLogs)
@@ -124,12 +143,7 @@ export async function POST(req: Request) {
         .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
       return NextResponse.json(
-        {
-          ok: false,
-          error: "MISSING_TENANT_KEY",
-          message: "Tenant OpenAI key is not configured.",
-          debugId,
-        },
+        { ok: false, error: "MISSING_TENANT_KEY", message: "Tenant OpenAI key is not configured.", debugId },
         { status: 500 }
       );
     }
@@ -152,31 +166,44 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey });
 
-    // 6) Build a prompt. Keep it simple + consistent.
-    // Pull a little context from output if present.
-    const outAny: any = q.output ?? {};
-    const summary = typeof outAny?.summary === "string" ? outAny.summary : "";
-    const serviceType =
-      (q.input as any)?.customer_context?.service_type ||
-      (q.input as any)?.customer_context?.category ||
-      (q.input as any)?.customer_context?.category ||
-      "";
+    // 6) Determine prompt (SOURCE OF TRUTH = stored render_prompt if present)
+    const storedPrompt = normStr(q.renderPrompt);
 
-    const prompt = [
-      "Generate a realistic 'after' concept rendering based on the customer's photos.",
-      "Do NOT add text or watermarks.",
-      "Style: realistic, clean lighting, product photography feel.",
-      serviceType ? `Service type: ${serviceType}` : "",
-      summary ? `Estimate summary context: ${summary}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    let prompt = storedPrompt;
 
-    // Persist prompt (best-effort)
-    await db
-      .update(quoteLogs)
-      .set({ renderPrompt: prompt })
-      .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+    if (!prompt) {
+      // Pull context from input/settings and rebuild deterministically
+      const inAny: any = q.input ?? {};
+      const ctx: any = inAny?.customer_context ?? {};
+
+      // sub-industry is stored today in customer_context.category (back-compat)
+      const subIndustryKey = normStr(ctx?.category);
+      const serviceType = normStr(ctx?.service_type);
+      const notes = normStr(ctx?.notes);
+
+      // tenant_settings.industry_key (best effort)
+      const settings = await db
+        .select({ industryKey: tenantSettings.industryKey })
+        .from(tenantSettings)
+        .where(eq(tenantSettings.tenantId, tenant.id))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      const industryKey = settings?.industryKey ?? "service";
+
+      prompt = buildRenderPrompt({
+        industryKey,
+        subIndustryKey,
+        serviceType,
+        notes,
+      });
+
+      // Persist prompt ONLY if it was empty (best-effort)
+      await db
+        .update(quoteLogs)
+        .set({ renderPrompt: prompt })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+    }
 
     // 7) Generate image (OpenAI Images API returns base64, not URL)
     // NOTE: gpt-image-1 returns data[0].b64_json
@@ -233,13 +260,13 @@ export async function POST(req: Request) {
       if (parsed.success) {
         const { tenantSlug, quoteLogId } = parsed.data;
 
-        const tenantRows = await db
+        const tenant = await db
           .select({ id: tenants.id })
           .from(tenants)
           .where(eq(tenants.slug, tenantSlug))
-          .limit(1);
+          .limit(1)
+          .then((r) => r[0] ?? null);
 
-        const tenant = tenantRows[0];
         if (tenant) {
           await db
             .update(quoteLogs)
