@@ -39,6 +39,9 @@ export type EmailMessage = {
   replyTo?: string[];
   cc?: string[];
   bcc?: string[];
+
+  // custom headers (provider may inject these into raw MIME)
+  headers?: Record<string, string | number | boolean>;
 };
 
 /**
