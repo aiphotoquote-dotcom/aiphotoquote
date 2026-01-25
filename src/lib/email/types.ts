@@ -3,7 +3,7 @@
 export type EmailSendMode = "standard" | "enterprise";
 
 /**
- * EmailContextType is a strict union so we can tag emails consistently.
+ * Strict union so emails are categorized consistently.
  * Add new types here whenever a new email flow is introduced.
  */
 export type EmailContextType =
@@ -20,7 +20,11 @@ export type EmailContext = {
   quoteLogId?: string | null;
 };
 
-export type SendEmailMessage = {
+/**
+ * Message shape used by email providers
+ * (keep this name because src/lib/email/index.ts imports EmailMessage)
+ */
+export type EmailMessage = {
   from: string;
   to: string[];
   subject: string;
@@ -28,15 +32,28 @@ export type SendEmailMessage = {
   replyTo?: string[];
 };
 
-export type SendEmailResult = {
+/**
+ * Result shape returned by sendEmail
+ * (keep this name because src/lib/email/index.ts imports EmailSendResult)
+ */
+export type EmailSendResult = {
   ok: boolean;
-  provider: "resend";
+  provider: "resend" | "gmail_oauth" | "microsoft_oauth";
   providerMessageId?: string | null;
   error?: string | null;
 };
 
+/**
+ * Canonical args for sendEmail
+ */
 export type SendEmailArgs = {
   tenantId: string;
   context: EmailContext;
-  message: SendEmailMessage;
+  message: EmailMessage;
 };
+
+/**
+ * Back-compat aliases (in case some routes/providers use the older names)
+ */
+export type SendEmailMessage = EmailMessage;
+export type SendEmailResult = EmailSendResult;
