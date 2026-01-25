@@ -29,6 +29,9 @@ export function renderCustomerReceiptEmailHTML(args: {
 
   // Optional support hint
   replyToEmail?: string | null;
+
+  // Back-compat ONLY (not shown)
+  quoteLogId?: string;
 }) {
   const { businessName, customerName, summary, estimateLow, estimateHigh, questions, brandLogoUrl, replyToEmail } =
     args;
@@ -76,7 +79,6 @@ export function renderCustomerReceiptEmailHTML(args: {
           <table role="presentation" cellpadding="0" cellspacing="0" width="100%"
             style="max-width:640px;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 12px 40px rgba(17,24,39,.12);">
 
-            <!-- Top bar -->
             <tr>
               <td style="padding:18px 20px;border-bottom:1px solid #eef0f4;">
                 <table role="presentation" width="100%">
@@ -92,7 +94,6 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- Header -->
             <tr>
               <td style="padding:18px 20px 0;">
                 <div style="font-size:22px;font-weight:900;letter-spacing:-.2px;margin:0 0 6px;">
@@ -104,23 +105,16 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- Estimate card -->
             <tr>
               <td style="padding:16px 20px 0;">
                 <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#ffffff;">
-                  <table role="presentation" width="100%">
-                    <tr>
-                      <td style="vertical-align:top;">
-                        <div style="font-size:12px;color:#6b7280;font-weight:800;">Estimate range</div>
-                        <div style="font-size:18px;font-weight:900;color:#111;margin-top:2px;">
-                          ${esc(rangeText)}
-                        </div>
-                        <div style="margin-top:8px;font-size:12px;color:#6b7280;">
-                          Final pricing can change after inspection and confirming materials/scope.
-                        </div>
-                      </td>
-                    </tr>
-                  </table>
+                  <div style="font-size:12px;color:#6b7280;font-weight:800;">Estimate range</div>
+                  <div style="font-size:18px;font-weight:900;color:#111;margin-top:2px;">
+                    ${esc(rangeText)}
+                  </div>
+                  <div style="margin-top:8px;font-size:12px;color:#6b7280;">
+                    Final pricing can change after inspection and confirming materials/scope.
+                  </div>
 
                   ${
                     safeSummary
@@ -136,7 +130,6 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- Questions -->
             ${
               q
                 ? `<tr>
@@ -152,7 +145,6 @@ export function renderCustomerReceiptEmailHTML(args: {
                 : ""
             }
 
-            <!-- Footer -->
             <tr>
               <td style="padding:18px 20px 22px;">
                 ${replyLine}
@@ -162,7 +154,6 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- Dark footer strip -->
             <tr>
               <td style="padding:18px 20px;background:#0b0b0b;">
                 <div style="color:#e5e7eb;font-size:12px;line-height:1.5;">
