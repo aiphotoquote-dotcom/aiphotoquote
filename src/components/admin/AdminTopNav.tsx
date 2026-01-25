@@ -260,7 +260,7 @@ export default function AdminTopNav() {
     { key: "quotes", href: "/admin/quotes", label: "Quotes" },
     { key: "settings", href: "/admin/settings", label: "Settings" },
     { key: "setup", href: "/admin/setup", label: "AI Setup" },
-    { key: "widgets", href: "/admin/widgets", label: "Widgets" },
+    { key: "widgets", href: "/admin/setup/widgets", label: "Widgets" },
   ];
 
   return (
