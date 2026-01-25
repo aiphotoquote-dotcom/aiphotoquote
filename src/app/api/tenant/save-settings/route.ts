@@ -1,4 +1,5 @@
 // src/app/api/tenant/save-settings/route.ts
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
@@ -75,6 +76,17 @@ const Body = z.object({
   week_starts_on: z.number().int().min(1).max(7).optional().nullable(),
 });
 
+function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
+  const candidates = [
+    jar.get("activeTenantId")?.value,
+    jar.get("active_tenant_id")?.value,
+    jar.get("tenantId")?.value,
+    jar.get("tenant_id")?.value,
+  ].filter(Boolean) as string[];
+
+  return candidates[0] || null;
+}
+
 function normalizeUrl(u: string | null | undefined) {
   const s = String(u ?? "").trim();
   if (!s) return null;
@@ -120,22 +132,46 @@ export async function POST(req: Request) {
 
     const data: any = parsed.data;
     const tenantSlug = String(data.tenantSlug).trim();
+// Update tenant slug if changed
+if (tenantSlug && tenantSlug !== tenant.slug) {
+  await db.update(tenants).set({ slug: tenantSlug }).where(eq(tenants.id, tenant.id));
+}
 
     // Resolve tenant owned by this user (slug is unique)
-    const tenantRows = await db
-      .select({
-        id: tenants.id,
-        slug: tenants.slug,
-        ownerClerkUserId: tenants.ownerClerkUserId,
-      })
-      .from(tenants)
-      .where(and(eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId)))
-      .limit(1);
+   const jar = await cookies();
+let tenantId = getCookieTenantId(jar);
 
-    const tenant = tenantRows[0] ?? null;
-    if (!tenant) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
-    }
+// fallback: first tenant owned by user
+if (!tenantId) {
+  const t = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.ownerClerkUserId, userId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  tenantId = t?.id ?? null;
+}
+
+if (!tenantId) {
+  return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
+}
+
+// resolve tenant by id + ownership
+const tenant = await db
+  .select({
+    id: tenants.id,
+    slug: tenants.slug,
+    ownerClerkUserId: tenants.ownerClerkUserId,
+  })
+  .from(tenants)
+  .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
+  .limit(1)
+  .then((r) => r[0] ?? null);
+
+if (!tenant) {
+  return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
+}
 
     // Load existing settings (so we can merge partial updates safely)
     const existing = await db
@@ -341,7 +377,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       ok: true,
-      tenant: { id: tenant.id, slug: tenant.slug },
+      tenant: { id: tenant.id, slug: tenantSlug || tenant.slug },
       settings: settingsRows[0] ?? null,
     });
   } catch (e: any) {
