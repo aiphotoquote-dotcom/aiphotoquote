@@ -13,8 +13,6 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
-import { buildEstimatePrompt, buildRenderPrompt } from "@/lib/ai/prompts/build";
-
 export const runtime = "nodejs";
 
 const CustomerSchema = z.object({
@@ -38,7 +36,7 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(), // today: used as sub-industry (auto/marine/residential/etc)
+      category: z.string().optional(),
     })
     .optional(),
 });
@@ -72,6 +70,11 @@ function ensureLowHigh(low: number, high: number) {
   return a <= b ? { low: a, high: b } : { low: b, high: a };
 }
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
@@ -99,9 +102,9 @@ export async function POST(req: Request) {
     }
 
     const customer = {
-      name: incoming.name.trim(),
+      name: safeTrim(incoming.name),
       phone: normalizePhone(incoming.phone),
-      email: incoming.email.trim().toLowerCase(),
+      email: safeTrim(incoming.email).toLowerCase(),
     };
 
     if (customer.phone.replace(/\D/g, "").length < 10) {
@@ -123,12 +126,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    // Settings (optional)
+    // Settings (optional) - include branding fields
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
         aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
+        brandLogoUrl: tenantSettings.brandLogoUrl,
+        businessName: tenantSettings.businessName,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
@@ -137,6 +142,10 @@ export async function POST(req: Request) {
 
     const industryKey = settings?.industryKey ?? "service";
     const aiRenderingEnabled = settings?.aiRenderingEnabled === true;
+
+    // Branding (best-effort)
+    const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
+    const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
     // Decrypt OpenAI key
     const secretRow = await db
@@ -157,26 +166,9 @@ export async function POST(req: Request) {
     const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
 
     const customer_context = parsed.data.customer_context ?? {};
-    // Back-compat: category exists today; we treat it as "sub-industry" selector (auto/marine/residential/etc)
-    const subIndustryKey = customer_context.category ?? null;
-    const serviceType = customer_context.service_type ?? null;
+    const category = customer_context.category ?? industryKey ?? "service";
+    const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
-
-    // Build prompts (Option B foundation)
-    const { system, userText } = buildEstimatePrompt({
-      industryKey,
-      subIndustryKey,
-      serviceType,
-      notes,
-    });
-
-    // Deterministic render prompt (stored for v1 audit + reuse by render route)
-    const renderPrompt = buildRenderPrompt({
-      industryKey,
-      subIndustryKey,
-      serviceType,
-      notes,
-    });
 
     // --- Build input we store (consistent, includes customer) ---
     const inputToStore = {
@@ -185,26 +177,39 @@ export async function POST(req: Request) {
       render_opt_in: renderOptIn,
       customer,
       customer_context: {
-        // keep existing fields for now so UI doesn’t break
-        category: subIndustryKey ?? (industryKey as any),
-        service_type: serviceType ?? undefined,
+        category,
+        service_type,
         notes,
-      },
-      prompt_context: {
-        industry_key: industryKey,
-        sub_industry_key: subIndustryKey,
-        service_type: serviceType,
       },
       createdAt: new Date().toISOString(),
     };
 
-    // Build multimodal message
+    // -------------------------
+    // AI estimate (vision)
+    // -------------------------
+    const system = [
+      "You are an expert estimator for service work based on photos and customer notes.",
+      "Be conservative: return a realistic RANGE, not a single number.",
+      "If photos are insufficient or ambiguous, set confidence low and inspection_required true.",
+      "Do not invent brand/model/year—ask questions instead.",
+      "Return ONLY valid JSON matching the provided schema.",
+    ].join("\n");
+
+    const userText = [
+      `Category: ${category}`,
+      `Service type: ${service_type}`,
+      `Customer notes: ${notes || "(none)"}`,
+      "",
+      "Instructions:",
+      "- Use the photos to identify the item, material type, and visible damage/wear.",
+      "- Provide estimate_low and estimate_high (whole dollars).",
+      "- Provide visible_scope as short bullet-style strings.",
+      "- Provide assumptions and questions (3–8 items each is fine).",
+    ].join("\n");
+
     const content: any[] = [{ type: "text", text: userText }];
     for (const img of images) {
-      content.push({
-        type: "image_url",
-        image_url: { url: img.url },
-      });
+      content.push({ type: "image_url", image_url: { url: img.url } });
     }
 
     const completion = await openai.chat.completions.create({
@@ -256,7 +261,6 @@ export async function POST(req: Request) {
       outputParsed = null;
     }
 
-    // Validate + normalize
     let output: any;
     const safe = AiOutputSchema.safeParse(outputParsed);
     if (!safe.success) {
@@ -276,7 +280,6 @@ export async function POST(req: Request) {
     } else {
       const v = safe.data;
       const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
-
       output = {
         confidence: v.confidence,
         inspection_required: Boolean(v.inspection_required),
@@ -290,7 +293,7 @@ export async function POST(req: Request) {
       };
     }
 
-    // Save quote log (+ render_prompt audit)
+    // Save quote log
     const inserted = await db
       .insert(quoteLogs)
       .values({
@@ -298,7 +301,6 @@ export async function POST(req: Request) {
         input: inputToStore,
         output,
         renderOptIn,
-        renderPrompt, // ✅ critical for v1 (audit + reuse)
       })
       .returning({ id: quoteLogs.id })
       .then((r) => r[0] ?? null);
@@ -314,9 +316,12 @@ export async function POST(req: Request) {
       try {
         const cfg = await getTenantEmailConfig(tenant.id);
 
+        // Prefer tenant_settings.business_name if present (branding)
+        const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
+
         const configured = Boolean(
           process.env.RESEND_API_KEY?.trim() &&
-            cfg.businessName &&
+            effectiveBusinessName &&
             cfg.leadToEmail &&
             cfg.fromEmail
         );
@@ -340,7 +345,7 @@ export async function POST(req: Request) {
           },
           missing: {
             RESEND_API_KEY: !Boolean(process.env.RESEND_API_KEY?.trim()),
-            business_name: !cfg.businessName,
+            business_name: !Boolean(effectiveBusinessName),
             lead_to_email: !cfg.leadToEmail,
             resend_from_email: !cfg.fromEmail,
           },
@@ -352,13 +357,15 @@ export async function POST(req: Request) {
             emailResult.lead_new.attempted = true;
 
             const leadHtml = renderLeadNewEmailHTML({
-              businessName: cfg.businessName!,
+              businessName: effectiveBusinessName!,
               tenantSlug,
               quoteLogId,
               customer,
               notes,
               imageUrls: images.map((x) => x.url),
-            });
+              // If your leadNew template ignores this, no harm. If it supports it later, it’s ready.
+              logoUrl: brandLogoUrl,
+            } as any);
 
             const r1 = await sendEmail({
               tenantId: tenant.id,
@@ -384,13 +391,14 @@ export async function POST(req: Request) {
             emailResult.customer_receipt.attempted = true;
 
             const custHtml = renderCustomerReceiptEmailHTML({
-              businessName: cfg.businessName!,
+              businessName: effectiveBusinessName!,
               quoteLogId,
               customerName: customer.name,
               summary: output.summary ?? "",
               estimateLow: output.estimate_low ?? 0,
               estimateHigh: output.estimate_high ?? 0,
               questions: output.questions ?? [],
+              logoUrl: brandLogoUrl,
             });
 
             const r2 = await sendEmail({
@@ -400,7 +408,7 @@ export async function POST(req: Request) {
                 from: cfg.fromEmail!,
                 to: [customer.email],
                 replyTo: [cfg.leadToEmail!],
-                subject: `Your AI Photo Quote — ${cfg.businessName}`,
+                subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
                 html: custHtml,
               },
             });
