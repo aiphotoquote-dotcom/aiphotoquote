@@ -1,6 +1,5 @@
 // src/lib/email/types.ts
 
-// Keep this union broad enough to cover what exists today + what you're adding next.
 export type EmailProviderKey =
   | "resend"
   | "gmail_oauth"
@@ -21,10 +20,13 @@ export type EmailMessage = {
   to: string[];
   cc?: string[];
   bcc?: string[];
-  replyTo?: string[]; // match your usage: replyTo as array
+  replyTo?: string[]; // you use replyTo as array in multiple places
   subject: string;
   html: string;
   text?: string;
+
+  // ✅ Needed by Resend provider (custom headers, e.g. for threading/metadata)
+  headers?: Record<string, string>;
 };
 
 // Result shape returned by providers and sendEmail()
