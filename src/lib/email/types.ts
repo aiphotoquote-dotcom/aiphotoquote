@@ -9,7 +9,7 @@ export type EmailSendMode = "standard" | "enterprise";
 export type EmailContextType =
   | "lead_new"
   | "customer_receipt"
-  // render flow (start + complete)
+  // render flow
   | "lead_render"
   | "customer_render"
   | "lead_render_complete"
@@ -22,7 +22,6 @@ export type EmailContext = {
 
 /**
  * Message shape used by email providers
- * (keep this name because src/lib/email/index.ts imports EmailMessage)
  */
 export type EmailMessage = {
   from: string;
@@ -33,14 +32,17 @@ export type EmailMessage = {
 };
 
 /**
- * Result shape returned by sendEmail
- * (keep this name because src/lib/email/index.ts imports EmailSendResult)
+ * Result shape returned by sendEmail (and providers).
+ * NOTE: meta is optional and used for debugging/telemetry (e.g., enterprise fromActual).
  */
 export type EmailSendResult = {
   ok: boolean;
   provider: "resend" | "gmail_oauth" | "microsoft_oauth";
   providerMessageId?: string | null;
   error?: string | null;
+
+  // ✅ Optional debug/telemetry payload (safe to omit)
+  meta?: Record<string, any>;
 };
 
 /**
@@ -53,7 +55,7 @@ export type SendEmailArgs = {
 };
 
 /**
- * Back-compat aliases (in case some routes/providers use the older names)
+ * Back-compat aliases (in case some files use older names)
  */
 export type SendEmailMessage = EmailMessage;
 export type SendEmailResult = EmailSendResult;
