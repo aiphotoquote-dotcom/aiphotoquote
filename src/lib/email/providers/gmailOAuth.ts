@@ -1,10 +1,24 @@
-// src/lib/email/providers/gmailOauth.ts
+// src/lib/email/providers/gmailOAuth.ts
 import type { EmailProvider } from "./base";
 import { decryptToken } from "@/lib/crypto/emailTokens";
 
+function b64url(input: string) {
+  return Buffer.from(input, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function headerLine(name: string, value: string) {
+  // Prevent header injection
+  const safe = String(value ?? "").replace(/[\r\n]+/g, " ").trim();
+  return `${name}: ${safe}`;
+}
+
 export function makeGmailOAuthProvider(args: {
   refreshTokenEnc: string;
-  fromEmail: string;
+  fromEmail: string; // authenticated mailbox email, e.g. maggioupholstery@gmail.com
 }): EmailProvider {
   return {
     key: "gmail_oauth",
@@ -25,7 +39,7 @@ export function makeGmailOAuthProvider(args: {
           };
         }
 
-        // Refresh access token
+        // 1) refresh access token
         const body = new URLSearchParams();
         body.set("client_id", clientId);
         body.set("client_secret", clientSecret);
@@ -44,7 +58,7 @@ export function makeGmailOAuthProvider(args: {
             ok: false,
             provider: "gmail_oauth",
             providerMessageId: null,
-            error: tj?.error_description || tj?.error || "Google refresh failed",
+            error: tj?.error_description || "Google refresh failed",
             meta: { tenantId, context, tj },
           };
         }
@@ -55,39 +69,43 @@ export function makeGmailOAuthProvider(args: {
             ok: false,
             provider: "gmail_oauth",
             providerMessageId: null,
-            error: "Missing access token from Google refresh",
+            error: "Missing access token after refresh",
             meta: { tenantId, context, tj },
           };
         }
 
-        // Build RFC2822 raw email (HTML)
+        // 2) build RFC2822 raw email (HTML)
         const toLine = (message.to || []).join(", ");
-        const replyTo =
-          message.replyTo == null
-            ? ""
-            : Array.isArray(message.replyTo)
-            ? message.replyTo[0] || ""
-            : String(message.replyTo);
+        const ccLine = (message.cc || []).join(", ");
+        const bccLine = (message.bcc || []).join(", ");
+        const replyTo = Array.isArray(message.replyTo) ? message.replyTo[0] : undefined;
 
-        const subject = message.subject || "(no subject)";
+        // NOTE: Gmail will typically override/normalize the From to the authenticated mailbox.
+        // We'll set From to args.fromEmail to match what Gmail will actually send as.
+        const baseHeaders: (string | null)[] = [
+          headerLine("From", args.fromEmail),
+          headerLine("To", toLine || args.fromEmail), // To is required-ish; fallback prevents weirdness
+          ccLine ? headerLine("Cc", ccLine) : null,
+          bccLine ? headerLine("Bcc", bccLine) : null,
+          replyTo ? headerLine("Reply-To", replyTo) : null,
+          headerLine("Subject", message.subject),
+          headerLine("MIME-Version", "1.0"),
+          headerLine("Content-Type", "text/html; charset=UTF-8"),
+        ];
 
-        const headers = [
-          `From: ${args.fromEmail}`,
-          `To: ${toLine}`,
-          replyTo ? `Reply-To: ${replyTo}` : null,
-          `Subject: ${subject}`,
-          `MIME-Version: 1.0`,
-          `Content-Type: text/html; charset=UTF-8`,
-        ]
-          .filter(Boolean)
-          .join("\r\n");
+        // Custom headers (optional)
+        const extra = message.headers && typeof message.headers === "object"
+          ? Object.entries(message.headers)
+              .filter(([k, v]) => k && v != null)
+              .map(([k, v]) => headerLine(k, String(v)))
+          : [];
 
-        const raw = Buffer.from(`${headers}\r\n\r\n${message.html || ""}`, "utf8")
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/g, "");
+        const headers = [...baseHeaders.filter(Boolean), ...extra].join("\r\n");
 
+        const rawMime = `${headers}\r\n\r\n${message.html || ""}`;
+        const raw = b64url(rawMime);
+
+        // 3) send via Gmail API
         const sr = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
           method: "POST",
           headers: {
@@ -113,7 +131,12 @@ export function makeGmailOAuthProvider(args: {
           provider: "gmail_oauth",
           providerMessageId: sj?.id ?? null,
           error: null,
-          meta: { tenantId, context },
+          meta: {
+            tenantId,
+            context,
+            // super useful for your test endpoint:
+            fromActual: args.fromEmail,
+          },
         };
       } catch (e: any) {
         return {

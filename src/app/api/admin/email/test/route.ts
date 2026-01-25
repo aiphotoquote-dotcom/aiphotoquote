@@ -35,6 +35,7 @@ export async function POST(req: Request) {
 
   const url = new URL(req.url);
   const bccSelf = url.searchParams.get("bccSelf") !== "0"; // default ON
+  const alsoToSelf = url.searchParams.get("alsoToSelf") === "1"; // default OFF
 
   const cfg = await getTenantEmailConfig(gate.tenantId);
 
@@ -46,16 +47,17 @@ export async function POST(req: Request) {
   const business = cfg.businessName?.trim() || "your business";
   const replyToFirst = replyTo?.[0] || "";
 
-  // Determine if we're enterprise and (optionally) BCC the connected mailbox
-  const mode = (cfg.emailSendMode ?? "standard").toString().trim().toLowerCase() === "enterprise"
-    ? "enterprise"
-    : "standard";
+  const mode =
+    (cfg.emailSendMode ?? "standard").toString().trim().toLowerCase() === "enterprise"
+      ? "enterprise"
+      : "standard";
 
   const mailboxEmail =
-    mode === "enterprise" && cfg.emailIdentityId ? await getEnterpriseMailboxEmail(cfg.emailIdentityId) : null;
+    mode === "enterprise" && cfg.emailIdentityId
+      ? await getEnterpriseMailboxEmail(cfg.emailIdentityId)
+      : null;
 
-  // ✅ Real email body (no placeholder)
-  const preHtml = `
+  const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
       <h2 style="margin:0 0 8px;">Test email ✅</h2>
       <p style="margin:0 0 10px;color:#374151;">
@@ -71,26 +73,35 @@ export async function POST(req: Request) {
             ? `<div><b>Connected mailbox (for send)</b>: ${escapeHtml(mailboxEmail || "(unknown)")}</div>`
             : ""
         }
+        <div><b>alsoToSelf</b>: ${escapeHtml(String(alsoToSelf))}</div>
+        <div><b>bccSelf</b>: ${escapeHtml(String(bccSelf))}</div>
       </div>
     </div>
   `;
 
-  const preText = `Test email: tenant=${business} mode=${mode} to=${cfg.leadToEmail} replyTo=${replyToFirst}`;
+  const text = `Test email: tenant=${business} mode=${mode} to=${cfg.leadToEmail} replyTo=${replyToFirst}`;
 
-  // Optional BCC-to-self on tests so you always see delivery
-  // NOTE: EmailMessage may not currently include bcc in your types/provider.
-  // If your EmailMessage supports it, this works immediately.
-  // If it doesn't, you can skip this and I’ll show the small type/provider patch next.
   const message: any = {
     from,
     to: [cfg.leadToEmail],
     replyTo,
     subject: `Test email from AI Photo Quote (${business})`,
-    html: preHtml,
-    text: preText,
+    html,
+    text,
+
+    // Helpful for tracing in headers if you want:
+    headers: {
+      "X-AIPQ-Tenant": gate.tenantId,
+      "X-AIPQ-Mode": mode,
+      "X-AIPQ-Context": "lead_new",
+    },
   };
 
-  if (bccSelf && mailboxEmail) {
+  // Gmail reality: BCC to yourself often shows only in Sent/All Mail.
+  // For testing, CC yourself if alsoToSelf=1 so it lands in Inbox.
+  if (mailboxEmail && alsoToSelf) {
+    message.cc = Array.from(new Set([...(message.cc || []), mailboxEmail]));
+  } else if (bccSelf && mailboxEmail) {
     message.bcc = [mailboxEmail];
   }
 
@@ -112,9 +123,14 @@ export async function POST(req: Request) {
       fromActual,
       replyToUsed: replyToFirst || null,
       emailIdentityId: cfg.emailIdentityId ?? null,
-      bccSelfApplied: Boolean(bccSelf && mailboxEmail),
-      bccSelfAddress: mailboxEmail,
+      mailboxEmail,
+      alsoToSelf,
+      bccSelf,
       error: res.error ?? null,
+      note:
+        res.ok
+          ? "Provider accepted the message. If delivery is missing, check recipient spam/quarantine and DMARC alignment."
+          : null,
     },
     res.ok ? 200 : 500
   );
