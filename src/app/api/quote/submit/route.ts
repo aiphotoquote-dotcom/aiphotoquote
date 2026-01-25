@@ -364,7 +364,7 @@ export async function POST(req: Request) {
               notes,
               imageUrls: images.map((x) => x.url),
               // If your leadNew template ignores this, no harm. If it supports it later, it’s ready.
-              logoUrl: brandLogoUrl,
+              brandLogoUrl: brandLogoUrl,
             } as any);
 
             const r1 = await sendEmail({
