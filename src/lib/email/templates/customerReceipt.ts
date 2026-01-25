@@ -16,14 +16,40 @@ export function renderCustomerReceiptEmailHTML(args: {
   estimateLow: number;
   estimateHigh: number;
   questions: string[];
+  // NEW (optional)
+  logoUrl?: string | null;
 }) {
-  const { businessName, quoteLogId, customerName, summary, estimateLow, estimateHigh, questions } = args;
+  const {
+    businessName,
+    quoteLogId,
+    customerName,
+    summary,
+    estimateLow,
+    estimateHigh,
+    questions,
+    logoUrl,
+  } = args;
 
-  const q = (questions || []).slice(0, 10).map((x) => `<li>${esc(x)}</li>`).join("");
+  const q = (questions || [])
+    .slice(0, 10)
+    .map((x) => `<li>${esc(x)}</li>`)
+    .join("");
+
+  const header = logoUrl
+    ? `
+      <div style="display:flex;align-items:center;gap:12px;margin:0 0 12px;">
+        <img src="${esc(logoUrl)}" alt="${esc(businessName)}" style="max-height:48px;width:auto;display:block;object-fit:contain;" />
+        <div>
+          <div style="font-size:18px;font-weight:800;color:#111;line-height:1.2;">Your AI Photo Quote</div>
+          <div style="font-size:12px;color:#6b7280;margin-top:2px;">${esc(businessName)}</div>
+        </div>
+      </div>
+    `
+    : `<h2 style="margin:0 0 10px;">Your AI Photo Quote</h2>`;
 
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111;">
-    <h2 style="margin:0 0 10px;">Your AI Photo Quote</h2>
+    ${header}
 
     <div style="margin:0 0 10px;color:#374151;">
       Hi ${esc(customerName)}, we received your photos. Here’s your preliminary estimate range.

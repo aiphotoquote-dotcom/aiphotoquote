@@ -14,12 +14,6 @@ function firstRow<T = any>(r: any): T | null {
   return (r?.rows?.[0] ?? (Array.isArray(r) ? r?.[0] : null)) as T | null;
 }
 
-function rowCount(r: any): number {
-  if (Array.isArray(r)) return r.length;
-  if (Array.isArray(r?.rows)) return r.rows.length;
-  return 0;
-}
-
 function normalizeTenantSlug(v: any): string {
   return String(v ?? "").trim();
 }
@@ -31,8 +25,12 @@ export default async function Page(props: PageProps) {
   // Results
   let tenantId: string | null = null;
   let tenantName: string | null = null;
+
   let industry_key: string | null = null;
   let ai_rendering_enabled: boolean | null = null;
+
+  let brand_logo_url: string | null = null;
+  let business_name: string | null = null;
 
   // Display defaults
   let displayTenantName = "Get a Photo Quote";
@@ -56,11 +54,15 @@ export default async function Page(props: PageProps) {
 
     if (tenantName) displayTenantName = tenantName;
 
-    // Settings lookup (ai_rendering_enabled exists in your DB)
+    // Settings lookup (prefer modern columns; fall back safely)
     if (tenantId) {
       try {
         const settingsRes = await db.execute(sql`
-          select "industry_key", "ai_rendering_enabled"
+          select
+            "industry_key",
+            "ai_rendering_enabled",
+            "brand_logo_url",
+            "business_name"
           from "tenant_settings"
           where "tenant_id" = ${tenantId}::uuid
           limit 1
@@ -69,17 +71,26 @@ export default async function Page(props: PageProps) {
         const settings = firstRow<{
           industry_key: string | null;
           ai_rendering_enabled: boolean | null;
+          brand_logo_url: string | null;
+          business_name: string | null;
         }>(settingsRes);
 
         industry_key = settings?.industry_key ?? null;
         ai_rendering_enabled =
-          typeof settings?.ai_rendering_enabled === "boolean"
-            ? settings.ai_rendering_enabled
-            : null;
+          typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
+
+        brand_logo_url = settings?.brand_logo_url ?? null;
+        business_name = settings?.business_name ?? null;
 
         if (industry_key) displayIndustry = industry_key;
         aiRenderingEnabled = ai_rendering_enabled === true;
+
+        // If tenantSettings has a business name, prefer it for display
+        if (business_name && business_name.trim()) {
+          displayTenantName = business_name.trim();
+        }
       } catch {
+        // ultra-safe fallback for older DB shape
         const settingsRes = await db.execute(sql`
           select "industry_key"
           from "tenant_settings"
@@ -98,11 +109,24 @@ export default async function Page(props: PageProps) {
     // If anything fails, we still render the form; QuoteForm will show errors if submit fails
   }
 
+  const logoUrl = (brand_logo_url ?? "").trim() || null;
+
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       <div className="mx-auto max-w-5xl px-6 py-12">
         <div className="grid gap-8 lg:grid-cols-5 lg:items-start">
           <div className="lg:col-span-2">
+            {/* Tenant branding */}
+            {logoUrl ? (
+              <div className="mb-4">
+                <img
+                  src={logoUrl}
+                  alt={displayTenantName}
+                  style={{ maxHeight: 64, width: "auto", objectFit: "contain", display: "block" }}
+                />
+              </div>
+            ) : null}
+
             <div className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
               <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
               Photo quote powered by AI
