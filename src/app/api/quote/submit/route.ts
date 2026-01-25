@@ -398,7 +398,7 @@ export async function POST(req: Request) {
               estimateLow: output.estimate_low ?? 0,
               estimateHigh: output.estimate_high ?? 0,
               questions: output.questions ?? [],
-              logoUrl: brandLogoUrl,
+              brandLogoUrl: brandLogoUrl,
             });
 
             const r2 = await sendEmail({
