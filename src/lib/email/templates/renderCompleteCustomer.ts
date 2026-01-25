@@ -1,5 +1,3 @@
-// src/lib/email/templates/renderCompleteCustomer.ts
-
 function esc(s: unknown) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -20,7 +18,7 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
   brandLogoUrl?: string | null;
 
   customerName: string;
-  quoteLogId: string;
+  quoteLogId: string; // kept for API compatibility (not shown to customer)
 
   renderImageUrl: string;
 
@@ -29,19 +27,17 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
   summary?: string | null;
 
   // optional deep links
-  publicQuoteUrl?: string | null;
+  publicQuoteUrl?: string | null; // kept for compatibility (not used)
   replyToEmail?: string | null;
 }) {
   const {
     businessName,
     brandLogoUrl,
     customerName,
-    quoteLogId,
     renderImageUrl,
     estimateLow,
     estimateHigh,
     summary,
-    publicQuoteUrl,
     replyToEmail,
   } = args;
 
@@ -51,19 +47,15 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
   const safeSummary = String(summary ?? "").trim();
 
   const topLogo = brandLogoUrl
-    ? `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />`
-    : `<div style="font-weight:800;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+    ? `<img src="${esc(brandLogoUrl)}" alt="${esc(
+        businessName
+      )}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />`
+    : `<div style="font-weight:800;font-size:14px;letter-spacing:.2px;color:#111;">${esc(
+        businessName
+      )}</div>`;
 
   // preheader (hidden in body)
   const preheader = `Your concept rendering is ready — a vision for what’s possible.`;
-
-  const viewBtn = publicQuoteUrl
-    ? `<a href="${esc(publicQuoteUrl)}" target="_blank" rel="noopener"
-         style="display:inline-block;background:#111;color:#fff;text-decoration:none;
-                padding:12px 16px;border-radius:12px;font-weight:800;font-size:14px;">
-         View details
-       </a>`
-    : "";
 
   const replyLine = replyToEmail
     ? `<div style="margin-top:10px;color:#6b7280;font-size:12px;">
@@ -119,6 +111,7 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
               </td>
             </tr>
 
+            <!-- Image -->
             <tr>
               <td style="padding:16px 20px 0;">
                 <div style="border-radius:16px;overflow:hidden;border:1px solid #eef0f4;background:#f9fafb;">
@@ -131,29 +124,19 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- Quote card -->
+            <!-- Summary + Range (no Quote ID, no CTA) -->
             <tr>
               <td style="padding:16px 20px 0;">
                 <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#ffffff;">
-                  <table role="presentation" width="100%">
-                    <tr>
-                      <td style="vertical-align:top;">
-                        <div style="font-size:12px;color:#6b7280;font-weight:800;">Quote ID</div>
-                        <div style="font-size:13px;font-weight:800;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
-                          ${esc(quoteLogId)}
-                        </div>
-                      </td>
-                      <td align="right" style="vertical-align:top;">
-                        ${
-                          rangeText
-                            ? `<div style="font-size:12px;color:#6b7280;font-weight:800;">Estimate range</div>
-                               <div style="font-size:14px;font-weight:900;">${esc(rangeText)}</div>`
-                            : `<div style="font-size:12px;color:#6b7280;font-weight:800;">Estimate</div>
-                               <div style="font-size:14px;font-weight:900;">Pending inspection</div>`
-                        }
-                      </td>
-                    </tr>
-                  </table>
+                  ${
+                    rangeText
+                      ? `<div style="font-size:12px;color:#6b7280;font-weight:800;">Estimate range</div>
+                         <div style="margin-top:6px;font-size:18px;font-weight:900;color:#111;">${esc(
+                           rangeText
+                         )}</div>`
+                      : `<div style="font-size:12px;color:#6b7280;font-weight:800;">Estimate</div>
+                         <div style="margin-top:6px;font-size:16px;font-weight:900;color:#111;">Pending inspection</div>`
+                  }
 
                   ${
                     safeSummary
@@ -169,21 +152,9 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- CTA -->
+            <!-- Contact line (optional) -->
             <tr>
-              <td style="padding:18px 20px 22px;">
-                <table role="presentation" width="100%">
-                  <tr>
-                    <td align="left">
-                      ${viewBtn}
-                    </td>
-                    <td align="right">
-                      <div style="font-size:12px;color:#6b7280;font-weight:800;">Next step</div>
-                      <div style="font-size:13px;font-weight:800;color:#111;">Confirm details & schedule</div>
-                    </td>
-                  </tr>
-                </table>
-
+              <td style="padding:16px 20px 22px;">
                 ${replyLine}
               </td>
             </tr>
