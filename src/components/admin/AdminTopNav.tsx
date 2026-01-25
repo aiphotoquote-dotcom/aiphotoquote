@@ -19,7 +19,7 @@ function activeFromPath(pathname: string): NavKey {
        if (p.startsWith("/admin/quotes")) return "quotes";
     if (p.startsWith("/admin/settings")) return "settings";
     if (p.startsWith("/admin/setup")) return "setup";
-    if (p.startsWith("/admin/widgets")) return "widgets";
+    if (p.startsWith("/admin/setup/widget")) return "widgets";
     return "dashboard";
   }
 
@@ -260,7 +260,7 @@ export default function AdminTopNav() {
     { key: "quotes", href: "/admin/quotes", label: "Quotes" },
     { key: "settings", href: "/admin/settings", label: "Settings" },
     { key: "setup", href: "/admin/setup", label: "AI Setup" },
-    { key: "widgets", href: "/admin/setup/widgets", label: "Widgets" },
+    { key: "widgets", href: "/admin/setup/widget", label: "Widgets" },
   ];
 
   return (
