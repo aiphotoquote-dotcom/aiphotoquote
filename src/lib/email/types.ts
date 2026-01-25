@@ -33,9 +33,12 @@ export type EmailMessage = {
   from: string;
   to: string[];
   subject: string;
-  html: string;
 
-  // optional headers
+  // content
+  html: string;
+  text?: string; // optional plain-text version (used by Resend)
+
+  // optional addressing
   replyTo?: string[];
   cc?: string[];
   bcc?: string[];
