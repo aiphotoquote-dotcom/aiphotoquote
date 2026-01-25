@@ -1,7 +1,7 @@
 // src/app/api/quote/submit/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 
 import { db } from "@/lib/db/client";
@@ -12,7 +12,8 @@ import { sendEmail } from "@/lib/email";
 import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
-import { sql } from "drizzle-orm"; // you already import eq; add sql too
+
+import { buildEstimatePrompt, buildRenderPrompt } from "@/lib/ai/prompts/build";
 
 export const runtime = "nodejs";
 
@@ -37,13 +38,12 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(),
+      category: z.string().optional(), // today: used as sub-industry (auto/marine/residential/etc)
     })
     .optional(),
 });
 
 function normalizePhone(raw: string) {
-  // Keep only digits; drop leading 1 if present and length 11
   const d = String(raw ?? "").replace(/\D/g, "");
   if (d.length === 11 && d.startsWith("1")) return d.slice(1);
   return d;
@@ -157,9 +157,26 @@ export async function POST(req: Request) {
     const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
 
     const customer_context = parsed.data.customer_context ?? {};
-    const category = customer_context.category ?? industryKey ?? "service";
-    const service_type = customer_context.service_type ?? "upholstery";
+    // Back-compat: category exists today; we treat it as "sub-industry" selector (auto/marine/residential/etc)
+    const subIndustryKey = customer_context.category ?? null;
+    const serviceType = customer_context.service_type ?? null;
     const notes = customer_context.notes ?? "";
+
+    // Build prompts (Option B foundation)
+    const { system, userText } = buildEstimatePrompt({
+      industryKey,
+      subIndustryKey,
+      serviceType,
+      notes,
+    });
+
+    // Deterministic render prompt (stored for v1 audit + reuse by render route)
+    const renderPrompt = buildRenderPrompt({
+      industryKey,
+      subIndustryKey,
+      serviceType,
+      notes,
+    });
 
     // --- Build input we store (consistent, includes customer) ---
     const inputToStore = {
@@ -168,37 +185,18 @@ export async function POST(req: Request) {
       render_opt_in: renderOptIn,
       customer,
       customer_context: {
-        category,
-        service_type,
+        // keep existing fields for now so UI doesn’t break
+        category: subIndustryKey ?? (industryKey as any),
+        service_type: serviceType ?? undefined,
         notes,
+      },
+      prompt_context: {
+        industry_key: industryKey,
+        sub_industry_key: subIndustryKey,
+        service_type: serviceType,
       },
       createdAt: new Date().toISOString(),
     };
-
-    /**
-     * VISION PROMPT:
-     * - The model sees the images
-     * - We request a structured estimate range + follow-up questions
-     */
-    const system = [
-      "You are an expert estimator for service work based on photos and customer notes.",
-      "Be conservative: return a realistic RANGE, not a single number.",
-      "If photos are insufficient or ambiguous, set confidence low and inspection_required true.",
-      "Do not invent brand/model/year—ask questions instead.",
-      "Return ONLY valid JSON matching the provided schema.",
-    ].join("\n");
-
-    const userText = [
-      `Category: ${category}`,
-      `Service type: ${service_type}`,
-      `Customer notes: ${notes || "(none)"}`,
-      "",
-      "Instructions:",
-      "- Use the photos to identify the item, material type, and visible damage/wear.",
-      "- Provide estimate_low and estimate_high (whole dollars).",
-      "- Provide visible_scope as short bullet-style strings.",
-      "- Provide assumptions and questions (3–8 items each is fine).",
-    ].join("\n");
 
     // Build multimodal message
     const content: any[] = [{ type: "text", text: userText }];
@@ -209,9 +207,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // Use responses API-style strict schema via chat.completions response_format (supported in modern OpenAI libs)
     const completion = await openai.chat.completions.create({
-      // gpt-4o-mini supports vision + is fast; keep it for cost/perf
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: system },
@@ -264,7 +260,6 @@ export async function POST(req: Request) {
     let output: any;
     const safe = AiOutputSchema.safeParse(outputParsed);
     if (!safe.success) {
-      // fallback: store raw for debugging, but still return a safe minimal object
       output = {
         confidence: "low",
         inspection_required: true,
@@ -295,7 +290,7 @@ export async function POST(req: Request) {
       };
     }
 
-           // Save quote log
+    // Save quote log (+ render_prompt audit)
     const inserted = await db
       .insert(quoteLogs)
       .values({
@@ -303,6 +298,7 @@ export async function POST(req: Request) {
         input: inputToStore,
         output,
         renderOptIn,
+        renderPrompt, // ✅ critical for v1 (audit + reuse)
       })
       .returning({ id: quoteLogs.id })
       .then((r) => r[0] ?? null);
