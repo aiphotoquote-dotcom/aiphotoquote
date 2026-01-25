@@ -3,6 +3,12 @@
 export type EmailSendMode = "standard" | "enterprise";
 
 /**
+ * Provider keys used across the email system.
+ * Keep in sync with providers you actually implement.
+ */
+export type EmailProviderKey = "resend" | "gmail_oauth" | "microsoft_oauth";
+
+/**
  * Strict union so emails are categorized consistently.
  * Add new types here whenever a new email flow is introduced.
  */
@@ -37,7 +43,7 @@ export type EmailMessage = {
  */
 export type EmailSendResult = {
   ok: boolean;
-  provider: "resend" | "gmail_oauth" | "microsoft_oauth";
+  provider: EmailProviderKey;
   providerMessageId?: string | null;
   error?: string | null;
 
