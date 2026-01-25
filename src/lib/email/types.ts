@@ -34,7 +34,11 @@ export type EmailMessage = {
   to: string[];
   subject: string;
   html: string;
+
+  // optional headers
   replyTo?: string[];
+  cc?: string[];
+  bcc?: string[];
 };
 
 /**
@@ -47,7 +51,7 @@ export type EmailSendResult = {
   providerMessageId?: string | null;
   error?: string | null;
 
-  // ✅ Optional debug/telemetry payload (safe to omit)
+  // Optional debug/telemetry payload (safe to omit)
   meta?: Record<string, any>;
 };
 
