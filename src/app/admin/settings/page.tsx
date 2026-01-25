@@ -1,7 +1,6 @@
-// src/app/admin/settings/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type TenantRow = {
   tenantId: string;
@@ -23,6 +22,9 @@ type SettingsResp =
         business_name: string;
         lead_to_email: string;
         resend_from_email: string;
+
+        brand_logo_url?: string | null;
+
         email_send_mode?: string | null;
         email_identity_id?: string | null;
       };
@@ -39,7 +41,6 @@ type EmailStatusResp =
         lead_to_email_present: boolean;
         resend_from_email_present: boolean;
 
-        // enterprise readiness
         email_send_mode?: "standard" | "enterprise";
         email_identity_id_present?: boolean;
       };
@@ -87,7 +88,9 @@ function Card(props: { title: string; subtitle?: string; children: React.ReactNo
       <div className="flex items-start justify-between gap-4 border-b border-gray-100 p-5 dark:border-white/10">
         <div>
           <div className="text-sm font-semibold text-gray-900 dark:text-white">{props.title}</div>
-          {props.subtitle ? <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{props.subtitle}</div> : null}
+          {props.subtitle ? (
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{props.subtitle}</div>
+          ) : null}
         </div>
         {props.right ? <div className="shrink-0">{props.right}</div> : null}
       </div>
@@ -103,6 +106,7 @@ function Field(props: {
   onChange: (v: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  inputType?: string;
 }) {
   return (
     <div>
@@ -112,6 +116,7 @@ function Field(props: {
         onChange={(e) => props.onChange(e.target.value)}
         disabled={props.disabled}
         placeholder={props.placeholder}
+        type={props.inputType ?? "text"}
         className={cx(
           "mt-1 w-full rounded-lg border px-3 py-2 text-sm outline-none transition",
           "border-gray-300 bg-white text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
@@ -136,6 +141,8 @@ export default function AdminTenantSettingsPage() {
   const [businessName, setBusinessName] = useState("");
   const [leadToEmail, setLeadToEmail] = useState("");
   const [fromEmail, setFromEmail] = useState("");
+
+  const [brandLogoUrl, setBrandLogoUrl] = useState<string>("");
 
   const [emailSendMode, setEmailSendMode] = useState<"standard" | "enterprise">("standard");
   const [emailIdentityId, setEmailIdentityId] = useState<string>("");
@@ -183,6 +190,8 @@ export default function AdminTenantSettingsPage() {
     setBusinessName(data.settings.business_name || "");
     setLeadToEmail(data.settings.lead_to_email || "");
     setFromEmail(data.settings.resend_from_email || "");
+
+    setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
     const modeRaw = (data.settings.email_send_mode ?? "").toString().trim().toLowerCase();
     const mode = modeRaw === "enterprise" ? "enterprise" : "standard";
@@ -267,8 +276,52 @@ export default function AdminTenantSettingsPage() {
     }
   }
 
+  // --- logo upload helpers ---
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [logoErr, setLogoErr] = useState<string | null>(null);
+
+  async function uploadLogo(file: File) {
+    const fd = new FormData();
+    fd.append("file", file);
+
+    const res = await fetch("/api/admin/tenant-logo/upload", {
+      method: "POST",
+      body: fd,
+    });
+
+    const ct = res.headers.get("content-type") || "";
+    const data = ct.includes("application/json") ? await res.json() : { ok: false, error: await res.text() };
+
+    if (!data?.ok) throw new Error(data?.message || data?.error || "Upload failed");
+    return data.url as string;
+  }
+
+  async function onPickLogoFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLogoErr(null);
+    setUploadingLogo(true);
+    setMsg(null);
+    setErr(null);
+
+    try {
+      const url = await uploadLogo(file);
+      setBrandLogoUrl(url);
+      setMsg("Logo uploaded. Click Save Settings to apply.");
+    } catch (ex: any) {
+      setLogoErr(ex?.message ?? String(ex));
+    } finally {
+      setUploadingLogo(false);
+      // allow picking same file again
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
   async function save() {
     setErr(null);
+    setLogoErr(null);
     setMsg(null);
     setSaving(true);
 
@@ -280,6 +333,8 @@ export default function AdminTenantSettingsPage() {
           business_name: businessName.trim(),
           lead_to_email: leadToEmail.trim(),
           resend_from_email: fromEmail.trim(),
+
+          brand_logo_url: brandLogoUrl.trim() || null,
 
           email_send_mode: emailSendMode,
           email_identity_id: emailIdentityId.trim() || null,
@@ -321,382 +376,503 @@ export default function AdminTenantSettingsPage() {
     !!leadToEmail.trim() &&
     (emailSendMode === "standard" || (emailSendMode === "enterprise" && !!emailIdentityId.trim()));
 
-  const headerRight = (
-    <div className="flex items-center gap-2">
-      <a
-        href="/admin/quotes"
-        className={cx(
-          "rounded-lg border px-3 py-2 text-sm font-medium transition",
-          "border-gray-300 bg-white text-gray-800 hover:bg-gray-50",
-          "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
-        )}
-      >
-        ← Quotes
-      </a>
-      <button
-        onClick={bootstrap}
-        className={cx(
-          "rounded-lg border px-3 py-2 text-sm font-medium transition",
-          "border-gray-300 bg-white text-gray-800 hover:bg-gray-50",
-          "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
-        )}
-      >
-        Refresh
-      </button>
-    </div>
-  );
-
   return (
-    // NOTE: AdminLayout already provides background + padding.
-    // Keep this page “clean” so it matches other admin pages.
-    <div className="mx-auto w-full max-w-4xl">
-      {/* Header */}
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Tenant Settings</h1>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Email routing and branding for the active tenant.
-          </p>
+    <div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-neutral-950">
+      <div className="mx-auto w-full max-w-4xl">
+        {/* Header (removed the circled Quotes/Refresh buttons) */}
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Tenant Settings</h1>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Email routing and branding for the active tenant.
+            </p>
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {activeTenant ? (
-              <>
-                <Pill>
-                  Tenant: <span className="ml-1 font-mono">{activeTenant.slug}</span>
-                </Pill>
-                {role ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {activeTenant ? (
+                <>
                   <Pill>
-                    Role: <span className="ml-1 font-mono">{role}</span>
+                    Tenant: <span className="ml-1 font-mono">{activeTenant.slug}</span>
                   </Pill>
-                ) : null}
-              </>
-            ) : (
-              <Pill tone="warn">No active tenant selected</Pill>
-            )}
+                  {role ? (
+                    <Pill>
+                      Role: <span className="ml-1 font-mono">{role}</span>
+                    </Pill>
+                  ) : null}
+                </>
+              ) : (
+                <Pill tone="warn">No active tenant selected</Pill>
+              )}
 
-            {emailSendMode === "enterprise" ? (
-              <Pill tone={emailIdentityId ? "good" : "warn"}>
-                Enterprise:{" "}
-                <span className="ml-1 font-mono">{emailIdentityId ? "connected" : "not connected"}</span>
+              {emailSendMode === "enterprise" ? (
+                <Pill tone={emailIdentityId ? "good" : "warn"}>
+                  Enterprise: <span className="ml-1 font-mono">{emailIdentityId ? "connected" : "not connected"}</span>
+                </Pill>
+              ) : (
+                <Pill>Standard mode</Pill>
+              )}
+
+              <Pill tone={brandLogoUrl.trim() ? "good" : "neutral"}>
+                Logo: <span className="ml-1 font-mono">{brandLogoUrl.trim() ? "set" : "not set"}</span>
               </Pill>
-            ) : (
-              <Pill>Standard mode</Pill>
-            )}
-          </div>
+            </div>
 
-          {msg ? <div className="mt-2 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
-          {err ? (
-            <div className="mt-2 whitespace-pre-wrap text-sm text-red-700 dark:text-red-300">{err}</div>
-          ) : null}
+            {msg ? <div className="mt-2 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
+            {err ? <div className="mt-2 text-sm text-red-700 dark:text-red-300 whitespace-pre-wrap">{err}</div> : null}
+          </div>
         </div>
 
-        {headerRight}
-      </div>
-
-      <div className="grid gap-5">
-        {/* Tenant switcher */}
-        <Card
-          title="Active Tenant"
-          subtitle="If you belong to multiple tenants, switch here."
-          right={<Pill tone="neutral">{tenants.length} tenants</Pill>}
-        >
-          {tenants.length === 0 ? (
-            <div className="text-sm text-gray-700 dark:text-gray-300">No tenants yet.</div>
-          ) : (
-            <div className="grid gap-2">
-              {tenants.map((t) => {
-                const isActive = t.tenantId === activeTenantId;
-                return (
-                  <button
-                    key={t.tenantId}
-                    onClick={() => switchTenant(t.tenantId)}
-                    className={cx(
-                      "w-full rounded-xl border p-3 text-left transition",
-                      isActive
-                        ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
-                        : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-gray-900 dark:text-white">
-                        {t.name || t.slug}{" "}
-                        <span className="font-normal text-gray-500 dark:text-gray-400">({t.slug})</span>
-                      </div>
-                      <span className="text-xs font-mono text-gray-600 dark:text-gray-300">{t.role}</span>
-                    </div>
-                    <div className="mt-1 text-xs font-mono text-gray-500 dark:text-gray-400">{t.tenantId}</div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </Card>
-
-        {/* Email status */}
-        <Card
-          title="Email Status"
-          subtitle="Shows whether email is configured. Delivery can still be affected by DMARC / spam / quarantine."
-          right={
-            emailStatus?.ok ? (
-              <Pill tone={emailStatus.enabled ? "good" : "warn"}>{emailStatus.enabled ? "Configured" : "Needs setup"}</Pill>
+        <div className="grid gap-5">
+          {/* Active tenant */}
+          <Card
+            title="Active Tenant"
+            subtitle="If you belong to multiple tenants, switch here."
+            right={<Pill tone="neutral">{tenants.length} tenants</Pill>}
+          >
+            {tenants.length === 0 ? (
+              <div className="text-sm text-gray-700 dark:text-gray-300">No tenants yet.</div>
             ) : (
-              <Pill tone="neutral">Loading…</Pill>
-            )
-          }
-        >
-          {emailStatus?.ok ? (
-            <div className="grid gap-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Pill tone="neutral">
-                  Mode: <span className="ml-1 font-mono">{statusMode}</span>
-                </Pill>
-                <Pill tone={emailStatus.platform.resend_key_present ? "good" : "bad"}>
-                  RESEND_API_KEY:{" "}
-                  <span className="ml-1 font-mono">{emailStatus.platform.resend_key_present ? "present" : "missing"}</span>
-                </Pill>
-                <Pill tone={enterpriseIdentityPresent ? "good" : "warn"}>
-                  email_identity_id:{" "}
-                  <span className="ml-1 font-mono">{enterpriseIdentityPresent ? "set" : "missing"}</span>
-                </Pill>
-              </div>
-
-              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-white/10 dark:bg-white/5">
-                <div className="mb-2 text-sm font-semibold text-gray-900 dark:text-white">Notes</div>
-                <ul className="list-disc space-y-1 pl-5 text-gray-700 dark:text-gray-300">
-                  {emailStatus.notes.map((n, i) => (
-                    <li key={i}>{n}</li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          ) : emailStatus ? (
-            <div className="text-sm text-red-700 dark:text-red-300">
-              {emailStatus.message || emailStatus.error || "Failed to load email status."}
-            </div>
-          ) : (
-            <div className="text-sm text-gray-700 dark:text-gray-300">Loading status…</div>
-          )}
-        </Card>
-
-        {/* Settings */}
-        <Card title="Configuration" subtitle="Update settings for the active tenant.">
-          {loading ? (
-            <div className="text-sm text-gray-700 dark:text-gray-300">Loading…</div>
-          ) : (
-            <div className="grid gap-6">
-              {!canEdit ? (
-                <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100">
-                  You are a <span className="font-mono">{role}</span>. Only <span className="font-mono">owner</span> or{" "}
-                  <span className="font-mono">admin</span> can edit tenant settings.
-                </div>
-              ) : null}
-
-              {/* Mode selector */}
-              <div className="grid gap-3">
-                <div className="text-sm font-semibold text-gray-900 dark:text-white">Email sending mode</div>
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <label
-                    className={cx(
-                      "cursor-pointer rounded-2xl border p-4 transition",
-                      emailSendMode === "standard"
-                        ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
-                        : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <div className="flex items-start gap-3">
-                      <input
-                        type="radio"
-                        name="email_send_mode"
-                        checked={emailSendMode === "standard"}
-                        onChange={() => {
-                          setEmailSendMode("standard");
-                          setTestEmailRes(null);
-                        }}
-                        disabled={!canEdit}
-                        className="mt-1"
-                      />
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900 dark:text-white">Standard (Resend)</div>
-                        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                          Platform email with domain verification. Recommended for most tenants.
-                        </div>
-                      </div>
-                    </div>
-                  </label>
-
-                  <label
-                    className={cx(
-                      "cursor-pointer rounded-2xl border p-4 transition",
-                      emailSendMode === "enterprise"
-                        ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
-                        : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
-                    )}
-                  >
-                    <div className="flex items-start gap-3">
-                      <input
-                        type="radio"
-                        name="email_send_mode"
-                        checked={emailSendMode === "enterprise"}
-                        onChange={() => {
-                          setEmailSendMode("enterprise");
-                          setTestEmailRes(null);
-                        }}
-                        disabled={!canEdit}
-                        className="mt-1"
-                      />
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900 dark:text-white">Enterprise (OAuth)</div>
-                        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                          Sends using a connected mailbox (Google / Microsoft). Best for strict IT policies.
-                        </div>
-                      </div>
-                    </div>
-                  </label>
-                </div>
-              </div>
-
-              {/* Standard settings */}
-              <div className="grid gap-4">
-                <div className="text-sm font-semibold text-gray-900 dark:text-white">Sender & routing</div>
-
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Field
-                    label="Business Name"
-                    value={businessName}
-                    onChange={setBusinessName}
-                    disabled={!canEdit}
-                    placeholder="Maggio Upholstery"
-                  />
-
-                  <Field
-                    label="Lead To Email"
-                    value={leadToEmail}
-                    onChange={setLeadToEmail}
-                    disabled={!canEdit}
-                    placeholder="leads@yourdomain.com"
-                  />
-                </div>
-
-                <Field
-                  label="Resend From Email"
-                  value={fromEmail}
-                  onChange={setFromEmail}
-                  disabled={!canEdit}
-                  placeholder="AI Photo Quote <no-reply@yourdomain.com>"
-                  hint="Must be a verified sending domain in Resend. Format: Name <email@domain.com>"
-                />
-              </div>
-
-              {/* Enterprise connect */}
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 dark:text-white">Enterprise connection</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      Connect a mailbox to enable Enterprise sending.
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <a
-                      href="/api/admin/email/google/start"
+              <div className="grid gap-2">
+                {tenants.map((t) => {
+                  const isActive = t.tenantId === activeTenantId;
+                  return (
+                    <button
+                      key={t.tenantId}
+                      onClick={() => switchTenant(t.tenantId)}
                       className={cx(
-                        "rounded-lg border px-3 py-2 text-sm font-semibold transition",
-                        "border-gray-300 bg-white text-gray-800 hover:bg-gray-50",
-                        "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10",
-                        !canEdit ? "pointer-events-none opacity-50" : ""
+                        "w-full rounded-xl border p-3 text-left transition",
+                        isActive
+                          ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
+                          : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                       )}
                     >
-                      Connect Google
-                    </a>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-medium text-gray-900 dark:text-white">
+                          {t.name || t.slug}{" "}
+                          <span className="text-gray-500 dark:text-gray-400 font-normal">({t.slug})</span>
+                        </div>
+                        <span className="text-xs font-mono text-gray-600 dark:text-gray-300">{t.role}</span>
+                      </div>
+                      <div className="mt-1 text-xs font-mono text-gray-500 dark:text-gray-400">{t.tenantId}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+
+          {/* Branding */}
+          <Card
+            title="Branding"
+            subtitle="Upload a logo or paste a URL. This will be reused on customer-facing pages and emails."
+            right={
+              brandLogoUrl.trim() ? (
+                <Pill tone="good">Logo set</Pill>
+              ) : (
+                <Pill tone="neutral">No logo</Pill>
+              )
+            }
+          >
+            <div className="grid gap-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Upload logo</div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={onPickLogoFile}
+                      disabled={!canEdit || uploadingLogo}
+                      className="hidden"
+                    />
 
                     <button
                       type="button"
-                      disabled
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={!canEdit || uploadingLogo}
                       className={cx(
-                        "rounded-lg border px-3 py-2 text-sm font-semibold transition",
-                        "border-gray-300 bg-white text-gray-700 opacity-60",
-                        "dark:border-white/10 dark:bg-white/5 dark:text-gray-300"
+                        "rounded-lg px-3 py-2 text-sm font-semibold transition",
+                        "bg-black text-white hover:opacity-90 disabled:opacity-50",
+                        "dark:bg-white dark:text-black dark:hover:opacity-90"
                       )}
-                      title="Coming soon"
                     >
-                      Connect Microsoft (soon)
+                      {uploadingLogo ? "Uploading…" : "Choose file"}
                     </button>
-                  </div>
-                </div>
 
-                <div className="mt-3">
-                  <Field
-                    label="Connected Email Identity ID"
-                    value={emailIdentityId}
-                    onChange={setEmailIdentityId}
-                    disabled={!canEdit}
-                    placeholder="(auto-populated after OAuth connect)"
-                    hint="This is set automatically when OAuth succeeds."
-                  />
-                </div>
-              </div>
-
-              {/* Test email */}
-              <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 dark:text-white">Send Test Email</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      Sends a test message to <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
-                    </div>
-                    {emailSendMode === "enterprise" ? (
-                      <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        Enterprise mode selected — sends via your connected mailbox.
-                      </div>
+                    {brandLogoUrl.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setBrandLogoUrl("")}
+                        disabled={!canEdit || uploadingLogo}
+                        className={cx(
+                          "rounded-lg border px-3 py-2 text-sm font-semibold transition",
+                          "border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50",
+                          "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+                        )}
+                        title="Clears the logo URL (remember to Save)"
+                      >
+                        Clear
+                      </button>
                     ) : null}
                   </div>
 
-                  <button
-                    onClick={sendTestEmail}
-                    disabled={!canSendTestEmail}
-                    title={testEmailDisabledReason ?? undefined}
-                    className={cx(
-                      "rounded-lg px-4 py-2 text-sm font-semibold transition",
-                      "bg-black text-white hover:opacity-90 disabled:opacity-50",
-                      "dark:bg-white dark:text-black dark:hover:opacity-90"
-                    )}
-                  >
-                    {testingEmail ? "Sending…" : "Send test email"}
-                  </button>
+                  {logoErr ? (
+                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200">
+                      {logoErr}
+                    </div>
+                  ) : null}
                 </div>
 
-                {testEmailRes ? (
-                  <pre className="mt-3 max-h-72 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-900 dark:border-white/10 dark:bg-black/40 dark:text-gray-100">
-                    {JSON.stringify(testEmailRes, null, 2)}
-                  </pre>
-                ) : null}
+                <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Logo URL</div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    Paste a public https URL (or we’ll set this automatically after upload).
+                  </div>
+
+                  <div className="mt-3">
+                    <Field
+                      label="brand_logo_url"
+                      value={brandLogoUrl}
+                      onChange={setBrandLogoUrl}
+                      disabled={!canEdit}
+                      placeholder="https://..."
+                      hint="Tip: leave blank to remove."
+                    />
+                  </div>
+                </div>
               </div>
 
-              {/* Save row */}
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="text-xs text-gray-500 dark:text-gray-400">
-                  Tip: connect Google first, then switch to Enterprise and save.
+              {/* Preview */}
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900 dark:text-white">Preview</div>
+                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                      This is how the logo will render in the UI (emails may scale it differently).
+                    </div>
+                  </div>
+                  {brandLogoUrl.trim() ? (
+                    <a
+                      href={brandLogoUrl.trim()}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={cx(
+                        "rounded-lg border px-3 py-2 text-sm font-semibold transition",
+                        "border-gray-300 bg-white text-gray-800 hover:bg-gray-50",
+                        "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+                      )}
+                    >
+                      Open
+                    </a>
+                  ) : null}
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={save}
-                    disabled={!canEdit || saving}
-                    className={cx(
-                      "rounded-lg px-4 py-2 text-sm font-semibold transition",
-                      "bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50",
-                      "dark:bg-blue-500 dark:hover:bg-blue-400"
-                    )}
-                  >
-                    {saving ? "Saving…" : "Save Settings"}
-                  </button>
+                <div className="mt-3 flex items-center justify-center rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 dark:border-white/10 dark:bg-black/30">
+                  {brandLogoUrl.trim() ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={brandLogoUrl.trim()}
+                      alt="Tenant logo"
+                      className="max-h-24 max-w-[280px] object-contain"
+                      onError={() => setLogoErr("Logo preview failed to load. Check the URL or upload again.")}
+                    />
+                  ) : (
+                    <div className="text-sm text-gray-500 dark:text-gray-400">No logo set.</div>
+                  )}
                 </div>
               </div>
             </div>
-          )}
-        </Card>
+          </Card>
+
+          {/* Email status */}
+          <Card
+            title="Email Status"
+            subtitle="Shows whether email is configured. Delivery can still be affected by DMARC / spam / quarantine."
+            right={
+              emailStatus?.ok ? (
+                <Pill tone={emailStatus.enabled ? "good" : "warn"}>
+                  {emailStatus.enabled ? "Configured" : "Needs setup"}
+                </Pill>
+              ) : (
+                <Pill tone="neutral">Loading…</Pill>
+              )
+            }
+          >
+            {emailStatus?.ok ? (
+              <div className="grid gap-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Pill tone="neutral">
+                    Mode: <span className="ml-1 font-mono">{statusMode}</span>
+                  </Pill>
+                  <Pill tone={emailStatus.platform.resend_key_present ? "good" : "bad"}>
+                    RESEND_API_KEY:{" "}
+                    <span className="ml-1 font-mono">
+                      {emailStatus.platform.resend_key_present ? "present" : "missing"}
+                    </span>
+                  </Pill>
+                  <Pill tone={enterpriseIdentityPresent ? "good" : "warn"}>
+                    email_identity_id:{" "}
+                    <span className="ml-1 font-mono">{enterpriseIdentityPresent ? "set" : "missing"}</span>
+                  </Pill>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-white/10 dark:bg-white/5">
+                  <div className="mb-2 text-sm font-semibold text-gray-900 dark:text-white">Notes</div>
+                  <ul className="list-disc space-y-1 pl-5 text-gray-700 dark:text-gray-300">
+                    {emailStatus.notes.map((n, i) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            ) : emailStatus ? (
+              <div className="text-sm text-red-700 dark:text-red-300">
+                {emailStatus.message || emailStatus.error || "Failed to load email status."}
+              </div>
+            ) : (
+              <div className="text-sm text-gray-700 dark:text-gray-300">Loading status…</div>
+            )}
+          </Card>
+
+          {/* Configuration */}
+          <Card title="Configuration" subtitle="Update settings for the active tenant.">
+            {loading ? (
+              <div className="text-sm text-gray-700 dark:text-gray-300">Loading…</div>
+            ) : (
+              <div className="grid gap-6">
+                {!canEdit ? (
+                  <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100">
+                    You are a <span className="font-mono">{role}</span>. Only{" "}
+                    <span className="font-mono">owner</span> or <span className="font-mono">admin</span> can edit
+                    tenant settings.
+                  </div>
+                ) : null}
+
+                {/* Mode selector */}
+                <div className="grid gap-3">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Email sending mode</div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label
+                      className={cx(
+                        "cursor-pointer rounded-2xl border p-4 transition",
+                        emailSendMode === "standard"
+                          ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
+                          : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+                      )}
+                    >
+                      <div className="flex items-start gap-3">
+                        <input
+                          type="radio"
+                          name="email_send_mode"
+                          checked={emailSendMode === "standard"}
+                          onChange={() => {
+                            setEmailSendMode("standard");
+                            setTestEmailRes(null);
+                          }}
+                          disabled={!canEdit}
+                          className="mt-1"
+                        />
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900 dark:text-white">Standard (Resend)</div>
+                          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                            Platform email with domain verification. Recommended for most tenants.
+                          </div>
+                        </div>
+                      </div>
+                    </label>
+
+                    <label
+                      className={cx(
+                        "cursor-pointer rounded-2xl border p-4 transition",
+                        emailSendMode === "enterprise"
+                          ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
+                          : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+                      )}
+                    >
+                      <div className="flex items-start gap-3">
+                        <input
+                          type="radio"
+                          name="email_send_mode"
+                          checked={emailSendMode === "enterprise"}
+                          onChange={() => {
+                            setEmailSendMode("enterprise");
+                            setTestEmailRes(null);
+                          }}
+                          disabled={!canEdit}
+                          className="mt-1"
+                        />
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900 dark:text-white">Enterprise (OAuth)</div>
+                          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                            Sends using a connected mailbox (Google / Microsoft). Best for strict IT policies.
+                          </div>
+                        </div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Sender & routing */}
+                <div className="grid gap-4">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Sender & routing</div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Field
+                      label="Business Name"
+                      value={businessName}
+                      onChange={setBusinessName}
+                      disabled={!canEdit}
+                      placeholder="Maggio Upholstery"
+                    />
+
+                    <Field
+                      label="Lead To Email"
+                      value={leadToEmail}
+                      onChange={setLeadToEmail}
+                      disabled={!canEdit}
+                      placeholder="leads@yourdomain.com"
+                      inputType="email"
+                    />
+                  </div>
+
+                  <Field
+                    label="Resend From Email"
+                    value={fromEmail}
+                    onChange={setFromEmail}
+                    disabled={!canEdit}
+                    placeholder="AI Photo Quote <no-reply@yourdomain.com>"
+                    hint="Must be a verified sending domain in Resend. Format: Name <email@domain.com>"
+                  />
+                </div>
+
+                {/* Enterprise connect */}
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white">Enterprise connection</div>
+                      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                        Connect a mailbox to enable Enterprise sending.
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <a
+                        href="/api/admin/email/google/start"
+                        className={cx(
+                          "rounded-lg border px-3 py-2 text-sm font-semibold transition",
+                          "border-gray-300 bg-white text-gray-800 hover:bg-gray-50",
+                          "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10",
+                          !canEdit ? "pointer-events-none opacity-50" : ""
+                        )}
+                      >
+                        Connect Google
+                      </a>
+
+                      <button
+                        type="button"
+                        disabled
+                        className={cx(
+                          "rounded-lg border px-3 py-2 text-sm font-semibold transition",
+                          "border-gray-300 bg-white text-gray-700 opacity-60",
+                          "dark:border-white/10 dark:bg-white/5 dark:text-gray-300"
+                        )}
+                        title="Coming soon"
+                      >
+                        Connect Microsoft (soon)
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-3">
+                    <Field
+                      label="Connected Email Identity ID"
+                      value={emailIdentityId}
+                      onChange={setEmailIdentityId}
+                      disabled={!canEdit}
+                      placeholder="(auto-populated after OAuth connect)"
+                      hint="This is set automatically when OAuth succeeds."
+                    />
+                  </div>
+                </div>
+
+                {/* Test email */}
+                <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white">Send Test Email</div>
+                      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                        Sends a test message to{" "}
+                        <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
+                      </div>
+                      {emailSendMode === "enterprise" ? (
+                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          Enterprise mode selected — sends via your connected mailbox.
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <button
+                      onClick={sendTestEmail}
+                      disabled={!canSendTestEmail}
+                      title={testEmailDisabledReason ?? undefined}
+                      className={cx(
+                        "rounded-lg px-4 py-2 text-sm font-semibold transition",
+                        "bg-black text-white hover:opacity-90 disabled:opacity-50",
+                        "dark:bg-white dark:text-black dark:hover:opacity-90"
+                      )}
+                    >
+                      {testingEmail ? "Sending…" : "Send test email"}
+                    </button>
+                  </div>
+
+                  {testEmailRes ? (
+                    <pre className="mt-3 max-h-72 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-900 dark:border-white/10 dark:bg-black/40 dark:text-gray-100">
+                      {JSON.stringify(testEmailRes, null, 2)}
+                    </pre>
+                  ) : null}
+                </div>
+
+                {/* Save row */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-xs text-gray-500 dark:text-gray-400">
+                    Tip: upload a logo, then click Save Settings to persist it.
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={save}
+                      disabled={!canEdit || saving}
+                      className={cx(
+                        "rounded-lg px-4 py-2 text-sm font-semibold transition",
+                        "bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50",
+                        "dark:bg-blue-500 dark:hover:bg-blue-400"
+                      )}
+                    >
+                      {saving ? "Saving…" : "Save Settings"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={bootstrap}
+                      className={cx(
+                        "rounded-lg border px-4 py-2 text-sm font-semibold transition",
+                        "border-gray-300 bg-white text-gray-800 hover:bg-gray-50",
+                        "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+                      )}
+                    >
+                      Reload
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
       </div>
     </div>
   );
