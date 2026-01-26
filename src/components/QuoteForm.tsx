@@ -877,7 +877,9 @@ export default function QuoteForm({
           )}
         </div>
       </section>
-// part 7
+
+
+
       {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
@@ -1044,7 +1046,9 @@ export default function QuoteForm({
           </div>
         </section>
       ) : null}
-// part 8
+
+
+
       {/* Results */}
       {hasEstimate ? (
         <section
