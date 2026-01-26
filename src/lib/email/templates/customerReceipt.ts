@@ -15,13 +15,26 @@ function money(n: unknown) {
   return `$${Math.round(v).toLocaleString()}`;
 }
 
+function badge(text: string, bg: string, fg: string) {
+  return `<span style="display:inline-block;padding:6px 10px;border-radius:999px;background:${bg};color:${fg};font-size:12px;font-weight:900;letter-spacing:.2px;">${esc(
+    text
+  )}</span>`;
+}
+
 export function renderCustomerReceiptEmailHTML(args: {
   businessName: string;
   customerName: string;
 
+  // Core AI estimate
   summary: string;
   estimateLow: number;
   estimateHigh: number;
+
+  // AI details (NEW / optional)
+  confidence?: "high" | "medium" | "low" | string | null;
+  inspectionRequired?: boolean | null;
+  visibleScope?: string[] | null;
+  assumptions?: string[] | null;
   questions: string[];
 
   // Optional branding
@@ -30,11 +43,23 @@ export function renderCustomerReceiptEmailHTML(args: {
   // Optional support hint
   replyToEmail?: string | null;
 
-  // Back-compat ONLY (not shown)
+  // Back-compat ONLY (not shown to customer)
   quoteLogId?: string;
 }) {
-  const { businessName, customerName, summary, estimateLow, estimateHigh, questions, brandLogoUrl, replyToEmail } =
-    args;
+  const {
+    businessName,
+    customerName,
+    summary,
+    estimateLow,
+    estimateHigh,
+    confidence,
+    inspectionRequired,
+    visibleScope,
+    assumptions,
+    questions,
+    brandLogoUrl,
+    replyToEmail,
+  } = args;
 
   const preheader = "We received your photos — your estimate range is ready.";
 
@@ -48,6 +73,28 @@ export function renderCustomerReceiptEmailHTML(args: {
   const rangeText = `${money(estimateLow)} – ${money(estimateHigh)}`;
   const safeSummary = String(summary ?? "").trim();
 
+  const conf = String(confidence ?? "").toLowerCase().trim();
+  const confBadge =
+    conf === "high"
+      ? badge("High confidence", "#ecfdf5", "#065f46")
+      : conf === "medium"
+      ? badge("Medium confidence", "#eff6ff", "#1d4ed8")
+      : conf === "low"
+      ? badge("Low confidence", "#fff7ed", "#9a3412")
+      : "";
+
+  const inspect = inspectionRequired === true;
+
+  const scopeList = (visibleScope || [])
+    .slice(0, 10)
+    .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
+    .join("");
+
+  const assumptionsList = (assumptions || [])
+    .slice(0, 10)
+    .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
+    .join("");
+
   const q = (questions || [])
     .slice(0, 8)
     .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
@@ -58,6 +105,15 @@ export function renderCustomerReceiptEmailHTML(args: {
          Questions? Reply to this email or contact <span style="font-weight:700;color:#111;">${esc(
            replyToEmail
          )}</span>.
+       </div>`
+    : "";
+
+  const inspectCallout = inspect
+    ? `<div style="margin-top:10px;padding:10px 12px;border-radius:14px;background:#fff7ed;border:1px solid #fed7aa;">
+         <div style="font-size:12px;font-weight:900;color:#9a3412;letter-spacing:.2px;">Inspection recommended</div>
+         <div style="margin-top:4px;font-size:13px;color:#7c2d12;line-height:1.45;">
+           Based on the photos, we may need a quick inspection to confirm scope/materials before final pricing.
+         </div>
        </div>`
     : "";
 
@@ -79,6 +135,7 @@ export function renderCustomerReceiptEmailHTML(args: {
           <table role="presentation" cellpadding="0" cellspacing="0" width="100%"
             style="max-width:640px;background:#fff;border-radius:18px;overflow:hidden;box-shadow:0 12px 40px rgba(17,24,39,.12);">
 
+            <!-- Top bar -->
             <tr>
               <td style="padding:18px 20px;border-bottom:1px solid #eef0f4;">
                 <table role="presentation" width="100%">
@@ -94,6 +151,7 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
+            <!-- Title -->
             <tr>
               <td style="padding:18px 20px 0;">
                 <div style="font-size:22px;font-weight:900;letter-spacing:-.2px;margin:0 0 6px;">
@@ -102,9 +160,13 @@ export function renderCustomerReceiptEmailHTML(args: {
                 <div style="font-size:14px;line-height:1.5;color:#374151;">
                   Hi ${esc(customerName)}, we received your photos. Here’s your preliminary estimate range.
                 </div>
+                <div style="margin-top:10px;">
+                  ${confBadge}
+                </div>
               </td>
             </tr>
 
+            <!-- Range + Summary -->
             <tr>
               <td style="padding:16px 20px 0;">
                 <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#ffffff;">
@@ -115,6 +177,8 @@ export function renderCustomerReceiptEmailHTML(args: {
                   <div style="margin-top:8px;font-size:12px;color:#6b7280;">
                     Final pricing can change after inspection and confirming materials/scope.
                   </div>
+
+                  ${inspectCallout}
 
                   ${
                     safeSummary
@@ -130,6 +194,39 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
+            <!-- Visible scope -->
+            ${
+              scopeList
+                ? `<tr>
+                     <td style="padding:16px 20px 0;">
+                       <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#f9fafb;">
+                         <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">What this estimate includes</div>
+                         <div style="margin-top:8px;font-size:14px;line-height:1.55;color:#111;">
+                           <ul style="margin:0;padding-left:18px;">${scopeList}</ul>
+                         </div>
+                       </div>
+                     </td>
+                   </tr>`
+                : ""
+            }
+
+            <!-- Assumptions -->
+            ${
+              assumptionsList
+                ? `<tr>
+                     <td style="padding:16px 20px 0;">
+                       <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#ffffff;">
+                         <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Assumptions</div>
+                         <div style="margin-top:8px;font-size:14px;line-height:1.55;color:#111;">
+                           <ul style="margin:0;padding-left:18px;">${assumptionsList}</ul>
+                         </div>
+                       </div>
+                     </td>
+                   </tr>`
+                : ""
+            }
+
+            <!-- Quick questions -->
             ${
               q
                 ? `<tr>
@@ -145,6 +242,7 @@ export function renderCustomerReceiptEmailHTML(args: {
                 : ""
             }
 
+            <!-- Footer content -->
             <tr>
               <td style="padding:18px 20px 22px;">
                 ${replyLine}
@@ -154,6 +252,7 @@ export function renderCustomerReceiptEmailHTML(args: {
               </td>
             </tr>
 
+            <!-- Dark footer -->
             <tr>
               <td style="padding:18px 20px;background:#0b0b0b;">
                 <div style="color:#e5e7eb;font-size:12px;line-height:1.5;">
