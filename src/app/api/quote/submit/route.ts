@@ -197,7 +197,7 @@ async function sendReceivedEmails(args: {
 
     const r1 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "lead_received", quoteLogId },
+      context: { type: "lead_new", quoteLogId },
       message: {
         from: cfg.fromEmail!,
         to: [cfg.leadToEmail!],
