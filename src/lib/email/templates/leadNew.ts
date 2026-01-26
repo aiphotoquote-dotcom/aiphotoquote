@@ -21,6 +21,74 @@ function badge(text: string, bg: string, fg: string) {
   )}</span>`;
 }
 
+function sectionCard(args: { title: string; body: string; subtle?: boolean }) {
+  const { title, body, subtle } = args;
+  const bg = subtle ? "#f9fafb" : "#ffffff";
+  return `
+    <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:${bg};">
+      <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">${esc(title)}</div>
+      <div style="margin-top:8px;font-size:14px;line-height:1.55;color:#111;">
+        ${body}
+      </div>
+    </div>
+  `;
+}
+
+function listItems(items: string[], max = 10) {
+  const html = (items || [])
+    .filter(Boolean)
+    .slice(0, max)
+    .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
+    .join("");
+  return html ? `<ul style="margin:0;padding-left:18px;">${html}</ul>` : "";
+}
+
+function twoColBullets(args: { leftTitle: string; left: string; rightTitle: string; right: string }) {
+  const { leftTitle, left, rightTitle, right } = args;
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:2px;">
+      <tr>
+        <td valign="top" style="padding-right:10px;width:50%;">
+          <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">${esc(leftTitle)}</div>
+          <div style="margin-top:6px;">${left}</div>
+        </td>
+        <td valign="top" style="padding-left:10px;width:50%;">
+          <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">${esc(rightTitle)}</div>
+          <div style="margin-top:6px;">${right}</div>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function buildPhotoGrid(imageUrls: string[]) {
+  const photos = (imageUrls || []).filter(Boolean).slice(0, 12);
+  if (!photos.length) return "";
+
+  const rows: string[] = [];
+  for (let i = 0; i < photos.length; i += 2) {
+    const a = photos[i];
+    const b = photos[i + 1];
+
+    const cell = (u?: string) =>
+      u
+        ? `<td width="50%" valign="top" style="padding:6px;">
+             <div style="border:1px solid #eef0f4;border-radius:14px;overflow:hidden;background:#fff;">
+               <img src="${esc(u)}" alt="Customer photo" style="width:100%;display:block;line-height:0;" />
+             </div>
+           </td>`
+        : `<td width="50%" style="padding:6px;"></td>`;
+
+    rows.push(`<tr>${cell(a)}${cell(b)}</tr>`);
+  }
+
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px;">
+      ${rows.join("")}
+    </table>
+  `;
+}
+
 export function renderLeadNewEmailHTML(args: {
   businessName: string;
   tenantSlug: string;
@@ -30,13 +98,13 @@ export function renderLeadNewEmailHTML(args: {
   notes?: string;
   imageUrls: string[];
 
-  // NEW (optional) branding
+  // branding
   brandLogoUrl?: string | null;
 
-  // NEW (optional) deep links
+  // deep links
   adminQuoteUrl?: string | null;
 
-  // AI details (NEW / optional)
+  // AI details
   confidence?: "high" | "medium" | "low" | string | null;
   inspectionRequired?: boolean | null;
   estimateLow?: number | null;
@@ -46,8 +114,22 @@ export function renderLeadNewEmailHTML(args: {
   assumptions?: string[] | null;
   questions?: string[] | null;
 
-  // render info (optional)
+  // render info
   renderOptIn?: boolean | null;
+
+  /**
+   * Plan (Phase 1 foundation):
+   * If omitted:
+   * - planWhat falls back to visibleScope
+   * - planHow falls back to platform default steps
+   */
+  planWhat?: string[] | null;
+  planHow?: string[] | null;
+
+  /**
+   * Dynamic sections (Phase 1 foundation)
+   */
+  sections?: Array<{ title: string; items?: string[]; note?: string | null; subtle?: boolean }> | null;
 }) {
   const {
     businessName,
@@ -67,6 +149,9 @@ export function renderLeadNewEmailHTML(args: {
     assumptions,
     questions,
     renderOptIn,
+    planWhat,
+    planHow,
+    sections,
   } = args;
 
   const topLogo = brandLogoUrl
@@ -92,71 +177,13 @@ export function renderLeadNewEmailHTML(args: {
   const rangeText = hasRange ? `${money(estimateLow)} – ${money(estimateHigh)}` : "";
 
   const safeSummary = String(summary ?? "").trim();
+  const safeNotes = String(notes ?? "").trim();
 
-  const scopeList = (visibleScope || [])
-    .slice(0, 10)
-    .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
-    .join("");
+  const scopeHtml = listItems(visibleScope || [], 10);
+  const assumptionsHtml = listItems(assumptions || [], 10);
+  const questionsHtml = listItems(questions || [], 10);
 
-  const assumptionsList = (assumptions || [])
-    .slice(0, 10)
-    .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
-    .join("");
-
-  const qList = (questions || [])
-    .slice(0, 10)
-    .map((x) => `<li style="margin:0 0 6px;">${esc(x)}</li>`)
-    .join("");
-
-  const imgs = (imageUrls || [])
-    .slice(0, 12)
-    .map(
-      (u) => `
-        <td style="padding:6px;" width="50%" valign="top">
-          <div style="border:1px solid #eef0f4;border-radius:14px;overflow:hidden;background:#fff;">
-            <img src="${esc(u)}" alt="Customer photo"
-              style="width:100%;display:block;line-height:0;" />
-          </div>
-        </td>
-      `
-    )
-    .join("");
-
-  const imgRows = (() => {
-    const cells = (imageUrls || []).slice(0, 12).map((u) => u);
-    if (cells.length === 0) return "";
-    const pairs: string[][] = [];
-    for (let i = 0; i < cells.length; i += 2) pairs.push(cells.slice(i, i + 2));
-    const rows = pairs
-      .map((pair) => {
-        const left = pair[0]
-          ? `<td style="padding:6px;" width="50%" valign="top">
-               <div style="border:1px solid #eef0f4;border-radius:14px;overflow:hidden;background:#fff;">
-                 <img src="${esc(pair[0])}" alt="Customer photo"
-                   style="width:100%;display:block;line-height:0;" />
-               </div>
-             </td>`
-          : `<td style="padding:6px;" width="50%"></td>`;
-
-        const right = pair[1]
-          ? `<td style="padding:6px;" width="50%" valign="top">
-               <div style="border:1px solid #eef0f4;border-radius:14px;overflow:hidden;background:#fff;">
-                 <img src="${esc(pair[1])}" alt="Customer photo"
-                   style="width:100%;display:block;line-height:0;" />
-               </div>
-             </td>`
-          : `<td style="padding:6px;" width="50%"></td>`;
-
-        return `<tr>${left}${right}</tr>`;
-      })
-      .join("");
-
-    return `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px;">
-        ${rows}
-      </table>
-    `;
-  })();
+  const photoGrid = buildPhotoGrid(imageUrls || []);
 
   const adminBtn = adminQuoteUrl
     ? `<a href="${esc(adminQuoteUrl)}" target="_blank" rel="noopener"
@@ -183,6 +210,44 @@ export function renderLeadNewEmailHTML(args: {
     : "";
 
   const preheader = `New quote request — ${customer?.name || "Customer"} — ${rangeText || "AI assessment ready"}.`;
+
+  // Plan (Phase 1 foundation)
+  const whatList = listItems((planWhat || visibleScope || []) as string[], 10);
+  const howDefault = [
+    "Review photos & notes",
+    "Reply with questions if needed",
+    "Confirm materials/scope",
+    "Schedule / inspect (if recommended)",
+  ];
+  const howList = listItems((planHow || howDefault) as string[], 10);
+
+  const planBlock =
+    whatList || howList
+      ? sectionCard({
+          title: "Plan",
+          body: twoColBullets({
+            leftTitle: "What we’ll do",
+            left: whatList || `<div style="color:#6b7280;">(Pending confirmation)</div>`,
+            rightTitle: "How we’ll do it",
+            right: howList || `<div style="color:#6b7280;">(Next steps coming soon)</div>`,
+          }),
+          subtle: true,
+        })
+      : "";
+
+  // Dynamic sections (Phase 1 foundation)
+  const dyn = (sections || [])
+    .filter((s) => s && s.title)
+    .slice(0, 6)
+    .map((s) => {
+      const items = listItems(s.items || [], 10);
+      const note = s.note
+        ? `<div style="margin-top:8px;color:#6b7280;font-size:12px;">${esc(s.note)}</div>`
+        : "";
+      const body = `${items || ""}${note || ""}` || `<div style="color:#6b7280;">(No details)</div>`;
+      return sectionCard({ title: s.title, body, subtle: s.subtle });
+    })
+    .join(`<div style="height:12px;"></div>`);
 
   return `<!doctype html>
 <html>
@@ -238,121 +303,148 @@ export function renderLeadNewEmailHTML(args: {
             <!-- Customer card -->
             <tr>
               <td style="padding:16px 20px 0;">
-                <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#ffffff;">
-                  <table role="presentation" width="100%">
-                    <tr>
-                      <td style="vertical-align:top;">
-                        <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Customer</div>
-                        <div style="margin-top:4px;font-size:16px;font-weight:900;color:#111;">${esc(
-                          customer?.name
-                        )}</div>
-                        <div style="margin-top:6px;font-size:13px;color:#111;">
-                          <div><span style="color:#6b7280;font-weight:800;">Email:</span> ${esc(
-                            customer?.email
+                ${sectionCard({
+                  title: "Customer",
+                  body: `
+                    <table role="presentation" width="100%">
+                      <tr>
+                        <td style="vertical-align:top;">
+                          <div style="margin-top:2px;font-size:16px;font-weight:900;color:#111;">${esc(
+                            customer?.name
                           )}</div>
-                          <div style="margin-top:2px;"><span style="color:#6b7280;font-weight:800;">Phone:</span> ${esc(
-                            customer?.phone
+                          <div style="margin-top:8px;font-size:13px;color:#111;">
+                            <div><span style="color:#6b7280;font-weight:900;">Email:</span> ${esc(
+                              customer?.email
+                            )}</div>
+                            <div style="margin-top:2px;"><span style="color:#6b7280;font-weight:900;">Phone:</span> ${esc(
+                              customer?.phone
+                            )}</div>
+                          </div>
+                        </td>
+
+                        <td align="right" style="vertical-align:top;">
+                          <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Tenant</div>
+                          <div style="margin-top:4px;font-size:13px;font-weight:900;color:#111;">${esc(
+                            tenantSlug
                           )}</div>
-                        </div>
-                      </td>
 
-                      <td align="right" style="vertical-align:top;">
-                        <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Tenant</div>
-                        <div style="margin-top:4px;font-size:13px;font-weight:900;color:#111;">${esc(
-                          tenantSlug
-                        )}</div>
+                          <div style="margin-top:10px;font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Internal ID</div>
+                          <div style="margin-top:4px;font-size:12px;font-weight:900;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;color:#111;">
+                            ${esc(quoteLogId)}
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
 
-                        <div style="margin-top:10px;font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Internal ID</div>
-                        <div style="margin-top:4px;font-size:12px;font-weight:900;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;color:#111;">
-                          ${esc(quoteLogId)}
-                        </div>
-                      </td>
-                    </tr>
-                  </table>
+                    ${
+                      rangeText
+                        ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid #eef0f4;">
+                             <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">AI estimate range</div>
+                             <div style="margin-top:4px;font-size:18px;font-weight:900;color:#111;">${esc(
+                               rangeText
+                             )}</div>
+                           </div>`
+                        : ""
+                    }
 
-                  ${
-                    rangeText
-                      ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid #eef0f4;">
-                           <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">AI estimate range</div>
-                           <div style="margin-top:4px;font-size:18px;font-weight:900;color:#111;">
-                             ${esc(rangeText)}
-                           </div>
-                         </div>`
-                      : ""
-                  }
+                    ${inspectCallout}
 
-                  ${inspectCallout}
+                    ${
+                      safeSummary
+                        ? `<div style="margin-top:12px;">
+                             <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">AI summary</div>
+                             <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(
+                               safeSummary
+                             )}</div>
+                           </div>`
+                        : ""
+                    }
 
-                  ${
-                    safeSummary
-                      ? `<div style="margin-top:12px;">
-                           <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">AI summary</div>
-                           <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(
-                             safeSummary
-                           )}</div>
-                         </div>`
-                      : ""
-                  }
-
-                  ${
-                    notes
-                      ? `<div style="margin-top:12px;">
-                           <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Customer notes</div>
-                           <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(
-                             notes
-                           )}</div>
-                         </div>`
-                      : ""
-                  }
-                </div>
+                    ${
+                      safeNotes
+                        ? `<div style="margin-top:12px;">
+                             <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Customer notes</div>
+                             <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(
+                               safeNotes
+                             )}</div>
+                           </div>`
+                        : ""
+                    }
+                  `,
+                })}
               </td>
             </tr>
 
-            <!-- Scope / assumptions / questions -->
+            <!-- Plan -->
             ${
-              scopeList || assumptionsList || qList
+              planBlock
                 ? `<tr>
                      <td style="padding:16px 20px 0;">
-                       <div style="border:1px solid #eef0f4;border-radius:16px;padding:14px 14px;background:#f9fafb;">
-                         ${
-                           scopeList
-                             ? `<div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Visible scope</div>
-                                <div style="margin-top:8px;font-size:14px;line-height:1.55;color:#111;">
-                                  <ul style="margin:0;padding-left:18px;">${scopeList}</ul>
-                                </div>`
-                             : ""
-                         }
-
-                         ${
-                           assumptionsList
-                             ? `<div style="margin-top:12px;font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Assumptions</div>
-                                <div style="margin-top:8px;font-size:14px;line-height:1.55;color:#111;">
-                                  <ul style="margin:0;padding-left:18px;">${assumptionsList}</ul>
-                                </div>`
-                             : ""
-                         }
-
-                         ${
-                           qList
-                             ? `<div style="margin-top:12px;font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Questions to confirm</div>
-                                <div style="margin-top:8px;font-size:14px;line-height:1.55;color:#111;">
-                                  <ul style="margin:0;padding-left:18px;">${qList}</ul>
-                                </div>`
-                             : ""
-                         }
-                       </div>
+                       ${planBlock}
                      </td>
                    </tr>`
                 : ""
             }
 
-            <!-- Images -->
+            <!-- AI detail cards -->
             ${
-              imgRows
+              scopeHtml
+                ? `<tr><td style="padding:16px 20px 0;">
+                     ${sectionCard({
+                       title: "Visible scope",
+                       body: scopeHtml,
+                       subtle: true,
+                     })}
+                   </td></tr>`
+                : ""
+            }
+
+            ${
+              assumptionsHtml
+                ? `<tr><td style="padding:16px 20px 0;">
+                     ${sectionCard({
+                       title: "Assumptions",
+                       body: assumptionsHtml,
+                     })}
+                   </td></tr>`
+                : ""
+            }
+
+            ${
+              questionsHtml
+                ? `<tr><td style="padding:16px 20px 0;">
+                     ${sectionCard({
+                       title: "Questions to confirm",
+                       body: questionsHtml,
+                       subtle: true,
+                     })}
+                   </td></tr>`
+                : ""
+            }
+
+            <!-- Dynamic sections (Phase 1 foundation) -->
+            ${
+              dyn
+                ? `<tr><td style="padding:16px 20px 0;">
+                     ${dyn}
+                   </td></tr>`
+                : ""
+            }
+
+            <!-- Photos -->
+            ${
+              photoGrid
                 ? `<tr>
                      <td style="padding:16px 20px 0;">
-                       <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;margin-bottom:8px;">Customer photos</div>
-                       ${imgRows}
+                       ${sectionCard({
+                         title: "Customer photos",
+                         body: `
+                           ${photoGrid}
+                           <div style="margin-top:10px;font-size:12px;color:#6b7280;">
+                             Photos included inline for quick review.
+                           </div>
+                         `,
+                       })}
                      </td>
                    </tr>`
                 : ""

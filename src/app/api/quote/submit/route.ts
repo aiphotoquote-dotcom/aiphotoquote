@@ -75,6 +75,27 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function getBaseUrl(req: Request) {
+  // Prefer explicit app URL if you have it
+  const envBase =
+    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
+    process.env.APP_URL?.trim() ||
+    "";
+
+  if (envBase) return envBase.replace(/\/+$/, "");
+
+  // Vercel preview/prod
+  const vercel = process.env.VERCEL_URL?.trim();
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
+
+  // Fallback: request host (works on dev)
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  return "";
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
@@ -326,6 +347,9 @@ export async function POST(req: Request) {
             cfg.fromEmail
         );
 
+        const baseUrl = getBaseUrl(req);
+        const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
+
         emailResult = {
           configured,
           mode: cfg.sendMode ?? "standard",
@@ -353,7 +377,7 @@ export async function POST(req: Request) {
 
         if (configured) {
           // -------------------------
-          // Lead: New submission
+          // Lead: New submission  (NOW gets the same AI sections)
           // -------------------------
           try {
             emailResult.lead_new.attempted = true;
@@ -365,7 +389,21 @@ export async function POST(req: Request) {
               customer,
               notes,
               imageUrls: images.map((x) => x.url),
-              brandLogoUrl: brandLogoUrl,
+              brandLogoUrl,
+              adminQuoteUrl,
+
+              // AI parity
+              confidence: output.confidence ?? null,
+              inspectionRequired: output.inspection_required ?? null,
+              estimateLow: output.estimate_low ?? null,
+              estimateHigh: output.estimate_high ?? null,
+              summary: output.summary ?? null,
+              visibleScope: output.visible_scope ?? [],
+              assumptions: output.assumptions ?? [],
+              questions: output.questions ?? [],
+
+              // render info
+              renderOptIn,
             } as any);
 
             const r1 = await sendEmail({
@@ -388,7 +426,7 @@ export async function POST(req: Request) {
           }
 
           // -------------------------
-          // Customer: Receipt
+          // Customer: Receipt  (photos + AI sections + next steps live in template)
           // -------------------------
           try {
             emailResult.customer_receipt.attempted = true;
@@ -402,18 +440,18 @@ export async function POST(req: Request) {
               estimateLow: output.estimate_low ?? 0,
               estimateHigh: output.estimate_high ?? 0,
 
-              // AI details (NEW)
+              // AI details (Phase 1 baseline)
               confidence: output.confidence ?? null,
               inspectionRequired: output.inspection_required ?? null,
               visibleScope: output.visible_scope ?? [],
               assumptions: output.assumptions ?? [],
               questions: output.questions ?? [],
 
-              // photos submitted (NEW)
+              // photos submitted
               imageUrls: images.map((x) => x.url),
 
               // branding/support
-              brandLogoUrl: brandLogoUrl,
+              brandLogoUrl,
               replyToEmail: cfg.leadToEmail ?? null,
 
               // back-compat only (not displayed)
