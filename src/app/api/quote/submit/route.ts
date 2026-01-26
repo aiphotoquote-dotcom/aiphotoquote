@@ -352,7 +352,9 @@ export async function POST(req: Request) {
         };
 
         if (configured) {
+          // -------------------------
           // Lead: New submission
+          // -------------------------
           try {
             emailResult.lead_new.attempted = true;
 
@@ -363,7 +365,6 @@ export async function POST(req: Request) {
               customer,
               notes,
               imageUrls: images.map((x) => x.url),
-              // If your leadNew template ignores this, no harm. If it supports it later, it’s ready.
               brandLogoUrl: brandLogoUrl,
             } as any);
 
@@ -386,55 +387,58 @@ export async function POST(req: Request) {
             emailResult.lead_new.error = e?.message ?? String(e);
           }
 
-         // Customer: Receipt
-try {
-  emailResult.customer_receipt.attempted = true;
+          // -------------------------
+          // Customer: Receipt
+          // -------------------------
+          try {
+            emailResult.customer_receipt.attempted = true;
 
-  const custHtml = renderCustomerReceiptEmailHTML({
-    businessName: effectiveBusinessName!,
-    customerName: customer.name,
+            const custHtml = renderCustomerReceiptEmailHTML({
+              businessName: effectiveBusinessName!,
+              customerName: customer.name,
 
-    // core estimate
-    summary: output.summary ?? "",
-    estimateLow: output.estimate_low ?? 0,
-    estimateHigh: output.estimate_high ?? 0,
+              // core estimate
+              summary: output.summary ?? "",
+              estimateLow: output.estimate_low ?? 0,
+              estimateHigh: output.estimate_high ?? 0,
 
-    // AI details (NEW)
-    confidence: output.confidence ?? null,
-    inspectionRequired: output.inspection_required ?? null,
-    visibleScope: output.visible_scope ?? [],
-    assumptions: output.assumptions ?? [],
-    questions: output.questions ?? [],
+              // AI details (NEW)
+              confidence: output.confidence ?? null,
+              inspectionRequired: output.inspection_required ?? null,
+              visibleScope: output.visible_scope ?? [],
+              assumptions: output.assumptions ?? [],
+              questions: output.questions ?? [],
 
-    // photos submitted (NEW)
-    imageUrls: images.map((x) => x.url),
+              // photos submitted (NEW)
+              imageUrls: images.map((x) => x.url),
 
-    // branding/support
-    brandLogoUrl: brandLogoUrl,
-    replyToEmail: cfg.leadToEmail ?? null,
+              // branding/support
+              brandLogoUrl: brandLogoUrl,
+              replyToEmail: cfg.leadToEmail ?? null,
 
-    // back-compat only (not displayed)
-    quoteLogId,
-  });
+              // back-compat only (not displayed)
+              quoteLogId,
+            } as any);
 
-  const r2 = await sendEmail({
-    tenantId: tenant.id,
-    context: { type: "customer_receipt", quoteLogId },
-    message: {
-      from: cfg.fromEmail!,
-      to: [customer.email],
-      replyTo: [cfg.leadToEmail!],
-      subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
-      html: custHtml,
-    },
-  });
+            const r2 = await sendEmail({
+              tenantId: tenant.id,
+              context: { type: "customer_receipt", quoteLogId },
+              message: {
+                from: cfg.fromEmail!,
+                to: [customer.email],
+                replyTo: [cfg.leadToEmail!],
+                subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
+                html: custHtml,
+              },
+            });
 
-  emailResult.customer_receipt.ok = r2.ok;
-  emailResult.customer_receipt.id = r2.providerMessageId ?? null;
-  emailResult.customer_receipt.error = r2.error ?? null;
-} catch (e: any) {
-  emailResult.customer_receipt.error = e?.message ?? String(e);
-}
+            emailResult.customer_receipt.ok = r2.ok;
+            emailResult.customer_receipt.id = r2.providerMessageId ?? null;
+            emailResult.customer_receipt.error = r2.error ?? null;
+          } catch (e: any) {
+            emailResult.customer_receipt.error = e?.message ?? String(e);
+          }
+        }
 
         // Persist into quote_logs.output.email (best effort)
         try {
