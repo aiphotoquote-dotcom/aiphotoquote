@@ -140,6 +140,9 @@ export const tenantSettings = pgTable("tenant_settings", {
   renderingMaxPerDay: integer("rendering_max_per_day"),
   renderingCustomerOptInRequired: boolean("rendering_customer_opt_in_required"),
   aiRenderingEnabled: boolean("ai_rendering_enabled"),
+  // Live Q&A (tenant-tunable)
+  liveQaEnabled: boolean("live_qa_enabled").notNull().default(false),
+  liveQaMaxQuestions: integer("live_qa_max_questions").notNull().default(3),
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
   updatedAt: timestamp("updated_at", { withTimezone: true }),
@@ -234,6 +237,11 @@ export const quoteLogs = pgTable("quote_logs", {
 
   input: jsonb("input").$type<any>().notNull(),
   output: jsonb("output").$type<any>().notNull(),
+  // Live Q&A capture (stored even before final assessment is produced)
+  qa: jsonb("qa").$type<any>(), // { questions:[], answers:[], ... }
+  qaStatus: text("qa_status").notNull().default("none"), // none | asking | answered
+  qaAskedAt: timestamp("qa_asked_at", { withTimezone: true }),
+  qaAnsweredAt: timestamp("qa_answered_at", { withTimezone: true }),
 
   renderOptIn: boolean("render_opt_in").notNull().default(false),
   renderStatus: text("render_status").notNull().default("not_requested"),

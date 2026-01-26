@@ -213,6 +213,7 @@ function toneBadge(label: string, tone: "gray" | "green" | "yellow" | "red" | "b
   return <span className={cn(base, cls)}>{label}</span>;
 }
 
+// part 2
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false,
@@ -237,6 +238,11 @@ export default function QuoteForm({
 
   const [result, setResult] = useState<any>(null);
   const [quoteLogId, setQuoteLogId] = useState<string | null>(null);
+
+  // Live Q&A (server-driven)
+  const [needsQa, setNeedsQa] = useState(false);
+  const [qaQuestions, setQaQuestions] = useState<string[]>([]);
+  const [qaAnswers, setQaAnswers] = useState<string[]>([]);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -350,7 +356,7 @@ export default function QuoteForm({
       { key: "estimate", label: "Estimate ready", state: estimateState },
     ];
   }, [photosOk, contactOk, working, phase, result]);
-
+// part 3
   const addCameraFiles = useCallback((files: File[]) => {
     if (!files.length) return;
 
@@ -408,6 +414,11 @@ export default function QuoteForm({
     setError(null);
     setResult(null);
     setQuoteLogId(null);
+
+    setNeedsQa(false);
+    setQaQuestions([]);
+    setQaAnswers([]);
+
     setNotes("");
     setCustomerName("");
     setEmail("");
@@ -448,11 +459,15 @@ export default function QuoteForm({
       setPhase("idle");
     }
   }
-
+// part 4
   async function submitEstimate() {
     setError(null);
     setResult(null);
     setQuoteLogId(null);
+
+    setNeedsQa(false);
+    setQaQuestions([]);
+    setQaAnswers([]);
 
     setRenderStatus("idle");
     setRenderImageUrl(null);
@@ -475,13 +490,15 @@ export default function QuoteForm({
 
     if (!customerName.trim()) return setError("Please enter your name.");
     if (!isValidEmail(email)) return setError("Please enter a valid email address.");
-    if (normalizeUSPhoneDigits(phone).length !== 10) return setError("Please enter a valid 10-digit phone number.");
+    if (normalizeUSPhoneDigits(phone).length !== 10)
+      return setError("Please enter a valid 10-digit phone number.");
 
     setWorking(true);
 
     try {
       let currentPhotos = photos;
 
+      // 1) Upload any camera photos that don't have uploadedUrl yet
       const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
       if (needUpload.length) {
         setPhase("compressing");
@@ -515,8 +532,11 @@ export default function QuoteForm({
       }
 
       const urls = currentPhotos.map((p) => p.uploadedUrl).filter(Boolean) as string[];
-      if (urls.length !== currentPhotos.length) throw new Error("Some photos are not uploaded yet. Please try again.");
+      if (urls.length !== currentPhotos.length) {
+        throw new Error("Some photos are not uploaded yet. Please try again.");
+      }
 
+      // 2) Submit to backend
       setPhase("analyzing");
 
       const res = await fetch("/api/quote/submit", {
@@ -557,14 +577,89 @@ export default function QuoteForm({
       }
 
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
-
       setQuoteLogId(qid);
+
+      // 3) Live Q&A gate (if server needs more info)
+      if (json?.needs_qa && Array.isArray(json?.questions) && json.questions.length) {
+        const qs = json.questions.map((x: any) => String(x)).filter(Boolean);
+
+        setNeedsQa(true);
+        setQaQuestions(qs);
+        setQaAnswers(qs.map(() => "")); // one answer per question
+
+        // optional placeholder output (keeps UI from looking empty)
+        setResult(json?.output ?? json);
+
+        renderAttemptedForQuoteRef.current = null;
+        return; // stop here — user must answer questions
+      }
+
+      // 4) Final estimate returned
+      setNeedsQa(false);
+      setQaQuestions([]);
+      setQaAnswers([]);
       setResult(json?.output ?? json);
 
       renderAttemptedForQuoteRef.current = null;
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
+    } finally {
+      setWorking(false);
+      setPhase("idle");
+    }
+  }
+// part 5
+  async function submitQaAnswers() {
+    setError(null);
+
+    if (!tenantSlug) return setError("Missing tenant slug.");
+    if (!quoteLogId) return setError("Missing quote reference. Please start over.");
+    if (!qaQuestions.length) return setError("No questions to answer.");
+
+    // require an answer for each question
+    const trimmed = qaAnswers.map((a) => String(a ?? "").trim());
+    const missingIdx = trimmed.findIndex((a) => !a);
+    if (missingIdx !== -1) {
+      return setError(`Please answer: "${qaQuestions[missingIdx]}"`);
+    }
+
+    setWorking(true);
+    setPhase("analyzing");
+
+    try {
+      const res = await fetch("/api/quote/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          tenantSlug,
+          quoteLogId,
+          qaAnswers: trimmed,
+        }),
+      });
+
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        throw new Error(`Server returned non-JSON (HTTP ${res.status}).`);
+      }
+
+      if (!json?.ok) {
+        const code = json?.error ? `\ncode: ${json.error}` : "";
+        const msg = json?.message ? `\nmessage: ${json.message}` : "";
+        const issues = json?.issues
+          ? `\nissues:\n${json.issues.map((i: any) => `- ${i.path?.join(".")}: ${i.message}`).join("\n")}`
+          : "";
+        throw new Error(`Finalize failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
+      }
+
+      // Final estimate is now available
+      setNeedsQa(false);
+      setResult(json?.output ?? json);
+    } catch (e: any) {
+      setError(e?.message ?? "Something went wrong.");
     } finally {
       setWorking(false);
       setPhase("idle");
@@ -622,8 +717,8 @@ export default function QuoteForm({
     renderAttemptedForQuoteRef.current = null;
     await startRenderOnce(quoteLogId);
   }
-
-  const hasEstimate = Boolean(result);
+// part 6
+  const hasEstimate = Boolean(result) && !needsQa;
 
   // --- structured result helpers ---
   const estLow = money(result?.estimate_low ?? result?.estimateLow);
@@ -631,7 +726,11 @@ export default function QuoteForm({
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
   const confidence = String(result?.confidence ?? "").toLowerCase();
-  const scope: string[] = Array.isArray(result?.visible_scope) ? result.visible_scope : Array.isArray(result?.visibleScope) ? result.visibleScope : [];
+  const scope: string[] = Array.isArray(result?.visible_scope)
+    ? result.visible_scope
+    : Array.isArray(result?.visibleScope)
+    ? result.visibleScope
+    : [];
   const assumptions: string[] = Array.isArray(result?.assumptions) ? result.assumptions : [];
   const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
 
@@ -769,19 +868,23 @@ export default function QuoteForm({
           {photoCount >= MIN_PHOTOS ? (
             <>
               ✅ {photoCount} photo{photoCount === 1 ? "" : "s"} added{" "}
-              {!recommendedOk ? <span className="text-gray-500 dark:text-gray-400">· Add 1+ more for best results</span> : null}
+              {!recommendedOk ? (
+                <span className="text-gray-500 dark:text-gray-400">· Add 1+ more for best results</span>
+              ) : null}
             </>
           ) : (
             `Add ${MIN_PHOTOS} photo (you have ${photoCount})`
           )}
         </div>
       </section>
-
+// part 7
       {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">Required so we can send your estimate and follow up if needed.</p>
+          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+            Required so we can send your estimate and follow up if needed.
+          </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -828,7 +931,9 @@ export default function QuoteForm({
             inputMode="tel"
             autoComplete="tel"
           />
-          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">Tip: if you type a leading “1”, we’ll normalize it automatically.</div>
+          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            Tip: if you type a leading “1”, we’ll normalize it automatically.
+          </div>
         </label>
 
         <label className="block">
@@ -855,8 +960,12 @@ export default function QuoteForm({
                 disabled={working}
               />
               <label htmlFor="renderOptIn" className="cursor-pointer">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Optional: AI rendering preview</div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">If selected, we’ll generate a visual “after” concept as a second step after your estimate.</div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                  Optional: AI rendering preview
+                </div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  If selected, we’ll generate a visual “after” concept as a second step after your estimate.
+                </div>
               </label>
             </div>
           </div>
@@ -888,6 +997,54 @@ export default function QuoteForm({
         )}
       </section>
 
+      {/* Live Q&A */}
+      {needsQa ? (
+        <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+          <div>
+            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Quick questions</h2>
+            <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+              One more step — answer these and we’ll finalize your estimate.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            {qaQuestions.map((q, i) => (
+              <label key={i} className="block">
+                <div className="text-xs font-semibold text-gray-800 dark:text-gray-200">
+                  {i + 1}. {q} <span className="text-red-600">*</span>
+                </div>
+                <input
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  value={qaAnswers[i] ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setQaAnswers((prev) => {
+                      const next = [...prev];
+                      next[i] = v;
+                      return next;
+                    });
+                  }}
+                  placeholder="Type your answer…"
+                  disabled={working}
+                />
+              </label>
+            ))}
+          </div>
+
+          <button
+            className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
+            onClick={submitQaAnswers}
+            disabled={working || !quoteLogId}
+          >
+            {working ? "Working…" : "Finalize Estimate"}
+          </button>
+
+          <div className="text-xs text-gray-600 dark:text-gray-300">
+            Ref: {quoteLogId ? quoteLogId.slice(0, 8) : "(missing)"}
+          </div>
+        </section>
+      ) : null}
+// part 8
       {/* Results */}
       {hasEstimate ? (
         <section
@@ -901,15 +1058,14 @@ export default function QuoteForm({
                 This is a fast estimate range based on your photos + notes. Final pricing may change after inspection.
               </p>
             </div>
-            {quoteLogId ? <div className="text-xs text-gray-500 dark:text-gray-400">Ref: {quoteLogId.slice(0, 8)}</div> : null}
+            {quoteLogId ? (
+              <div className="text-xs text-gray-500 dark:text-gray-400">Ref: {quoteLogId.slice(0, 8)}</div>
+            ) : null}
           </div>
 
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex flex-wrap items-center gap-2">
-              {toneBadge(
-                confidence ? `Confidence: ${confidence}` : "Confidence: unknown",
-                confidenceTone as any
-              )}
+              {toneBadge(confidence ? `Confidence: ${confidence}` : "Confidence: unknown", confidenceTone as any)}
               {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
               {aiRenderingEnabled && renderOptIn ? toneBadge("Rendering requested", "blue") : null}
             </div>
@@ -929,14 +1085,16 @@ export default function QuoteForm({
             </div>
           </div>
 
-          {(scope.length || assumptions.length || questions.length) ? (
+          {scope.length || assumptions.length || questions.length ? (
             <div className="grid gap-4 lg:grid-cols-3">
               <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Visible scope</div>
                 <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
                   {scope.length ? (
                     <ul className="list-disc pl-5 space-y-1">
-                      {scope.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
+                      {scope.slice(0, 10).map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
                     </ul>
                   ) : (
                     <div className="text-gray-500 dark:text-gray-400 italic">Not enough detail yet.</div>
@@ -949,7 +1107,9 @@ export default function QuoteForm({
                 <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
                   {assumptions.length ? (
                     <ul className="list-disc pl-5 space-y-1">
-                      {assumptions.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
+                      {assumptions.slice(0, 10).map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
                     </ul>
                   ) : (
                     <div className="text-gray-500 dark:text-gray-400 italic">None.</div>
@@ -962,7 +1122,9 @@ export default function QuoteForm({
                 <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
                   {questions.length ? (
                     <ul className="list-disc pl-5 space-y-1">
-                      {questions.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
+                      {questions.slice(0, 10).map((s, i) => (
+                        <li key={i}>{s}</li>
+                      ))}
                     </ul>
                   ) : (
                     <div className="text-gray-500 dark:text-gray-400 italic">No follow-ups needed.</div>
