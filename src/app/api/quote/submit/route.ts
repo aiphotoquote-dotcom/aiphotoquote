@@ -52,7 +52,13 @@ const Req = z.object({
 
   // Phase 2 fields
   quoteLogId: z.string().uuid().optional(),
-  qaAnswers: z.array(QaAnswerSchema).optional(),
+
+  // accept BOTH:
+  // - [{question, answer}] (future/clean)
+  // - ["answer1", "answer2"] (what your current QuoteForm sends)
+  qaAnswers: z
+    .union([z.array(QaAnswerSchema), z.array(z.string().min(1))])
+    .optional(),
 });
 
 const AiOutputSchema = z.object({
@@ -127,6 +133,133 @@ async function getOpenAiForTenant(tenantId: string) {
   const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
   return new OpenAI({ apiKey: openaiKey });
 }
+
+// Send initial “received” emails right after creating the quote log.
+// Best-effort: never blocks the request.
+async function sendReceivedEmails(args: {
+  req: Request;
+  tenant: { id: string; name: string; slug: string };
+  tenantSlug: string;
+  quoteLogId: string;
+  customer: { name: string; email: string; phone: string };
+  notes: string;
+  images: Array<{ url: string; shotType?: string }>;
+  brandLogoUrl: string | null;
+  businessNameFromSettings: string | null;
+}) {
+  const { req, tenant, tenantSlug, quoteLogId, customer, notes, images, brandLogoUrl, businessNameFromSettings } = args;
+
+  const cfg = await getTenantEmailConfig(tenant.id);
+  const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
+
+  const configured = Boolean(
+    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
+  );
+
+  const baseUrl = getBaseUrl(req);
+  const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
+
+  const result: any = {
+    configured,
+    mode: cfg.sendMode ?? "standard",
+    lead_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    customer_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+  };
+
+  if (!configured) return result;
+
+  // Lead “received”
+  try {
+    result.lead_received.attempted = true;
+
+    const leadHtml = renderLeadNewEmailHTML({
+      businessName: effectiveBusinessName!,
+      tenantSlug,
+      quoteLogId,
+      customer,
+      notes,
+      imageUrls: images.map((x) => x.url).filter(Boolean),
+      brandLogoUrl,
+      adminQuoteUrl,
+
+      // no estimate yet:
+      confidence: null,
+      inspectionRequired: null,
+      estimateLow: null,
+      estimateHigh: null,
+      summary: "New request received. Estimate pending.",
+      visibleScope: [],
+      assumptions: [],
+      questions: [],
+
+      renderOptIn: false,
+    } as any);
+
+    const r1 = await sendEmail({
+      tenantId: tenant.id,
+      context: { type: "lead_received", quoteLogId },
+      message: {
+        from: cfg.fromEmail!,
+        to: [cfg.leadToEmail!],
+        replyTo: [cfg.leadToEmail!],
+        subject: `New Photo Quote — ${customer.name}`,
+        html: leadHtml,
+      },
+    });
+
+    result.lead_received.ok = r1.ok;
+    result.lead_received.id = r1.providerMessageId ?? null;
+    result.lead_received.error = r1.error ?? null;
+  } catch (e: any) {
+    result.lead_received.error = e?.message ?? String(e);
+  }
+
+  // Customer “received”
+  try {
+    result.customer_received.attempted = true;
+
+    const custHtml = renderCustomerReceiptEmailHTML({
+      businessName: effectiveBusinessName!,
+      customerName: customer.name,
+      summary: "We received your request. Your estimate is being prepared now.",
+      estimateLow: 0,
+      estimateHigh: 0,
+
+      confidence: null,
+      inspectionRequired: null,
+      visibleScope: [],
+      assumptions: [],
+      questions: [],
+
+      imageUrls: images.map((x) => x.url).filter(Boolean),
+      brandLogoUrl,
+      replyToEmail: cfg.leadToEmail ?? null,
+      quoteLogId,
+    } as any);
+
+    const r2 = await sendEmail({
+      tenantId: tenant.id,
+      context: { type: "customer_received", quoteLogId },
+      message: {
+        from: cfg.fromEmail!,
+        to: [customer.email],
+        replyTo: [cfg.leadToEmail!],
+        subject: `We got your request — ${effectiveBusinessName}`,
+        html: custHtml,
+      },
+    });
+
+    result.customer_received.ok = r2.ok;
+    result.customer_received.id = r2.providerMessageId ?? null;
+    result.customer_received.error = r2.error ?? null;
+  } catch (e: any) {
+    result.customer_received.error = e?.message ?? String(e);
+  }
+
+  return result;
+}
+
+// ===== PART 2/4 =====
 
 // ----------------- main -----------------
 export async function POST(req: Request) {
@@ -210,10 +343,34 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG" }, { status: 400 });
       }
 
+      // Normalize incoming QA answers:
+      // - if client sent [{question, answer}], use it
+      // - if client sent ["a1","a2"], pair with stored questions from quote_logs.qa.questions
+      const qaStored: any = existing.qa ?? {};
+      const storedQuestions: string[] = Array.isArray(qaStored?.questions)
+        ? qaStored.questions.map((x: any) => String(x)).filter(Boolean)
+        : [];
+
+      let normalizedAnswers: Array<{ question: string; answer: string }> = [];
+
+      if (Array.isArray(parsed.data.qaAnswers) && typeof parsed.data.qaAnswers[0] === "string") {
+        const answersOnly = (parsed.data.qaAnswers as string[]).map((s) => String(s ?? "").trim());
+        normalizedAnswers = answersOnly.map((ans, i) => ({
+          question: storedQuestions[i] ?? `Question ${i + 1}`,
+          answer: ans,
+        }));
+      } else {
+        normalizedAnswers = (parsed.data.qaAnswers as Array<any>).map((x) => ({
+          question: String(x?.question ?? "").trim(),
+          answer: String(x?.answer ?? "").trim(),
+        }));
+      }
+
       // Store answers into quote_logs.qa
       const qaPayload = {
-        ...(existing.qa ?? {}),
-        answers: parsed.data.qaAnswers,
+        ...(qaStored ?? {}),
+        questions: storedQuestions,
+        answers: normalizedAnswers,
         answeredAt: nowIso(),
       };
 
@@ -236,7 +393,7 @@ export async function POST(req: Request) {
         "Return ONLY valid JSON matching the provided schema.",
       ].join("\n");
 
-      const qaText = parsed.data.qaAnswers
+      const qaText = normalizedAnswers
         .map((x) => `Q: ${x.question}\nA: ${x.answer}`)
         .join("\n\n");
 
@@ -348,276 +505,15 @@ export async function POST(req: Request) {
         where id = ${quoteLogId}::uuid
       `);
 
-      // -------------------------
-      // Email (best effort) - only after we have output
-      // -------------------------
-      let emailResult: any = null;
-      try {
-        const cfg = await getTenantEmailConfig(tenant.id);
-        const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
-
-        const configured = Boolean(
-          process.env.RESEND_API_KEY?.trim() &&
-            effectiveBusinessName &&
-            cfg.leadToEmail &&
-            cfg.fromEmail
-        );
-
-        const baseUrl = getBaseUrl(req);
-        const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
-
-        emailResult = {
-          configured,
-          mode: cfg.sendMode ?? "standard",
-          lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-          customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-        };
-
-        if (configured) {
-          // Lead email
-          try {
-            emailResult.lead_new.attempted = true;
-
-            const leadHtml = renderLeadNewEmailHTML({
-              businessName: effectiveBusinessName!,
-              tenantSlug,
-              quoteLogId,
-              customer,
-              notes,
-              imageUrls: images.map((x: any) => x.url).filter(Boolean),
-              brandLogoUrl,
-              adminQuoteUrl,
-
-              confidence: output.confidence ?? null,
-              inspectionRequired: output.inspection_required ?? null,
-              estimateLow: output.estimate_low ?? null,
-              estimateHigh: output.estimate_high ?? null,
-              summary: output.summary ?? null,
-              visibleScope: output.visible_scope ?? [],
-              assumptions: output.assumptions ?? [],
-              questions: output.questions ?? [],
-
-              renderOptIn: Boolean(inputAny.render_opt_in),
-            } as any);
-
-            const r1 = await sendEmail({
-              tenantId: tenant.id,
-              context: { type: "lead_new", quoteLogId },
-              message: {
-                from: cfg.fromEmail!,
-                to: [cfg.leadToEmail!],
-                replyTo: [cfg.leadToEmail!],
-                subject: `New Photo Quote — ${customer.name}`,
-                html: leadHtml,
-              },
-            });
-
-            emailResult.lead_new.ok = r1.ok;
-            emailResult.lead_new.id = r1.providerMessageId ?? null;
-            emailResult.lead_new.error = r1.error ?? null;
-          } catch (e: any) {
-            emailResult.lead_new.error = e?.message ?? String(e);
-          }
-
-          // Customer receipt
-          try {
-            emailResult.customer_receipt.attempted = true;
-
-            const custHtml = renderCustomerReceiptEmailHTML({
-              businessName: effectiveBusinessName!,
-              customerName: customer.name,
-              summary: output.summary ?? "",
-              estimateLow: output.estimate_low ?? 0,
-              estimateHigh: output.estimate_high ?? 0,
-
-              confidence: output.confidence ?? null,
-              inspectionRequired: output.inspection_required ?? null,
-              visibleScope: output.visible_scope ?? [],
-              assumptions: output.assumptions ?? [],
-              questions: output.questions ?? [],
-
-              imageUrls: images.map((x: any) => x.url).filter(Boolean),
-              brandLogoUrl,
-              replyToEmail: cfg.leadToEmail ?? null,
-              quoteLogId,
-            } as any);
-
-            const r2 = await sendEmail({
-              tenantId: tenant.id,
-              context: { type: "customer_receipt", quoteLogId },
-              message: {
-                from: cfg.fromEmail!,
-                to: [customer.email],
-                replyTo: [cfg.leadToEmail!],
-                subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
-                html: custHtml,
-              },
-            });
-
-            emailResult.customer_receipt.ok = r2.ok;
-            emailResult.customer_receipt.id = r2.providerMessageId ?? null;
-            emailResult.customer_receipt.error = r2.error ?? null;
-          } catch (e: any) {
-            emailResult.customer_receipt.error = e?.message ?? String(e);
-          }
-        }
-
-        // persist email into output.email
-        try {
-          const nextOutput = { ...(output ?? {}), email: emailResult };
-          await db.execute(sql`
-            update quote_logs
-            set output = ${JSON.stringify(nextOutput)}::jsonb
-            where id = ${quoteLogId}::uuid
-          `);
-          output = nextOutput;
-        } catch {
-          // ignore
-        }
-      } catch (e: any) {
-        output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
-      }
-
-      return NextResponse.json({ ok: true, quoteLogId, output });
-    }
-
-    // -------------------------
-    // Phase 1: initial submission
-    // -------------------------
-    const images = parsed.data.images ?? [];
-
-    const incoming = parsed.data.customer ?? parsed.data.contact;
-    if (!incoming) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_CUSTOMER", message: "Customer info is required (name, phone, email)." },
-        { status: 400 }
-      );
-    }
-
-    const customer = {
-      name: safeTrim(incoming.name),
-      phone: normalizePhone(incoming.phone),
-      email: safeTrim(incoming.email).toLowerCase(),
-    };
-
-    if (customer.phone.replace(/\D/g, "").length < 10) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
-        { status: 400 }
-      );
-    }
-
-    if (!images.length) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
-        { status: 400 }
-      );
-    }
-
-    const openai = await getOpenAiForTenant(tenant.id);
-
-    const customer_context = parsed.data.customer_context ?? {};
-    const category = customer_context.category ?? industryKey ?? "service";
-    const service_type = customer_context.service_type ?? "upholstery";
-    const notes = customer_context.notes ?? "";
-
-    // Only allow render opt-in if tenant enabled it
-    const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
-
-    // Store input
-    const inputToStore = {
-      tenantSlug,
-      images,
-      render_opt_in: renderOptIn,
-      customer,
-      customer_context: { category, service_type, notes },
-      createdAt: nowIso(),
-    };
-
-    // Create quote log now (so Q&A can reference it)
-    const inserted = await db
-      .insert(quoteLogs)
-      .values({
-        tenantId: tenant.id,
-        input: inputToStore,
-        output: {}, // will be filled after estimate
-        renderOptIn,
-        qaStatus: "none",
-      })
-      .returning({ id: quoteLogs.id })
-      .then((r) => r[0] ?? null);
-
-    const quoteLogId = inserted?.id ? String(inserted.id) : null;
-    if (!quoteLogId) {
-      return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
-    }
-
-    // If live QA is enabled, ask clarifying questions first
-    if (liveQaEnabled) {
-      const system = [
-        "You generate short, practical clarification questions for a service quote based on photos and notes.",
-        "Ask only what is necessary to estimate accurately.",
-        "Return ONLY valid JSON: { questions: string[] }",
-      ].join("\n");
-
-      const userText = [
-        `Category: ${category}`,
-        `Service type: ${service_type}`,
-        `Customer notes: ${notes || "(none)"}`,
-        "",
-        `Generate up to ${liveQaMaxQuestions} questions.`,
-        "- Keep each question short (1 sentence).",
-        "- Prefer measurable details (dimensions, quantity, material, access, location).",
-        "- Avoid questions the photo obviously answers.",
-      ].join("\n");
-
-      const content: any[] = [{ type: "text", text: userText }];
-      for (const img of images) {
-        if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-      }
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content },
-        ],
-        temperature: 0.2,
-      });
-
-      const raw = completion.choices?.[0]?.message?.content ?? "{}";
-
-      let parsedQa: any = null;
-      try {
-        parsedQa = JSON.parse(raw);
-      } catch {
-        parsedQa = null;
-      }
-
-      const safeQa = QaQuestionsSchema.safeParse(parsedQa);
-      const questions = safeQa.success
-        ? safeQa.data.questions.slice(0, liveQaMaxQuestions)
-        : ["Can you describe what you want done (repair vs full replacement) and any material preference?"];
-
-      const qa = {
-        questions,
-        answers: [],
-        askedAt: nowIso(),
-      };
-
-      await db
-        .update(quoteLogs)
-        .set({
-          qa: qa as any,
-          qaStatus: "asking",
-          qaAskedAt: new Date(),
-        })
-        .where(eq(quoteLogs.id, quoteLogId));
+      // (emails + response continue in PART 3)
+// ===== PART 3/4 =====
 
       return NextResponse.json({
         ok: true,
         quoteLogId,
         needsQa: true,
+        // IMPORTANT: frontend expects `questions` at top-level
+        questions,
         qa,
       });
     }
@@ -736,7 +632,142 @@ export async function POST(req: Request) {
       where id = ${quoteLogId}::uuid
     `);
 
+    // -------------------------
+    // Email (best effort) - PHASE 1 TOO (fixes “no initial email”)
+    // -------------------------
+    let emailResult: any = null;
+    try {
+      const cfg = await getTenantEmailConfig(tenant.id);
+      const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
+
+      const configured = Boolean(
+        process.env.RESEND_API_KEY?.trim() &&
+          effectiveBusinessName &&
+          cfg.leadToEmail &&
+          cfg.fromEmail
+      );
+
+      const baseUrl = getBaseUrl(req);
+      const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
+
+      emailResult = {
+        configured,
+        mode: cfg.sendMode ?? "standard",
+        lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+        customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+      };
+
+      if (configured) {
+        // Lead email
+        try {
+          emailResult.lead_new.attempted = true;
+
+          const leadHtml = renderLeadNewEmailHTML({
+            businessName: effectiveBusinessName!,
+            tenantSlug,
+            quoteLogId,
+            customer,
+            notes,
+            imageUrls: images.map((x: any) => x.url).filter(Boolean),
+            brandLogoUrl,
+            adminQuoteUrl,
+
+            confidence: output.confidence ?? null,
+            inspectionRequired: output.inspection_required ?? null,
+            estimateLow: output.estimate_low ?? null,
+            estimateHigh: output.estimate_high ?? null,
+            summary: output.summary ?? null,
+            visibleScope: output.visible_scope ?? [],
+            assumptions: output.assumptions ?? [],
+            questions: output.questions ?? [],
+
+            renderOptIn: Boolean(renderOptIn),
+          } as any);
+
+          const r1 = await sendEmail({
+            tenantId: tenant.id,
+            context: { type: "lead_new", quoteLogId },
+            message: {
+              from: cfg.fromEmail!,
+              to: [cfg.leadToEmail!],
+              replyTo: [cfg.leadToEmail!],
+              subject: `New Photo Quote — ${customer.name}`,
+              html: leadHtml,
+            },
+          });
+
+          emailResult.lead_new.ok = r1.ok;
+          emailResult.lead_new.id = r1.providerMessageId ?? null;
+          emailResult.lead_new.error = r1.error ?? null;
+        } catch (e: any) {
+          emailResult.lead_new.error = e?.message ?? String(e);
+        }
+
+        // Customer receipt
+        try {
+          emailResult.customer_receipt.attempted = true;
+
+          const custHtml = renderCustomerReceiptEmailHTML({
+            businessName: effectiveBusinessName!,
+            customerName: customer.name,
+            summary: output.summary ?? "",
+            estimateLow: output.estimate_low ?? 0,
+            estimateHigh: output.estimate_high ?? 0,
+
+            confidence: output.confidence ?? null,
+            inspectionRequired: output.inspection_required ?? null,
+            visibleScope: output.visible_scope ?? [],
+            assumptions: output.assumptions ?? [],
+            questions: output.questions ?? [],
+
+            imageUrls: images.map((x: any) => x.url).filter(Boolean),
+            brandLogoUrl,
+            replyToEmail: cfg.leadToEmail ?? null,
+            quoteLogId,
+          } as any);
+
+          const r2 = await sendEmail({
+            tenantId: tenant.id,
+            context: { type: "customer_receipt", quoteLogId },
+            message: {
+              from: cfg.fromEmail!,
+              to: [customer.email],
+              replyTo: [cfg.leadToEmail!],
+              subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
+              html: custHtml,
+            },
+          });
+
+          emailResult.customer_receipt.ok = r2.ok;
+          emailResult.customer_receipt.id = r2.providerMessageId ?? null;
+          emailResult.customer_receipt.error = r2.error ?? null;
+        } catch (e: any) {
+          emailResult.customer_receipt.error = e?.message ?? String(e);
+        }
+      }
+
+      // persist email into output.email
+      try {
+        const nextOutput = { ...(output ?? {}), email: emailResult };
+        await db.execute(sql`
+          update quote_logs
+          set output = ${JSON.stringify(nextOutput)}::jsonb
+          where id = ${quoteLogId}::uuid
+        `);
+        output = nextOutput;
+      } catch {
+        // ignore
+      }
+    } catch (e: any) {
+      output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+    }
+
     return NextResponse.json({ ok: true, quoteLogId, output });
+
+    // (rest continues in PART 4/4)
+
+// ===== PART 4/4 =====
+
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     // preserve your known error signals
