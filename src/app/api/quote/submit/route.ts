@@ -386,40 +386,55 @@ export async function POST(req: Request) {
             emailResult.lead_new.error = e?.message ?? String(e);
           }
 
-          // Customer: Receipt
-          try {
-            emailResult.customer_receipt.attempted = true;
+         // Customer: Receipt
+try {
+  emailResult.customer_receipt.attempted = true;
 
-            const custHtml = renderCustomerReceiptEmailHTML({
-              businessName: effectiveBusinessName!,
-              quoteLogId,
-              customerName: customer.name,
-              summary: output.summary ?? "",
-              estimateLow: output.estimate_low ?? 0,
-              estimateHigh: output.estimate_high ?? 0,
-              questions: output.questions ?? [],
-              brandLogoUrl: brandLogoUrl,
-            });
+  const custHtml = renderCustomerReceiptEmailHTML({
+    businessName: effectiveBusinessName!,
+    customerName: customer.name,
 
-            const r2 = await sendEmail({
-              tenantId: tenant.id,
-              context: { type: "customer_receipt", quoteLogId },
-              message: {
-                from: cfg.fromEmail!,
-                to: [customer.email],
-                replyTo: [cfg.leadToEmail!],
-                subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
-                html: custHtml,
-              },
-            });
+    // core estimate
+    summary: output.summary ?? "",
+    estimateLow: output.estimate_low ?? 0,
+    estimateHigh: output.estimate_high ?? 0,
 
-            emailResult.customer_receipt.ok = r2.ok;
-            emailResult.customer_receipt.id = r2.providerMessageId ?? null;
-            emailResult.customer_receipt.error = r2.error ?? null;
-          } catch (e: any) {
-            emailResult.customer_receipt.error = e?.message ?? String(e);
-          }
-        }
+    // AI details (NEW)
+    confidence: output.confidence ?? null,
+    inspectionRequired: output.inspection_required ?? null,
+    visibleScope: output.visible_scope ?? [],
+    assumptions: output.assumptions ?? [],
+    questions: output.questions ?? [],
+
+    // photos submitted (NEW)
+    imageUrls: images.map((x) => x.url),
+
+    // branding/support
+    brandLogoUrl: brandLogoUrl,
+    replyToEmail: cfg.leadToEmail ?? null,
+
+    // back-compat only (not displayed)
+    quoteLogId,
+  });
+
+  const r2 = await sendEmail({
+    tenantId: tenant.id,
+    context: { type: "customer_receipt", quoteLogId },
+    message: {
+      from: cfg.fromEmail!,
+      to: [customer.email],
+      replyTo: [cfg.leadToEmail!],
+      subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
+      html: custHtml,
+    },
+  });
+
+  emailResult.customer_receipt.ok = r2.ok;
+  emailResult.customer_receipt.id = r2.providerMessageId ?? null;
+  emailResult.customer_receipt.error = r2.error ?? null;
+} catch (e: any) {
+  emailResult.customer_receipt.error = e?.message ?? String(e);
+}
 
         // Persist into quote_logs.output.email (best effort)
         try {
