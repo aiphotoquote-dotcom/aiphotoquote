@@ -239,7 +239,7 @@ async function sendReceivedEmails(args: {
 
     const r2 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "customer_received", quoteLogId },
+      context: { type: "customer_receipt", quoteLogId },
       message: {
         from: cfg.fromEmail!,
         to: [customer.email],
