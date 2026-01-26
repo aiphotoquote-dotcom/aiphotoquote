@@ -15,23 +15,33 @@ import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerRe
 
 export const runtime = "nodejs";
 
+// ----------------- schemas -----------------
 const CustomerSchema = z.object({
   name: z.string().min(2, "Name is required"),
   phone: z.string().min(7, "Phone is required"),
   email: z.string().email("Valid email is required"),
 });
 
+const QaAnswerSchema = z.object({
+  question: z.string().min(1),
+  answer: z.string().min(1),
+});
+
 const Req = z.object({
   tenantSlug: z.string().min(3),
+
+  // Phase 1 fields
   images: z
     .array(z.object({ url: z.string().url(), shotType: z.string().optional() }))
     .min(1)
-    .max(12),
+    .max(12)
+    .optional(),
 
   customer: CustomerSchema.optional(),
   contact: CustomerSchema.optional(),
 
   render_opt_in: z.boolean().optional(),
+
   customer_context: z
     .object({
       notes: z.string().optional(),
@@ -39,13 +49,11 @@ const Req = z.object({
       category: z.string().optional(),
     })
     .optional(),
-});
 
-function normalizePhone(raw: string) {
-  const d = String(raw ?? "").replace(/\D/g, "");
-  if (d.length === 11 && d.startsWith("1")) return d.slice(1);
-  return d;
-}
+  // Phase 2 fields
+  quoteLogId: z.string().uuid().optional(),
+  qaAnswers: z.array(QaAnswerSchema).optional(),
+});
 
 const AiOutputSchema = z.object({
   confidence: z.enum(["high", "medium", "low"]),
@@ -58,6 +66,17 @@ const AiOutputSchema = z.object({
   assumptions: z.array(z.string()).default([]),
   questions: z.array(z.string()).default([]),
 });
+
+const QaQuestionsSchema = z.object({
+  questions: z.array(z.string().min(1)).min(1),
+});
+
+// ----------------- helpers -----------------
+function normalizePhone(raw: string) {
+  const d = String(raw ?? "").replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("1")) return d.slice(1);
+  return d;
+}
 
 function clampMoney(n: number) {
   if (!Number.isFinite(n)) return 0;
@@ -76,19 +95,12 @@ function safeTrim(v: unknown) {
 }
 
 function getBaseUrl(req: Request) {
-  // Prefer explicit app URL if you have it
-  const envBase =
-    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-    process.env.APP_URL?.trim() ||
-    "";
-
+  const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
   if (envBase) return envBase.replace(/\/+$/, "");
 
-  // Vercel preview/prod
   const vercel = process.env.VERCEL_URL?.trim();
   if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
-  // Fallback: request host (works on dev)
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
@@ -96,6 +108,27 @@ function getBaseUrl(req: Request) {
   return "";
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+async function getOpenAiForTenant(tenantId: string) {
+  const secretRow = await db
+    .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+    .from(tenantSecrets)
+    .where(eq(tenantSecrets.tenantId, tenantId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  if (!secretRow?.openaiKeyEnc) {
+    throw new Error("MISSING_OPENAI_KEY");
+  }
+
+  const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+  return new OpenAI({ apiKey: openaiKey });
+}
+
+// ----------------- main -----------------
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => null);
@@ -107,17 +140,356 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantSlug, images } = parsed.data;
+    const { tenantSlug } = parsed.data;
 
-    // Accept customer OR contact (but require one)
+    // Tenant lookup
+    const tenant = await db
+      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
+      .from(tenants)
+      .where(eq(tenants.slug, tenantSlug))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!tenant) {
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    }
+
+    // Settings (optional)
+    const settings = await db
+      .select({
+        tenantId: tenantSettings.tenantId,
+        industryKey: tenantSettings.industryKey,
+        aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
+        brandLogoUrl: tenantSettings.brandLogoUrl,
+        businessName: tenantSettings.businessName,
+
+        // Live Q&A
+        liveQaEnabled: tenantSettings.liveQaEnabled,
+        liveQaMaxQuestions: tenantSettings.liveQaMaxQuestions,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenant.id))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    const industryKey = settings?.industryKey ?? "service";
+    const aiRenderingEnabled = settings?.aiRenderingEnabled === true;
+
+    const liveQaEnabled = settings?.liveQaEnabled === true;
+    const liveQaMaxQuestions = Math.max(1, Math.min(10, Number(settings?.liveQaMaxQuestions ?? 3)));
+
+    const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
+    const businessNameFromSettings = safeTrim(settings?.businessName) || null;
+
+    // -------------------------
+    // Phase 2: answer QA (finalize estimate)
+    // -------------------------
+    if (parsed.data.quoteLogId && parsed.data.qaAnswers?.length) {
+      const quoteLogId = parsed.data.quoteLogId;
+
+      const existing = await db
+        .select({ id: quoteLogs.id, input: quoteLogs.input, qa: quoteLogs.qa })
+        .from(quoteLogs)
+        .where(eq(quoteLogs.id, quoteLogId))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      if (!existing) {
+        return NextResponse.json({ ok: false, error: "QUOTE_NOT_FOUND" }, { status: 404 });
+      }
+
+      const inputAny: any = existing.input ?? {};
+      const images = Array.isArray(inputAny.images) ? inputAny.images : [];
+      const customer = inputAny.customer ?? null;
+      const customer_context = inputAny.customer_context ?? {};
+      const category = customer_context.category ?? industryKey ?? "service";
+      const service_type = customer_context.service_type ?? "upholstery";
+      const notes = customer_context.notes ?? "";
+
+      if (!customer?.name || !customer?.email || !customer?.phone) {
+        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG" }, { status: 400 });
+      }
+
+      // Store answers into quote_logs.qa
+      const qaPayload = {
+        ...(existing.qa ?? {}),
+        answers: parsed.data.qaAnswers,
+        answeredAt: nowIso(),
+      };
+
+      await db
+        .update(quoteLogs)
+        .set({
+          qa: qaPayload as any,
+          qaStatus: "answered",
+          qaAnsweredAt: new Date(),
+        })
+        .where(eq(quoteLogs.id, quoteLogId));
+
+      const openai = await getOpenAiForTenant(tenant.id);
+
+      const system = [
+        "You are an expert estimator for service work based on photos, customer notes, and follow-up Q&A.",
+        "Be conservative: return a realistic RANGE, not a single number.",
+        "If still insufficient, set confidence low and inspection_required true.",
+        "Do not invent brand/model/year—ask questions instead.",
+        "Return ONLY valid JSON matching the provided schema.",
+      ].join("\n");
+
+      const qaText = parsed.data.qaAnswers
+        .map((x) => `Q: ${x.question}\nA: ${x.answer}`)
+        .join("\n\n");
+
+      const userText = [
+        `Category: ${category}`,
+        `Service type: ${service_type}`,
+        `Customer notes: ${notes || "(none)"}`,
+        "",
+        "Follow-up Q&A:",
+        qaText || "(none)",
+        "",
+        "Instructions:",
+        "- Use the photos to identify the item, material type, and visible damage/wear.",
+        "- Provide estimate_low and estimate_high (whole dollars).",
+        "- Provide visible_scope as short bullet-style strings.",
+        "- Provide assumptions and questions (3–8 items each is fine).",
+      ].join("\n");
+
+      const content: any[] = [{ type: "text", text: userText }];
+      for (const img of images) {
+        if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
+      }
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content },
+        ],
+        temperature: 0.2,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "quote_estimate",
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                confidence: { type: "string", enum: ["high", "medium", "low"] },
+                inspection_required: { type: "boolean" },
+                estimate_low: { type: "number" },
+                estimate_high: { type: "number" },
+                currency: { type: "string" },
+                summary: { type: "string" },
+                visible_scope: { type: "array", items: { type: "string" } },
+                assumptions: { type: "array", items: { type: "string" } },
+                questions: { type: "array", items: { type: "string" } },
+              },
+              required: [
+                "confidence",
+                "inspection_required",
+                "estimate_low",
+                "estimate_high",
+                "summary",
+                "visible_scope",
+                "assumptions",
+                "questions",
+              ],
+            },
+          },
+        } as any,
+      });
+
+      const raw = completion.choices?.[0]?.message?.content ?? "{}";
+
+      let outputParsed: any = null;
+      try {
+        outputParsed = JSON.parse(raw);
+      } catch {
+        outputParsed = null;
+      }
+
+      let output: any;
+      const safe = AiOutputSchema.safeParse(outputParsed);
+      if (!safe.success) {
+        output = {
+          confidence: "low",
+          inspection_required: true,
+          estimate_low: 0,
+          estimate_high: 0,
+          currency: "USD",
+          summary:
+            "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
+          visible_scope: [],
+          assumptions: [],
+          questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
+          _raw: raw,
+        };
+      } else {
+        const v = safe.data;
+        const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
+        output = {
+          confidence: v.confidence,
+          inspection_required: Boolean(v.inspection_required),
+          estimate_low: low,
+          estimate_high: high,
+          currency: v.currency || "USD",
+          summary: String(v.summary || "").trim(),
+          visible_scope: Array.isArray(v.visible_scope) ? v.visible_scope : [],
+          assumptions: Array.isArray(v.assumptions) ? v.assumptions : [],
+          questions: Array.isArray(v.questions) ? v.questions : [],
+        };
+      }
+
+      // Update quote output + stage
+      await db.execute(sql`
+        update quote_logs
+        set output = ${JSON.stringify(output)}::jsonb
+        where id = ${quoteLogId}::uuid
+      `);
+
+      // -------------------------
+      // Email (best effort) - only after we have output
+      // -------------------------
+      let emailResult: any = null;
+      try {
+        const cfg = await getTenantEmailConfig(tenant.id);
+        const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
+
+        const configured = Boolean(
+          process.env.RESEND_API_KEY?.trim() &&
+            effectiveBusinessName &&
+            cfg.leadToEmail &&
+            cfg.fromEmail
+        );
+
+        const baseUrl = getBaseUrl(req);
+        const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
+
+        emailResult = {
+          configured,
+          mode: cfg.sendMode ?? "standard",
+          lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+          customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+        };
+
+        if (configured) {
+          // Lead email
+          try {
+            emailResult.lead_new.attempted = true;
+
+            const leadHtml = renderLeadNewEmailHTML({
+              businessName: effectiveBusinessName!,
+              tenantSlug,
+              quoteLogId,
+              customer,
+              notes,
+              imageUrls: images.map((x: any) => x.url).filter(Boolean),
+              brandLogoUrl,
+              adminQuoteUrl,
+
+              confidence: output.confidence ?? null,
+              inspectionRequired: output.inspection_required ?? null,
+              estimateLow: output.estimate_low ?? null,
+              estimateHigh: output.estimate_high ?? null,
+              summary: output.summary ?? null,
+              visibleScope: output.visible_scope ?? [],
+              assumptions: output.assumptions ?? [],
+              questions: output.questions ?? [],
+
+              renderOptIn: Boolean(inputAny.render_opt_in),
+            } as any);
+
+            const r1 = await sendEmail({
+              tenantId: tenant.id,
+              context: { type: "lead_new", quoteLogId },
+              message: {
+                from: cfg.fromEmail!,
+                to: [cfg.leadToEmail!],
+                replyTo: [cfg.leadToEmail!],
+                subject: `New Photo Quote — ${customer.name}`,
+                html: leadHtml,
+              },
+            });
+
+            emailResult.lead_new.ok = r1.ok;
+            emailResult.lead_new.id = r1.providerMessageId ?? null;
+            emailResult.lead_new.error = r1.error ?? null;
+          } catch (e: any) {
+            emailResult.lead_new.error = e?.message ?? String(e);
+          }
+
+          // Customer receipt
+          try {
+            emailResult.customer_receipt.attempted = true;
+
+            const custHtml = renderCustomerReceiptEmailHTML({
+              businessName: effectiveBusinessName!,
+              customerName: customer.name,
+              summary: output.summary ?? "",
+              estimateLow: output.estimate_low ?? 0,
+              estimateHigh: output.estimate_high ?? 0,
+
+              confidence: output.confidence ?? null,
+              inspectionRequired: output.inspection_required ?? null,
+              visibleScope: output.visible_scope ?? [],
+              assumptions: output.assumptions ?? [],
+              questions: output.questions ?? [],
+
+              imageUrls: images.map((x: any) => x.url).filter(Boolean),
+              brandLogoUrl,
+              replyToEmail: cfg.leadToEmail ?? null,
+              quoteLogId,
+            } as any);
+
+            const r2 = await sendEmail({
+              tenantId: tenant.id,
+              context: { type: "customer_receipt", quoteLogId },
+              message: {
+                from: cfg.fromEmail!,
+                to: [customer.email],
+                replyTo: [cfg.leadToEmail!],
+                subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
+                html: custHtml,
+              },
+            });
+
+            emailResult.customer_receipt.ok = r2.ok;
+            emailResult.customer_receipt.id = r2.providerMessageId ?? null;
+            emailResult.customer_receipt.error = r2.error ?? null;
+          } catch (e: any) {
+            emailResult.customer_receipt.error = e?.message ?? String(e);
+          }
+        }
+
+        // persist email into output.email
+        try {
+          const nextOutput = { ...(output ?? {}), email: emailResult };
+          await db.execute(sql`
+            update quote_logs
+            set output = ${JSON.stringify(nextOutput)}::jsonb
+            where id = ${quoteLogId}::uuid
+          `);
+          output = nextOutput;
+        } catch {
+          // ignore
+        }
+      } catch (e: any) {
+        output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+      }
+
+      return NextResponse.json({ ok: true, quoteLogId, output });
+    }
+
+    // -------------------------
+    // Phase 1: initial submission
+    // -------------------------
+    const images = parsed.data.images ?? [];
+
     const incoming = parsed.data.customer ?? parsed.data.contact;
     if (!incoming) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "MISSING_CUSTOMER",
-          message: "Customer info is required (name, phone, email).",
-        },
+        { ok: false, error: "MISSING_CUSTOMER", message: "Customer info is required (name, phone, email)." },
         { status: 400 }
       );
     }
@@ -135,79 +507,122 @@ export async function POST(req: Request) {
       );
     }
 
-    // Tenant lookup
-    const tenant = await db
-      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
-      .from(tenants)
-      .where(eq(tenants.slug, tenantSlug))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!tenant) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    if (!images.length) {
+      return NextResponse.json(
+        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
+        { status: 400 }
+      );
     }
 
-    // Settings (optional) - include branding fields
-    const settings = await db
-      .select({
-        tenantId: tenantSettings.tenantId,
-        industryKey: tenantSettings.industryKey,
-        aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
-        brandLogoUrl: tenantSettings.brandLogoUrl,
-        businessName: tenantSettings.businessName,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    const industryKey = settings?.industryKey ?? "service";
-    const aiRenderingEnabled = settings?.aiRenderingEnabled === true;
-
-    // Branding (best-effort)
-    const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
-    const businessNameFromSettings = safeTrim(settings?.businessName) || null;
-
-    // Decrypt OpenAI key
-    const secretRow = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenant.id))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!secretRow?.openaiKeyEnc) {
-      return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
-    }
-
-    const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
-    const openai = new OpenAI({ apiKey: openaiKey });
-
-    // Only allow render opt-in if tenant enabled it
-    const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
+    const openai = await getOpenAiForTenant(tenant.id);
 
     const customer_context = parsed.data.customer_context ?? {};
     const category = customer_context.category ?? industryKey ?? "service";
     const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
 
-    // --- Build input we store (consistent, includes customer) ---
+    // Only allow render opt-in if tenant enabled it
+    const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
+
+    // Store input
     const inputToStore = {
       tenantSlug,
       images,
       render_opt_in: renderOptIn,
       customer,
-      customer_context: {
-        category,
-        service_type,
-        notes,
-      },
-      createdAt: new Date().toISOString(),
+      customer_context: { category, service_type, notes },
+      createdAt: nowIso(),
     };
 
-    // -------------------------
-    // AI estimate (vision)
-    // -------------------------
+    // Create quote log now (so Q&A can reference it)
+    const inserted = await db
+      .insert(quoteLogs)
+      .values({
+        tenantId: tenant.id,
+        input: inputToStore,
+        output: {}, // will be filled after estimate
+        renderOptIn,
+        qaStatus: "none",
+      })
+      .returning({ id: quoteLogs.id })
+      .then((r) => r[0] ?? null);
+
+    const quoteLogId = inserted?.id ? String(inserted.id) : null;
+    if (!quoteLogId) {
+      return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
+    }
+
+    // If live QA is enabled, ask clarifying questions first
+    if (liveQaEnabled) {
+      const system = [
+        "You generate short, practical clarification questions for a service quote based on photos and notes.",
+        "Ask only what is necessary to estimate accurately.",
+        "Return ONLY valid JSON: { questions: string[] }",
+      ].join("\n");
+
+      const userText = [
+        `Category: ${category}`,
+        `Service type: ${service_type}`,
+        `Customer notes: ${notes || "(none)"}`,
+        "",
+        `Generate up to ${liveQaMaxQuestions} questions.`,
+        "- Keep each question short (1 sentence).",
+        "- Prefer measurable details (dimensions, quantity, material, access, location).",
+        "- Avoid questions the photo obviously answers.",
+      ].join("\n");
+
+      const content: any[] = [{ type: "text", text: userText }];
+      for (const img of images) {
+        if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
+      }
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content },
+        ],
+        temperature: 0.2,
+      });
+
+      const raw = completion.choices?.[0]?.message?.content ?? "{}";
+
+      let parsedQa: any = null;
+      try {
+        parsedQa = JSON.parse(raw);
+      } catch {
+        parsedQa = null;
+      }
+
+      const safeQa = QaQuestionsSchema.safeParse(parsedQa);
+      const questions = safeQa.success
+        ? safeQa.data.questions.slice(0, liveQaMaxQuestions)
+        : ["Can you describe what you want done (repair vs full replacement) and any material preference?"];
+
+      const qa = {
+        questions,
+        answers: [],
+        askedAt: nowIso(),
+      };
+
+      await db
+        .update(quoteLogs)
+        .set({
+          qa: qa as any,
+          qaStatus: "asking",
+          qaAskedAt: new Date(),
+        })
+        .where(eq(quoteLogs.id, quoteLogId));
+
+      return NextResponse.json({
+        ok: true,
+        quoteLogId,
+        needsQa: true,
+        qa,
+      });
+    }
+
+    // Otherwise, do estimate immediately (your old behavior)
     const system = [
       "You are an expert estimator for service work based on photos and customer notes.",
       "Be conservative: return a realistic RANGE, not a single number.",
@@ -230,7 +645,7 @@ export async function POST(req: Request) {
 
     const content: any[] = [{ type: "text", text: userText }];
     for (const img of images) {
-      content.push({ type: "image_url", image_url: { url: img.url } });
+      if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
     }
 
     const completion = await openai.chat.completions.create({
@@ -314,197 +729,20 @@ export async function POST(req: Request) {
       };
     }
 
-    // Save quote log
-    const inserted = await db
-      .insert(quoteLogs)
-      .values({
-        tenantId: tenant.id,
-        input: inputToStore,
-        output,
-        renderOptIn,
-      })
-      .returning({ id: quoteLogs.id })
-      .then((r) => r[0] ?? null);
+    // Update quote output
+    await db.execute(sql`
+      update quote_logs
+      set output = ${JSON.stringify(output)}::jsonb
+      where id = ${quoteLogId}::uuid
+    `);
 
-    const quoteLogId = inserted?.id ? String(inserted.id) : null;
-
-    // -------------------------
-    // Email (best effort)
-    // -------------------------
-    let emailResult: any = null;
-
-    if (quoteLogId) {
-      try {
-        const cfg = await getTenantEmailConfig(tenant.id);
-
-        // Prefer tenant_settings.business_name if present (branding)
-        const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
-
-        const configured = Boolean(
-          process.env.RESEND_API_KEY?.trim() &&
-            effectiveBusinessName &&
-            cfg.leadToEmail &&
-            cfg.fromEmail
-        );
-
-        const baseUrl = getBaseUrl(req);
-        const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
-
-        emailResult = {
-          configured,
-          mode: cfg.sendMode ?? "standard",
-          lead_new: {
-            attempted: false,
-            ok: false,
-            provider: "resend",
-            id: null as string | null,
-            error: null as string | null,
-          },
-          customer_receipt: {
-            attempted: false,
-            ok: false,
-            provider: "resend",
-            id: null as string | null,
-            error: null as string | null,
-          },
-          missing: {
-            RESEND_API_KEY: !Boolean(process.env.RESEND_API_KEY?.trim()),
-            business_name: !Boolean(effectiveBusinessName),
-            lead_to_email: !cfg.leadToEmail,
-            resend_from_email: !cfg.fromEmail,
-          },
-        };
-
-        if (configured) {
-          // -------------------------
-          // Lead: New submission  (NOW gets the same AI sections)
-          // -------------------------
-          try {
-            emailResult.lead_new.attempted = true;
-
-            const leadHtml = renderLeadNewEmailHTML({
-              businessName: effectiveBusinessName!,
-              tenantSlug,
-              quoteLogId,
-              customer,
-              notes,
-              imageUrls: images.map((x) => x.url),
-              brandLogoUrl,
-              adminQuoteUrl,
-
-              // AI parity
-              confidence: output.confidence ?? null,
-              inspectionRequired: output.inspection_required ?? null,
-              estimateLow: output.estimate_low ?? null,
-              estimateHigh: output.estimate_high ?? null,
-              summary: output.summary ?? null,
-              visibleScope: output.visible_scope ?? [],
-              assumptions: output.assumptions ?? [],
-              questions: output.questions ?? [],
-
-              // render info
-              renderOptIn,
-            } as any);
-
-            const r1 = await sendEmail({
-              tenantId: tenant.id,
-              context: { type: "lead_new", quoteLogId },
-              message: {
-                from: cfg.fromEmail!,
-                to: [cfg.leadToEmail!],
-                replyTo: [cfg.leadToEmail!],
-                subject: `New Photo Quote — ${customer.name}`,
-                html: leadHtml,
-              },
-            });
-
-            emailResult.lead_new.ok = r1.ok;
-            emailResult.lead_new.id = r1.providerMessageId ?? null;
-            emailResult.lead_new.error = r1.error ?? null;
-          } catch (e: any) {
-            emailResult.lead_new.error = e?.message ?? String(e);
-          }
-
-          // -------------------------
-          // Customer: Receipt  (photos + AI sections + next steps live in template)
-          // -------------------------
-          try {
-            emailResult.customer_receipt.attempted = true;
-
-            const custHtml = renderCustomerReceiptEmailHTML({
-              businessName: effectiveBusinessName!,
-              customerName: customer.name,
-
-              // core estimate
-              summary: output.summary ?? "",
-              estimateLow: output.estimate_low ?? 0,
-              estimateHigh: output.estimate_high ?? 0,
-
-              // AI details (Phase 1 baseline)
-              confidence: output.confidence ?? null,
-              inspectionRequired: output.inspection_required ?? null,
-              visibleScope: output.visible_scope ?? [],
-              assumptions: output.assumptions ?? [],
-              questions: output.questions ?? [],
-
-              // photos submitted
-              imageUrls: images.map((x) => x.url),
-
-              // branding/support
-              brandLogoUrl,
-              replyToEmail: cfg.leadToEmail ?? null,
-
-              // back-compat only (not displayed)
-              quoteLogId,
-            } as any);
-
-            const r2 = await sendEmail({
-              tenantId: tenant.id,
-              context: { type: "customer_receipt", quoteLogId },
-              message: {
-                from: cfg.fromEmail!,
-                to: [customer.email],
-                replyTo: [cfg.leadToEmail!],
-                subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
-                html: custHtml,
-              },
-            });
-
-            emailResult.customer_receipt.ok = r2.ok;
-            emailResult.customer_receipt.id = r2.providerMessageId ?? null;
-            emailResult.customer_receipt.error = r2.error ?? null;
-          } catch (e: any) {
-            emailResult.customer_receipt.error = e?.message ?? String(e);
-          }
-        }
-
-        // Persist into quote_logs.output.email (best effort)
-        try {
-          const nextOutput = { ...(output ?? {}), email: emailResult };
-          await db.execute(sql`
-            update quote_logs
-            set output = ${JSON.stringify(nextOutput)}::jsonb
-            where id = ${quoteLogId}::uuid
-          `);
-          output = nextOutput;
-        } catch {
-          // ignore
-        }
-      } catch (e: any) {
-        emailResult = { configured: false, error: e?.message ?? String(e) };
-        output = { ...(output ?? {}), email: emailResult };
-      }
-    }
-
-    return NextResponse.json({
-      ok: true,
-      quoteLogId,
-      output,
-    });
+    return NextResponse.json({ ok: true, quoteLogId, output });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    const msg = e?.message ?? String(e);
+    // preserve your known error signals
+    if (msg === "MISSING_OPENAI_KEY") {
+      return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
+    }
+    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status: 500 });
   }
 }
