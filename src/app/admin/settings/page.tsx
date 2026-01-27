@@ -2,6 +2,10 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
+/* =======================
+   Types
+======================= */
+
 type TenantRow = {
   tenantId: string;
   slug: string;
@@ -25,8 +29,12 @@ type SettingsResp =
 
         brand_logo_url?: string | null;
 
-        email_send_mode?: string | null;
+        email_send_mode?: "standard" | "enterprise" | null;
         email_identity_id?: string | null;
+
+        /* 🔥 Live Q&A */
+        live_qa_enabled?: boolean;
+        live_qa_max_questions?: number;
       };
     }
   | { ok: false; error: string; message?: string; issues?: any };
@@ -48,6 +56,10 @@ type EmailStatusResp =
     }
   | { ok: false; error: string; message?: string };
 
+/* =======================
+   Helpers
+======================= */
+
 async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
@@ -64,16 +76,20 @@ function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
+/* =======================
+   UI Primitives
+======================= */
+
 function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "warn" | "bad" }) {
   const tone = props.tone ?? "neutral";
   const cls =
     tone === "good"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200"
       : tone === "warn"
-        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
-        : tone === "bad"
-          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200"
-          : "border-gray-200 bg-white text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200";
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
+      : tone === "bad"
+      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200"
+      : "border-gray-200 bg-white text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200";
 
   return (
     <span className={cx("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium", cls)}>
@@ -82,7 +98,12 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
   );
 }
 
-function Card(props: { title: string; subtitle?: string; children: React.ReactNode; right?: React.ReactNode }) {
+function Card(props: {
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <div className="rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-neutral-950/40">
       <div className="flex items-start justify-between gap-4 border-b border-gray-100 p-5 dark:border-white/10">
@@ -101,16 +122,18 @@ function Card(props: { title: string; subtitle?: string; children: React.ReactNo
 
 function Field(props: {
   label: string;
-  hint?: string;
   value: string;
   onChange: (v: string) => void;
   disabled?: boolean;
   placeholder?: string;
   inputType?: string;
+  hint?: string;
 }) {
   return (
     <div>
-      <label className="block text-sm font-medium text-gray-800 dark:text-gray-200">{props.label}</label>
+      <label className="block text-sm font-medium text-gray-800 dark:text-gray-200">
+        {props.label}
+      </label>
       <input
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
@@ -130,7 +153,12 @@ function Field(props: {
   );
 }
 
+/* =======================
+   Page Component (Shell)
+======================= */
+
 export default function AdminTenantSettingsPage() {
+  /* ---------- context ---------- */
   const [context, setContext] = useState<{ activeTenantId: string | null; tenants: TenantRow[] }>({
     activeTenantId: null,
     tenants: [],
@@ -138,20 +166,22 @@ export default function AdminTenantSettingsPage() {
 
   const [role, setRole] = useState<"owner" | "admin" | "member" | null>(null);
 
+  /* ---------- branding ---------- */
   const [businessName, setBusinessName] = useState("");
   const [leadToEmail, setLeadToEmail] = useState("");
   const [fromEmail, setFromEmail] = useState("");
+  const [brandLogoUrl, setBrandLogoUrl] = useState("");
 
-const [brandLogoUrl, setBrandLogoUrl] = useState<string>("");
-
-const brandLogoUrlStr = brandLogoUrl;
-const hasBrandLogo = brandLogoUrl.trim().length > 0;
-  
+  /* ---------- email ---------- */
   const [emailSendMode, setEmailSendMode] = useState<"standard" | "enterprise">("standard");
-  const [emailIdentityId, setEmailIdentityId] = useState<string>("");
-
+  const [emailIdentityId, setEmailIdentityId] = useState("");
   const [emailStatus, setEmailStatus] = useState<EmailStatusResp | null>(null);
 
+  /* ---------- 🔥 Live Q&A ---------- */
+  const [liveQaEnabled, setLiveQaEnabled] = useState(false);
+  const [liveQaMaxQuestions, setLiveQaMaxQuestions] = useState(3);
+
+  /* ---------- ui ---------- */
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -163,13 +193,20 @@ const hasBrandLogo = brandLogoUrl.trim().length > 0;
   const SETTINGS_URL = "/api/admin/tenant-settings";
   const EMAIL_STATUS_URL = "/api/admin/email/status";
 
-  const tenants = useMemo(() => (Array.isArray(context?.tenants) ? context.tenants : []), [context]);
+  const tenants = useMemo(
+    () => (Array.isArray(context?.tenants) ? context.tenants : []),
+    [context]
+  );
+
   const activeTenantId = context?.activeTenantId ?? null;
 
   const activeTenant = useMemo(() => {
     if (!activeTenantId) return null;
     return tenants.find((t) => t.tenantId === activeTenantId) || null;
   }, [tenants, activeTenantId]);
+
+  const brandLogoUrlStr = brandLogoUrl;
+  const hasBrandLogo = (brandLogoUrl ?? "").trim().length > 0;
 
   async function loadContext() {
     const res = await fetch(CONTEXT_URL, { cache: "no-store" });
@@ -190,18 +227,24 @@ const hasBrandLogo = brandLogoUrl.trim().length > 0;
     if (!data.ok) throw new Error(data.message || data.error || "Failed to load settings");
 
     setRole(data.role);
+
     setBusinessName(data.settings.business_name || "");
     setLeadToEmail(data.settings.lead_to_email || "");
     setFromEmail(data.settings.resend_from_email || "");
-setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
-    
+    setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
-    const modeRaw = (data.settings.email_send_mode ?? "").toString().trim().toLowerCase();
-    const mode = modeRaw === "enterprise" ? "enterprise" : "standard";
-    setEmailSendMode(mode);
+    const modeRaw = String(data.settings.email_send_mode ?? "")
+      .trim()
+      .toLowerCase();
+    setEmailSendMode(modeRaw === "enterprise" ? "enterprise" : "standard");
 
     setEmailIdentityId((data.settings.email_identity_id ?? "").toString());
+
+    // 🔥 Live Q&A (defaults)
+    setLiveQaEnabled(Boolean(data.settings.live_qa_enabled));
+    const mq = Number(data.settings.live_qa_max_questions ?? 3);
+    setLiveQaMaxQuestions(Number.isFinite(mq) ? Math.max(1, Math.min(10, Math.round(mq))) : 3);
   }
 
   async function loadEmailStatus() {
@@ -247,6 +290,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tenantId }),
       });
+
       const data = await safeJson<any>(res);
       if (!data?.ok) throw new Error(data?.message || data?.error || "Failed to switch tenant");
 
@@ -258,6 +302,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
     }
   }
 
+  /* ---------- test email ---------- */
   const [testEmailRes, setTestEmailRes] = useState<any>(null);
   const [testingEmail, setTestingEmail] = useState(false);
 
@@ -280,7 +325,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
     }
   }
 
-  // --- logo upload helpers ---
+  /* ---------- logo upload ---------- */
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [logoErr, setLogoErr] = useState<string | null>(null);
@@ -295,7 +340,9 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
     });
 
     const ct = res.headers.get("content-type") || "";
-    const data = ct.includes("application/json") ? await res.json() : { ok: false, error: await res.text() };
+    const data = ct.includes("application/json")
+      ? await res.json()
+      : { ok: false, error: await res.text() };
 
     if (!data?.ok) throw new Error(data?.message || data?.error || "Upload failed");
     return data.url as string;
@@ -318,11 +365,11 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
       setLogoErr(ex?.message ?? String(ex));
     } finally {
       setUploadingLogo(false);
-      // allow picking same file again
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
+  /* ---------- save ---------- */
   async function save() {
     setErr(null);
     setLogoErr(null);
@@ -330,19 +377,25 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
     setSaving(true);
 
     try {
+      const payload = {
+        business_name: businessName.trim(),
+        lead_to_email: leadToEmail.trim(),
+        resend_from_email: fromEmail.trim(),
+
+        brand_logo_url: (brandLogoUrl ?? "").trim() ? (brandLogoUrl ?? "").trim() : null,
+
+        email_send_mode: emailSendMode,
+        email_identity_id: emailIdentityId.trim() || null,
+
+        // 🔥 Live Q&A
+        live_qa_enabled: Boolean(liveQaEnabled),
+        live_qa_max_questions: Math.max(1, Math.min(10, Number(liveQaMaxQuestions) || 3)),
+      };
+
       const res = await fetch(SETTINGS_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          business_name: businessName.trim(),
-          lead_to_email: leadToEmail.trim(),
-          resend_from_email: fromEmail.trim(),
-
-          brand_logo_url: brandLogoUrl.trim() ? brandLogoUrl.trim() : null,
-
-          email_send_mode: emailSendMode,
-          email_identity_id: emailIdentityId.trim() || null,
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = await safeJson<SettingsResp>(res);
@@ -350,7 +403,6 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
       setRole(data.role);
       await loadEmailStatus();
-
       setMsg("Saved.");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -371,8 +423,8 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
     !leadToEmail.trim()
       ? "Set Lead To Email first."
       : emailSendMode === "enterprise" && !emailIdentityId.trim()
-        ? "Connect Google first (no Email Identity linked yet)."
-        : null;
+      ? "Connect Google first (no Email Identity linked yet)."
+      : null;
 
   const canSendTestEmail =
     canEdit &&
@@ -383,12 +435,12 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-neutral-950">
       <div className="mx-auto w-full max-w-4xl">
-        {/* Header (removed the circled Quotes/Refresh buttons) */}
+        {/* Header */}
         <div className="mb-6 flex items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Tenant Settings</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Email routing and branding for the active tenant.
+              Branding, live Q&A, and email configuration for the active tenant.
             </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -415,10 +467,13 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
                 <Pill>Standard mode</Pill>
               )}
 
-             <Pill tone={(brandLogoUrl ?? "").trim() ? "good" : "neutral"}>
-  Logo:{" "}
-  <span className="ml-1 font-mono">{(brandLogoUrl ?? "").trim() ? "set" : "not set"}</span>
-</Pill>
+              <Pill tone={hasBrandLogo ? "good" : "neutral"}>
+                Logo: <span className="ml-1 font-mono">{hasBrandLogo ? "set" : "not set"}</span>
+              </Pill>
+
+              <Pill tone={liveQaEnabled ? "good" : "neutral"}>
+                Live Q&amp;A: <span className="ml-1 font-mono">{liveQaEnabled ? "on" : "off"}</span>
+              </Pill>
             </div>
 
             {msg ? <div className="mt-2 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
@@ -469,13 +524,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
           <Card
             title="Branding"
             subtitle="Upload a logo or paste a URL. This will be reused on customer-facing pages and emails."
-            right={
-  (brandLogoUrl ?? "").trim() ? (
-    <Pill tone="good">Logo set</Pill>
-  ) : (
-    <Pill tone="neutral">No logo</Pill>
-  )
-}
+            right={hasBrandLogo ? <Pill tone="good">Logo set</Pill> : <Pill tone="neutral">No logo</Pill>}
           >
             <div className="grid gap-4">
               <div className="grid gap-4 md:grid-cols-2">
@@ -508,10 +557,10 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
                       {uploadingLogo ? "Uploading…" : "Choose file"}
                     </button>
 
-                   {hasBrandLogo ? (
+                    {hasBrandLogo ? (
                       <button
                         type="button"
-                      onClick={() => setBrandLogoUrl("")}
+                        onClick={() => setBrandLogoUrl("")}
                         disabled={!canEdit || uploadingLogo}
                         className={cx(
                           "rounded-lg border px-3 py-2 text-sm font-semibold transition",
@@ -540,9 +589,9 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
                   <div className="mt-3">
                     <Field
-  label="brand_logo_url"
-  value={brandLogoUrl}
-  onChange={(v) => setBrandLogoUrl(v)}
+                      label="brand_logo_url"
+                      value={brandLogoUrl}
+                      onChange={(v) => setBrandLogoUrl(v)}
                       disabled={!canEdit}
                       placeholder="https://..."
                       hint="Tip: leave blank to remove."
@@ -562,7 +611,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
                   </div>
                   {hasBrandLogo ? (
                     <a
-                      href={brandLogoUrlStr.trim()}
+                      href={(brandLogoUrlStr ?? "").trim()}
                       target="_blank"
                       rel="noreferrer"
                       className={cx(
@@ -580,7 +629,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
                   {hasBrandLogo ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                     src={brandLogoUrlStr.trim()}
+                      src={(brandLogoUrlStr ?? "").trim()}
                       alt="Tenant logo"
                       className="max-h-24 max-w-[280px] object-contain"
                       onError={() => setLogoErr("Logo preview failed to load. Check the URL or upload again.")}
@@ -590,6 +639,107 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
                   )}
                 </div>
               </div>
+            </div>
+          </Card>
+
+          {/* Live Q&A */}
+          <Card
+            title="Live Q&A (follow-up questions)"
+            subtitle="When enabled, the quote flow asks a few quick questions before finalizing the estimate."
+            right={liveQaEnabled ? <Pill tone="good">Enabled</Pill> : <Pill tone="neutral">Disabled</Pill>}
+          >
+            <div className="grid gap-4">
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900 dark:text-white">Enable Live Q&amp;A</div>
+                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                      Turn this on if you want the AI to ask clarifying questions (dimensions, materials, access, etc.)
+                      before producing a final range.
+                    </div>
+
+                    <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-gray-700 dark:text-gray-300">
+                      <li>Improves estimate accuracy for ambiguous photos</li>
+                      <li>Reduces back-and-forth emails</li>
+                      <li>Creates a cleaner “two-step” quote experience</li>
+                    </ul>
+                  </div>
+
+                  <div className="shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setLiveQaEnabled((v) => !v)}
+                      disabled={!canEdit}
+                      className={cx(
+                        "rounded-xl border px-4 py-2 text-sm font-semibold transition",
+                        liveQaEnabled
+                          ? "border-green-300 bg-green-50 text-green-900 hover:bg-green-100 dark:border-green-900/60 dark:bg-green-900/15 dark:text-green-200 dark:hover:bg-green-900/25"
+                          : "border-gray-300 bg-white text-gray-900 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10",
+                        !canEdit ? "opacity-50 cursor-not-allowed" : ""
+                      )}
+                    >
+                      {liveQaEnabled ? "Enabled" : "Disabled"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Max questions</div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    Recommended: 3–5. Keep it short to avoid drop-off.
+                  </div>
+
+                  <div className="mt-3 flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={1}
+                      max={10}
+                      value={liveQaMaxQuestions}
+                      onChange={(e) => setLiveQaMaxQuestions(Number(e.target.value))}
+                      disabled={!canEdit || !liveQaEnabled}
+                      className="w-full"
+                    />
+                    <div className="w-10 text-right text-sm font-mono text-gray-900 dark:text-gray-100">
+                      {liveQaMaxQuestions}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    If disabled, the quote will return the estimate immediately (single-step flow).
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">What customers see</div>
+                  <div className="mt-2 rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-700 dark:border-white/10 dark:bg-neutral-950/40 dark:text-gray-200">
+                    <div className="font-semibold">Quick questions</div>
+                    <div className="mt-1 text-sm opacity-90">
+                      “One more step — answer these and we’ll finalize your estimate.”
+                    </div>
+                    <div className="mt-3 grid gap-2">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
+                        What is the exact size (L×W) of the item?
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
+                        Repair vs full replacement?
+                      </div>
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
+                        Any material preference?
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {!canEdit ? (
+                <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100">
+                  You are a <span className="font-mono">{role}</span>. Only{" "}
+                  <span className="font-mono">owner</span> or <span className="font-mono">admin</span> can edit
+                  tenant settings.
+                </div>
+              ) : null}
             </div>
           </Card>
 
@@ -724,7 +874,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
                 {/* Sender & routing */}
                 <div className="grid gap-4">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Sender & routing</div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Sender &amp; routing</div>
 
                   <div className="grid gap-4 md:grid-cols-2">
                     <Field
@@ -845,7 +995,7 @@ setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
                 {/* Save row */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="text-xs text-gray-500 dark:text-gray-400">
-                    Tip: upload a logo, then click Save Settings to persist it.
+                    Tip: upload a logo, enable Live Q&amp;A if desired, then click Save Settings.
                   </div>
 
                   <div className="flex items-center gap-3">
