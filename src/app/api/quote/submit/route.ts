@@ -1195,15 +1195,6 @@ export async function POST(req: Request) {
       output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
     }
 
-    return NextResponse.json({ ok: true, quoteLogId, output });
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    if (msg === "MISSING_OPENAI_KEY") {
-      return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
-    }
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status: 500 });
-  }
-}
 
     return NextResponse.json({ ok: true, quoteLogId, output });
   } catch (e: any) {
