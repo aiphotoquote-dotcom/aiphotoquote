@@ -184,8 +184,8 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
   const urls: string[] = Array.isArray(j?.urls)
     ? j.urls.map((x: any) => String(x)).filter(Boolean)
     : Array.isArray(j?.files)
-    ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
-    : [];
+      ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
+      : [];
 
   if (!urls.length) throw new Error("Blob upload returned no file urls.");
   return urls;
@@ -203,15 +203,17 @@ function toneBadge(label: string, tone: "gray" | "green" | "yellow" | "red" | "b
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-      : tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+          : tone === "blue"
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
 
   return <span className={cn(base, cls)}>{label}</span>;
 }
+
+// --- PART 1/8 ends here ---
 
 // part 2
 export default function QuoteForm({
@@ -332,18 +334,17 @@ export default function QuoteForm({
       working && phase === "compressing"
         ? "active"
         : working && (phase === "uploading" || phase === "analyzing" || hasResult)
-        ? "done"
-        : "todo";
+          ? "done"
+          : "todo";
 
     const uploadState: StepState =
       working && phase === "uploading"
         ? "active"
         : working && (phase === "analyzing" || hasResult)
-        ? "done"
-        : "todo";
+          ? "done"
+          : "todo";
 
-    const inspectState: StepState =
-      working && phase === "analyzing" ? "active" : hasResult ? "done" : "todo";
+    const inspectState: StepState = working && phase === "analyzing" ? "active" : hasResult ? "done" : "todo";
 
     const estimateState: StepState = hasResult ? "done" : "todo";
 
@@ -356,42 +357,51 @@ export default function QuoteForm({
       { key: "estimate", label: "Estimate ready", state: estimateState },
     ];
   }, [photosOk, contactOk, working, phase, result]);
+
+// --- PART 2/8 ends here ---
+
 // part 3
-  const addCameraFiles = useCallback((files: File[]) => {
-    if (!files.length) return;
+  const addCameraFiles = useCallback(
+    (files: File[]) => {
+      if (!files.length) return;
 
-    setPhotos((prev) => {
-      const next = [...prev];
-      for (const f of files) {
-        if (next.length >= MAX_PHOTOS) break;
+      setPhotos((prev) => {
+        const next = [...prev];
+        for (const f of files) {
+          if (next.length >= MAX_PHOTOS) break;
 
-        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const previewSrc = URL.createObjectURL(f);
-        const shotType = defaultShotTypeForIndex(next.length);
+          const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          const previewSrc = URL.createObjectURL(f);
+          const shotType = defaultShotTypeForIndex(next.length);
 
-        next.push({ id, shotType, previewSrc, file: f });
-      }
-      return next;
-    });
-  }, []);
+          next.push({ id, shotType, previewSrc, file: f });
+        }
+        return next;
+      });
+    },
+    [MAX_PHOTOS]
+  );
 
-  const addUploadedUrls = useCallback((urls: string[]) => {
-    if (!urls.length) return;
+  const addUploadedUrls = useCallback(
+    (urls: string[]) => {
+      if (!urls.length) return;
 
-    setPhotos((prev) => {
-      const next = [...prev];
-      for (const u of urls) {
-        if (!u) continue;
-        if (next.length >= MAX_PHOTOS) break;
+      setPhotos((prev) => {
+        const next = [...prev];
+        for (const u of urls) {
+          if (!u) continue;
+          if (next.length >= MAX_PHOTOS) break;
 
-        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const shotType = defaultShotTypeForIndex(next.length);
+          const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          const shotType = defaultShotTypeForIndex(next.length);
 
-        next.push({ id, shotType, previewSrc: u, uploadedUrl: u });
-      }
-      return next;
-    });
-  }, []);
+          next.push({ id, shotType, previewSrc: u, uploadedUrl: u });
+        }
+        return next;
+      });
+    },
+    [MAX_PHOTOS]
+  );
 
   const removePhoto = useCallback((id: string) => {
     setPhotos((prev) => {
@@ -459,6 +469,9 @@ export default function QuoteForm({
       setPhase("idle");
     }
   }
+
+// --- PART 3/8 ends here ---
+
 // part 4
   async function submitEstimate() {
     setError(null);
@@ -580,12 +593,21 @@ export default function QuoteForm({
       setQuoteLogId(qid);
 
       // 3) Live Q&A gate (if server needs more info)
-      if (json?.needs_qa && Array.isArray(json?.questions) && json.questions.length) {
-        const qs = json.questions.map((x: any) => String(x)).filter(Boolean);
+      // IMPORTANT:
+      // Your backend currently returns `needsQa` + `qa` (and maybe NOT `needs_qa`/`questions`).
+      // So we support both shapes here.
+      const needsQaFlag = Boolean(json?.needsQa ?? json?.needs_qa);
+      const qsFromTop: string[] = Array.isArray(json?.questions) ? json.questions : [];
+      const qsFromQaObj: string[] = Array.isArray(json?.qa?.questions) ? json.qa.questions : [];
 
+      const qsMerged = (qsFromTop.length ? qsFromTop : qsFromQaObj)
+        .map((x: any) => String(x))
+        .filter(Boolean);
+
+      if (needsQaFlag && qsMerged.length) {
         setNeedsQa(true);
-        setQaQuestions(qs);
-        setQaAnswers(qs.map(() => "")); // one answer per question
+        setQaQuestions(qsMerged);
+        setQaAnswers(qsMerged.map(() => "")); // one answer per question
 
         // optional placeholder output (keeps UI from looking empty)
         setResult(json?.output ?? json);
@@ -609,6 +631,9 @@ export default function QuoteForm({
       setPhase("idle");
     }
   }
+
+// --- PART 4/8 ends here ---
+
 // part 5
   async function submitQaAnswers() {
     setError(null);
@@ -631,6 +656,10 @@ export default function QuoteForm({
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
+
+        // Backend supports BOTH:
+        // - qaAnswers: ["a1","a2"] (current UI)
+        // - qaAnswers: [{question, answer}] (future)
         body: JSON.stringify({
           tenantSlug,
           quoteLogId,
@@ -657,6 +686,8 @@ export default function QuoteForm({
 
       // Final estimate is now available
       setNeedsQa(false);
+      setQaQuestions([]);
+      setQaAnswers([]);
       setResult(json?.output ?? json);
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
@@ -717,6 +748,9 @@ export default function QuoteForm({
     renderAttemptedForQuoteRef.current = null;
     await startRenderOnce(quoteLogId);
   }
+
+// --- PART 5/8 ends here ---
+
 // part 6
   const hasEstimate = Boolean(result) && !needsQa;
 
@@ -735,7 +769,13 @@ export default function QuoteForm({
   const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
 
   const confidenceTone =
-    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
+    confidence === "high"
+      ? "green"
+      : confidence === "medium"
+      ? "yellow"
+      : confidence === "low"
+      ? "red"
+      : "gray";
 
   return (
     <div className="space-y-6">
@@ -878,7 +918,7 @@ export default function QuoteForm({
         </div>
       </section>
 
-
+// --- PART 6/8 ends here ---
 
       {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
@@ -1047,7 +1087,7 @@ export default function QuoteForm({
         </section>
       ) : null}
 
-
+// --- PART 7/8 ends here ---
 
       {/* Results */}
       {hasEstimate ? (
