@@ -185,10 +185,7 @@ export default async function Page(props: PageProps) {
                 <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
               </div>
 
-              <p className="mt-6 text-xs text-gray-600 dark:text-gray-300">
-                By submitting, you agree we may contact you about this request. Photos are used only to
-                prepare your estimate.
-              </p>
+             
             </div>
           </div>
         </div>

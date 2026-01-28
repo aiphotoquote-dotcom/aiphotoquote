@@ -53,17 +53,6 @@ function safeFocus(el: HTMLElement | null | undefined) {
   }
 }
 
-function isTypingElement(el: Element | null) {
-  if (!el) return false;
-  const tag = (el as HTMLElement).tagName?.toLowerCase?.() || "";
-  if (tag === "input" || tag === "textarea" || tag === "select") return true;
-
-  const he = el as HTMLElement;
-  if (typeof he.isContentEditable === "boolean" && he.isContentEditable) return true;
-
-  return false;
-}
-
 async function focusAndScroll(
   el: HTMLElement | null | undefined,
   opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }
@@ -84,12 +73,6 @@ async function focusAndScroll(
 
   await sleep(25);
   safeFocus(el);
-}
-
-function defaultShotTypeForIndex(idx: number): ShotType {
-  if (idx === 0) return "wide";
-  if (idx === 1) return "closeup";
-  return "extra";
 }
 
 async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
@@ -137,6 +120,12 @@ async function compressImage(file: File, opts?: { maxDim?: number; quality?: num
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
+function defaultShotTypeForIndex(idx: number): ShotType {
+  if (idx === 0) return "wide";
+  if (idx === 1) return "closeup";
+  return "extra";
+}
+
 async function uploadToBlob(files: File[]): Promise<string[]> {
   if (!files.length) return [];
 
@@ -167,12 +156,6 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
   return urls;
 }
 
-function money(n: any) {
-  const num = Number(n);
-  if (!Number.isFinite(num) || num <= 0) return null;
-  return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
-}
-
 function computeWorkingStep(phase: "idle" | "compressing" | "uploading" | "analyzing") {
   if (phase === "compressing") return { idx: 1, total: 3, label: "Optimizing photos…" };
   if (phase === "uploading") return { idx: 2, total: 3, label: "Uploading…" };
@@ -195,7 +178,6 @@ export default function QuoteForm({
   aiRenderingEnabled?: boolean;
 }) {
   const MIN_PHOTOS = 1;
-  const RECOMMENDED_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
   // --- form state ---
@@ -226,7 +208,7 @@ export default function QuoteForm({
   const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
-  // --- refs for focus/scroll management ---
+  // --- refs ---
   const statusRegionRef = useRef<HTMLDivElement | null>(null);
   const errorSummaryRef = useRef<HTMLDivElement | null>(null);
 
@@ -242,49 +224,6 @@ export default function QuoteForm({
 
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
-  // --- typing detection (UI-only) ---
-  const [isTyping, setIsTyping] = useState(false);
-
-  useEffect(() => {
-    const onFocusLike = () => {
-      const active = document.activeElement;
-      setIsTyping(active instanceof Element ? isTypingElement(active) : false);
-    };
-
-    document.addEventListener("focusin", onFocusLike);
-    document.addEventListener("focusout", onFocusLike);
-    onFocusLike();
-
-    return () => {
-      document.removeEventListener("focusin", onFocusLike);
-      document.removeEventListener("focusout", onFocusLike);
-    };
-  }, []);
-
-  // Calm scroll helper:
-  // - If user is typing (keyboard up), avoid scrollIntoView (causes jump on mobile).
-  const focusAndScrollCalm = useCallback(
-    async (el: HTMLElement | null | undefined, opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }) => {
-      if (!el) return;
-      if (isTyping) {
-        safeFocus(el);
-        return;
-      }
-      await focusAndScroll(el, opts);
-    },
-    [isTyping]
-  );
-
-  // ✅ IMPORTANT: keep the latest calm-focus function in a ref,
-  // so effects don't re-run when isTyping flips.
-  const focusCalmRef = useRef(focusAndScrollCalm);
-  useEffect(() => {
-    focusCalmRef.current = focusAndScrollCalm;
-  }, [focusAndScrollCalm]);
-
-  // ✅ IMPORTANT: only autofocus QA once when entering QA
-  const qaAutoFocusDoneRef = useRef(false);
-
   // --- derived state ---
   const photoCount = photos.length;
 
@@ -296,7 +235,6 @@ export default function QuoteForm({
   }, [customerName, email, phone]);
 
   const photosOk = photoCount >= MIN_PHOTOS;
-
   const canSubmit = useMemo(() => !working && photosOk && contactOk, [working, photosOk, contactOk]);
 
   const disabledReason = useMemo(() => {
@@ -361,36 +299,31 @@ export default function QuoteForm({
     return false;
   }, [working, needsQa, showRenderingMini, renderStatus]);
 
-  // focus/scroll rules (calm)
+  // focus/scroll rules
   useEffect(() => {
     if (!error) return;
     (async () => {
-      await focusCalmRef.current(errorSummaryRef.current, { block: "start" });
+      await focusAndScroll(errorSummaryRef.current, { block: "start" });
     })();
   }, [error]);
 
   useEffect(() => {
-    // ✅ only autofocus first QA input ONCE when entering QA
-    if (!needsQa) {
-      qaAutoFocusDoneRef.current = false;
-      return;
-    }
-    if (qaAutoFocusDoneRef.current) return;
-    qaAutoFocusDoneRef.current = true;
-
+    if (!needsQa) return;
+    // IMPORTANT: only scroll/focus once when QA is first shown.
     (async () => {
-      await sleep(50);
-      await focusCalmRef.current(qaSectionRef.current, { block: "start" });
+      await sleep(75);
+      await focusAndScroll(qaSectionRef.current, { block: "start" });
       await sleep(50);
       safeFocus(qaFirstInputRef.current);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsQa]);
 
   useEffect(() => {
     if (!hasEstimate) return;
     (async () => {
       await sleep(75);
-      await focusCalmRef.current(resultsRef.current, { block: "start" });
+      await focusAndScroll(resultsRef.current, { block: "start" });
       await sleep(25);
       safeFocus(resultsHeadingRef.current);
     })();
@@ -505,7 +438,7 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) setRenderOptIn(false);
 
     queueMicrotask(() => {
-      focusCalmRef.current(statusRegionRef.current, { block: "start" });
+      focusAndScroll(statusRegionRef.current, { block: "start" });
     });
   }
 
@@ -525,7 +458,7 @@ export default function QuoteForm({
       addUploadedUrls(urls);
 
       queueMicrotask(() => {
-        focusCalmRef.current(photosSectionRef.current, { block: "start" });
+        focusAndScroll(photosSectionRef.current, { block: "start" });
       });
     } catch (e: any) {
       setError(e?.message ?? "Upload failed.");
@@ -550,42 +483,36 @@ export default function QuoteForm({
     renderAttemptedForQuoteRef.current = null;
 
     queueMicrotask(() => {
-      focusCalmRef.current(statusRegionRef.current, { block: "start" });
+      focusAndScroll(statusRegionRef.current, { block: "start" });
     });
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length > MAX_PHOTOS) {
       setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!customerName.trim()) {
       setError("Please enter your name.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!isValidEmail(email)) {
       setError("Please enter a valid email address.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (normalizeUSPhoneDigits(phone).length !== 10) {
       setError("Please enter a valid 10-digit phone number.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
@@ -598,13 +525,9 @@ export default function QuoteForm({
 
       if (needUpload.length) {
         setPhase("compressing");
-        queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
-
         const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
 
         setPhase("uploading");
-        queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
-
         const urls = await uploadToBlob(compressed);
 
         const byId = new Map<string, string>();
@@ -637,7 +560,6 @@ export default function QuoteForm({
       }
 
       setPhase("analyzing");
-      queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
@@ -691,15 +613,6 @@ export default function QuoteForm({
         setQaQuestions(qsMerged);
         setQaAnswers(qsMerged.map(() => ""));
         setResult(json?.output ?? json);
-
-        qaAutoFocusDoneRef.current = false; // allow QA entry autofocus once
-
-        queueMicrotask(async () => {
-          await focusCalmRef.current(qaSectionRef.current, { block: "start" });
-          await sleep(25);
-          safeFocus(qaFirstInputRef.current);
-        });
-
         renderAttemptedForQuoteRef.current = null;
         return;
       }
@@ -710,41 +623,32 @@ export default function QuoteForm({
       setResult(json?.output ?? json);
 
       renderAttemptedForQuoteRef.current = null;
-
-      queueMicrotask(async () => {
-        await sleep(25);
-        safeFocus(resultsHeadingRef.current);
-      });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
-      setPhase("idle");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
+      queueMicrotask(() => {
+        if (errorSummaryRef.current) focusAndScroll(errorSummaryRef.current, { block: "start" });
+      });
     }
   }
 
   async function submitQaAnswers() {
     setError(null);
 
-    queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
-
     if (!tenantSlug) {
       setError("Missing tenant slug.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!quoteLogId) {
       setError("Missing quote reference. Please start over.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!qaQuestions.length) {
       setError("No questions to answer.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
@@ -753,15 +657,12 @@ export default function QuoteForm({
 
     if (missingIdx !== -1) {
       setError(`Please answer: "${qaQuestions[missingIdx]}"`);
-
       queueMicrotask(async () => {
-        await focusCalmRef.current(qaSectionRef.current, { block: "start" });
+        await focusAndScroll(qaSectionRef.current, { block: "start" });
         await sleep(25);
         const el = document.getElementById(`qa-input-${missingIdx}`) as HTMLInputElement | null;
-        if (el) safeFocus(el);
-        else safeFocus(qaFirstInputRef.current);
+        safeFocus(el || qaFirstInputRef.current);
       });
-
       return;
     }
 
@@ -801,17 +702,14 @@ export default function QuoteForm({
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
-
-      queueMicrotask(async () => {
-        await sleep(25);
-        safeFocus(resultsHeadingRef.current);
-      });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
+      queueMicrotask(() => {
+        if (errorSummaryRef.current) focusAndScroll(errorSummaryRef.current, { block: "start" });
+      });
     }
   }
 
@@ -822,8 +720,6 @@ export default function QuoteForm({
     setRenderStatus("running");
     setRenderError(null);
     setRenderImageUrl(null);
-
-    queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
     try {
       const res = await fetch("/api/quote/render", {
@@ -851,12 +747,11 @@ export default function QuoteForm({
 
       queueMicrotask(async () => {
         await sleep(50);
-        await focusCalmRef.current(renderPreviewRef.current, { block: "start" });
+        await focusAndScroll(renderPreviewRef.current, { block: "start" });
       });
     } catch (e: any) {
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
-      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
     }
   }
 
@@ -876,8 +771,8 @@ export default function QuoteForm({
     await startRenderOnce(String(quoteLogId));
   }
 
-  // keep helpers referenced for type-safety (unused in UI directly here)
-  void money;
+  // MODE: show only one major “panel” at a time (removes button clutter)
+  const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
 
   return (
     <div className="space-y-6">
@@ -904,40 +799,44 @@ export default function QuoteForm({
         </div>
       ) : null}
 
-      <PhotoSection
-        sectionRef={photosSectionRef as any}
-        working={working}
-        photos={photos}
-        minPhotos={MIN_PHOTOS}
-        recommendedPhotos={RECOMMENDED_PHOTOS}
-        maxPhotos={MAX_PHOTOS}
-        onAddCameraFiles={addCameraFiles}
-        onUploadPhotosNow={uploadPhotosNow}
-        onRemovePhoto={removePhoto}
-        onSetShotType={setShotType}
-      />
+      {mode === "entry" ? (
+        <>
+          <PhotoSection
+            sectionRef={photosSectionRef as any}
+            working={working}
+            photos={photos}
+            minPhotos={MIN_PHOTOS}
+            recommendedPhotos={2}
+            maxPhotos={MAX_PHOTOS}
+            onAddCameraFiles={addCameraFiles}
+            onUploadPhotosNow={uploadPhotosNow}
+            onRemovePhoto={removePhoto}
+            onSetShotType={setShotType}
+          />
 
-      <InfoSection
-        sectionRef={infoSectionRef as any}
-        working={working}
-        customerName={customerName}
-        email={email}
-        phone={phone}
-        notes={notes}
-        disabledReason={disabledReason}
-        canSubmit={canSubmit}
-        aiRenderingEnabled={aiRenderingEnabled}
-        renderOptIn={renderOptIn}
-        onCustomerName={setCustomerName}
-        onEmail={setEmail}
-        onPhone={(v) => setPhone(formatUSPhone(v))}
-        onNotes={setNotes}
-        onRenderOptIn={setRenderOptIn}
-        onSubmitEstimate={submitEstimate}
-        onStartOver={startOver}
-      />
+          <InfoSection
+            sectionRef={infoSectionRef as any}
+            working={working}
+            customerName={customerName}
+            email={email}
+            phone={phone}
+            notes={notes}
+            disabledReason={disabledReason}
+            canSubmit={canSubmit}
+            aiRenderingEnabled={aiRenderingEnabled}
+            renderOptIn={renderOptIn}
+            onCustomerName={setCustomerName}
+            onEmail={setEmail}
+            onPhone={(v) => setPhone(formatUSPhone(v))}
+            onNotes={setNotes}
+            onRenderOptIn={setRenderOptIn}
+            onSubmitEstimate={submitEstimate}
+            onStartOver={startOver}
+          />
+        </>
+      ) : null}
 
-      {needsQa ? (
+      {mode === "qa" ? (
         <QaSection
           sectionRef={qaSectionRef as any}
           firstInputRef={qaFirstInputRef}
@@ -954,25 +853,29 @@ export default function QuoteForm({
             });
           }}
           onSubmit={submitQaAnswers}
+          onStartOver={startOver}
         />
       ) : null}
 
-      <ResultsSection
-        sectionRef={resultsRef as any}
-        headingRef={resultsHeadingRef}
-        renderPreviewRef={renderPreviewRef as any}
-        hasEstimate={hasEstimate}
-        result={result}
-        quoteLogId={quoteLogId}
-        aiRenderingEnabled={aiRenderingEnabled}
-        renderOptIn={renderOptIn}
-        renderStatus={renderStatus}
-        renderImageUrl={renderImageUrl}
-        renderError={renderError}
-        working={working}
-        onRetryRender={retryRender}
-      />
+      {mode === "results" ? (
+        <ResultsSection
+          sectionRef={resultsRef as any}
+          headingRef={resultsHeadingRef}
+          renderPreviewRef={renderPreviewRef as any}
+          hasEstimate={hasEstimate}
+          result={result}
+          quoteLogId={quoteLogId}
+          aiRenderingEnabled={aiRenderingEnabled}
+          renderOptIn={renderOptIn}
+          renderStatus={renderStatus}
+          renderImageUrl={renderImageUrl}
+          renderError={renderError}
+          working={working}
+          onRetryRender={retryRender}
+        />
+      ) : null}
 
+      {/* ONE footer. If you still see it twice, it exists elsewhere too (see step 4 below). */}
       <p className="text-xs text-gray-600 dark:text-gray-300">
         By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
       </p>

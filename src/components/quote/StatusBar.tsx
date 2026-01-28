@@ -42,7 +42,6 @@ export function StatusBar({
   renderingLabel,
   sticky = false,
 
-  // Back-compat props (ignored by this UI)
   workingActiveDetail,
   stepperSteps,
 }: {
@@ -97,10 +96,7 @@ export function StatusBar({
   }, [statusRef]);
 
   const effectiveSticky = sticky && isWorking && !isTyping;
-
-  // Keep layout stable: do NOT change padding/font-size/rows based on typing.
-  // When typing, we “de-emphasize” via opacity + line-clamp instead.
-  const deemphasize = !isWorking || isTyping;
+  const collapsed = !isWorking || isTyping;
 
   const showRenderingRow = Boolean(showRenderingMini && (isWorking || renderingIsActive));
   const showRenderingMotion = !isWorking && renderingIsActive;
@@ -112,7 +108,7 @@ export function StatusBar({
       aria-label="Progress status"
       className={[
         "rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900",
-        "p-4", // ✅ stable
+        collapsed ? "p-3" : "p-4",
         effectiveSticky ? "sticky top-2 z-20" : "",
       ].join(" ")}
     >
@@ -120,29 +116,26 @@ export function StatusBar({
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-gray-600 dark:text-gray-300">Status</div>
 
-          <div className="mt-0.5 text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
+          <div
+            className={[
+              "mt-0.5 font-semibold text-gray-900 dark:text-gray-100 truncate",
+              collapsed ? "text-base" : "text-lg",
+            ].join(" ")}
+          >
             {workingLabel}
           </div>
 
-          {workingSubtitle ? (
-            <div
-              className={[
-                "mt-1 text-xs text-gray-600 dark:text-gray-300 truncate transition-opacity duration-150",
-                deemphasize ? "opacity-60" : "opacity-100",
-              ].join(" ")}
-            >
-              {workingSubtitle}
-            </div>
-          ) : (
-            // ✅ stable vertical rhythm even when subtitle missing
-            <div className="mt-1 text-xs opacity-0 select-none">.</div>
-          )}
+          {workingSubtitle && !collapsed ? (
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300 truncate">{workingSubtitle}</div>
+          ) : null}
         </div>
 
         <div
           className={[
-            "shrink-0 whitespace-nowrap transition-opacity duration-150",
-            deemphasize ? "text-xs font-medium text-gray-600 dark:text-gray-300" : "text-sm font-semibold text-gray-700 dark:text-gray-200",
+            "shrink-0 whitespace-nowrap",
+            collapsed
+              ? "text-xs font-medium text-gray-600 dark:text-gray-300"
+              : "text-sm font-semibold text-gray-700 dark:text-gray-200",
           ].join(" ")}
         >
           {workingRightLabel}
@@ -152,17 +145,19 @@ export function StatusBar({
       {isWorking ? (
         <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
           <div
-            className="h-full rounded-full bg-gray-900/80 dark:bg-gray-100/90 transition-[width] duration-300 ease-out"
+            className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 ease-out dark:bg-emerald-400"
             style={{ width: `${pct}%` }}
           />
         </div>
-      ) : (
-        // ✅ stable spacer so height doesn’t jump when work starts/stops during keyboard animation
-        <div className="mt-3 h-2 w-full opacity-0 select-none" aria-hidden="true" />
-      )}
+      ) : null}
 
       {showRenderingRow ? (
-        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div
+          className={[
+            "rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950",
+            isWorking ? "mt-4 p-4" : "mt-3 px-3 py-2",
+          ].join(" ")}
+        >
           <div className="flex items-center justify-between">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
             <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{renderingLabel || "Off"}</div>
@@ -170,7 +165,7 @@ export function StatusBar({
 
           {showRenderingMotion ? (
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
-              <div className="h-full w-1/2 rounded-full bg-gray-900/70 dark:bg-gray-100/80 animate-pulse" />
+              <div className="h-full w-1/2 rounded-full bg-emerald-600/80 dark:bg-emerald-400/80 animate-pulse" />
             </div>
           ) : null}
         </div>
