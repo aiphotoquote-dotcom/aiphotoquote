@@ -925,7 +925,7 @@ export default function QuoteForm({
         onSetShotType={setShotType}
       />
 
-      <InfoSection
+          <InfoSection
         sectionRef={infoSectionRef as any}
         working={working}
         customerName={customerName}
@@ -943,6 +943,7 @@ export default function QuoteForm({
         onRenderOptIn={setRenderOptIn}
         onSubmitEstimate={submitEstimate}
         onStartOver={startOver}
+        collapsed={needsQa || hasEstimate} // ✅ compact while QA / after estimate
       />
 
       {needsQa ? (
