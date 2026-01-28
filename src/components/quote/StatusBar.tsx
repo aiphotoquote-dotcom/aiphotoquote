@@ -28,7 +28,6 @@ function isTypingElement(el: Element | null) {
   const tag = (el as HTMLElement).tagName?.toLowerCase?.() || "";
   if (tag === "input" || tag === "textarea" || tag === "select") return true;
 
-  // contenteditable can be on the element or inherited
   const he = el as HTMLElement;
   if (typeof he.isContentEditable === "boolean" && he.isContentEditable) return true;
 
@@ -39,6 +38,7 @@ export function StatusBar({
   statusRef,
   workingLabel,
   workingSubtitle,
+  working predominately,
   workingRightLabel,
   showRenderingMini,
   renderingLabel,
@@ -56,7 +56,6 @@ export function StatusBar({
   renderingLabel?: string;
   sticky?: boolean;
 
-  // ✅ allow older callers / typings
   workingActiveDetail?: string | null;
   stepperSteps?: StepperStep[];
 }) {
@@ -111,15 +110,15 @@ export function StatusBar({
       tabIndex={-1}
       aria-label="Progress status"
       className={[
-        // ✅ critical: prevent any child from pushing layout wider than viewport
-        "w-full max-w-full overflow-x-hidden",
+        // ✅ key: prevent ANY child from widening the page
+        "w-full max-w-full overflow-hidden",
         "rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900",
         collapsed ? "p-3" : "p-4",
         effectiveSticky ? "sticky top-2 z-20" : "",
       ].join(" ")}
     >
       {/* Header row */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-gray-600 dark:text-gray-300">Status</div>
 
@@ -137,16 +136,15 @@ export function StatusBar({
           ) : null}
         </div>
 
-        {/* ✅ was shrink-0 + nowrap (can force horizontal overflow on mobile).
-            Now it can shrink + truncate within the card. */}
+        {/* ✅ allow shrink + truncate so "Step 3 of 3" never causes horizontal overflow */}
         <div
           className={[
-            "min-w-0 max-w-[45%] text-right truncate",
+            "min-w-0 max-w-[44%] text-right",
+            "overflow-hidden text-ellipsis whitespace-nowrap",
             collapsed
               ? "text-xs font-medium text-gray-600 dark:text-gray-300"
               : "text-sm font-semibold text-gray-700 dark:text-gray-200",
           ].join(" ")}
-          title={workingRightLabel}
         >
           {workingRightLabel}
         </div>
@@ -154,16 +152,15 @@ export function StatusBar({
 
       {/* Progress bar only while working */}
       {isWorking ? (
-        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
+        <div className="mt-3 h-2 w-full max-w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
           <div
-            // ✅ make it pop (green)
+            // ✅ green that pops
             className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 ease-out"
             style={{ width: `${pct}%` }}
           />
         </div>
       ) : null}
 
-      {/* Optional: AI Rendering row */}
       {showRenderingRow ? (
         <div
           className={[
