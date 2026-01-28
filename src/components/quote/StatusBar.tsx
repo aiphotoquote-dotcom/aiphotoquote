@@ -38,7 +38,6 @@ export function StatusBar({
   statusRef,
   workingLabel,
   workingSubtitle,
-  working predominately,
   workingRightLabel,
   showRenderingMini,
   renderingLabel,
