@@ -12,9 +12,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <ClerkProvider>
       <html lang="en" suppressHydrationWarning>
-        <body className="min-h-screen overflow-x-hidden bg-background text-foreground antialiased">
-          {children}
-        </body>
+       <body className="min-h-screen overflow-x-hidden bg-background text-foreground antialiased">
+  {children}
+</body>
       </html>
     </ClerkProvider>
   );

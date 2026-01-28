@@ -73,7 +73,6 @@ export function StatusBar({
     return t.includes("queued") || t.includes("running") || t.includes("rendering");
   }, [renderingLabel]);
 
-  // Track whether the user is actively typing (keyboard up).
   const [isTyping, setIsTyping] = useState(false);
 
   useEffect(() => {
@@ -81,7 +80,6 @@ export function StatusBar({
       const active = document.activeElement;
       const statusEl = statusRef?.current;
 
-      // If focus is inside the status bar itself, don’t treat it as “typing”.
       if (statusEl && active instanceof Element && statusEl.contains(active)) {
         setIsTyping(false);
         return;
@@ -112,14 +110,13 @@ export function StatusBar({
       tabIndex={-1}
       aria-label="Progress status"
       className={[
-        // ✅ critical: prevent any child from creating horizontal scroll
-        "w-full max-w-full overflow-x-hidden",
+        // key: never allow this card to exceed viewport width
+        "w-full max-w-full overflow-hidden",
         "rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900",
         collapsed ? "p-3" : "p-4",
         effectiveSticky ? "sticky top-2 z-20" : "",
       ].join(" ")}
     >
-      {/* Header row */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-gray-600 dark:text-gray-300">Status</div>
@@ -134,14 +131,16 @@ export function StatusBar({
           </div>
 
           {workingSubtitle && !collapsed ? (
-            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300 truncate">{workingSubtitle}</div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300 truncate">
+              {workingSubtitle}
+            </div>
           ) : null}
         </div>
 
-        {/* ✅ fix overflow: allow truncation instead of forcing nowrap off-screen */}
+        {/* ✅ This was the main overflow culprit: shrink-0 + nowrap */}
         <div
           className={[
-            "min-w-0 max-w-[40%] text-right truncate",
+            "min-w-0 max-w-[42%] text-right truncate",
             collapsed
               ? "text-xs font-medium text-gray-600 dark:text-gray-300"
               : "text-sm font-semibold text-gray-700 dark:text-gray-200",
@@ -152,22 +151,19 @@ export function StatusBar({
         </div>
       </div>
 
-      {/* Progress bar only while working */}
       {isWorking ? (
-        <div className="mt-3 h-2 w-full max-w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
           <div
-            // ✅ green pop
+            // ✅ green progress “pop”
             className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 ease-out"
             style={{ width: `${pct}%` }}
           />
         </div>
       ) : null}
 
-      {/* Optional: AI Rendering row */}
       {showRenderingRow ? (
         <div
           className={[
-            "w-full max-w-full overflow-x-hidden",
             "rounded-xl border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950",
             isWorking ? "mt-4 p-4" : "mt-3 px-3 py-2",
           ].join(" ")}
@@ -176,13 +172,13 @@ export function StatusBar({
             <div className="min-w-0 text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">
               AI Rendering
             </div>
-            <div className="min-w-0 text-xs font-semibold text-gray-700 dark:text-gray-200 truncate">
+            <div className="min-w-0 text-xs font-semibold text-gray-700 dark:text-gray-200 truncate text-right">
               {renderingLabel || "Off"}
             </div>
           </div>
 
           {showRenderingMotion ? (
-            <div className="mt-3 h-2 w-full max-w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
               <div className="h-full w-1/2 rounded-full bg-emerald-600/80 animate-pulse" />
             </div>
           ) : null}
