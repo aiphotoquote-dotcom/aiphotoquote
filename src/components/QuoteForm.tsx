@@ -3,7 +3,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { StatusBar, type StepperStep } from "./quote/StatusBar";
+import { StatusBar } from "./quote/StatusBar";
 import { PhotoSection, type PhotoItem, type ShotType } from "./quote/PhotoSection";
 import { InfoSection } from "./quote/InfoSection";
 import { QaSection } from "./quote/QaSection";
@@ -301,31 +301,43 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-  const stepperSteps = useMemo<StepperStep[]>(() => {
-    const p = phase;
-
-    const stateFor = (step: "compress" | "upload" | "analyze") => {
-      if (!working || p === "idle") return "todo" as const;
-
-      if (step === "compress") {
-        return p === "compressing"
-          ? ("active" as const)
-          : p === "uploading" || p === "analyzing"
-            ? ("done" as const)
-            : ("todo" as const);
-      }
-      if (step === "upload") {
-        return p === "uploading" ? ("active" as const) : p === "analyzing" ? ("done" as const) : ("todo" as const);
-      }
-      return p === "analyzing" ? ("active" as const) : ("todo" as const);
-    };
-
+const stepperSteps = useMemo(() => {
+  // When the user has an estimate (or is in QA), all steps are complete.
+  if (hasEstimate || needsQa) {
     return [
-      { key: "compress", label: "Optimize photos", state: stateFor("compress") },
-      { key: "upload", label: "Upload", state: stateFor("upload") },
-      { key: "analyze", label: "Inspect & estimate", state: stateFor("analyze") },
+      { key: "compress", label: "Optimize photos", state: "done" as const },
+      { key: "upload", label: "Upload", state: "done" as const },
+      { key: "analyze", label: "Inspect & estimate", state: "done" as const },
     ];
-  }, [working, phase]);
+  }
+
+  // Not currently running -> show neutral (no “Pending” vibes)
+  if (!working || phase === "idle") {
+    return [
+      { key: "compress", label: "Optimize photos", state: "todo" as const },
+      { key: "upload", label: "Upload", state: "todo" as const },
+      { key: "analyze", label: "Inspect & estimate", state: "todo" as const },
+    ];
+  }
+
+  // Running -> reflect actual phase
+  const p = phase;
+  const stateFor = (step: "compress" | "upload" | "analyze") => {
+    if (step === "compress") {
+      return p === "compressing" ? "active" : p === "uploading" || p === "analyzing" ? "done" : "todo";
+    }
+    if (step === "upload") {
+      return p === "uploading" ? "active" : p === "analyzing" ? "done" : "todo";
+    }
+    return p === "analyzing" ? "active" : "todo";
+  };
+
+  return [
+    { key: "compress", label: "Optimize photos", state: stateFor("compress") },
+    { key: "upload", label: "Upload", state: stateFor("upload") },
+    { key: "analyze", label: "Inspect & estimate", state: stateFor("analyze") },
+  ];
+}, [working, phase, hasEstimate, needsQa]);
 
   // focus/scroll rules
   useEffect(() => {
@@ -854,17 +866,15 @@ export default function QuoteForm({
 
   return (
     <div className="space-y-6">
-      <StatusBar
-        statusRef={statusRegionRef as any}
-        workingLabel={workingLabel}
-        workingSubtitle={workingSubtitle}
-        workingRightLabel={workingRightLabel}
-        workingActiveDetail={working ? workingStep.label : "Next"}
-        stepperSteps={stepperSteps}
-        sticky={true}
-        showRenderingMini={showRenderingMini}
-        renderingLabel={renderingLabel}
-      />
+     <StatusBar
+  statusRef={statusRegionRef as any}
+  workingLabel={workingLabel}
+  workingSubtitle={workingSubtitle}
+  workingRightLabel={workingRightLabel}
+  sticky={true}
+  showRenderingMini={showRenderingMini}
+  renderingLabel={renderingLabel}
+/>
 
       {error ? (
         <div
