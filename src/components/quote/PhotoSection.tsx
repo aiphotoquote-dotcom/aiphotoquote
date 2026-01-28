@@ -75,7 +75,12 @@ export function PhotoSection({
             }}
             disabled={working}
           />
-          <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
+          <div
+            className={cn(
+              "w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black",
+              working ? "opacity-50 cursor-not-allowed" : ""
+            )}
+          >
             Take Photo
           </div>
         </label>
@@ -95,71 +100,80 @@ export function PhotoSection({
             }}
             disabled={working}
           />
-          <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
+          <div
+            className={cn(
+              "w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800",
+              working ? "opacity-50 cursor-not-allowed" : ""
+            )}
+          >
             Upload Photos
           </div>
         </label>
       </div>
 
-      {photos.length > 0 ? (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {photos.map((p, idx) => {
-            const badge = shotBadge(p.shotType);
-            return (
-              <div key={p.id} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
-                <div className="relative">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.previewSrc} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
-                  <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
-                    {badge}
-                  </div>
-                  <button
-                    type="button"
-                    className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                    onClick={() => onRemovePhoto(p.id)}
-                    disabled={working}
-                  >
-                    Remove
-                  </button>
-                </div>
-
-                <div className="p-3 flex flex-wrap items-center gap-2">
-                  <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
-
-                  {(["wide", "closeup", "extra"] as ShotType[]).map((t) => (
+      {/* Reserve space so switching between empty/grid is less jarring (helps mobile focus stability). */}
+      <div className="min-h-[10rem]">
+        {photos.length > 0 ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {photos.map((p, idx) => {
+              const badge = shotBadge(p.shotType);
+              return (
+                <div key={p.id} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+                  <div className="relative">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={p.previewSrc} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
+                    <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
+                      {badge}
+                    </div>
                     <button
-                      key={t}
                       type="button"
-                      className={cn(
-                        "rounded-md px-2 py-1 text-xs font-semibold border",
-                        p.shotType === t
-                          ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-                          : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
-                      )}
-                      onClick={() => onSetShotType(p.id, t)}
+                      className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
+                      onClick={() => onRemovePhoto(p.id)}
                       disabled={working}
                     >
-                      {t === "wide" ? "Wide" : t === "closeup" ? "Close-up" : "Extra"}
+                      Remove
                     </button>
-                  ))}
+                  </div>
 
-                  {!p.uploadedUrl && p.file ? (
-                    <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">
-                      Camera photo (uploads on submit)
-                    </span>
-                  ) : null}
+                  <div className="p-3 flex flex-wrap items-center gap-2">
+                    <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
+
+                    {(["wide", "closeup", "extra"] as ShotType[]).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={cn(
+                          "rounded-md px-2 py-1 text-xs font-semibold border",
+                          p.shotType === t
+                            ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                            : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
+                        )}
+                        onClick={() => onSetShotType(p.id, t)}
+                        disabled={working}
+                      >
+                        {t === "wide" ? "Wide" : t === "closeup" ? "Close-up" : "Extra"}
+                      </button>
+                    ))}
+
+                    {!p.uploadedUrl && p.file ? (
+                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">
+                        Camera photo (uploads on submit)
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-          No photos yet. Add at least one photo to continue — two or more is better.
-        </div>
-      )}
+              );
+            })}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+            No photos yet. Add at least one photo to continue — two or more is better.
+          </div>
+        )}
+      </div>
 
-      <div className="text-xs text-gray-600 dark:text-gray-300">
+      {/* Reserve a consistent line height so this doesn't reflow while interacting. */}
+      <div className="text-xs text-gray-600 dark:text-gray-300 min-h-[1.25rem]">
         {photoCount >= minPhotos ? (
           <>
             ✅ {photoCount} photo{photoCount === 1 ? "" : "s"} added{" "}

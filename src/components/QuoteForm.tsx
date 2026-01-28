@@ -53,6 +53,17 @@ function safeFocus(el: HTMLElement | null | undefined) {
   }
 }
 
+function isTypingElement(el: Element | null) {
+  if (!el) return false;
+  const tag = (el as HTMLElement).tagName?.toLowerCase?.() || "";
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+
+  const he = el as HTMLElement;
+  if (typeof he.isContentEditable === "boolean" && he.isContentEditable) return true;
+
+  return false;
+}
+
 async function focusAndScroll(
   el: HTMLElement | null | undefined,
   opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }
@@ -73,6 +84,12 @@ async function focusAndScroll(
 
   await sleep(25);
   safeFocus(el);
+}
+
+function defaultShotTypeForIndex(idx: number): ShotType {
+  if (idx === 0) return "wide";
+  if (idx === 1) return "closeup";
+  return "extra";
 }
 
 async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
@@ -118,12 +135,6 @@ async function compressImage(file: File, opts?: { maxDim?: number; quality?: num
   const baseName = file.name.replace(/\.[^/.]+$/, "");
   const outName = `${baseName}.jpg`;
   return new File([blob], outName, { type: "image/jpeg" });
-}
-
-function defaultShotTypeForIndex(idx: number): ShotType {
-  if (idx === 0) return "wide";
-  if (idx === 1) return "closeup";
-  return "extra";
 }
 
 async function uploadToBlob(files: File[]): Promise<string[]> {
@@ -231,6 +242,40 @@ export default function QuoteForm({
 
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
+  // --- typing detection (UI-only) ---
+  const [isTyping, setIsTyping] = useState(false);
+
+  useEffect(() => {
+    const onFocusLike = () => {
+      const active = document.activeElement;
+      setIsTyping(active instanceof Element ? isTypingElement(active) : false);
+    };
+
+    document.addEventListener("focusin", onFocusLike);
+    document.addEventListener("focusout", onFocusLike);
+    onFocusLike();
+
+    return () => {
+      document.removeEventListener("focusin", onFocusLike);
+      document.removeEventListener("focusout", onFocusLike);
+    };
+  }, []);
+
+  // Calm scroll helper:
+  // - If user is typing (keyboard up), avoid scrollIntoView (causes jump on mobile).
+  // - Still focus (with preventScroll) for accessibility and “where to look”.
+  const focusAndScrollCalm = useCallback(
+    async (el: HTMLElement | null | undefined, opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }) => {
+      if (!el) return;
+      if (isTyping) {
+        safeFocus(el);
+        return;
+      }
+      await focusAndScroll(el, opts);
+    },
+    [isTyping]
+  );
+
   // --- derived state ---
   const photoCount = photos.length;
 
@@ -242,7 +287,6 @@ export default function QuoteForm({
   }, [customerName, email, phone]);
 
   const photosOk = photoCount >= MIN_PHOTOS;
-  const recommendedOk = photoCount >= RECOMMENDED_PHOTOS;
 
   const canSubmit = useMemo(() => !working && photosOk && contactOk, [working, photosOk, contactOk]);
 
@@ -301,71 +345,41 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-const stepperSteps = useMemo(() => {
-  // When the user has an estimate (or is in QA), all steps are complete.
-  if (hasEstimate || needsQa) {
-    return [
-      { key: "compress", label: "Optimize photos", state: "done" as const },
-      { key: "upload", label: "Upload", state: "done" as const },
-      { key: "analyze", label: "Inspect & estimate", state: "done" as const },
-    ];
-  }
+  // Enable "sticky mode" only when the status actually matters.
+  const enableStickyStatus = useMemo(() => {
+    if (working) return true;
+    if (needsQa) return true;
+    if (showRenderingMini && renderStatus === "running") return true;
+    return false;
+  }, [working, needsQa, showRenderingMini, renderStatus]);
 
-  // Not currently running -> show neutral (no “Pending” vibes)
-  if (!working || phase === "idle") {
-    return [
-      { key: "compress", label: "Optimize photos", state: "todo" as const },
-      { key: "upload", label: "Upload", state: "todo" as const },
-      { key: "analyze", label: "Inspect & estimate", state: "todo" as const },
-    ];
-  }
-
-  // Running -> reflect actual phase
-  const p = phase;
-  const stateFor = (step: "compress" | "upload" | "analyze") => {
-    if (step === "compress") {
-      return p === "compressing" ? "active" : p === "uploading" || p === "analyzing" ? "done" : "todo";
-    }
-    if (step === "upload") {
-      return p === "uploading" ? "active" : p === "analyzing" ? "done" : "todo";
-    }
-    return p === "analyzing" ? "active" : "todo";
-  };
-
-  return [
-    { key: "compress", label: "Optimize photos", state: stateFor("compress") },
-    { key: "upload", label: "Upload", state: stateFor("upload") },
-    { key: "analyze", label: "Inspect & estimate", state: stateFor("analyze") },
-  ];
-}, [working, phase, hasEstimate, needsQa]);
-
-  // focus/scroll rules
+  // focus/scroll rules (calm)
   useEffect(() => {
     if (!error) return;
     (async () => {
-      await focusAndScroll(errorSummaryRef.current, { block: "start" });
+      await focusAndScrollCalm(errorSummaryRef.current, { block: "start" });
     })();
-  }, [error]);
+  }, [error, focusAndScrollCalm]);
 
   useEffect(() => {
     if (!needsQa) return;
     (async () => {
       await sleep(50);
-      await focusAndScroll(qaSectionRef.current, { block: "start" });
+      await focusAndScrollCalm(qaSectionRef.current, { block: "start" });
       await sleep(50);
       safeFocus(qaFirstInputRef.current);
     })();
-  }, [needsQa]);
+  }, [needsQa, focusAndScrollCalm]);
 
   useEffect(() => {
     if (!hasEstimate) return;
     (async () => {
       await sleep(75);
-      await focusAndScroll(resultsRef.current, { block: "start" });
+      await focusAndScrollCalm(resultsRef.current, { block: "start" });
       await sleep(25);
       safeFocus(resultsHeadingRef.current);
     })();
-  }, [hasEstimate]);
+  }, [hasEstimate, focusAndScrollCalm]);
 
   useEffect(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
@@ -476,7 +490,7 @@ const stepperSteps = useMemo(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
 
     queueMicrotask(() => {
-      focusAndScroll(statusRegionRef.current, { block: "start" });
+      focusAndScrollCalm(statusRegionRef.current, { block: "start" });
     });
   }
 
@@ -496,7 +510,7 @@ const stepperSteps = useMemo(() => {
       addUploadedUrls(urls);
 
       queueMicrotask(() => {
-        focusAndScroll(photosSectionRef.current, { block: "start" });
+        focusAndScrollCalm(photosSectionRef.current, { block: "start" });
       });
     } catch (e: any) {
       setError(e?.message ?? "Upload failed.");
@@ -521,42 +535,42 @@ const stepperSteps = useMemo(() => {
     renderAttemptedForQuoteRef.current = null;
 
     queueMicrotask(() => {
-      focusAndScroll(statusRegionRef.current, { block: "start" });
+      focusAndScrollCalm(statusRegionRef.current, { block: "start" });
     });
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length > MAX_PHOTOS) {
       setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!customerName.trim()) {
       setError("Please enter your name.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!isValidEmail(email)) {
       setError("Please enter a valid email address.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (normalizeUSPhoneDigits(phone).length !== 10) {
       setError("Please enter a valid 10-digit phone number.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
@@ -569,12 +583,12 @@ const stepperSteps = useMemo(() => {
 
       if (needUpload.length) {
         setPhase("compressing");
-        queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+        queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
 
         const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
 
         setPhase("uploading");
-        queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+        queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
 
         const urls = await uploadToBlob(compressed);
 
@@ -608,7 +622,7 @@ const stepperSteps = useMemo(() => {
       }
 
       setPhase("analyzing");
-      queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
@@ -664,7 +678,7 @@ const stepperSteps = useMemo(() => {
         setResult(json?.output ?? json);
 
         queueMicrotask(async () => {
-          await focusAndScroll(qaSectionRef.current, { block: "start" });
+          await focusAndScrollCalm(qaSectionRef.current, { block: "start" });
           await sleep(25);
           safeFocus(qaFirstInputRef.current);
         });
@@ -687,7 +701,7 @@ const stepperSteps = useMemo(() => {
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
@@ -697,23 +711,23 @@ const stepperSteps = useMemo(() => {
   async function submitQaAnswers() {
     setError(null);
 
-    queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+    queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
 
     if (!tenantSlug) {
       setError("Missing tenant slug.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!quoteLogId) {
       setError("Missing quote reference. Please start over.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!qaQuestions.length) {
       setError("No questions to answer.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
@@ -724,7 +738,7 @@ const stepperSteps = useMemo(() => {
       setError(`Please answer: "${qaQuestions[missingIdx]}"`);
 
       queueMicrotask(async () => {
-        await focusAndScroll(qaSectionRef.current, { block: "start" });
+        await focusAndScrollCalm(qaSectionRef.current, { block: "start" });
         await sleep(25);
         const el = document.getElementById(`qa-input-${missingIdx}`) as HTMLInputElement | null;
         if (el) safeFocus(el);
@@ -777,7 +791,7 @@ const stepperSteps = useMemo(() => {
       });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
@@ -792,7 +806,7 @@ const stepperSteps = useMemo(() => {
     setRenderError(null);
     setRenderImageUrl(null);
 
-    queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+    queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
 
     try {
       const res = await fetch("/api/quote/render", {
@@ -820,12 +834,12 @@ const stepperSteps = useMemo(() => {
 
       queueMicrotask(async () => {
         await sleep(50);
-        await focusAndScroll(renderPreviewRef.current, { block: "start" });
+        await focusAndScrollCalm(renderPreviewRef.current, { block: "start" });
       });
     } catch (e: any) {
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
-      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
     }
   }
 
@@ -845,7 +859,7 @@ const stepperSteps = useMemo(() => {
     await startRenderOnce(String(quoteLogId));
   }
 
-  // structured result helpers (used in Results UI)
+  // structured result helpers (kept for back-compat / safety)
   const estLow = money(result?.estimate_low ?? result?.estimateLow);
   const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
   const summary = String(result?.summary ?? "").trim();
@@ -864,17 +878,26 @@ const stepperSteps = useMemo(() => {
   const confidenceTone =
     confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
 
+  void estLow;
+  void estHigh;
+  void summary;
+  void inspection;
+  void scope;
+  void assumptions;
+  void questions;
+  void confidenceTone;
+
   return (
     <div className="space-y-6">
-     <StatusBar
-  statusRef={statusRegionRef as any}
-  workingLabel={workingLabel}
-  workingSubtitle={workingSubtitle}
-  workingRightLabel={workingRightLabel}
-  sticky={true}
-  showRenderingMini={showRenderingMini}
-  renderingLabel={renderingLabel}
-/>
+      <StatusBar
+        statusRef={statusRegionRef as any}
+        workingLabel={workingLabel}
+        workingSubtitle={workingSubtitle}
+        workingRightLabel={workingRightLabel}
+        sticky={enableStickyStatus}
+        showRenderingMini={showRenderingMini}
+        renderingLabel={renderingLabel}
+      />
 
       {error ? (
         <div
@@ -942,7 +965,7 @@ const stepperSteps = useMemo(() => {
         />
       ) : null}
 
-           <ResultsSection
+      <ResultsSection
         sectionRef={resultsRef as any}
         headingRef={resultsHeadingRef}
         renderPreviewRef={renderPreviewRef as any}

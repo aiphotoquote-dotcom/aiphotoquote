@@ -28,6 +28,10 @@ export function QaSection({
 }) {
   if (!needsQa) return null;
 
+  // Match InfoSection: prevent iOS Safari zoom by using 16px on mobile.
+  const inputCls =
+    "mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-[16px] text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 sm:text-sm";
+
   return (
     <section
       ref={sectionRef as any}
@@ -49,25 +53,33 @@ export function QaSection({
             <input
               id={`qa-input-${i}`}
               ref={i === 0 ? firstInputRef : undefined}
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              className={inputCls}
               value={qaAnswers[i] ?? ""}
               onChange={(e) => onAnswer(i, e.target.value)}
               placeholder="Type your answer…"
               disabled={working}
+              inputMode="text"
+              autoCapitalize="sentences"
             />
           </label>
         ))}
       </div>
 
+      {/* Keep CTA text stable (StatusBar owns “working/progress”). */}
       <button
+        type="button"
         className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
         onClick={() => onSubmit()}
         disabled={working || !quoteLogId}
+        aria-busy={working}
       >
-        {working ? "Working…" : "Finalize Estimate"}
+        Finalize Estimate
       </button>
 
-      <div className="text-xs text-gray-600 dark:text-gray-300">Ref: {quoteLogId ? quoteLogId.slice(0, 8) : "(missing)"}</div>
+      {/* Stable footer line height */}
+      <div className="text-xs text-gray-600 dark:text-gray-300 min-h-[1.25rem]">
+        Ref: {quoteLogId ? quoteLogId.slice(0, 8) : "(missing)"}
+      </div>
     </section>
   );
 }
