@@ -1,22 +1,15 @@
+// src/components/QuoteForm.tsx
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type ShotType = "wide" | "closeup" | "extra";
-
-type PhotoItem = {
-  id: string;
-  shotType: ShotType;
-  previewSrc: string;
-  uploadedUrl?: string;
-  file?: File;
-};
+import { StatusBar, type StepperStep } from "./quote/StatusBar";
+import { PhotoSection, type PhotoItem, type ShotType } from "./quote/PhotoSection";
+import { InfoSection } from "./quote/InfoSection";
+import { QaSection } from "./quote/QaSection";
+import { ResultsSection } from "./quote/ResultsSection";
 
 type RenderStatus = "idle" | "running" | "rendered" | "failed";
-
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
 
 function digitsOnlyRaw(s: string) {
   return (s || "").replace(/\D/g, "");
@@ -68,7 +61,6 @@ async function focusAndScroll(
   const block = opts?.block ?? "start";
   const behavior = opts?.behavior ?? "smooth";
 
-  // Scroll first (mobile Safari is less jumpy this way)
   try {
     el.scrollIntoView({ behavior, block });
   } catch {
@@ -134,10 +126,6 @@ function defaultShotTypeForIndex(idx: number): ShotType {
   return "extra";
 }
 
-function shotBadge(t: ShotType) {
-  return t === "wide" ? "Wide shot" : t === "closeup" ? "Close-up" : "Extra";
-}
-
 async function uploadToBlob(files: File[]): Promise<string[]> {
   if (!files.length) return [];
 
@@ -174,26 +162,7 @@ function money(n: any) {
   return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
-function toneBadge(label: string, tone: "gray" | "green" | "yellow" | "red" | "blue" = "gray") {
-  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold";
-  const cls =
-    tone === "green"
-      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
-      : tone === "yellow"
-        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-        : tone === "red"
-          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-          : tone === "blue"
-            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
-
-  return <span className={cn(base, cls)}>{label}</span>;
-}
-
-
-// ---- Smart status helpers (UI only; no behavior changes) ----
 function computeWorkingStep(phase: "idle" | "compressing" | "uploading" | "analyzing") {
-  // Conceptual 1..3 steps (compress/upload/analyze). We intentionally do NOT show "contact/photos" as steps.
   if (phase === "compressing") return { idx: 1, total: 3, label: "Optimizing photos…" };
   if (phase === "uploading") return { idx: 2, total: 3, label: "Uploading…" };
   if (phase === "analyzing") return { idx: 3, total: 3, label: "Inspecting…" };
@@ -247,7 +216,7 @@ export default function QuoteForm({
   const [renderError, setRenderError] = useState<string | null>(null);
 
   // --- refs for focus/scroll management ---
-  const statusRegionRef = useRef<HTMLDivElement | null>(null); // “Working / progress” wrapper
+  const statusRegionRef = useRef<HTMLDivElement | null>(null);
   const errorSummaryRef = useRef<HTMLDivElement | null>(null);
 
   const photosSectionRef = useRef<HTMLElement | null>(null);
@@ -288,7 +257,6 @@ export default function QuoteForm({
 
   const hasEstimate = Boolean(result) && !needsQa;
 
-  // --- Smart top-card copy (B layout) ---
   const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
 
   const workingLabel = useMemo(() => {
@@ -333,20 +301,22 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-  const stepperSteps = useMemo(() => {
-    // 3-step rail that reflects the actual runtime "phase"
+  const stepperSteps = useMemo<StepperStep[]>(() => {
     const p = phase;
 
     const stateFor = (step: "compress" | "upload" | "analyze") => {
       if (!working || p === "idle") return "todo" as const;
 
       if (step === "compress") {
-        return p === "compressing" ? ("active" as const) : p === "uploading" || p === "analyzing" ? ("done" as const) : ("todo" as const);
+        return p === "compressing"
+          ? ("active" as const)
+          : p === "uploading" || p === "analyzing"
+            ? ("done" as const)
+            : ("todo" as const);
       }
       if (step === "upload") {
         return p === "uploading" ? ("active" as const) : p === "analyzing" ? ("done" as const) : ("todo" as const);
       }
-      // analyze
       return p === "analyzing" ? ("active" as const) : ("todo" as const);
     };
 
@@ -357,8 +327,7 @@ export default function QuoteForm({
     ];
   }, [working, phase]);
 
-  // --- focus/scroll rules ---
-  // 1) errors -> focus error summary
+  // focus/scroll rules
   useEffect(() => {
     if (!error) return;
     (async () => {
@@ -366,7 +335,6 @@ export default function QuoteForm({
     })();
   }, [error]);
 
-  // 2) when QA appears -> focus Question 1
   useEffect(() => {
     if (!needsQa) return;
     (async () => {
@@ -377,9 +345,6 @@ export default function QuoteForm({
     })();
   }, [needsQa]);
 
-  // (removed) status focus is handled explicitly at action boundaries via queueMicrotask()
-
-  // 4) when final results appear -> focus results heading + scroll
   useEffect(() => {
     if (!hasEstimate) return;
     (async () => {
@@ -390,12 +355,10 @@ export default function QuoteForm({
     })();
   }, [hasEstimate]);
 
-  // keep opt-in off if tenant disables rendering
   useEffect(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
   }, [aiRenderingEnabled]);
 
-  // cleanup blob urls on unmount
   useEffect(() => {
     return () => {
       photos.forEach((p) => {
@@ -405,7 +368,6 @@ export default function QuoteForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- photo helpers ---
   const addCameraFiles = useCallback(
     (files: File[]) => {
       if (!files.length) return;
@@ -459,7 +421,6 @@ export default function QuoteForm({
 
       const next = prev.filter((x) => x.id !== id);
 
-      // Preserve ordering semantics
       return next.map((x, idx) => ({
         ...x,
         shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType,
@@ -534,7 +495,6 @@ export default function QuoteForm({
   }
 
   async function submitEstimate() {
-    // reset top-level state for a clean run
     setError(null);
     setResult(null);
     setQuoteLogId(null);
@@ -548,12 +508,10 @@ export default function QuoteForm({
     setRenderError(null);
     renderAttemptedForQuoteRef.current = null;
 
-    // Always move attention to the status/progress region when starting a run
     queueMicrotask(() => {
       focusAndScroll(statusRegionRef.current, { block: "start" });
     });
 
-    // ---- validations ----
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
       queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
@@ -595,7 +553,6 @@ export default function QuoteForm({
     try {
       let currentPhotos = photos;
 
-      // 1) Upload any camera photos that don't have uploadedUrl yet
       const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
 
       if (needUpload.length) {
@@ -638,7 +595,6 @@ export default function QuoteForm({
         throw new Error("Some photos are not uploaded yet. Please try again.");
       }
 
-      // 2) Submit to backend (preserve payload shape + routes)
       setPhase("analyzing");
       queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
@@ -683,22 +639,18 @@ export default function QuoteForm({
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
       setQuoteLogId(qid);
 
-      // 3) Live Q&A gate (support both server shapes)
       const needsQaFlag = Boolean(json?.needsQa ?? json?.needs_qa);
       const qsFromTop: string[] = Array.isArray(json?.questions) ? json.questions : [];
       const qsFromQaObj: string[] = Array.isArray(json?.qa?.questions) ? json.qa.questions : [];
 
-      const qsMerged = (qsFromTop.length ? qsFromTop : qsFromQaObj)
-        .map((x: any) => String(x))
-        .filter(Boolean);
+      const qsMerged = (qsFromTop.length ? qsFromTop : qsFromQaObj).map((x: any) => String(x)).filter(Boolean);
 
       if (needsQaFlag && qsMerged.length) {
         setNeedsQa(true);
         setQaQuestions(qsMerged);
         setQaAnswers(qsMerged.map(() => ""));
-        setResult(json?.output ?? json); // keeps UI populated
+        setResult(json?.output ?? json);
 
-        // When QA appears, focus Question 1 input
         queueMicrotask(async () => {
           await focusAndScroll(qaSectionRef.current, { block: "start" });
           await sleep(25);
@@ -709,7 +661,6 @@ export default function QuoteForm({
         return;
       }
 
-      // 4) Final estimate returned
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
@@ -717,7 +668,6 @@ export default function QuoteForm({
 
       renderAttemptedForQuoteRef.current = null;
 
-      // After render commit, focus results heading
       queueMicrotask(async () => {
         await sleep(25);
         safeFocus(resultsHeadingRef.current);
@@ -735,7 +685,6 @@ export default function QuoteForm({
   async function submitQaAnswers() {
     setError(null);
 
-    // move attention to status region when finalizing
     queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
     if (!tenantSlug) {
@@ -805,13 +754,11 @@ export default function QuoteForm({
         throw new Error(`Finalize failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
       }
 
-      // Final estimate is now available
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
 
-      // focus results heading once rendered
       queueMicrotask(async () => {
         await sleep(25);
         safeFocus(resultsHeadingRef.current);
@@ -833,7 +780,6 @@ export default function QuoteForm({
     setRenderError(null);
     setRenderImageUrl(null);
 
-    // anchor attention to status
     queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
     try {
@@ -860,7 +806,6 @@ export default function QuoteForm({
       setRenderImageUrl(url);
       setRenderStatus("rendered");
 
-      // after render completion, scroll to preview block
       queueMicrotask(async () => {
         await sleep(50);
         await focusAndScroll(renderPreviewRef.current, { block: "start" });
@@ -888,7 +833,7 @@ export default function QuoteForm({
     await startRenderOnce(String(quoteLogId));
   }
 
-  // --- structured result helpers (used in Results UI) ---
+  // structured result helpers (used in Results UI)
   const estLow = money(result?.estimate_low ?? result?.estimateLow);
   const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
   const summary = String(result?.summary ?? "").trim();
@@ -905,121 +850,22 @@ export default function QuoteForm({
   const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
 
   const confidenceTone =
-    confidence === "high"
-      ? "green"
-      : confidence === "medium"
-        ? "yellow"
-        : confidence === "low"
-          ? "red"
-          : "gray";
+    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
 
   return (
     <div className="space-y-6">
+      <StatusBar
+        statusRef={statusRegionRef as any}
+        workingLabel={workingLabel}
+        workingSubtitle={workingSubtitle}
+        workingRightLabel={workingRightLabel}
+        workingActiveDetail={working ? workingStep.label : "Next"}
+        stepperSteps={stepperSteps}
+        sticky={true}
+        showRenderingMini={showRenderingMini}
+        renderingLabel={renderingLabel}
+      />
 
-      {/* Status / Progress region (B: intelligent vertical rail + smart summary) */}
-      <section
-        ref={statusRegionRef}
-        tabIndex={-1}
-        aria-label="Progress status"
-        className="rounded-2xl border border-gray-200 bg-white p-5 outline-none focus:ring-2 focus:ring-black/20 dark:border-gray-800 dark:bg-gray-900 dark:focus:ring-white/20"
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Status</div>
-            <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{workingLabel}</div>
-            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{workingSubtitle}</div>
-          </div>
-
-          <div className="flex flex-col items-end gap-2">
-            <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{workingRightLabel}</div>
-
-            {showRenderingMini ? (
-              <div className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                Rendering: {renderingLabel}
-              </div>
-            ) : null}
-          </div>
-        </div>
-
-        {/* Vertical rail */}
-        <div className="mt-4 flex gap-4">
-          <div className="relative flex w-7 flex-col items-center">
-            {/* line */}
-            <div className="absolute top-0 bottom-0 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
-
-            {stepperSteps.map((step, idx) => {
-              const isDone = step.state === "done";
-              const isActive = step.state === "active";
-
-              const dotCls = isDone
-                ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-                : isActive
-                  ? "bg-white text-black border-black dark:bg-black dark:text-white dark:border-white"
-                  : "bg-gray-100 text-gray-400 border-gray-300 dark:bg-gray-900 dark:text-gray-500 dark:border-gray-800";
-
-              return (
-                <div key={step.key} className="relative z-10 flex flex-col items-center">
-                  <div
-                    className={cn(
-                      "flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-semibold",
-                      dotCls
-                    )}
-                    aria-label={`${step.label}: ${
-                      step.state === "done" ? "done" : step.state === "active" ? "in progress" : "pending"
-                    }`}
-                  >
-                    {isDone ? "✓" : idx + 1}
-                  </div>
-
-                  {/* spacer between nodes */}
-                  {idx !== stepperSteps.length - 1 ? <div className="h-5" aria-hidden="true" /> : null}
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="flex-1 space-y-4">
-            {stepperSteps.map((step) => {
-              const isDone = step.state === "done";
-              const isActive = step.state === "active";
-
-              return (
-                <div key={step.key} className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div
-                      className={cn(
-                        "text-sm font-semibold",
-                        step.state === "todo"
-                          ? "text-gray-400 dark:text-gray-500"
-                          : "text-gray-900 dark:text-gray-100"
-                      )}
-                    >
-                      {step.label}
-                    </div>
-
-                    {isActive ? (
-                      <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">In progress…</div>
-                    ) : isDone ? (
-                      <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">Completed</div>
-                    ) : (
-                      <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Pending</div>
-                    )}
-                  </div>
-
-                  {/* right-side “smart” detail only for active step */}
-                  {isActive ? (
-                    <div className="shrink-0 text-xs font-semibold text-gray-700 dark:text-gray-200">
-                      {working ? workingStep.label : "Next"}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </section>
-
-      {/* Error summary (focus target on any error) */}
       {error ? (
         <div
           ref={errorSummaryRef}
@@ -1033,453 +879,74 @@ export default function QuoteForm({
         </div>
       ) : null}
 
-      {/* Photos */}
-      <section
-        ref={photosSectionRef}
-        className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-      >
+      <PhotoSection
+        sectionRef={photosSectionRef as any}
+        working={working}
+        photos={photos}
+        minPhotos={MIN_PHOTOS}
+        recommendedPhotos={RECOMMENDED_PHOTOS}
+        maxPhotos={MAX_PHOTOS}
+        onAddCameraFiles={addCameraFiles}
+        onUploadPhotosNow={uploadPhotosNow}
+        onRemovePhoto={removePhoto}
+        onSetShotType={setShotType}
+      />
 
-        <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Add photos</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Minimum <b>{MIN_PHOTOS}</b> photo to submit — but <b>{RECOMMENDED_PHOTOS}–6</b> photos usually gives a better
-            estimate. (max {MAX_PHOTOS})
-          </p>
-        </div>
+      <InfoSection
+        sectionRef={infoSectionRef as any}
+        working={working}
+        customerName={customerName}
+        email={email}
+        phone={phone}
+        notes={notes}
+        disabledReason={disabledReason}
+        canSubmit={canSubmit}
+        aiRenderingEnabled={aiRenderingEnabled}
+        renderOptIn={renderOptIn}
+        onCustomerName={setCustomerName}
+        onEmail={setEmail}
+        onPhone={(v) => setPhone(formatUSPhone(v))}
+        onNotes={setNotes}
+        onRenderOptIn={setRenderOptIn}
+        onSubmitEstimate={submitEstimate}
+        onStartOver={startOver}
+      />
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <input
-              className="hidden"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              multiple
-              onChange={async (e) => {
-                try {
-                  const f = Array.from(e.target.files ?? []);
-                  if (f.length) addCameraFiles(f);
-                } catch (err: any) {
-                  setError(err?.message ?? "Failed to add photo");
-                } finally {
-                  e.currentTarget.value = "";
-                }
-              }}
-              disabled={working}
-            />
-            <div className="w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black">
-              Take Photo
-            </div>
-          </label>
-
-          <label className="block">
-            <input
-              className="hidden"
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={async (e) => {
-                try {
-                  if (e.target.files) await uploadPhotosNow(e.target.files);
-                } catch (err: any) {
-                  setError(err?.message ?? "Upload failed");
-                } finally {
-                  e.currentTarget.value = "";
-                }
-              }}
-              disabled={working}
-            />
-            <div className="w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800">
-              Upload Photos
-            </div>
-          </label>
-        </div>
-
-        {photos.length > 0 ? (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {photos.map((p, idx) => {
-              const badge = shotBadge(p.shotType);
-              return (
-                <div key={p.id} className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
-                  <div className="relative">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.previewSrc} alt={`photo ${idx + 1}`} className="h-44 w-full object-cover" />
-                    <div className="absolute left-2 top-2 rounded-full bg-black/80 px-2 py-1 text-xs font-semibold text-white">
-                      {badge}
-                    </div>
-                    <button
-                      type="button"
-                      className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
-                      onClick={() => removePhoto(p.id)}
-                      disabled={working}
-                    >
-                      Remove
-                    </button>
-                  </div>
-
-                  <div className="p-3 flex flex-wrap items-center gap-2">
-                    <div className="text-xs text-gray-600 dark:text-gray-300 mr-1">Label:</div>
-
-                    {(["wide", "closeup", "extra"] as ShotType[]).map((t) => (
-                      <button
-                        key={t}
-                        type="button"
-                        className={cn(
-                          "rounded-md px-2 py-1 text-xs font-semibold border",
-                          p.shotType === t
-                            ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-                            : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
-                        )}
-                        onClick={() => setShotType(p.id, t)}
-                        disabled={working}
-                      >
-                        {t === "wide" ? "Wide" : t === "closeup" ? "Close-up" : "Extra"}
-                      </button>
-                    ))}
-
-                    {!p.uploadedUrl && p.file ? (
-                      <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-300">
-                        Camera photo (uploads on submit)
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-            No photos yet. Add at least one photo to continue — two or more is better.
-          </div>
-        )}
-
-        <div className="text-xs text-gray-600 dark:text-gray-300">
-          {photoCount >= MIN_PHOTOS ? (
-            <>
-              ✅ {photoCount} photo{photoCount === 1 ? "" : "s"} added{" "}
-              {!recommendedOk ? (
-                <span className="text-gray-500 dark:text-gray-400">· Add 1+ more for best results</span>
-              ) : null}
-            </>
-          ) : (
-            `Add ${MIN_PHOTOS} photo (you have ${photoCount})`
-          )}
-        </div>
-      </section>
-
-      {/* Details */}
-      <section
-        ref={infoSectionRef}
-        className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-      >
-        <div>
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
-          <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-            Required so we can send your estimate and follow up if needed.
-          </p>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="block">
-            <div className="text-xs text-gray-700 dark:text-gray-200">
-              Name <span className="text-red-600">*</span>
-            </div>
-            <input
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              value={customerName}
-              onChange={(e) => setCustomerName(e.target.value)}
-              placeholder="Your name"
-              disabled={working}
-              autoComplete="name"
-            />
-          </label>
-
-          <label className="block">
-            <div className="text-xs text-gray-700 dark:text-gray-200">
-              Email <span className="text-red-600">*</span>
-            </div>
-            <input
-              className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@email.com"
-              disabled={working}
-              inputMode="email"
-              autoComplete="email"
-            />
-          </label>
-        </div>
-
-        <label className="block">
-          <div className="text-xs text-gray-700 dark:text-gray-200">
-            Phone <span className="text-red-600">*</span>
-          </div>
-          <input
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            value={phone}
-            onChange={(e) => setPhone(formatUSPhone(e.target.value))}
-            placeholder="(555) 555-5555"
-            disabled={working}
-            inputMode="tel"
-            autoComplete="tel"
-          />
-          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-            Tip: if you type a leading “1”, we’ll normalize it automatically.
-          </div>
-        </label>
-
-        <label className="block">
-          <div className="text-xs text-gray-700 dark:text-gray-200">Notes</div>
-          <textarea
-            className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            rows={4}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="What are you looking to do? Material preference, timeline, constraints?"
-            disabled={working}
-          />
-        </label>
-
-        {aiRenderingEnabled ? (
-          <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-start gap-3">
-              <input
-                id="renderOptIn"
-                type="checkbox"
-                className="mt-1 h-4 w-4"
-                checked={renderOptIn}
-                onChange={(e) => setRenderOptIn(e.target.checked)}
-                disabled={working}
-              />
-              <label htmlFor="renderOptIn" className="cursor-pointer">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  Optional: AI rendering preview
-                </div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                  If selected, we’ll generate a visual “after” concept as a second step after your estimate.
-                </div>
-              </label>
-            </div>
-          </div>
-        ) : null}
-
-        <button
-          className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
-          onClick={submitEstimate}
-          disabled={!canSubmit}
-        >
-          {working ? "Working…" : "Get Estimate"}
-        </button>
-
-        {disabledReason ? <div className="text-xs text-gray-600 dark:text-gray-300">{disabledReason}</div> : null}
-
-        <button
-          type="button"
-          className="w-full rounded-xl border border-gray-200 py-3 text-sm font-semibold dark:border-gray-800"
-          onClick={startOver}
-          disabled={working}
-        >
-          Start Over
-        </button>
-      </section>
-
-      {/* Live Q&A */}
       {needsQa ? (
-        <section
-          ref={qaSectionRef}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-        >
-          <div>
-            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Quick questions</h2>
-            <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              One more step — answer these and we’ll finalize your estimate.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            {qaQuestions.map((q, i) => (
-              <label key={i} className="block">
-                <div className="text-xs font-semibold text-gray-800 dark:text-gray-200">
-                  {i + 1}. {q} <span className="text-red-600">*</span>
-                </div>
-                <input
-                  id={`qa-input-${i}`}
-                  ref={i === 0 ? qaFirstInputRef : undefined}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  value={qaAnswers[i] ?? ""}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setQaAnswers((prev) => {
-                      const next = [...prev];
-                      next[i] = v;
-                      return next;
-                    });
-                  }}
-                  placeholder="Type your answer…"
-                  disabled={working}
-                />
-              </label>
-            ))}
-          </div>
-
-          <button
-            className="w-full rounded-xl bg-black text-white py-4 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
-            onClick={submitQaAnswers}
-            disabled={working || !quoteLogId}
-          >
-            {working ? "Working…" : "Finalize Estimate"}
-          </button>
-
-          <div className="text-xs text-gray-600 dark:text-gray-300">
-            Ref: {quoteLogId ? quoteLogId.slice(0, 8) : "(missing)"}
-          </div>
-        </section>
+        <QaSection
+          sectionRef={qaSectionRef as any}
+          firstInputRef={qaFirstInputRef}
+          working={working}
+          needsQa={needsQa}
+          qaQuestions={qaQuestions}
+          qaAnswers={qaAnswers}
+          quoteLogId={quoteLogId}
+          onAnswer={(idx, v) => {
+            setQaAnswers((prev) => {
+              const next = [...prev];
+              next[idx] = v;
+              return next;
+            });
+          }}
+          onSubmit={submitQaAnswers}
+        />
       ) : null}
 
-      {/* Results */}
-      {hasEstimate ? (
-        <section
-          ref={resultsRef}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2
-                ref={resultsHeadingRef}
-                tabIndex={-1}
-                className="text-lg font-semibold text-gray-900 dark:text-gray-100 outline-none"
-              >
-                Your estimate
-              </h2>
-              <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                This is a fast estimate range based on your photos + notes. Final pricing may change after inspection.
-              </p>
-            </div>
-            {quoteLogId ? (
-              <div className="text-xs text-gray-500 dark:text-gray-400">Ref: {quoteLogId.slice(0, 8)}</div>
-            ) : null}
-          </div>
-
-          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex flex-wrap items-center gap-2">
-              {toneBadge(confidence ? `Confidence: ${confidence}` : "Confidence: unknown", confidenceTone as any)}
-              {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
-              {aiRenderingEnabled && renderOptIn ? toneBadge("Rendering requested", "blue") : null}
-            </div>
-
-            <div className="mt-4 flex flex-col gap-2">
-              <div className="text-xs font-semibold tracking-wide text-gray-600 dark:text-gray-300">ESTIMATE RANGE</div>
-              <div className="text-3xl font-semibold text-gray-900 dark:text-gray-100">
-                {estLow && estHigh ? `$${estLow} – $${estHigh}` : "We need a bit more info"}
-              </div>
-
-              {summary ? (
-                <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{summary}</div>
-              ) : (
-                <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                  We’ll follow up if we need any clarifications.
-                </div>
-              )}
-            </div>
-          </div>
-
-          {scope.length || assumptions.length || questions.length ? (
-            <div className="grid gap-4 lg:grid-cols-3">
-              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Visible scope</div>
-                <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
-                  {scope.length ? (
-                    <ul className="list-disc pl-5 space-y-1">
-                      {scope.slice(0, 10).map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="text-gray-500 dark:text-gray-400 italic">Not enough detail yet.</div>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Assumptions</div>
-                <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
-                  {assumptions.length ? (
-                    <ul className="list-disc pl-5 space-y-1">
-                      {assumptions.slice(0, 10).map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="text-gray-500 dark:text-gray-400 italic">None.</div>
-                  )}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Questions</div>
-                <div className="mt-3 space-y-2 text-sm text-gray-700 dark:text-gray-200">
-                  {questions.length ? (
-                    <ul className="list-disc pl-5 space-y-1">
-                      {questions.slice(0, 10).map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="text-gray-500 dark:text-gray-400 italic">No follow-ups needed.</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {aiRenderingEnabled && renderOptIn ? (
-            <div
-              ref={renderPreviewRef}
-              className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering preview</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
-                </div>
-
-                <button
-                  type="button"
-                  className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
-                  onClick={retryRender}
-                  disabled={!quoteLogId || working || renderStatus === "running"}
-                >
-                  Retry Render
-                </button>
-              </div>
-
-              {renderError ? (
-                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                  {renderError}
-                </div>
-              ) : null}
-
-              {renderImageUrl ? (
-                <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
-                </div>
-              ) : (
-                <div className="text-sm text-gray-600 dark:text-gray-300">
-                  If enabled, your visual concept will appear here when ready.
-                </div>
-              )}
-            </div>
-          ) : null}
-
-          <details className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-            <summary className="cursor-pointer text-sm font-semibold">Raw result (debug)</summary>
-            <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
-{JSON.stringify(result, null, 2)}
-            </pre>
-          </details>
-        </section>
-      ) : null}
+           <ResultsSection
+        sectionRef={resultsRef as any}
+        headingRef={resultsHeadingRef}
+        renderPreviewRef={renderPreviewRef as any}
+        hasEstimate={hasEstimate}
+        result={result}
+        quoteLogId={quoteLogId}
+        aiRenderingEnabled={aiRenderingEnabled}
+        renderOptIn={renderOptIn}
+        renderStatus={renderStatus}
+        renderImageUrl={renderImageUrl}
+        renderError={renderError}
+        working={working}
+        onRetryRender={retryRender}
+      />
 
       <p className="text-xs text-gray-600 dark:text-gray-300">
         By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
@@ -1487,4 +954,3 @@ export default function QuoteForm({
     </div>
   );
 }
-
