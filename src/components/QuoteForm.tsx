@@ -1,4 +1,3 @@
-// src/components/QuoteForm.tsx
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -190,63 +189,22 @@ function toneBadge(label: string, tone: "gray" | "green" | "yellow" | "red" | "b
 
   return <span className={cn(base, cls)}>{label}</span>;
 }
-function ProgressBar({ title, label, active }: { title: string; label: string; active: boolean }) {
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-      <div className="flex items-center justify-between gap-4">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
-        <div className="text-xs text-gray-700 dark:text-gray-200">{label}</div>
-      </div>
-      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-        <div
-          className={cn(
-            "h-full rounded-full bg-black transition-all duration-500 dark:bg-white",
-            active ? "w-1/2 animate-pulse" : "w-full"
-          )}
-        />
-      </div>
-    </div>
-  );
+
+
+// ---- Smart status helpers (UI only; no behavior changes) ----
+function computeWorkingStep(phase: "idle" | "compressing" | "uploading" | "analyzing") {
+  // Conceptual 1..3 steps (compress/upload/analyze). We intentionally do NOT show "contact/photos" as steps.
+  if (phase === "compressing") return { idx: 1, total: 3, label: "Optimizing photos…" };
+  if (phase === "uploading") return { idx: 2, total: 3, label: "Uploading…" };
+  if (phase === "analyzing") return { idx: 3, total: 3, label: "Inspecting…" };
+  return { idx: 0, total: 3, label: "Ready" };
 }
 
-type StepState = "todo" | "active" | "done";
-type StepperStep = { key: string; label: string; state: StepState };
-
-function Stepper({ steps }: { steps: StepperStep[] }) {
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Progress</div>
-
-      <div className="mt-3 grid gap-2">
-        {steps.map((s) => {
-          const dot =
-            s.state === "done"
-              ? "bg-green-600"
-              : s.state === "active"
-                ? "bg-black dark:bg-white"
-                : "bg-gray-300 dark:bg-gray-700";
-
-          const text =
-            s.state === "done"
-              ? "text-gray-900 dark:text-gray-100"
-              : s.state === "active"
-                ? "text-gray-900 dark:text-gray-100"
-                : "text-gray-600 dark:text-gray-300";
-
-          return (
-            <div key={s.key} className="flex items-center gap-3">
-              <span className={cn("h-2.5 w-2.5 rounded-full", dot)} />
-              <span className={cn("text-xs font-semibold", text)}>{s.label}</span>
-
-              <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-400">
-                {s.state === "done" ? "Done" : s.state === "active" ? "In progress" : "Pending"}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
+function prettyCount(n: number) {
+  if (!Number.isFinite(n)) return "0";
+  if (n <= 999) return String(n);
+  if (n <= 9_999) return `${Math.round(n / 100) / 10}k`;
+  return `${Math.round(n / 1000)}k`;
 }
 
 export default function QuoteForm({
@@ -303,6 +261,7 @@ export default function QuoteForm({
   const renderPreviewRef = useRef<HTMLDivElement | null>(null);
 
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
+
   // --- derived state ---
   const photoCount = photos.length;
 
@@ -327,13 +286,41 @@ export default function QuoteForm({
     return null;
   }, [working, photosOk, customerName, email, phone, MIN_PHOTOS]);
 
+  const hasEstimate = Boolean(result) && !needsQa;
+
+  // --- Smart top-card copy (B layout) ---
+  const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
+
   const workingLabel = useMemo(() => {
-    if (!working) return "Ready";
-    if (phase === "compressing") return "Optimizing photos…";
-    if (phase === "uploading") return "Uploading…";
-    if (phase === "analyzing") return "Inspecting…";
-    return "Working…";
-  }, [working, phase]);
+    if (working) return workingStep.label;
+    if (needsQa) return "Action needed";
+    if (hasEstimate) return "Estimate ready";
+    return "Ready";
+  }, [working, workingStep.label, needsQa, hasEstimate]);
+
+  const workingRightLabel = useMemo(() => {
+    if (working && workingStep.idx) return `Step ${workingStep.idx} of ${workingStep.total}`;
+    if (needsQa) return "Answer questions";
+    if (hasEstimate) return "Done";
+    return "Idle";
+  }, [working, workingStep.idx, workingStep.total, needsQa, hasEstimate]);
+
+  const workingSubtitle = useMemo(() => {
+    if (working && workingStep.idx) {
+      const photosLabel = photoCount ? `${prettyCount(photoCount)} photo${photoCount === 1 ? "" : "s"}` : null;
+      return [photosLabel, "Hang tight — this usually takes a few seconds."].filter(Boolean).join(" • ");
+    }
+    if (needsQa) return "Answer these quick questions so we can finalize your estimate.";
+    if (hasEstimate) {
+      const conf = String(result?.confidence ?? "").toLowerCase();
+      const c =
+        conf === "high" ? "High" : conf === "medium" ? "Medium" : conf === "low" ? "Low" : conf ? conf : "Unknown";
+      return `Confidence: ${c}${quoteLogId ? ` • Ref: ${String(quoteLogId).slice(0, 8)}` : ""}`;
+    }
+    return "Upload photos and add a quick note. We’ll return an estimate range.";
+  }, [working, workingStep.idx, photoCount, needsQa, hasEstimate, result?.confidence, quoteLogId]);
+
+  const showRenderingMini = useMemo(() => aiRenderingEnabled && renderOptIn, [aiRenderingEnabled, renderOptIn]);
 
   const renderingLabel = useMemo(() => {
     if (!aiRenderingEnabled) return "Disabled";
@@ -346,43 +333,32 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-  const hasEstimate = Boolean(result) && !needsQa;
+  const stepperSteps = useMemo(() => {
+    // 3-step rail that reflects the actual runtime "phase"
+    const p = phase;
 
-  // --- Stepper (reflects the current flow) ---
-  const stepperSteps: StepperStep[] = useMemo(() => {
-    const hasResult = Boolean(result) && !needsQa;
+    const stateFor = (step: "compress" | "upload" | "analyze") => {
+      if (!working || p === "idle") return "todo" as const;
 
-    const photosState: StepState = photosOk ? "done" : "active";
-    const contactState: StepState = !photosOk ? "todo" : contactOk ? "done" : "active";
-
-    const optimizeState: StepState =
-      working && phase === "compressing"
-        ? "active"
-        : working && (phase === "uploading" || phase === "analyzing" || hasResult)
-          ? "done"
-          : "todo";
-
-    const uploadState: StepState =
-      working && phase === "uploading"
-        ? "active"
-        : working && (phase === "analyzing" || hasResult)
-          ? "done"
-          : "todo";
-
-    const inspectState: StepState = working && phase === "analyzing" ? "active" : hasResult ? "done" : "todo";
-    const estimateState: StepState = hasResult ? "done" : "todo";
+      if (step === "compress") {
+        return p === "compressing" ? ("active" as const) : p === "uploading" || p === "analyzing" ? ("done" as const) : ("todo" as const);
+      }
+      if (step === "upload") {
+        return p === "uploading" ? ("active" as const) : p === "analyzing" ? ("done" as const) : ("todo" as const);
+      }
+      // analyze
+      return p === "analyzing" ? ("active" as const) : ("todo" as const);
+    };
 
     return [
-      { key: "photos", label: "Add photos", state: photosState },
-      { key: "contact", label: "Enter your info", state: contactState },
-      { key: "optimize", label: "Optimize", state: optimizeState },
-      { key: "upload", label: "Upload", state: uploadState },
-      { key: "inspect", label: "Inspect", state: inspectState },
-      { key: "estimate", label: "Estimate ready", state: estimateState },
+      { key: "compress", label: "Optimize photos", state: stateFor("compress") },
+      { key: "upload", label: "Upload", state: stateFor("upload") },
+      { key: "analyze", label: "Inspect & estimate", state: stateFor("analyze") },
     ];
-  }, [photosOk, contactOk, working, phase, result, needsQa]);
+  }, [working, phase]);
 
   // --- focus/scroll rules ---
+  // 1) errors -> focus error summary
   useEffect(() => {
     if (!error) return;
     (async () => {
@@ -390,6 +366,7 @@ export default function QuoteForm({
     })();
   }, [error]);
 
+  // 2) when QA appears -> focus Question 1
   useEffect(() => {
     if (!needsQa) return;
     (async () => {
@@ -400,14 +377,9 @@ export default function QuoteForm({
     })();
   }, [needsQa]);
 
-  useEffect(() => {
-    if (!working) return;
-    if (phase === "idle") return;
-    (async () => {
-      await focusAndScroll(statusRegionRef.current, { block: "start" });
-    })();
-  }, [working, phase]);
+  // (removed) status focus is handled explicitly at action boundaries via queueMicrotask()
 
+  // 4) when final results appear -> focus results heading + scroll
   useEffect(() => {
     if (!hasEstimate) return;
     (async () => {
@@ -418,10 +390,12 @@ export default function QuoteForm({
     })();
   }, [hasEstimate]);
 
+  // keep opt-in off if tenant disables rendering
   useEffect(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
   }, [aiRenderingEnabled]);
 
+  // cleanup blob urls on unmount
   useEffect(() => {
     return () => {
       photos.forEach((p) => {
@@ -430,6 +404,8 @@ export default function QuoteForm({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // --- photo helpers ---
   const addCameraFiles = useCallback(
     (files: File[]) => {
       if (!files.length) return;
@@ -558,6 +534,7 @@ export default function QuoteForm({
   }
 
   async function submitEstimate() {
+    // reset top-level state for a clean run
     setError(null);
     setResult(null);
     setQuoteLogId(null);
@@ -571,10 +548,12 @@ export default function QuoteForm({
     setRenderError(null);
     renderAttemptedForQuoteRef.current = null;
 
+    // Always move attention to the status/progress region when starting a run
     queueMicrotask(() => {
       focusAndScroll(statusRegionRef.current, { block: "start" });
     });
 
+    // ---- validations ----
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
       queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
@@ -615,6 +594,8 @@ export default function QuoteForm({
 
     try {
       let currentPhotos = photos;
+
+      // 1) Upload any camera photos that don't have uploadedUrl yet
       const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
 
       if (needUpload.length) {
@@ -657,6 +638,7 @@ export default function QuoteForm({
         throw new Error("Some photos are not uploaded yet. Please try again.");
       }
 
+      // 2) Submit to backend (preserve payload shape + routes)
       setPhase("analyzing");
       queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
@@ -701,6 +683,7 @@ export default function QuoteForm({
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
       setQuoteLogId(qid);
 
+      // 3) Live Q&A gate (support both server shapes)
       const needsQaFlag = Boolean(json?.needsQa ?? json?.needs_qa);
       const qsFromTop: string[] = Array.isArray(json?.questions) ? json.questions : [];
       const qsFromQaObj: string[] = Array.isArray(json?.qa?.questions) ? json.qa.questions : [];
@@ -713,8 +696,9 @@ export default function QuoteForm({
         setNeedsQa(true);
         setQaQuestions(qsMerged);
         setQaAnswers(qsMerged.map(() => ""));
-        setResult(json?.output ?? json);
+        setResult(json?.output ?? json); // keeps UI populated
 
+        // When QA appears, focus Question 1 input
         queueMicrotask(async () => {
           await focusAndScroll(qaSectionRef.current, { block: "start" });
           await sleep(25);
@@ -725,6 +709,7 @@ export default function QuoteForm({
         return;
       }
 
+      // 4) Final estimate returned
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
@@ -732,6 +717,7 @@ export default function QuoteForm({
 
       renderAttemptedForQuoteRef.current = null;
 
+      // After render commit, focus results heading
       queueMicrotask(async () => {
         await sleep(25);
         safeFocus(resultsHeadingRef.current);
@@ -745,9 +731,11 @@ export default function QuoteForm({
       setPhase("idle");
     }
   }
+
   async function submitQaAnswers() {
     setError(null);
 
+    // move attention to status region when finalizing
     queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
     if (!tenantSlug) {
@@ -817,11 +805,13 @@ export default function QuoteForm({
         throw new Error(`Finalize failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
       }
 
+      // Final estimate is now available
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
 
+      // focus results heading once rendered
       queueMicrotask(async () => {
         await sleep(25);
         safeFocus(resultsHeadingRef.current);
@@ -843,6 +833,7 @@ export default function QuoteForm({
     setRenderError(null);
     setRenderImageUrl(null);
 
+    // anchor attention to status
     queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
     try {
@@ -869,6 +860,7 @@ export default function QuoteForm({
       setRenderImageUrl(url);
       setRenderStatus("rendered");
 
+      // after render completion, scroll to preview block
       queueMicrotask(async () => {
         await sleep(50);
         await focusAndScroll(renderPreviewRef.current, { block: "start" });
@@ -920,21 +912,112 @@ export default function QuoteForm({
         : confidence === "low"
           ? "red"
           : "gray";
+
   return (
     <div className="space-y-6">
-      {/* Status / Progress region (focus target while working/rendering) */}
-      <div
+
+      {/* Status / Progress region (B: intelligent vertical rail + smart summary) */}
+      <section
         ref={statusRegionRef}
         tabIndex={-1}
-        aria-label="Status and progress"
-        className="grid gap-3 outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20 rounded-xl"
+        aria-label="Progress status"
+        className="rounded-2xl border border-gray-200 bg-white p-5 outline-none focus:ring-2 focus:ring-black/20 dark:border-gray-800 dark:bg-gray-900 dark:focus:ring-white/20"
       >
-        <ProgressBar title="Working" label={workingLabel} active={working} />
-        <Stepper steps={stepperSteps} />
-        {aiRenderingEnabled ? (
-          <ProgressBar title="AI Rendering" label={renderingLabel} active={renderStatus === "running"} />
-        ) : null}
-      </div>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Status</div>
+            <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{workingLabel}</div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{workingSubtitle}</div>
+          </div>
+
+          <div className="flex flex-col items-end gap-2">
+            <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{workingRightLabel}</div>
+
+            {showRenderingMini ? (
+              <div className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                Rendering: {renderingLabel}
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Vertical rail */}
+        <div className="mt-4 flex gap-4">
+          <div className="relative flex w-7 flex-col items-center">
+            {/* line */}
+            <div className="absolute top-0 bottom-0 w-px bg-gray-200 dark:bg-gray-800" aria-hidden="true" />
+
+            {stepperSteps.map((step, idx) => {
+              const isDone = step.state === "done";
+              const isActive = step.state === "active";
+
+              const dotCls = isDone
+                ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                : isActive
+                  ? "bg-white text-black border-black dark:bg-black dark:text-white dark:border-white"
+                  : "bg-gray-100 text-gray-400 border-gray-300 dark:bg-gray-900 dark:text-gray-500 dark:border-gray-800";
+
+              return (
+                <div key={step.key} className="relative z-10 flex flex-col items-center">
+                  <div
+                    className={cn(
+                      "flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-semibold",
+                      dotCls
+                    )}
+                    aria-label={`${step.label}: ${
+                      step.state === "done" ? "done" : step.state === "active" ? "in progress" : "pending"
+                    }`}
+                  >
+                    {isDone ? "✓" : idx + 1}
+                  </div>
+
+                  {/* spacer between nodes */}
+                  {idx !== stepperSteps.length - 1 ? <div className="h-5" aria-hidden="true" /> : null}
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex-1 space-y-4">
+            {stepperSteps.map((step) => {
+              const isDone = step.state === "done";
+              const isActive = step.state === "active";
+
+              return (
+                <div key={step.key} className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div
+                      className={cn(
+                        "text-sm font-semibold",
+                        step.state === "todo"
+                          ? "text-gray-400 dark:text-gray-500"
+                          : "text-gray-900 dark:text-gray-100"
+                      )}
+                    >
+                      {step.label}
+                    </div>
+
+                    {isActive ? (
+                      <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">In progress…</div>
+                    ) : isDone ? (
+                      <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">Completed</div>
+                    ) : (
+                      <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">Pending</div>
+                    )}
+                  </div>
+
+                  {/* right-side “smart” detail only for active step */}
+                  {isActive ? (
+                    <div className="shrink-0 text-xs font-semibold text-gray-700 dark:text-gray-200">
+                      {working ? workingStep.label : "Next"}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </section>
 
       {/* Error summary (focus target on any error) */}
       {error ? (
@@ -955,6 +1038,7 @@ export default function QuoteForm({
         ref={photosSectionRef}
         className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
       >
+
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Add photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -1403,3 +1487,4 @@ export default function QuoteForm({
     </div>
   );
 }
+
