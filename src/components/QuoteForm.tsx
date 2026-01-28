@@ -263,7 +263,6 @@ export default function QuoteForm({
 
   // Calm scroll helper:
   // - If user is typing (keyboard up), avoid scrollIntoView (causes jump on mobile).
-  // - Still focus (with preventScroll) for accessibility and “where to look”.
   const focusAndScrollCalm = useCallback(
     async (el: HTMLElement | null | undefined, opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }) => {
       if (!el) return;
@@ -275,6 +274,16 @@ export default function QuoteForm({
     },
     [isTyping]
   );
+
+  // ✅ IMPORTANT: keep the latest calm-focus function in a ref,
+  // so effects don't re-run when isTyping flips.
+  const focusCalmRef = useRef(focusAndScrollCalm);
+  useEffect(() => {
+    focusCalmRef.current = focusAndScrollCalm;
+  }, [focusAndScrollCalm]);
+
+  // ✅ IMPORTANT: only autofocus QA once when entering QA
+  const qaAutoFocusDoneRef = useRef(false);
 
   // --- derived state ---
   const photoCount = photos.length;
@@ -345,7 +354,6 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-  // Enable "sticky mode" only when the status actually matters.
   const enableStickyStatus = useMemo(() => {
     if (working) return true;
     if (needsQa) return true;
@@ -357,29 +365,36 @@ export default function QuoteForm({
   useEffect(() => {
     if (!error) return;
     (async () => {
-      await focusAndScrollCalm(errorSummaryRef.current, { block: "start" });
+      await focusCalmRef.current(errorSummaryRef.current, { block: "start" });
     })();
-  }, [error, focusAndScrollCalm]);
+  }, [error]);
 
   useEffect(() => {
-    if (!needsQa) return;
+    // ✅ only autofocus first QA input ONCE when entering QA
+    if (!needsQa) {
+      qaAutoFocusDoneRef.current = false;
+      return;
+    }
+    if (qaAutoFocusDoneRef.current) return;
+    qaAutoFocusDoneRef.current = true;
+
     (async () => {
       await sleep(50);
-      await focusAndScrollCalm(qaSectionRef.current, { block: "start" });
+      await focusCalmRef.current(qaSectionRef.current, { block: "start" });
       await sleep(50);
       safeFocus(qaFirstInputRef.current);
     })();
-  }, [needsQa, focusAndScrollCalm]);
+  }, [needsQa]);
 
   useEffect(() => {
     if (!hasEstimate) return;
     (async () => {
       await sleep(75);
-      await focusAndScrollCalm(resultsRef.current, { block: "start" });
+      await focusCalmRef.current(resultsRef.current, { block: "start" });
       await sleep(25);
       safeFocus(resultsHeadingRef.current);
     })();
-  }, [hasEstimate, focusAndScrollCalm]);
+  }, [hasEstimate]);
 
   useEffect(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
@@ -490,7 +505,7 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) setRenderOptIn(false);
 
     queueMicrotask(() => {
-      focusAndScrollCalm(statusRegionRef.current, { block: "start" });
+      focusCalmRef.current(statusRegionRef.current, { block: "start" });
     });
   }
 
@@ -510,7 +525,7 @@ export default function QuoteForm({
       addUploadedUrls(urls);
 
       queueMicrotask(() => {
-        focusAndScrollCalm(photosSectionRef.current, { block: "start" });
+        focusCalmRef.current(photosSectionRef.current, { block: "start" });
       });
     } catch (e: any) {
       setError(e?.message ?? "Upload failed.");
@@ -535,42 +550,42 @@ export default function QuoteForm({
     renderAttemptedForQuoteRef.current = null;
 
     queueMicrotask(() => {
-      focusAndScrollCalm(statusRegionRef.current, { block: "start" });
+      focusCalmRef.current(statusRegionRef.current, { block: "start" });
     });
 
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length > MAX_PHOTOS) {
       setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!customerName.trim()) {
       setError("Please enter your name.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!isValidEmail(email)) {
       setError("Please enter a valid email address.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (normalizeUSPhoneDigits(phone).length !== 10) {
       setError("Please enter a valid 10-digit phone number.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
@@ -583,12 +598,12 @@ export default function QuoteForm({
 
       if (needUpload.length) {
         setPhase("compressing");
-        queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
+        queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
         const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
 
         setPhase("uploading");
-        queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
+        queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
         const urls = await uploadToBlob(compressed);
 
@@ -622,7 +637,7 @@ export default function QuoteForm({
       }
 
       setPhase("analyzing");
-      queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
@@ -677,8 +692,10 @@ export default function QuoteForm({
         setQaAnswers(qsMerged.map(() => ""));
         setResult(json?.output ?? json);
 
+        qaAutoFocusDoneRef.current = false; // allow QA entry autofocus once
+
         queueMicrotask(async () => {
-          await focusAndScrollCalm(qaSectionRef.current, { block: "start" });
+          await focusCalmRef.current(qaSectionRef.current, { block: "start" });
           await sleep(25);
           safeFocus(qaFirstInputRef.current);
         });
@@ -701,7 +718,7 @@ export default function QuoteForm({
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
@@ -711,23 +728,23 @@ export default function QuoteForm({
   async function submitQaAnswers() {
     setError(null);
 
-    queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
+    queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
     if (!tenantSlug) {
       setError("Missing tenant slug.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!quoteLogId) {
       setError("Missing quote reference. Please start over.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (!qaQuestions.length) {
       setError("No questions to answer.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
@@ -738,7 +755,7 @@ export default function QuoteForm({
       setError(`Please answer: "${qaQuestions[missingIdx]}"`);
 
       queueMicrotask(async () => {
-        await focusAndScrollCalm(qaSectionRef.current, { block: "start" });
+        await focusCalmRef.current(qaSectionRef.current, { block: "start" });
         await sleep(25);
         const el = document.getElementById(`qa-input-${missingIdx}`) as HTMLInputElement | null;
         if (el) safeFocus(el);
@@ -791,7 +808,7 @@ export default function QuoteForm({
       });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
@@ -806,7 +823,7 @@ export default function QuoteForm({
     setRenderError(null);
     setRenderImageUrl(null);
 
-    queueMicrotask(() => focusAndScrollCalm(statusRegionRef.current, { block: "start" }));
+    queueMicrotask(() => focusCalmRef.current(statusRegionRef.current, { block: "start" }));
 
     try {
       const res = await fetch("/api/quote/render", {
@@ -834,12 +851,12 @@ export default function QuoteForm({
 
       queueMicrotask(async () => {
         await sleep(50);
-        await focusAndScrollCalm(renderPreviewRef.current, { block: "start" });
+        await focusCalmRef.current(renderPreviewRef.current, { block: "start" });
       });
     } catch (e: any) {
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
-      queueMicrotask(() => focusAndScrollCalm(errorSummaryRef.current, { block: "start" }));
+      queueMicrotask(() => focusCalmRef.current(errorSummaryRef.current, { block: "start" }));
     }
   }
 
@@ -859,33 +876,8 @@ export default function QuoteForm({
     await startRenderOnce(String(quoteLogId));
   }
 
-  // structured result helpers (kept for back-compat / safety)
-  const estLow = money(result?.estimate_low ?? result?.estimateLow);
-  const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
-  const summary = String(result?.summary ?? "").trim();
-  const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
-  const confidence = String(result?.confidence ?? "").toLowerCase();
-
-  const scope: string[] = Array.isArray(result?.visible_scope)
-    ? result.visible_scope
-    : Array.isArray(result?.visibleScope)
-      ? result.visibleScope
-      : [];
-
-  const assumptions: string[] = Array.isArray(result?.assumptions) ? result.assumptions : [];
-  const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
-
-  const confidenceTone =
-    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
-
-  void estLow;
-  void estHigh;
-  void summary;
-  void inspection;
-  void scope;
-  void assumptions;
-  void questions;
-  void confidenceTone;
+  // keep helpers referenced for type-safety (unused in UI directly here)
+  void money;
 
   return (
     <div className="space-y-6">
@@ -925,7 +917,7 @@ export default function QuoteForm({
         onSetShotType={setShotType}
       />
 
-          <InfoSection
+      <InfoSection
         sectionRef={infoSectionRef as any}
         working={working}
         customerName={customerName}
@@ -943,7 +935,6 @@ export default function QuoteForm({
         onRenderOptIn={setRenderOptIn}
         onSubmitEstimate={submitEstimate}
         onStartOver={startOver}
-        collapsed={needsQa || hasEstimate} // ✅ compact while QA / after estimate
       />
 
       {needsQa ? (
