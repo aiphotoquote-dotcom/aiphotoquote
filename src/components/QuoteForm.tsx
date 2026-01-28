@@ -48,6 +48,42 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function safeFocus(el: HTMLElement | null | undefined) {
+  if (!el) return;
+  try {
+    el.focus({ preventScroll: true } as any);
+  } catch {
+    try {
+      (el as any).focus();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function focusAndScroll(
+  el: HTMLElement | null | undefined,
+  opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }
+) {
+  if (!el) return;
+  const block = opts?.block ?? "start";
+  const behavior = opts?.behavior ?? "smooth";
+
+  // Scroll first (mobile Safari is less jumpy this way)
+  try {
+    el.scrollIntoView({ behavior, block });
+  } catch {
+    try {
+      el.scrollIntoView();
+    } catch {
+      // ignore
+    }
+  }
+
+  await sleep(25);
+  safeFocus(el);
+}
+
 async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
   const maxDim = opts?.maxDim ?? 1600;
   const quality = opts?.quality ?? 0.78;
@@ -93,65 +129,6 @@ async function compressImage(file: File, opts?: { maxDim?: number; quality?: num
   return new File([blob], outName, { type: "image/jpeg" });
 }
 
-function ProgressBar({ title, label, active }: { title: string; label: string; active: boolean }) {
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-      <div className="flex items-center justify-between gap-4">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
-        <div className="text-xs text-gray-700 dark:text-gray-200">{label}</div>
-      </div>
-      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-        <div
-          className={cn(
-            "h-full rounded-full bg-black transition-all duration-500 dark:bg-white",
-            active ? "w-1/2 animate-pulse" : "w-full"
-          )}
-        />
-      </div>
-    </div>
-  );
-}
-
-type StepState = "todo" | "active" | "done";
-type StepperStep = { key: string; label: string; state: StepState };
-
-function Stepper({ steps }: { steps: StepperStep[] }) {
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Progress</div>
-
-      <div className="mt-3 grid gap-2">
-        {steps.map((s) => {
-          const dot =
-            s.state === "done"
-              ? "bg-green-600"
-              : s.state === "active"
-              ? "bg-black dark:bg-white"
-              : "bg-gray-300 dark:bg-gray-700";
-
-          const text =
-            s.state === "done"
-              ? "text-gray-900 dark:text-gray-100"
-              : s.state === "active"
-              ? "text-gray-900 dark:text-gray-100"
-              : "text-gray-600 dark:text-gray-300";
-
-          return (
-            <div key={s.key} className="flex items-center gap-3">
-              <span className={cn("h-2.5 w-2.5 rounded-full", dot)} />
-              <span className={cn("text-xs font-semibold", text)}>{s.label}</span>
-
-              <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-400">
-                {s.state === "done" ? "Done" : s.state === "active" ? "In progress" : "Pending"}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function defaultShotTypeForIndex(idx: number): ShotType {
   if (idx === 0) return "wide";
   if (idx === 1) return "closeup";
@@ -164,6 +141,7 @@ function shotBadge(t: ShotType) {
 
 async function uploadToBlob(files: File[]): Promise<string[]> {
   if (!files.length) return [];
+
   const form = new FormData();
   files.forEach((f) => form.append("files", f));
 
@@ -212,10 +190,65 @@ function toneBadge(label: string, tone: "gray" | "green" | "yellow" | "red" | "b
 
   return <span className={cn(base, cls)}>{label}</span>;
 }
+function ProgressBar({ title, label, active }: { title: string; label: string; active: boolean }) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+      <div className="flex items-center justify-between gap-4">
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
+        <div className="text-xs text-gray-700 dark:text-gray-200">{label}</div>
+      </div>
+      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+        <div
+          className={cn(
+            "h-full rounded-full bg-black transition-all duration-500 dark:bg-white",
+            active ? "w-1/2 animate-pulse" : "w-full"
+          )}
+        />
+      </div>
+    </div>
+  );
+}
 
-// --- PART 1/8 ends here ---
+type StepState = "todo" | "active" | "done";
+type StepperStep = { key: string; label: string; state: StepState };
 
-// part 2
+function Stepper({ steps }: { steps: StepperStep[] }) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Progress</div>
+
+      <div className="mt-3 grid gap-2">
+        {steps.map((s) => {
+          const dot =
+            s.state === "done"
+              ? "bg-green-600"
+              : s.state === "active"
+                ? "bg-black dark:bg-white"
+                : "bg-gray-300 dark:bg-gray-700";
+
+          const text =
+            s.state === "done"
+              ? "text-gray-900 dark:text-gray-100"
+              : s.state === "active"
+                ? "text-gray-900 dark:text-gray-100"
+                : "text-gray-600 dark:text-gray-300";
+
+          return (
+            <div key={s.key} className="flex items-center gap-3">
+              <span className={cn("h-2.5 w-2.5 rounded-full", dot)} />
+              <span className={cn("text-xs font-semibold", text)}>{s.label}</span>
+
+              <span className="ml-auto text-[11px] text-gray-500 dark:text-gray-400">
+                {s.state === "done" ? "Done" : s.state === "active" ? "In progress" : "Pending"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false,
@@ -227,6 +260,7 @@ export default function QuoteForm({
   const RECOMMENDED_PHOTOS = 2;
   const MAX_PHOTOS = 12;
 
+  // --- form state ---
   const [customerName, setCustomerName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
@@ -246,35 +280,31 @@ export default function QuoteForm({
   const [qaQuestions, setQaQuestions] = useState<string[]>([]);
   const [qaAnswers, setQaAnswers] = useState<string[]>([]);
 
+  // Errors
   const [error, setError] = useState<string | null>(null);
 
+  // Rendering
   const [renderStatus, setRenderStatus] = useState<RenderStatus>("idle");
   const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
+  // --- refs for focus/scroll management ---
+  const statusRegionRef = useRef<HTMLDivElement | null>(null); // “Working / progress” wrapper
+  const errorSummaryRef = useRef<HTMLDivElement | null>(null);
+
+  const photosSectionRef = useRef<HTMLElement | null>(null);
+  const infoSectionRef = useRef<HTMLElement | null>(null);
+  const qaSectionRef = useRef<HTMLElement | null>(null);
+  const resultsRef = useRef<HTMLElement | null>(null);
+
+  const qaFirstInputRef = useRef<HTMLInputElement | null>(null);
+
+  const resultsHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const renderPreviewRef = useRef<HTMLDivElement | null>(null);
+
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
-  const resultsRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!result) return;
-    (async () => {
-      await sleep(50);
-      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    })();
-  }, [result]);
-
-  useEffect(() => {
-    if (!aiRenderingEnabled) setRenderOptIn(false);
-  }, [aiRenderingEnabled]);
-
-  useEffect(() => {
-    return () => {
-      photos.forEach((p) => {
-        if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
-      });
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // --- derived state ---
+  const photoCount = photos.length;
 
   const contactOk = useMemo(() => {
     const nOk = customerName.trim().length > 0;
@@ -283,23 +313,19 @@ export default function QuoteForm({
     return nOk && eOk && pOk;
   }, [customerName, email, phone]);
 
-  const photoCount = photos.length;
+  const photosOk = photoCount >= MIN_PHOTOS;
+  const recommendedOk = photoCount >= RECOMMENDED_PHOTOS;
 
-  const canSubmit = useMemo(() => !working && photoCount >= MIN_PHOTOS && contactOk, [
-    working,
-    photoCount,
-    contactOk,
-    MIN_PHOTOS,
-  ]);
+  const canSubmit = useMemo(() => !working && photosOk && contactOk, [working, photosOk, contactOk]);
 
   const disabledReason = useMemo(() => {
     if (working) return null;
-    if (photoCount < MIN_PHOTOS) return `Add at least ${MIN_PHOTOS} photo to continue.`;
+    if (!photosOk) return `Add at least ${MIN_PHOTOS} photo to continue.`;
     if (!customerName.trim()) return "Enter your name to continue.";
     if (!isValidEmail(email)) return "Enter a valid email to continue.";
     if (normalizeUSPhoneDigits(phone).length !== 10) return "Enter a valid 10-digit phone number.";
     return null;
-  }, [working, photoCount, customerName, email, phone, MIN_PHOTOS]);
+  }, [working, photosOk, customerName, email, phone, MIN_PHOTOS]);
 
   const workingLabel = useMemo(() => {
     if (!working) return "Ready";
@@ -320,14 +346,13 @@ export default function QuoteForm({
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
-  const photosOk = photoCount >= MIN_PHOTOS;
-  const recommendedOk = photoCount >= RECOMMENDED_PHOTOS;
+  const hasEstimate = Boolean(result) && !needsQa;
 
+  // --- Stepper (reflects the current flow) ---
   const stepperSteps: StepperStep[] = useMemo(() => {
-    const hasResult = Boolean(result);
+    const hasResult = Boolean(result) && !needsQa;
 
     const photosState: StepState = photosOk ? "done" : "active";
-
     const contactState: StepState = !photosOk ? "todo" : contactOk ? "done" : "active";
 
     const optimizeState: StepState =
@@ -345,7 +370,6 @@ export default function QuoteForm({
           : "todo";
 
     const inspectState: StepState = working && phase === "analyzing" ? "active" : hasResult ? "done" : "todo";
-
     const estimateState: StepState = hasResult ? "done" : "todo";
 
     return [
@@ -356,17 +380,63 @@ export default function QuoteForm({
       { key: "inspect", label: "Inspect", state: inspectState },
       { key: "estimate", label: "Estimate ready", state: estimateState },
     ];
-  }, [photosOk, contactOk, working, phase, result]);
+  }, [photosOk, contactOk, working, phase, result, needsQa]);
 
-// --- PART 2/8 ends here ---
+  // --- focus/scroll rules ---
+  useEffect(() => {
+    if (!error) return;
+    (async () => {
+      await focusAndScroll(errorSummaryRef.current, { block: "start" });
+    })();
+  }, [error]);
 
-// part 3
+  useEffect(() => {
+    if (!needsQa) return;
+    (async () => {
+      await sleep(50);
+      await focusAndScroll(qaSectionRef.current, { block: "start" });
+      await sleep(50);
+      safeFocus(qaFirstInputRef.current);
+    })();
+  }, [needsQa]);
+
+  useEffect(() => {
+    if (!working) return;
+    if (phase === "idle") return;
+    (async () => {
+      await focusAndScroll(statusRegionRef.current, { block: "start" });
+    })();
+  }, [working, phase]);
+
+  useEffect(() => {
+    if (!hasEstimate) return;
+    (async () => {
+      await sleep(75);
+      await focusAndScroll(resultsRef.current, { block: "start" });
+      await sleep(25);
+      safeFocus(resultsHeadingRef.current);
+    })();
+  }, [hasEstimate]);
+
+  useEffect(() => {
+    if (!aiRenderingEnabled) setRenderOptIn(false);
+  }, [aiRenderingEnabled]);
+
+  useEffect(() => {
+    return () => {
+      photos.forEach((p) => {
+        if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const addCameraFiles = useCallback(
     (files: File[]) => {
       if (!files.length) return;
 
       setPhotos((prev) => {
         const next = [...prev];
+
         for (const f of files) {
           if (next.length >= MAX_PHOTOS) break;
 
@@ -376,6 +446,7 @@ export default function QuoteForm({
 
           next.push({ id, shotType, previewSrc, file: f });
         }
+
         return next;
       });
     },
@@ -388,6 +459,7 @@ export default function QuoteForm({
 
       setPhotos((prev) => {
         const next = [...prev];
+
         for (const u of urls) {
           if (!u) continue;
           if (next.length >= MAX_PHOTOS) break;
@@ -397,6 +469,7 @@ export default function QuoteForm({
 
           next.push({ id, shotType, previewSrc: u, uploadedUrl: u });
         }
+
         return next;
       });
     },
@@ -407,8 +480,10 @@ export default function QuoteForm({
     setPhotos((prev) => {
       const p = prev.find((x) => x.id === id);
       if (p?.previewSrc?.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+
       const next = prev.filter((x) => x.id !== id);
 
+      // Preserve ordering semantics
       return next.map((x, idx) => ({
         ...x,
         shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType,
@@ -450,29 +525,38 @@ export default function QuoteForm({
     renderAttemptedForQuoteRef.current = null;
 
     if (!aiRenderingEnabled) setRenderOptIn(false);
+
+    queueMicrotask(() => {
+      focusAndScroll(statusRegionRef.current, { block: "start" });
+    });
   }
 
   async function uploadPhotosNow(filesList: FileList) {
     const arr = Array.from(filesList ?? []);
     if (!arr.length) return;
 
+    setError(null);
     setWorking(true);
     setPhase("compressing");
 
     try {
       const compressed = await Promise.all(arr.map((f) => compressImage(f)));
       setPhase("uploading");
+
       const urls = await uploadToBlob(compressed);
       addUploadedUrls(urls);
+
+      queueMicrotask(() => {
+        focusAndScroll(photosSectionRef.current, { block: "start" });
+      });
+    } catch (e: any) {
+      setError(e?.message ?? "Upload failed.");
     } finally {
       setWorking(false);
       setPhase("idle");
     }
   }
 
-// --- PART 3/8 ends here ---
-
-// part 4
   async function submitEstimate() {
     setError(null);
     setResult(null);
@@ -487,37 +571,61 @@ export default function QuoteForm({
     setRenderError(null);
     renderAttemptedForQuoteRef.current = null;
 
+    queueMicrotask(() => {
+      focusAndScroll(statusRegionRef.current, { block: "start" });
+    });
+
     if (!tenantSlug || typeof tenantSlug !== "string") {
       setError("Missing tenant slug. Please reload the page (invalid tenant link).");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
     if (photos.length < MIN_PHOTOS) {
       setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
-      return;
-    }
-    if (photos.length > MAX_PHOTOS) {
-      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
       return;
     }
 
-    if (!customerName.trim()) return setError("Please enter your name.");
-    if (!isValidEmail(email)) return setError("Please enter a valid email address.");
-    if (normalizeUSPhoneDigits(phone).length !== 10)
-      return setError("Please enter a valid 10-digit phone number.");
+    if (photos.length > MAX_PHOTOS) {
+      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
+
+    if (!customerName.trim()) {
+      setError("Please enter your name.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
+
+    if (!isValidEmail(email)) {
+      setError("Please enter a valid email address.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
+
+    if (normalizeUSPhoneDigits(phone).length !== 10) {
+      setError("Please enter a valid 10-digit phone number.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
 
     setWorking(true);
 
     try {
       let currentPhotos = photos;
-
-      // 1) Upload any camera photos that don't have uploadedUrl yet
       const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
+
       if (needUpload.length) {
         setPhase("compressing");
+        queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+
         const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
 
         setPhase("uploading");
+        queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+
         const urls = await uploadToBlob(compressed);
 
         const byId = new Map<string, string>();
@@ -549,8 +657,8 @@ export default function QuoteForm({
         throw new Error("Some photos are not uploaded yet. Please try again.");
       }
 
-      // 2) Submit to backend
       setPhase("analyzing");
+      queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
       const res = await fetch("/api/quote/submit", {
         method: "POST",
@@ -574,6 +682,7 @@ export default function QuoteForm({
 
       const text = await res.text();
       let json: any = null;
+
       try {
         json = text ? JSON.parse(text) : null;
       } catch {
@@ -592,10 +701,6 @@ export default function QuoteForm({
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
       setQuoteLogId(qid);
 
-      // 3) Live Q&A gate (if server needs more info)
-      // IMPORTANT:
-      // Your backend currently returns `needsQa` + `qa` (and maybe NOT `needs_qa`/`questions`).
-      // So we support both shapes here.
       const needsQaFlag = Boolean(json?.needsQa ?? json?.needs_qa);
       const qsFromTop: string[] = Array.isArray(json?.questions) ? json.questions : [];
       const qsFromQaObj: string[] = Array.isArray(json?.qa?.questions) ? json.qa.questions : [];
@@ -607,46 +712,77 @@ export default function QuoteForm({
       if (needsQaFlag && qsMerged.length) {
         setNeedsQa(true);
         setQaQuestions(qsMerged);
-        setQaAnswers(qsMerged.map(() => "")); // one answer per question
-
-        // optional placeholder output (keeps UI from looking empty)
+        setQaAnswers(qsMerged.map(() => ""));
         setResult(json?.output ?? json);
 
+        queueMicrotask(async () => {
+          await focusAndScroll(qaSectionRef.current, { block: "start" });
+          await sleep(25);
+          safeFocus(qaFirstInputRef.current);
+        });
+
         renderAttemptedForQuoteRef.current = null;
-        return; // stop here — user must answer questions
+        return;
       }
 
-      // 4) Final estimate returned
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
 
       renderAttemptedForQuoteRef.current = null;
+
+      queueMicrotask(async () => {
+        await sleep(25);
+        safeFocus(resultsHeadingRef.current);
+      });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
       setPhase("idle");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
     }
   }
-
-// --- PART 4/8 ends here ---
-
-// part 5
   async function submitQaAnswers() {
     setError(null);
 
-    if (!tenantSlug) return setError("Missing tenant slug.");
-    if (!quoteLogId) return setError("Missing quote reference. Please start over.");
-    if (!qaQuestions.length) return setError("No questions to answer.");
+    queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
 
-    // require an answer for each question
+    if (!tenantSlug) {
+      setError("Missing tenant slug.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
+
+    if (!quoteLogId) {
+      setError("Missing quote reference. Please start over.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
+
+    if (!qaQuestions.length) {
+      setError("No questions to answer.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
+      return;
+    }
+
     const trimmed = qaAnswers.map((a) => String(a ?? "").trim());
     const missingIdx = trimmed.findIndex((a) => !a);
+
     if (missingIdx !== -1) {
-      return setError(`Please answer: "${qaQuestions[missingIdx]}"`);
+      setError(`Please answer: "${qaQuestions[missingIdx]}"`);
+
+      queueMicrotask(async () => {
+        await focusAndScroll(qaSectionRef.current, { block: "start" });
+        await sleep(25);
+        const el = document.getElementById(`qa-input-${missingIdx}`) as HTMLInputElement | null;
+        if (el) safeFocus(el);
+        else safeFocus(qaFirstInputRef.current);
+      });
+
+      return;
     }
 
     setWorking(true);
@@ -656,10 +792,6 @@ export default function QuoteForm({
       const res = await fetch("/api/quote/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-
-        // Backend supports BOTH:
-        // - qaAnswers: ["a1","a2"] (current UI)
-        // - qaAnswers: [{question, answer}] (future)
         body: JSON.stringify({
           tenantSlug,
           quoteLogId,
@@ -669,6 +801,7 @@ export default function QuoteForm({
 
       const text = await res.text();
       let json: any = null;
+
       try {
         json = text ? JSON.parse(text) : null;
       } catch {
@@ -684,13 +817,18 @@ export default function QuoteForm({
         throw new Error(`Finalize failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
       }
 
-      // Final estimate is now available
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
+
+      queueMicrotask(async () => {
+        await sleep(25);
+        safeFocus(resultsHeadingRef.current);
+      });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
     } finally {
       setWorking(false);
       setPhase("idle");
@@ -705,6 +843,8 @@ export default function QuoteForm({
     setRenderError(null);
     setRenderImageUrl(null);
 
+    queueMicrotask(() => focusAndScroll(statusRegionRef.current, { block: "start" }));
+
     try {
       const res = await fetch("/api/quote/render", {
         method: "POST",
@@ -714,6 +854,7 @@ export default function QuoteForm({
 
       const txt = await res.text();
       let j: any = null;
+
       try {
         j = txt ? JSON.parse(txt) : null;
       } catch {
@@ -727,9 +868,15 @@ export default function QuoteForm({
 
       setRenderImageUrl(url);
       setRenderStatus("rendered");
+
+      queueMicrotask(async () => {
+        await sleep(50);
+        await focusAndScroll(renderPreviewRef.current, { block: "start" });
+      });
     } catch (e: any) {
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
+      queueMicrotask(() => focusAndScroll(errorSummaryRef.current, { block: "start" }));
     }
   }
 
@@ -746,25 +893,22 @@ export default function QuoteForm({
   async function retryRender() {
     if (!quoteLogId) return;
     renderAttemptedForQuoteRef.current = null;
-    await startRenderOnce(quoteLogId);
+    await startRenderOnce(String(quoteLogId));
   }
 
-// --- PART 5/8 ends here ---
-
-// part 6
-  const hasEstimate = Boolean(result) && !needsQa;
-
-  // --- structured result helpers ---
+  // --- structured result helpers (used in Results UI) ---
   const estLow = money(result?.estimate_low ?? result?.estimateLow);
   const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
   const confidence = String(result?.confidence ?? "").toLowerCase();
+
   const scope: string[] = Array.isArray(result?.visible_scope)
     ? result.visible_scope
     : Array.isArray(result?.visibleScope)
-    ? result.visibleScope
-    : [];
+      ? result.visibleScope
+      : [];
+
   const assumptions: string[] = Array.isArray(result?.assumptions) ? result.assumptions : [];
   const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
 
@@ -772,15 +916,19 @@ export default function QuoteForm({
     confidence === "high"
       ? "green"
       : confidence === "medium"
-      ? "yellow"
-      : confidence === "low"
-      ? "red"
-      : "gray";
-
+        ? "yellow"
+        : confidence === "low"
+          ? "red"
+          : "gray";
   return (
     <div className="space-y-6">
-      {/* Progress */}
-      <div className="grid gap-3">
+      {/* Status / Progress region (focus target while working/rendering) */}
+      <div
+        ref={statusRegionRef}
+        tabIndex={-1}
+        aria-label="Status and progress"
+        className="grid gap-3 outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20 rounded-xl"
+      >
         <ProgressBar title="Working" label={workingLabel} active={working} />
         <Stepper steps={stepperSteps} />
         {aiRenderingEnabled ? (
@@ -788,8 +936,25 @@ export default function QuoteForm({
         ) : null}
       </div>
 
+      {/* Error summary (focus target on any error) */}
+      {error ? (
+        <div
+          ref={errorSummaryRef}
+          tabIndex={-1}
+          role="alert"
+          aria-live="assertive"
+          className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 whitespace-pre-wrap outline-none dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200"
+        >
+          <div className="font-semibold mb-1">There was a problem</div>
+          {error}
+        </div>
+      ) : null}
+
       {/* Photos */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+      <section
+        ref={photosSectionRef}
+        className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+      >
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Add photos</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -918,10 +1083,11 @@ export default function QuoteForm({
         </div>
       </section>
 
-// --- PART 6/8 ends here ---
-
       {/* Details */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+      <section
+        ref={infoSectionRef}
+        className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+      >
         <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Your info</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -1031,17 +1197,14 @@ export default function QuoteForm({
         >
           Start Over
         </button>
-
-        {error && (
-          <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-            {error}
-          </div>
-        )}
       </section>
 
       {/* Live Q&A */}
       {needsQa ? (
-        <section className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900">
+        <section
+          ref={qaSectionRef}
+          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+        >
           <div>
             <h2 className="font-semibold text-gray-900 dark:text-gray-100">Quick questions</h2>
             <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -1056,6 +1219,8 @@ export default function QuoteForm({
                   {i + 1}. {q} <span className="text-red-600">*</span>
                 </div>
                 <input
+                  id={`qa-input-${i}`}
+                  ref={i === 0 ? qaFirstInputRef : undefined}
                   className="mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                   value={qaAnswers[i] ?? ""}
                   onChange={(e) => {
@@ -1087,8 +1252,6 @@ export default function QuoteForm({
         </section>
       ) : null}
 
-// --- PART 7/8 ends here ---
-
       {/* Results */}
       {hasEstimate ? (
         <section
@@ -1097,7 +1260,13 @@ export default function QuoteForm({
         >
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Your estimate</h2>
+              <h2
+                ref={resultsHeadingRef}
+                tabIndex={-1}
+                className="text-lg font-semibold text-gray-900 dark:text-gray-100 outline-none"
+              >
+                Your estimate
+              </h2>
               <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
                 This is a fast estimate range based on your photos + notes. Final pricing may change after inspection.
               </p>
@@ -1119,6 +1288,7 @@ export default function QuoteForm({
               <div className="text-3xl font-semibold text-gray-900 dark:text-gray-100">
                 {estLow && estHigh ? `$${estLow} – $${estHigh}` : "We need a bit more info"}
               </div>
+
               {summary ? (
                 <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{summary}</div>
               ) : (
@@ -1179,7 +1349,10 @@ export default function QuoteForm({
           ) : null}
 
           {aiRenderingEnabled && renderOptIn ? (
-            <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900">
+            <div
+              ref={renderPreviewRef}
+              className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900"
+            >
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering preview</div>
