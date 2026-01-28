@@ -14,6 +14,7 @@ function clamp(n: number, min: number, max: number) {
 }
 
 function parseStepLabel(s: string) {
+  // expects: "Step X of Y"
   const m = String(s || "").match(/Step\s+(\d+)\s+of\s+(\d+)/i);
   if (!m) return null;
   const step = Number(m[1]);
@@ -27,6 +28,7 @@ function isTypingElement(el: Element | null) {
   const tag = (el as HTMLElement).tagName?.toLowerCase?.() || "";
   if (tag === "input" || tag === "textarea" || tag === "select") return true;
 
+  // contenteditable can be on the element or inherited
   const he = el as HTMLElement;
   if (typeof he.isContentEditable === "boolean" && he.isContentEditable) return true;
 
@@ -42,6 +44,7 @@ export function StatusBar({
   renderingLabel,
   sticky = false,
 
+  // Back-compat props (ignored by this UI)
   workingActiveDetail,
   stepperSteps,
 }: {
@@ -53,6 +56,7 @@ export function StatusBar({
   renderingLabel?: string;
   sticky?: boolean;
 
+  // ✅ allow older callers / typings
   workingActiveDetail?: string | null;
   stepperSteps?: StepperStep[];
 }) {
@@ -107,11 +111,14 @@ export function StatusBar({
       tabIndex={-1}
       aria-label="Progress status"
       className={[
+        // ✅ critical: prevent any child from pushing layout wider than viewport
+        "w-full max-w-full overflow-x-hidden",
         "rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-900",
         collapsed ? "p-3" : "p-4",
         effectiveSticky ? "sticky top-2 z-20" : "",
       ].join(" ")}
     >
+      {/* Header row */}
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-gray-600 dark:text-gray-300">Status</div>
@@ -130,27 +137,33 @@ export function StatusBar({
           ) : null}
         </div>
 
+        {/* ✅ was shrink-0 + nowrap (can force horizontal overflow on mobile).
+            Now it can shrink + truncate within the card. */}
         <div
           className={[
-            "shrink-0 whitespace-nowrap",
+            "min-w-0 max-w-[45%] text-right truncate",
             collapsed
               ? "text-xs font-medium text-gray-600 dark:text-gray-300"
               : "text-sm font-semibold text-gray-700 dark:text-gray-200",
           ].join(" ")}
+          title={workingRightLabel}
         >
           {workingRightLabel}
         </div>
       </div>
 
+      {/* Progress bar only while working */}
       {isWorking ? (
         <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
           <div
-            className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 ease-out dark:bg-emerald-400"
+            // ✅ make it pop (green)
+            className="h-full rounded-full bg-emerald-600 transition-[width] duration-300 ease-out"
             style={{ width: `${pct}%` }}
           />
         </div>
       ) : null}
 
+      {/* Optional: AI Rendering row */}
       {showRenderingRow ? (
         <div
           className={[
@@ -158,14 +171,14 @@ export function StatusBar({
             isWorking ? "mt-4 p-4" : "mt-3 px-3 py-2",
           ].join(" ")}
         >
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI Rendering</div>
-            <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{renderingLabel || "Off"}</div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0 text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">AI Rendering</div>
+            <div className="shrink-0 text-xs font-semibold text-gray-700 dark:text-gray-200">{renderingLabel || "Off"}</div>
           </div>
 
           {showRenderingMotion ? (
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
-              <div className="h-full w-1/2 rounded-full bg-emerald-600/80 dark:bg-emerald-400/80 animate-pulse" />
+              <div className="h-full w-1/2 rounded-full bg-emerald-600/80 animate-pulse" />
             </div>
           ) : null}
         </div>

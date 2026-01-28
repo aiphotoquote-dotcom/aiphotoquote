@@ -775,7 +775,7 @@ export default function QuoteForm({
   const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
 
   return (
-    <div className="space-y-6">
+  <div className="space-y-6 w-full max-w-full overflow-x-hidden">
       <StatusBar
         statusRef={statusRegionRef as any}
         workingLabel={workingLabel}
