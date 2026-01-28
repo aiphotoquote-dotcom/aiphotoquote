@@ -1,4 +1,4 @@
-// app/layout.tsx
+// src/app/layout.tsx
 import type { Metadata } from "next";
 import "./globals.css";
 import { ClerkProvider } from "@clerk/nextjs";
@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <ClerkProvider>
-      <html lang="en" suppressHydrationWarning className="overflow-x-hidden">
+      <html lang="en" suppressHydrationWarning>
         <body className="min-h-screen overflow-x-hidden bg-background text-foreground antialiased">
           {children}
         </body>
