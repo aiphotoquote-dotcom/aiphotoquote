@@ -264,6 +264,16 @@ export default function QuoteForm({
   // MODE: show only one major “panel” at a time
   const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
 
+  // Progress for render preview (for ResultsSection)
+  const renderProgressPct = useMemo(() => {
+    if (!showRenderingMini) return 0;
+    if (renderStatus === "idle") return 10;
+    if (renderStatus === "running") return 60;
+    if (renderStatus === "rendered") return 100;
+    if (renderStatus === "failed") return 100;
+    return 0;
+  }, [showRenderingMini, renderStatus]);
+
   // Overall progress for bottom dock
   const progressPct = useMemo(() => {
     // During working: step-based progress (not full)
@@ -283,17 +293,6 @@ export default function QuoteForm({
 
     return 60;
   }, [working, workingStep.idx, workingStep.total, mode, photosOk, contactOk, showRenderingMini, renderStatus]);
-
-  // Rendering progress for ResultsSection (required prop)
-  const renderProgressPct = useMemo(() => {
-    if (!aiRenderingEnabled || !renderOptIn) return 0;
-    if (!quoteLogId) return 10;
-    if (renderStatus === "idle") return 15;
-    if (renderStatus === "running") return 65;
-    if (renderStatus === "rendered") return 100;
-    if (renderStatus === "failed") return 100;
-    return 10;
-  }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
   // Bottom dock copy + action
   const dock = useMemo(() => {
@@ -318,7 +317,9 @@ export default function QuoteForm({
         rightLabel: "Error",
         primaryLabel: "View error",
         disabled: false,
-        onPrimary: () => focusAndScroll(errorSummaryRef.current, { block: "start" }),
+        onPrimary: () => {
+          void focusAndScroll(errorSummaryRef.current, { block: "start" });
+        },
       };
     }
 
@@ -329,12 +330,14 @@ export default function QuoteForm({
         rightLabel: "Action needed",
         primaryLabel: "Jump to questions",
         disabled: false,
-        onPrimary: () => focusAndScroll(qaSectionRef.current, { block: "start" }),
+        onPrimary: () => {
+          void focusAndScroll(qaSectionRef.current, { block: "start" });
+        },
       };
     }
 
     if (mode === "results") {
-      // If rendering is running, steer to preview (but no retry button here)
+      // If rendering is running, steer to preview
       if (showRenderingMini && renderStatus === "running") {
         return {
           title: "Rendering in progress",
@@ -342,7 +345,9 @@ export default function QuoteForm({
           rightLabel: "Rendering…",
           primaryLabel: "Jump to preview",
           disabled: false,
-          onPrimary: () => focusAndScroll(renderPreviewRef.current, { block: "start" }),
+          onPrimary: () => {
+            void focusAndScroll(renderPreviewRef.current, { block: "start" });
+          },
         };
       }
 
@@ -352,7 +357,9 @@ export default function QuoteForm({
         rightLabel: "Done",
         primaryLabel: "View estimate",
         disabled: false,
-        onPrimary: () => focusAndScroll(resultsRef.current, { block: "start" }),
+        onPrimary: () => {
+          void focusAndScroll(resultsRef.current, { block: "start" });
+        },
       };
     }
 
@@ -364,7 +371,9 @@ export default function QuoteForm({
         rightLabel: "Photos",
         primaryLabel: "Jump to photos",
         disabled: false,
-        onPrimary: () => focusAndScroll(photosSectionRef.current, { block: "start" }),
+        onPrimary: () => {
+          void focusAndScroll(photosSectionRef.current, { block: "start" });
+        },
       };
     }
 
@@ -375,7 +384,9 @@ export default function QuoteForm({
         rightLabel: "Contact",
         primaryLabel: "Jump to contact",
         disabled: false,
-        onPrimary: () => focusAndScroll(infoSectionRef.current, { block: "start" }),
+        onPrimary: () => {
+          void focusAndScroll(infoSectionRef.current, { block: "start" });
+        },
       };
     }
 
@@ -385,7 +396,9 @@ export default function QuoteForm({
       rightLabel: "Ready",
       primaryLabel: "Jump to submit",
       disabled: false,
-      onPrimary: () => focusAndScroll(infoSectionRef.current, { block: "start" }),
+      onPrimary: () => {
+        void focusAndScroll(infoSectionRef.current, { block: "start" });
+      },
     };
   }, [
     working,
@@ -420,7 +433,7 @@ export default function QuoteForm({
     })();
   }, [needsQa]);
 
-  // When estimate appears, don’t auto-scroll. Let dock handle it.
+  // When estimate appears, do not auto-scroll. Let dock handle it.
   useEffect(() => {
     if (!hasEstimate) return;
     (async () => {
@@ -538,7 +551,7 @@ export default function QuoteForm({
     if (!aiRenderingEnabled) setRenderOptIn(false);
 
     queueMicrotask(() => {
-      focusAndScroll(photosSectionRef.current, { block: "start" });
+      void focusAndScroll(photosSectionRef.current, { block: "start" });
     });
   }
 
@@ -722,7 +735,7 @@ export default function QuoteForm({
       setWorking(false);
       setPhase("idle");
       queueMicrotask(() => {
-        if (errorSummaryRef.current) focusAndScroll(errorSummaryRef.current, { block: "start" });
+        if (errorSummaryRef.current) void focusAndScroll(errorSummaryRef.current, { block: "start" });
       });
     }
   }
@@ -801,7 +814,7 @@ export default function QuoteForm({
       setWorking(false);
       setPhase("idle");
       queueMicrotask(() => {
-        if (errorSummaryRef.current) focusAndScroll(errorSummaryRef.current, { block: "start" });
+        if (errorSummaryRef.current) void focusAndScroll(errorSummaryRef.current, { block: "start" });
       });
     }
   }
@@ -853,13 +866,6 @@ export default function QuoteForm({
     startRenderOnce(quoteLogId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
-
-  async function retryRender() {
-    // Keeping function for backwards compatibility with older ResultsSection; we won't pass it unless needed.
-    if (!quoteLogId) return;
-    renderAttemptedForQuoteRef.current = null;
-    await startRenderOnce(String(quoteLogId));
-  }
 
   return (
     <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6 pb-44">
@@ -947,7 +953,6 @@ export default function QuoteForm({
           renderImageUrl={renderImageUrl}
           renderError={renderError}
           renderProgressPct={renderProgressPct}
-          working={working}
         />
       ) : null}
 
