@@ -4,23 +4,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { StatusBar } from "./quote/StatusBar";
-import { useQuoteFlow, type RenderStatus, type WorkPhase } from "./quote/useQuoteFlow";
-
 import { PhotoSection, type PhotoItem, type ShotType } from "./quote/PhotoSection";
 import { InfoSection } from "./quote/InfoSection";
 import { QaSection } from "./quote/QaSection";
 import { ResultsSection } from "./quote/ResultsSection";
 
+type RenderStatus = "idle" | "running" | "rendered" | "failed";
+
 function digitsOnlyRaw(s: string) {
   return (s || "").replace(/\D/g, "");
 }
-
 function normalizeUSPhoneDigits(input: string) {
   const d = digitsOnlyRaw(input);
   if (d.length === 11 && d.startsWith("1")) return d.slice(1);
   return d.slice(0, 10);
 }
-
 function formatUSPhone(input: string) {
   const d = normalizeUSPhoneDigits(input);
   const a = d.slice(0, 3);
@@ -30,16 +28,13 @@ function formatUSPhone(input: string) {
   if (d.length <= 6) return `(${a}) ${b}`;
   return `(${a}) ${b}-${c}`;
 }
-
 function isValidEmail(email: string) {
   const s = (email || "").trim();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 }
-
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
-
 function safeFocus(el: HTMLElement | null | undefined) {
   if (!el) return;
   try {
@@ -52,7 +47,6 @@ function safeFocus(el: HTMLElement | null | undefined) {
     }
   }
 }
-
 async function focusAndScroll(
   el: HTMLElement | null | undefined,
   opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }
@@ -60,7 +54,6 @@ async function focusAndScroll(
   if (!el) return;
   const block = opts?.block ?? "start";
   const behavior = opts?.behavior ?? "smooth";
-
   try {
     el.scrollIntoView({ behavior, block });
   } catch {
@@ -70,7 +63,6 @@ async function focusAndScroll(
       // ignore
     }
   }
-
   await sleep(25);
   safeFocus(el);
 }
@@ -142,7 +134,9 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
     throw new Error(`Upload returned non-JSON (HTTP ${res.status}).`);
   }
 
-  if (!res.ok || !j?.ok) throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
+  if (!res.ok || !j?.ok) {
+    throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
+  }
 
   const urls: string[] = Array.isArray(j?.urls)
     ? j.urls.map((x: any) => String(x)).filter(Boolean)
@@ -152,6 +146,20 @@ async function uploadToBlob(files: File[]): Promise<string[]> {
 
   if (!urls.length) throw new Error("Blob upload returned no file urls.");
   return urls;
+}
+
+function computeWorkingStep(phase: "idle" | "compressing" | "uploading" | "analyzing") {
+  if (phase === "compressing") return { idx: 1, total: 3, label: "Optimizing photos…" };
+  if (phase === "uploading") return { idx: 2, total: 3, label: "Uploading…" };
+  if (phase === "analyzing") return { idx: 3, total: 3, label: "Inspecting…" };
+  return { idx: 0, total: 3, label: "Ready" };
+}
+
+function prettyCount(n: number) {
+  if (!Number.isFinite(n)) return "0";
+  if (n <= 999) return String(n);
+  if (n <= 9_999) return `${Math.round(n / 100) / 10}k`;
+  return `${Math.round(n / 1000)}k`;
 }
 
 export default function QuoteForm({
@@ -164,6 +172,7 @@ export default function QuoteForm({
   const MIN_PHOTOS = 1;
   const MAX_PHOTOS = 12;
 
+  // --- form state ---
   const [customerName, setCustomerName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
@@ -173,22 +182,28 @@ export default function QuoteForm({
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<WorkPhase>("idle");
+  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
 
   const [result, setResult] = useState<any>(null);
   const [quoteLogId, setQuoteLogId] = useState<string | null>(null);
 
+  // Live Q&A (server-driven)
   const [needsQa, setNeedsQa] = useState(false);
   const [qaQuestions, setQaQuestions] = useState<string[]>([]);
   const [qaAnswers, setQaAnswers] = useState<string[]>([]);
 
+  // Errors
   const [error, setError] = useState<string | null>(null);
 
+  // Rendering
   const [renderStatus, setRenderStatus] = useState<RenderStatus>("idle");
   const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
-  const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
+  // Fake-but-smooth render progress
+  const [renderProgressPct, setRenderProgressPct] = useState(0);
+
+  // --- refs ---
   const statusRegionRef = useRef<HTMLDivElement | null>(null);
   const errorSummaryRef = useRef<HTMLDivElement | null>(null);
 
@@ -201,6 +216,9 @@ export default function QuoteForm({
   const resultsHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const renderPreviewRef = useRef<HTMLDivElement | null>(null);
 
+  const renderAttemptedForQuoteRef = useRef<string | null>(null);
+
+  // --- derived state ---
   const photoCount = photos.length;
 
   const contactOk = useMemo(() => {
@@ -211,6 +229,7 @@ export default function QuoteForm({
   }, [customerName, email, phone]);
 
   const photosOk = photoCount >= MIN_PHOTOS;
+
   const canSubmit = useMemo(() => !working && photosOk && contactOk, [working, photosOk, contactOk]);
 
   const disabledReason = useMemo(() => {
@@ -223,44 +242,146 @@ export default function QuoteForm({
   }, [working, photosOk, customerName, email, phone, MIN_PHOTOS]);
 
   const hasEstimate = Boolean(result) && !needsQa;
+
+  const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
+
+  const showRendering = useMemo(() => aiRenderingEnabled && renderOptIn, [aiRenderingEnabled, renderOptIn]);
+
+  const renderingLabel = useMemo(() => {
+    if (!aiRenderingEnabled) return "Disabled";
+    if (!renderOptIn) return "Off";
+    if (!quoteLogId) return "Waiting";
+    if (renderStatus === "idle") return "Queued";
+    if (renderStatus === "running") return "Rendering…";
+    if (renderStatus === "rendered") return "Ready";
+    if (renderStatus === "failed") return "Failed";
+    return "Waiting";
+  }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
+
   const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
 
-  const confidenceLabel = useMemo(() => {
-    const conf = String(result?.confidence ?? "").toLowerCase();
-    if (!conf) return undefined;
-    if (conf === "high") return "High";
-    if (conf === "medium") return "Medium";
-    if (conf === "low") return "Low";
-    return conf;
-  }, [result?.confidence]);
+  // Status card copy + single action (no clutter)
+  const statusModel = useMemo(() => {
+    if (working) {
+      const right = workingStep.idx ? `Step ${workingStep.idx}/${workingStep.total}` : "Working";
+      const photosLabel = photoCount ? `${prettyCount(photoCount)} photo${photoCount === 1 ? "" : "s"}` : null;
+      const subtitle = [photosLabel, "Hang tight — this usually takes a few seconds."].filter(Boolean).join(" • ");
+      return {
+        title: workingStep.label,
+        subtitle,
+        rightLabel: right,
+        primaryLabel: undefined as string | undefined,
+        onPrimary: undefined as (() => void) | undefined,
+      };
+    }
 
-  const vm = useQuoteFlow({
-    mode,
+    if (error) {
+      return {
+        title: "Fix the issue",
+        subtitle: "There was a problem — jump to the error and try again.",
+        rightLabel: "Error",
+        primaryLabel: "View error",
+        onPrimary: () => focusAndScroll(errorSummaryRef.current, { block: "start" }),
+      };
+    }
+
+    if (mode === "qa") {
+      return {
+        title: "Answer questions",
+        subtitle: "One more step — answer these and we’ll finalize your estimate.",
+        rightLabel: "Next",
+        primaryLabel: "Jump to questions",
+        onPrimary: () => focusAndScroll(qaSectionRef.current, { block: "start" }),
+      };
+    }
+
+    if (mode === "results") {
+      if (showRendering && renderStatus === "running") {
+        return {
+          title: "Estimate ready",
+          subtitle: "Rendering your visual preview now…",
+          rightLabel: "Rendering",
+          primaryLabel: "Jump to preview",
+          onPrimary: () => focusAndScroll(renderPreviewRef.current, { block: "start" }),
+        };
+      }
+
+      return {
+        title: "Estimate ready",
+        subtitle: showRendering ? `Rendering: ${renderingLabel}` : "Review your estimate details below.",
+        rightLabel: "Done",
+        primaryLabel: "View estimate",
+        onPrimary: () => focusAndScroll(resultsRef.current, { block: "start" }),
+      };
+    }
+
+    // entry
+    if (!photosOk) {
+      return {
+        title: "Add photos",
+        subtitle: `Add at least ${MIN_PHOTOS} photo to continue — 2–6 is best.`,
+        rightLabel: "Next",
+        primaryLabel: "Jump to photos",
+        onPrimary: () => focusAndScroll(photosSectionRef.current, { block: "start" }),
+      };
+    }
+
+    if (!contactOk) {
+      return {
+        title: "Enter your info",
+        subtitle: "Name, email, and phone are required so we can follow up.",
+        rightLabel: "Next",
+        primaryLabel: "Jump to contact",
+        onPrimary: () => focusAndScroll(infoSectionRef.current, { block: "start" }),
+      };
+    }
+
+    return {
+      title: "Ready to submit",
+      subtitle: "You’re ready — submit and we’ll inspect your photos.",
+      rightLabel: "Ready",
+      primaryLabel: "Jump to submit",
+      onPrimary: () => focusAndScroll(infoSectionRef.current, { block: "start" }),
+    };
+  }, [
     working,
-    phase,
+    workingStep.label,
+    workingStep.idx,
+    workingStep.total,
+    photoCount,
     error,
-
+    mode,
+    showRendering,
+    renderStatus,
+    renderingLabel,
     photosOk,
     contactOk,
-    photoCount,
+    MIN_PHOTOS,
+  ]);
 
-    hasEstimate,
-    confidenceLabel,
+  // Overall progress for the top bar (never disappears)
+  const progressPct = useMemo(() => {
+    if (working) {
+      const pct = Math.round((workingStep.idx / Math.max(1, workingStep.total)) * 100);
+      return Math.max(5, Math.min(95, pct));
+    }
+    if (mode === "results") return 100;
+    if (mode === "qa") return 80;
+    if (!photosOk) return 20;
+    if (!contactOk) return 45;
+    return 60;
+  }, [working, workingStep.idx, workingStep.total, mode, photosOk, contactOk]);
 
-    aiRenderingEnabled,
-    renderOptIn,
-    quoteLogId,
-    renderStatus,
+  // Sticky rules: keep the top bar available during the “important” states
+  const sticky = useMemo(() => {
+    if (working) return true;
+    if (error) return true;
+    if (mode === "qa") return true;
+    if (mode === "results" && showRendering && renderStatus === "running") return true;
+    return false;
+  }, [working, error, mode, showRendering, renderStatus]);
 
-    statusRef: statusRegionRef,
-    errorRef: errorSummaryRef,
-    photosRef: photosSectionRef,
-    infoRef: infoSectionRef,
-    qaRef: qaSectionRef,
-    resultsRef: resultsRef,
-    renderPreviewRef: renderPreviewRef,
-  });
-
+  // Error auto-scroll only (avoid “focus all over the place”)
   useEffect(() => {
     if (!error) return;
     (async () => {
@@ -268,25 +389,36 @@ export default function QuoteForm({
     })();
   }, [error]);
 
+  // When QA appears, focus first input (no auto-scroll)
   useEffect(() => {
     if (!needsQa) return;
     (async () => {
-      await sleep(60);
-      await focusAndScroll(qaSectionRef.current, { block: "start" });
-      await sleep(30);
+      await sleep(50);
       safeFocus(qaFirstInputRef.current);
     })();
   }, [needsQa]);
 
+  // Render progress animation while running
   useEffect(() => {
-    if (!hasEstimate) return;
-    (async () => {
-      await sleep(60);
-      await focusAndScroll(statusRegionRef.current, { block: "start" });
-      await sleep(20);
-      safeFocus(resultsHeadingRef.current);
-    })();
-  }, [hasEstimate]);
+    if (renderStatus !== "running") {
+      setRenderProgressPct(renderStatus === "rendered" ? 100 : 0);
+      return;
+    }
+
+    setRenderProgressPct(12);
+
+    const t = window.setInterval(() => {
+      setRenderProgressPct((prev) => {
+        // ease toward 92, then hold until server returns
+        const cap = 92;
+        if (prev >= cap) return cap;
+        const bump = prev < 50 ? 6 : prev < 75 ? 3 : 1;
+        return Math.min(cap, prev + bump);
+      });
+    }, 650);
+
+    return () => window.clearInterval(t);
+  }, [renderStatus]);
 
   useEffect(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
@@ -307,13 +439,17 @@ export default function QuoteForm({
 
       setPhotos((prev) => {
         const next = [...prev];
+
         for (const f of files) {
           if (next.length >= MAX_PHOTOS) break;
+
           const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
           const previewSrc = URL.createObjectURL(f);
           const shotType = defaultShotTypeForIndex(next.length);
+
           next.push({ id, shotType, previewSrc, file: f });
         }
+
         return next;
       });
     },
@@ -326,13 +462,17 @@ export default function QuoteForm({
 
       setPhotos((prev) => {
         const next = [...prev];
+
         for (const u of urls) {
           if (!u) continue;
           if (next.length >= MAX_PHOTOS) break;
+
           const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
           const shotType = defaultShotTypeForIndex(next.length);
+
           next.push({ id, shotType, previewSrc: u, uploadedUrl: u });
         }
+
         return next;
       });
     },
@@ -345,6 +485,7 @@ export default function QuoteForm({
       if (p?.previewSrc?.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
 
       const next = prev.filter((x) => x.id !== id);
+
       return next.map((x, idx) => ({
         ...x,
         shotType: idx === 0 ? "wide" : idx === 1 ? "closeup" : x.shotType,
@@ -383,6 +524,7 @@ export default function QuoteForm({
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
+    setRenderProgressPct(0);
     renderAttemptedForQuoteRef.current = null;
 
     if (!aiRenderingEnabled) setRenderOptIn(false);
@@ -403,6 +545,7 @@ export default function QuoteForm({
     try {
       const compressed = await Promise.all(arr.map((f) => compressImage(f)));
       setPhase("uploading");
+
       const urls = await uploadToBlob(compressed);
       addUploadedUrls(urls);
     } catch (e: any) {
@@ -425,23 +568,44 @@ export default function QuoteForm({
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
+    setRenderProgressPct(0);
     renderAttemptedForQuoteRef.current = null;
 
-    if (!tenantSlug || typeof tenantSlug !== "string")
-      return setError("Missing tenant slug. Please reload the page (invalid tenant link).");
+    queueMicrotask(() => {
+      focusAndScroll(statusRegionRef.current, { block: "start" });
+    });
 
-    if (photos.length < MIN_PHOTOS) return setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
-    if (photos.length > MAX_PHOTOS) return setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
-    if (!customerName.trim()) return setError("Please enter your name.");
-    if (!isValidEmail(email)) return setError("Please enter a valid email address.");
-    if (normalizeUSPhoneDigits(phone).length !== 10) return setError("Please enter a valid 10-digit phone number.");
+    if (!tenantSlug || typeof tenantSlug !== "string") {
+      setError("Missing tenant slug. Please reload the page (invalid tenant link).");
+      return;
+    }
+    if (photos.length < MIN_PHOTOS) {
+      setError(`Please add at least ${MIN_PHOTOS} photo for an accurate estimate.`);
+      return;
+    }
+    if (photos.length > MAX_PHOTOS) {
+      setError(`Please limit to ${MAX_PHOTOS} photos or fewer.`);
+      return;
+    }
+    if (!customerName.trim()) {
+      setError("Please enter your name.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+    if (normalizeUSPhoneDigits(phone).length !== 10) {
+      setError("Please enter a valid 10-digit phone number.");
+      return;
+    }
 
     setWorking(true);
 
     try {
       let currentPhotos = photos;
-      const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
 
+      const needUpload = currentPhotos.filter((p) => !p.uploadedUrl && p.file);
       if (needUpload.length) {
         setPhase("compressing");
         const compressed = await Promise.all(needUpload.map((p) => compressImage(p.file!)));
@@ -458,7 +622,9 @@ export default function QuoteForm({
         const mapped = currentPhotos.map((p) => {
           const u = byId.get(p.id);
           if (!u) return p;
+
           if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
+
           return { ...p, uploadedUrl: u, previewSrc: u, file: undefined };
         });
 
@@ -536,6 +702,9 @@ export default function QuoteForm({
     } finally {
       setWorking(false);
       setPhase("idle");
+      queueMicrotask(() => {
+        if (errorSummaryRef.current) focusAndScroll(errorSummaryRef.current, { block: "start" });
+      });
     }
   }
 
@@ -596,6 +765,9 @@ export default function QuoteForm({
     } finally {
       setWorking(false);
       setPhase("idle");
+      queueMicrotask(() => {
+        if (errorSummaryRef.current) focusAndScroll(errorSummaryRef.current, { block: "start" });
+      });
     }
   }
 
@@ -629,6 +801,7 @@ export default function QuoteForm({
 
       setRenderImageUrl(url);
       setRenderStatus("rendered");
+      setRenderProgressPct(100);
     } catch (e: any) {
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
@@ -640,7 +813,6 @@ export default function QuoteForm({
     if (!renderOptIn) return;
     if (!quoteLogId) return;
     if (renderAttemptedForQuoteRef.current === quoteLogId) return;
-
     startRenderOnce(quoteLogId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
@@ -648,17 +820,15 @@ export default function QuoteForm({
   return (
     <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6">
       <StatusBar
-        statusRef={statusRegionRef}
-        title={vm.title}
-        subtitle={vm.subtitle}
-        rightLabel={vm.rightLabel}
-        progressPct={vm.progressPct}
-        sticky={vm.sticky}
-        showRenderingMini={vm.showRenderingMini}
-        renderingLabel={vm.renderingLabel}
-        doneLabel={vm.doneLabel}
-        doneDisabled={vm.doneDisabled}
-        onDone={vm.onDone}
+        statusRef={statusRegionRef as any}
+        title={statusModel.title}
+        subtitle={statusModel.subtitle}
+        rightLabel={statusModel.rightLabel}
+        sticky={sticky}
+        progressPct={progressPct}
+        primaryLabel={statusModel.primaryLabel}
+        onPrimary={statusModel.onPrimary}
+        primaryDisabled={working}
       />
 
       {error ? (
@@ -745,7 +915,7 @@ export default function QuoteForm({
           renderStatus={renderStatus}
           renderImageUrl={renderImageUrl}
           renderError={renderError}
-          renderProgressPct={vm.renderProgressPct}
+          renderProgressPct={renderProgressPct}
         />
       ) : null}
 
