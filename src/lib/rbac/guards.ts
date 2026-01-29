@@ -1,39 +1,53 @@
 // src/lib/rbac/guards.ts
-import { getActorContext } from "./actor";
+import type { ActorContext } from "./actor";
 
+// Platform-wide roles (PCC)
 export type PlatformRole =
+  | "readonly"
   | "platform_owner"
   | "platform_admin"
   | "platform_support"
-  | "platform_billing"
-  | "readonly";
+  | "platform_billing";
 
-/**
- * Returns true if actor has ANY of the required roles.
- * Note: "platform_owner" implicitly satisfies all platform roles.
- */
-export function hasPlatformRole(
-  actor: { platformRole: PlatformRole },
-  roles: PlatformRole[]
-) {
-  const r = actor.platformRole;
+// Higher number = more privilege
+const PLATFORM_ROLE_RANK: Record<PlatformRole, number> = {
+  readonly: 0,
+  platform_support: 10,
+  platform_billing: 20,
+  platform_admin: 30,
+  platform_owner: 40,
+};
 
-  if (r === "platform_owner") return true;
+export function hasPlatformRole(actor: ActorContext, roles: PlatformRole[]) {
+  const r = actor.platformRole ?? "readonly";
   return roles.includes(r);
 }
 
 /**
- * Use inside Server Components / route handlers to enforce access.
- * Throws:
- * - UNAUTHENTICATED if user is not signed in
- * - FORBIDDEN if signed in but role not allowed
+ * Hierarchical check: allow any actor whose role rank >= any required role rank.
+ * Example: requireMinPlatformRole("platform_admin") allows admin + owner.
  */
-export async function requirePlatformRole(roles: PlatformRole[]) {
-  const actor = await getActorContext(); // may throw UNAUTHENTICATED
+export function hasMinPlatformRole(actor: ActorContext, minRole: PlatformRole) {
+  const r = actor.platformRole ?? "readonly";
+  return (PLATFORM_ROLE_RANK[r] ?? 0) >= (PLATFORM_ROLE_RANK[minRole] ?? 0);
+}
 
+/**
+ * Guard: throws FORBIDDEN if actor doesn't match one of the allowed roles.
+ * Use this when a page/route is strict about specific roles.
+ */
+export function assertPlatformRole(actor: ActorContext, roles: PlatformRole[]) {
   if (!hasPlatformRole(actor, roles)) {
     throw new Error("FORBIDDEN");
   }
+}
 
-  return actor;
+/**
+ * Guard: throws FORBIDDEN if actor is below a minimum platform role.
+ * Use this when you want hierarchy behavior.
+ */
+export function assertMinPlatformRole(actor: ActorContext, minRole: PlatformRole) {
+  if (!hasMinPlatformRole(actor, minRole)) {
+    throw new Error("FORBIDDEN");
+  }
 }
