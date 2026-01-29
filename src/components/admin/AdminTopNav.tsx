@@ -16,11 +16,10 @@ function activeFromPath(pathname: string): NavKey {
   const p = (pathname || "").toLowerCase();
 
   if (p === "/admin" || p.startsWith("/admin/")) {
-       if (p.startsWith("/admin/quotes")) return "quotes";
+    if (p.startsWith("/admin/quotes")) return "quotes";
     if (p.startsWith("/admin/settings")) return "settings";
- if (p.startsWith("/admin/setup/widget")) return "widgets";   
- if (p.startsWith("/admin/setup")) return "setup";
-   
+    if (p.startsWith("/admin/setup/widget")) return "widgets";
+    if (p.startsWith("/admin/setup")) return "setup";
     return "dashboard";
   }
 
@@ -218,9 +217,7 @@ function TenantSwitcher({ compact }: { compact?: boolean }) {
                           Active
                         </span>
                       ) : null}
-                      <span className="text-xs font-mono text-gray-600 dark:text-gray-300">
-                        {isBusy ? "…" : t.role}
-                      </span>
+                      <span className="text-xs font-mono text-gray-600 dark:text-gray-300">{isBusy ? "…" : t.role}</span>
                     </div>
                   </div>
                 </button>
@@ -256,6 +253,7 @@ export default function AdminTopNav() {
   const linkActive =
     "bg-gray-900 text-white shadow-sm dark:bg-white dark:text-black";
 
+  // NOTE: No LLM Manager link here (by design). We'll link to it from /admin/setup page.
   const links: Array<{ key: NavKey; href: string; label: string }> = [
     { key: "dashboard", href: "/admin", label: "Dashboard" },
     { key: "quotes", href: "/admin/quotes", label: "Quotes" },

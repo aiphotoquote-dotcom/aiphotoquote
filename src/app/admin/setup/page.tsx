@@ -1,3 +1,4 @@
+// src/app/admin/setup/page.tsx
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
@@ -44,11 +45,19 @@ export default async function AdminSetupHubPage() {
           subtitle="Controls AI behavior, rendering opt-in, and guardrails."
           href="/admin/setup/ai-policy"
         />
+
+        <Tile
+          title="LLM Settings"
+          subtitle="Tenant overrides for models + prompts (guardrails are platform-locked)."
+          href="/admin/setup/llm"
+        />
+
         <Tile
           title="Widgets"
           subtitle="Get embed code and button options for your website."
           href="/admin/setup/widget"
         />
+
         <Tile
           title="Sub-industries"
           subtitle="View available sub-industries for the tenant’s industry (read-only)."
