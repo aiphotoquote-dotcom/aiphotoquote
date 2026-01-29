@@ -25,8 +25,9 @@ export const dynamic = "force-dynamic";
 // If your cookie name differs, update this constant (runtime behavior), but this compiles either way.
 const ACTIVE_TENANT_COOKIE = "activeTenantId";
 
-function getActiveTenantIdFromCookie(): string | null {
-  const c = cookies().get(ACTIVE_TENANT_COOKIE)?.value;
+async function getActiveTenantIdFromCookie(): Promise<string | null> {
+  const jar = await cookies();
+  const c = jar.get(ACTIVE_TENANT_COOKIE)?.value;
   const v = String(c ?? "").trim();
   return v || null;
 }
@@ -83,7 +84,7 @@ function normalizeOverrides(input: any): TenantLlmOverrides {
 export async function GET(_req: Request) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-  const tenantId = getActiveTenantIdFromCookie();
+  const tenantId = await getActiveTenantIdFromCookie();
   if (!tenantId) {
     return NextResponse.json(
       { ok: false, error: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
@@ -103,7 +104,7 @@ export async function GET(_req: Request) {
 export async function POST(req: Request) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-  const tenantId = getActiveTenantIdFromCookie();
+  const tenantId = await getActiveTenantIdFromCookie();
   if (!tenantId) {
     return NextResponse.json(
       { ok: false, error: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
