@@ -40,9 +40,7 @@ export default function TopNav() {
 
   // Tenant switcher state
   const [tenantListLoading, setTenantListLoading] = useState(true);
-  const [tenantList, setTenantList] = useState<Array<{ id: string; name: string; slug: string }>>(
-    []
-  );
+  const [tenantList, setTenantList] = useState<Array<{ id: string; name: string; slug: string }>>([]);
   const [activeTenantId, setActiveTenantId] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
 
@@ -113,6 +111,7 @@ export default function TopNav() {
   }, []);
 
   const settingsLabel = complete === true ? "Settings" : "Configure";
+  const inAdmin = Boolean(pathname?.startsWith("/admin"));
 
   const activeTenantLabel = useMemo(() => {
     if (!activeTenantId) return "Select tenant";
@@ -140,11 +139,10 @@ export default function TopNav() {
       // If you’re currently in admin pages, refresh helps,
       // but some pages may still cache client state. This ensures a clean view.
       if (pathname?.startsWith("/admin")) {
-        // stay on the same page, just reload
         window.location.reload();
       }
     } catch {
-      // no toast yet; keep it silent for now
+      // silent for now
     } finally {
       setSwitching(false);
     }
@@ -153,10 +151,7 @@ export default function TopNav() {
   return (
     <header className="border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
       <div className="mx-auto max-w-6xl px-6 py-4 flex items-center justify-between">
-        <Link
-          href="/"
-          className="font-semibold text-lg text-gray-900 hover:opacity-90 dark:text-gray-100"
-        >
+        <Link href="/" className="font-semibold text-lg text-gray-900 hover:opacity-90 dark:text-gray-100">
           AIPhotoQuote
         </Link>
 
@@ -207,6 +202,19 @@ export default function TopNav() {
                 Admin
               </Link>
 
+              {/* Show platform tools when you're in the admin section */}
+              {inAdmin ? (
+                <Link
+                  className={cn(
+                    "underline text-gray-700 hover:text-gray-900 dark:text-gray-200 dark:hover:text-gray-50",
+                    pathname === "/admin/pcc/llm" ? "font-semibold" : ""
+                  )}
+                  href="/admin/pcc/llm"
+                >
+                  LLM Manager
+                </Link>
+              ) : null}
+
               {/* Tenant switcher */}
               <div className="hidden sm:flex items-center gap-2">
                 <span className="text-xs text-gray-500 dark:text-gray-400">Tenant</span>
@@ -224,7 +232,6 @@ export default function TopNav() {
                     )}
                     aria-label="Select tenant"
                   >
-                    {/* Placeholder when no active tenant */}
                     {!activeTenantId ? <option value="">{activeTenantLabel}</option> : null}
 
                     {tenantList.map((t) => (
@@ -234,11 +241,7 @@ export default function TopNav() {
                     ))}
                   </select>
 
-                  {switching ? (
-                    <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
-                      Switching…
-                    </span>
-                  ) : null}
+                  {switching ? <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">Switching…</span> : null}
                 </div>
               </div>
             </nav>
