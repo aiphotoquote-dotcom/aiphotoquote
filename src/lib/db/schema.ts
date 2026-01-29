@@ -31,26 +31,52 @@ export const appUsers = pgTable(
   })
 );
 
-// --- tenant sub-industries (per-tenant override/extension) ---
-export const tenantSubIndustries = pgTable(
-  "tenant_sub_industries",
+/**
+ * Platform users / RBAC
+ * This is separate from tenant_members (tenant-scoped RBAC).
+ *
+ * platform_role values:
+ * - platform_owner
+ * - platform_admin
+ * - platform_support
+ * - platform_billing
+ * - readonly
+ */
+export const platformUsers = pgTable(
+  "platform_users",
   {
-    id: uuid("id").primaryKey(),
-    tenantId: uuid("tenant_id")
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    userId: uuid("user_id")
       .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
+      .references(() => appUsers.id, { onDelete: "cascade" }),
 
-    key: text("key").notNull(),     // normalized key, e.g. "marine", "commercial"
-    label: text("label").notNull(), // display label
+    platformRole: text("platform_role").notNull().default("readonly"),
 
-    updatedAt: timestamp("updated_at", { withTimezone: false }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // ensures one key per tenant (and enables our onConflictDoUpdate target)
-    tenantKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_key_uq").on(t.tenantId, t.key),
-    tenantIdx: index("tenant_sub_industries_tenant_id_idx").on(t.tenantId),
+    userUq: uniqueIndex("platform_users_user_uq").on(t.userId),
+    roleIdx: index("platform_users_role_idx").on(t.platformRole),
   })
 );
+
+/**
+ * Platform config (single-row feature gates)
+ * PCC v1 reads this; if you never insert a row, code will fall back to defaults.
+ */
+export const platformConfig = pgTable("platform_config", {
+  id: uuid("id").defaultRandom().primaryKey(),
+
+  aiQuotingEnabled: boolean("ai_quoting_enabled").notNull().default(true),
+  aiRenderingEnabled: boolean("ai_rendering_enabled").notNull().default(false),
+
+  maintenanceEnabled: boolean("maintenance_enabled").notNull().default(false),
+  maintenanceMessage: text("maintenance_message"),
+
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
 
 /**
  * Tenants
@@ -74,6 +100,28 @@ export const tenants = pgTable(
   },
   (t) => ({
     slugIdx: uniqueIndex("tenants_slug_idx").on(t.slug),
+  })
+);
+
+// --- tenant sub-industries (per-tenant override/extension) ---
+export const tenantSubIndustries = pgTable(
+  "tenant_sub_industries",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    key: text("key").notNull(), // normalized key, e.g. "marine", "commercial"
+    label: text("label").notNull(), // display label
+
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    // ensures one key per tenant (and enables our onConflictDoUpdate target)
+    tenantKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_key_uq").on(t.tenantId, t.key),
+    tenantIdx: index("tenant_sub_industries_tenant_id_idx").on(t.tenantId),
   })
 );
 
@@ -116,19 +164,14 @@ export const tenantSettings = pgTable("tenant_settings", {
   redirectUrl: text("redirect_url"),
   thankYouUrl: text("thank_you_url"),
 
-
-
   businessName: text("business_name"),
   leadToEmail: text("lead_to_email"),
   resendFromEmail: text("resend_from_email"),
 
-  // NEW: tenant branding (logo URL stored as canonical string)
-  // Can be a Vercel Blob URL or a user-provided https URL
+  // tenant branding (logo URL stored as canonical string)
   brandLogoUrl: text("brand_logo_url"),
 
-  // NEW: email sending mode + identity pointer (OAuth identity record)
-  // - emailSendMode: "standard" | "enterprise"
-  // - emailIdentityId: UUID referencing tenant_email_identities.id
+  // email sending mode + identity pointer (OAuth identity record)
   emailSendMode: text("email_send_mode"),
   emailIdentityId: uuid("email_identity_id"),
 
@@ -140,22 +183,19 @@ export const tenantSettings = pgTable("tenant_settings", {
   renderingMaxPerDay: integer("rendering_max_per_day"),
   renderingCustomerOptInRequired: boolean("rendering_customer_opt_in_required"),
   aiRenderingEnabled: boolean("ai_rendering_enabled"),
+
   // Live Q&A (tenant-tunable)
   liveQaEnabled: boolean("live_qa_enabled").notNull().default(false),
   liveQaMaxQuestions: integer("live_qa_max_questions").notNull().default(3),
+
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
-  updatedAt: timestamp("updated_at", { withTimezone: true }),
+
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 /**
  * Tenant email identities (OAuth mailboxes)
- *
- * NOTE: Your DB currently shows these base columns:
- * id, tenant_id, provider, email, display_name, status, scopes, last_error, created_at, updated_at
- *
- * If you are adding from_email + refresh_token_enc via migration, keep them here ONCE each.
- * (The TypeScript error you hit happens when these keys get duplicated.)
  */
 export const tenantEmailIdentities = pgTable(
   "tenant_email_identities",
@@ -178,7 +218,7 @@ export const tenantEmailIdentities = pgTable(
 
     lastError: text("last_error"),
 
-    // ✅ If/when your migration adds these columns, they belong here exactly once each:
+    // Optional if your DB migration adds these columns (keep ONCE each)
     fromEmail: text("from_email"),
     refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
 
@@ -237,7 +277,8 @@ export const quoteLogs = pgTable("quote_logs", {
 
   input: jsonb("input").$type<any>().notNull(),
   output: jsonb("output").$type<any>().notNull(),
-  // Live Q&A capture (stored even before final assessment is produced)
+
+  // Live Q&A capture
   qa: jsonb("qa").$type<any>(), // { questions:[], answers:[], ... }
   qaStatus: text("qa_status").notNull().default("none"), // none | asking | answered
   qaAskedAt: timestamp("qa_asked_at", { withTimezone: true }),
@@ -272,17 +313,3 @@ export const industries = pgTable(
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
   })
 );
-
-/**
- * Platform controls (PCC)
- * Single-row table: feature gates + maintenance controls.
- */
-export const platformConfig = pgTable("platform_config", {
-  aiQuotingEnabled: boolean("ai_quoting_enabled").notNull().default(true),
-  aiRenderingEnabled: boolean("ai_rendering_enabled").notNull().default(false),
-
-  maintenanceEnabled: boolean("maintenance_enabled").notNull().default(false),
-  maintenanceMessage: text("maintenance_message"),
-
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
