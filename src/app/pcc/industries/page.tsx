@@ -1,7 +1,7 @@
 // src/app/pcc/industries/page.tsx
 import React from "react";
 import Link from "next/link";
-import { asc } from "drizzle-orm";
+import { desc, asc } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { industries } from "@/lib/db/schema";
@@ -10,40 +10,44 @@ import { requirePlatformRole } from "@/lib/rbac/guards";
 export const runtime = "nodejs";
 
 export default async function PccIndustriesPage() {
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+  await requirePlatformRole([
+    "platform_owner",
+    "platform_admin",
+    "platform_support",
+    "platform_billing",
+  ]);
 
-  const rows = await db.select().from(industries).orderBy(asc(industries.label));
+  const rows = await db
+    .select({
+      id: industries.id,
+      key: industries.key,
+      label: industries.label,
+      description: industries.description,
+      createdAt: industries.createdAt,
+    })
+    .from(industries)
+    .orderBy(asc(industries.label), asc(industries.key));
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-start justify-between gap-3">
+      <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industries</h1>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Industries
+            </h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Platform-wide industries (read-only v1). Sub-industries next.
+              Global industry catalog used for tenant configuration and downstream reporting.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Link
-              href="/pcc"
-              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
-            >
-              Back to PCC
-            </Link>
-
-            {/* Stub for v2 create */}
-            <button
-              type="button"
-              className="rounded-xl bg-black px-3 py-2 text-xs font-semibold text-white disabled:opacity-60 dark:bg-white dark:text-black"
-              disabled
-              title="Create is coming next"
-            >
-              New industry (coming)
-            </button>
-          </div>
+          <Link
+            href="/pcc"
+            className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+          >
+            Back to PCC
+          </Link>
         </div>
       </div>
 
@@ -51,49 +55,74 @@ export default async function PccIndustriesPage() {
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-            All industries ({rows.length})
+            All industries
           </div>
 
-          {/* Stub for sub-industries module */}
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            Sub-industries manager: next file
-          </span>
+          {/* v1: read-only, keep button but disabled */}
+          <button
+            type="button"
+            disabled
+            className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+            title="PCC v1 is read-only"
+          >
+            Add industry (soon)
+          </button>
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
-          <div className="grid grid-cols-12 bg-gray-50 px-4 py-3 text-[11px] font-semibold tracking-wide text-gray-600 dark:bg-gray-900 dark:text-gray-300">
-            <div className="col-span-3">KEY</div>
-            <div className="col-span-4">LABEL</div>
-            <div className="col-span-5">DESCRIPTION</div>
-          </div>
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+                <th className="py-3 pr-3">Label</th>
+                <th className="py-3 pr-3">Key</th>
+                <th className="py-3 pr-3">Description</th>
+                <th className="py-3 pr-0 text-right">Actions</th>
+              </tr>
+            </thead>
 
-          <div className="divide-y divide-gray-200 dark:divide-gray-800">
-            {rows.length ? (
-              rows.map((r) => (
-                <div key={r.id} className="grid grid-cols-12 px-4 py-3 text-sm">
-                  <div className="col-span-3 font-mono text-xs text-gray-800 dark:text-gray-200">{r.key}</div>
-                  <div className="col-span-4 font-semibold text-gray-900 dark:text-gray-100">{r.label}</div>
-                  <div className="col-span-5 text-gray-700 dark:text-gray-200">
-                    {r.description ? r.description : <span className="text-gray-400">—</span>}
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="px-4 py-6 text-sm text-gray-600 dark:text-gray-300">
-                No industries found.
-              </div>
-            )}
-          </div>
+            <tbody>
+              {rows.length ? (
+                rows.map((r) => (
+                  <tr
+                    key={r.id}
+                    className="border-b border-gray-100 last:border-b-0 dark:border-gray-900"
+                  >
+                    <td className="py-3 pr-3 font-semibold text-gray-900 dark:text-gray-100">
+                      {r.label}
+                    </td>
+                    <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">
+                      {r.key}
+                    </td>
+                    <td className="py-3 pr-3 text-gray-600 dark:text-gray-300">
+                      {r.description ? r.description : <span className="italic text-gray-400">—</span>}
+                    </td>
+                    <td className="py-3 pr-0 text-right">
+                      <Link
+                        href={`/pcc/industries/${encodeURIComponent(r.key)}`}
+                        className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:text-gray-100"
+                      >
+                        Manage sub-industries
+                      </Link>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td
+                    colSpan={4}
+                    className="py-10 text-center text-sm text-gray-600 dark:text-gray-300"
+                  >
+                    No industries found in <code className="font-mono">industries</code>.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      </div>
 
-      {/* Next */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Next</div>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-          Add <span className="font-mono text-xs">/pcc/industries/sub-industries</span> for platform-managed sub-industries,
-          then we’ll wire tenant overrides (your <span className="font-mono text-xs">tenant_sub_industries</span> table).
-        </p>
+        <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+          Next: industry detail page will manage default sub-industries and tenant overrides.
+        </div>
       </div>
     </div>
   );
