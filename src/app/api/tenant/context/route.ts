@@ -28,7 +28,7 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
     maxAge: 60 * 60 * 24 * 30, // 30 days
   };
 
-  // set BOTH keys because your code checks multiple names
+  // keep back-compat names because other code checks multiple keys
   res.cookies.set("activeTenantId", tenantId, opts);
   res.cookies.set("active_tenant_id", tenantId, opts);
   res.cookies.set("tenantId", tenantId, opts);
@@ -40,7 +40,6 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
 async function readActiveTenantIdFromCookies(): Promise<string | null> {
   // ✅ Next 16 typing: cookies() may be async depending on runtime/build
   const jar = await cookies();
-
   return (
     jar.get("activeTenantId")?.value ||
     jar.get("active_tenant_id")?.value ||
@@ -52,8 +51,12 @@ async function readActiveTenantIdFromCookies(): Promise<string | null> {
 
 /**
  * GET: returns tenant context for the signed-in user.
- * - activeTenantId (from cookies)
- * - tenants[] (currently owner-only until tenant_members is wired to app_users)
+ *
+ * Option B behavior:
+ * - If user has 0 tenants: return ok:false? (we return ok:true + needsTenant=false + error code for UI)
+ * - If user has exactly 1 tenant and cookie missing: auto-select that tenant (set cookie)
+ * - If user has >1 tenants and cookie missing: DO NOT auto-select; UI must pick
+ * - If cookie exists but doesn't match user's tenants: treat as not selected (UI must pick)
  */
 export async function GET() {
   try {
@@ -65,10 +68,10 @@ export async function GET() {
     // Ensure app_user exists (mobility layer)
     await requireAppUserId();
 
-    const activeTenantId = await readActiveTenantIdFromCookies();
+    const cookieTenantId = await readActiveTenantIdFromCookies();
 
-    // For now: treat "tenants" as those owned by this Clerk user.
-    // (We’ll extend this to tenant_members + app_users next.)
+    // For now: tenants owned by this Clerk user.
+    // (Later: expand to tenant_members joined to app_users)
     const rows = await db
       .select({
         tenantId: tenants.id,
@@ -86,20 +89,53 @@ export async function GET() {
       role: "owner" as const,
     }));
 
-    // If cookie is missing but user has tenants, set cookie to first tenant for convenience
-    if (!activeTenantId && tenantList.length > 0) {
-      const res = NextResponse.json({
+    // 0 tenants → nothing to select
+    if (tenantList.length === 0) {
+      return NextResponse.json({
         ok: true,
-        activeTenantId: tenantList[0].tenantId,
-        tenants: tenantList,
+        activeTenantId: null,
+        tenants: [],
+        needsTenantSelection: false,
+        error: "NO_TENANTS",
+        message: "No tenants found for this user.",
       });
-      return setTenantCookies(res, tenantList[0].tenantId);
     }
 
+    // If cookie exists, ensure it belongs to this user
+    const cookieMatches =
+      !!cookieTenantId && tenantList.some((t) => t.tenantId === cookieTenantId);
+
+    // If cookie is valid → use it
+    if (cookieMatches) {
+      return NextResponse.json({
+        ok: true,
+        activeTenantId: cookieTenantId,
+        tenants: tenantList,
+        needsTenantSelection: false,
+      });
+    }
+
+    // If exactly 1 tenant and cookie missing/invalid → auto-select (Option B)
+    if (tenantList.length === 1) {
+      const only = tenantList[0];
+      const res = NextResponse.json({
+        ok: true,
+        activeTenantId: only.tenantId,
+        tenants: tenantList,
+        needsTenantSelection: false,
+        autoSelected: true,
+      });
+      return setTenantCookies(res, only.tenantId);
+    }
+
+    // If multiple tenants and no valid cookie → require explicit selection
     return NextResponse.json({
       ok: true,
-      activeTenantId,
+      activeTenantId: null,
       tenants: tenantList,
+      needsTenantSelection: true,
+      error: "TENANT_NOT_SELECTED",
+      message: "Multiple tenants available. Please select an active tenant.",
     });
   } catch (e: any) {
     return NextResponse.json(
@@ -137,7 +173,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, { status: 400 });
     }
 
-    // For now: user must OWN the tenant (we’ll extend to tenant_members next).
+    // For now: user must OWN the tenant
     const where =
       tenantId && tenantSlug
         ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId))
