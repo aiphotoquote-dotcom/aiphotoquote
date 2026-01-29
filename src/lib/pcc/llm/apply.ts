@@ -36,30 +36,33 @@ export async function getPlatformLlm(): Promise<{
 
   // Back-compat: older stored JSON may still be { promptSets: {...} }
   const anyCfg = cfg as any;
-  const promptsObj = (cfg as any).prompts ?? anyCfg.promptSets ?? {};
+  const promptsObj = anyCfg.prompts ?? anyCfg.promptSets ?? {};
 
   const quoteEstimatorSystem = String(promptsObj?.quoteEstimatorSystem || "").trim();
   const qaQuestionGeneratorSystem = String(promptsObj?.qaQuestionGeneratorSystem || "").trim();
 
-  const maxOutputTokensRaw = Number(cfg.guardrails?.maxOutputTokens ?? 900);
+  // Guardrails: types may lag behind stored JSON, so read via `any`
+  const guardAny = (anyCfg.guardrails ?? {}) as any;
+
+  const maxOutputTokensRaw = Number(guardAny.maxOutputTokens ?? 900);
   const maxOutputTokens = Number.isFinite(maxOutputTokensRaw)
     ? Math.max(200, Math.min(4000, Math.floor(maxOutputTokensRaw)))
     : 900;
 
-  const modeRaw = String(cfg.guardrails?.mode ?? "balanced");
+  const modeRaw = String(guardAny.mode ?? "balanced");
   const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive" ? modeRaw : "balanced") as
     | "strict"
     | "balanced"
     | "permissive";
 
-  const piiRaw = String(cfg.guardrails?.piiHandling ?? "redact");
+  const piiRaw = String(guardAny.piiHandling ?? "redact");
   const piiHandling = (piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact") as
     | "redact"
     | "allow"
     | "deny";
 
-  const blockedTopics = Array.isArray(cfg.guardrails?.blockedTopics)
-    ? cfg.guardrails.blockedTopics.map((s) => String(s)).filter(Boolean)
+  const blockedTopics = Array.isArray(guardAny.blockedTopics)
+    ? guardAny.blockedTopics.map((s: any) => String(s)).filter(Boolean)
     : [];
 
   return {
