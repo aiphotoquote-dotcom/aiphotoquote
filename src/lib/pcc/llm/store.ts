@@ -1,117 +1,144 @@
 // src/lib/pcc/llm/store.ts
-import { z } from "zod";
-import {
-  type PlatformLlmConfig,
-  defaultPlatformLlmConfig,
-} from "@/lib/pcc/llm/types";
+import { put, head, del } from "@vercel/blob";
 
-const EnvKey = "PCC_LLM_CONFIG_JSON";
+export type PlatformLlmConfig = {
+  version: number;
 
-// ---- schema (runtime validation) ----
-const LlmModelConfigSchema = z.object({
-  estimatorModel: z.string().min(1),
-  qaModel: z.string().min(1),
-  renderModel: z.string().min(1).optional(),
-});
+  models: {
+    estimatorModel: string;
+    qaModel: string;
+    renderModel?: string;
+  };
 
-const LlmPromptSetSchema = z.object({
-  quoteEstimatorSystem: z.string().min(1),
-  qaQuestionGeneratorSystem: z.string().min(1),
-  extraSystemPreamble: z.string().optional(),
-});
+  prompts: {
+    quoteEstimatorSystem: string;
+    qaQuestionGeneratorSystem: string;
+    extraSystemPreamble?: string;
+  };
 
-const LlmGuardrailsSchema = z.object({
-  blockedTopics: z.array(z.string().min(1)).default([]),
-  maxQaQuestions: z.number().int().min(1).max(10).default(3),
-  maxOutputTokens: z.number().int().min(100).max(4000).optional(),
-});
+  guardrails: {
+    blockedTopics: string[];
+    maxQaQuestions: number;
+    maxOutputTokens?: number;
+  };
 
-const PlatformLlmConfigSchema = z.object({
-  version: z.number().int().min(1).default(1),
-  models: LlmModelConfigSchema,
-  prompts: LlmPromptSetSchema,
-  guardrails: LlmGuardrailsSchema,
-  updatedAt: z.string().min(1),
-});
+  updatedAt: string;
+};
 
-// ---- helpers ----
-function safeJsonParse(raw: string): unknown {
+const BLOB_KEY = "pcc/llm/platform-llm-config.json";
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function defaultConfig(): PlatformLlmConfig {
+  return {
+    version: 1,
+    models: {
+      estimatorModel: "gpt-4o-mini",
+      qaModel: "gpt-4o-mini",
+      renderModel: "gpt-image-1",
+    },
+    prompts: {
+      extraSystemPreamble: [
+        "You are producing an estimate for legitimate service work.",
+        "Do not provide instructions for wrongdoing or unsafe activity.",
+        "Do not request or expose sensitive personal data beyond what is needed for the quote.",
+        "If the submission is ambiguous, ask clarifying questions instead of guessing.",
+      ].join("\n"),
+      qaQuestionGeneratorSystem: [
+        "You generate short, practical clarification questions for a service quote based on photos and notes.",
+        "Ask only what is necessary to estimate accurately.",
+        "Keep each question to one sentence.",
+        "Prefer measurable details (dimensions, quantity, material, access, location).",
+        "Avoid questions the photo obviously answers.",
+        "Return ONLY valid JSON: { questions: string[] }",
+      ].join("\n"),
+      quoteEstimatorSystem: [
+        "You are an expert estimator for service work based on photos and customer notes.",
+        "Be conservative: return a realistic RANGE, not a single number.",
+        "If photos are insufficient or ambiguous, set confidence low and inspection_required true.",
+        "Do not invent brand/model/year—ask questions instead.",
+        "Return ONLY valid JSON matching the provided schema.",
+      ].join("\n"),
+    },
+    guardrails: {
+      blockedTopics: [
+        "credit card",
+        "social security",
+        "ssn",
+        "password",
+        "explosive",
+        "bomb",
+        "weapon",
+      ],
+      maxQaQuestions: 3,
+      maxOutputTokens: 1200,
+    },
+    updatedAt: nowIso(),
+  };
+}
+
+function safeParse(json: string | null): PlatformLlmConfig | null {
+  if (!json) return null;
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(json);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as PlatformLlmConfig;
   } catch {
     return null;
   }
 }
 
-function mergeDefaults(base: PlatformLlmConfig, override: Partial<PlatformLlmConfig>): PlatformLlmConfig {
-  // shallow-ish merge to keep v1 simple (no fancy patch semantics)
-  const merged: PlatformLlmConfig = {
-    ...base,
-    ...override,
-    models: { ...base.models, ...(override.models ?? {}) },
-    prompts: { ...base.prompts, ...(override.prompts ?? {}) },
-    guardrails: { ...base.guardrails, ...(override.guardrails ?? {}) },
-    updatedAt: override.updatedAt ?? base.updatedAt,
-  };
-
-  // guardrails sanity
-  merged.guardrails.maxQaQuestions = Math.max(1, Math.min(10, Number(merged.guardrails.maxQaQuestions ?? 3)));
-
-  return merged;
+async function getBlobUrlIfExists(): Promise<string | null> {
+  try {
+    const meta = await head(BLOB_KEY);
+    return meta?.url ?? null;
+  } catch {
+    return null;
+  }
 }
 
-// ---- public API ----
-
-/**
- * Load platform LLM config (V1).
- * Source priority:
- *  1) env PCC_LLM_CONFIG_JSON
- *  2) defaults (in code)
- */
 export async function loadPlatformLlmConfig(): Promise<PlatformLlmConfig> {
-  const defaults = defaultPlatformLlmConfig();
+  // Try env override first (fast, deploy-friendly)
+  const envRaw = process.env.PCC_LLM_CONFIG?.trim();
+  const envCfg = safeParse(envRaw || null);
+  if (envCfg) return envCfg;
 
-  const raw = process.env[EnvKey]?.trim();
-  if (!raw) return defaults;
-
-  const parsed = safeJsonParse(raw);
-  if (!parsed || typeof parsed !== "object") return defaults;
-
-  const safe = PlatformLlmConfigSchema.safeParse(parsed);
-  if (!safe.success) {
-    // If env is malformed, do not break runtime — fall back to defaults.
-    return defaults;
+  // Then blob (persistent)
+  const url = await getBlobUrlIfExists();
+  if (url) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      const txt = await res.text();
+      const cfg = safeParse(txt);
+      if (cfg) return cfg;
+    } catch {
+      // fallthrough
+    }
   }
 
-  // Merge in case env omitted new fields
-  return mergeDefaults(defaults, safe.data as any);
+  // Default
+  return defaultConfig();
+}
+
+export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<void> {
+  const payload = JSON.stringify(cfg, null, 2);
+  // Overwrite by using same key (Vercel Blob will version internally; URL changes)
+  await put(BLOB_KEY, payload, {
+    access: "private",
+    contentType: "application/json",
+    addRandomSuffix: false,
+  });
 }
 
 /**
- * Validate a config payload from the PCC UI.
- * Returns a fully-normalized config that can be serialized.
+ * Optional: reset to defaults by deleting blob (won't affect env override).
  */
-export function validateAndNormalizePlatformLlmConfig(input: unknown): PlatformLlmConfig {
-  const defaults = defaultPlatformLlmConfig();
-
-  const safe = PlatformLlmConfigSchema.safeParse(input);
-  if (!safe.success) {
-    // throw a friendly error for API/UI
-    const msg = safe.error.issues?.[0]?.message ?? "Invalid LLM config";
-    throw new Error(msg);
+export async function resetPlatformLlmConfig(): Promise<void> {
+  try {
+    await del(BLOB_KEY);
+  } catch {
+    // ignore
   }
-
-  const normalized = mergeDefaults(defaults, safe.data as any);
-
-  // always bump updatedAt if caller didn't
-  if (!normalized.updatedAt) normalized.updatedAt = new Date().toISOString();
-
-  return normalized;
-}
-
-/**
- * Serialize config to a JSON string suitable for env storage or later DB storage.
- */
-export function serializePlatformLlmConfig(cfg: PlatformLlmConfig): string {
-  return JSON.stringify(cfg);
 }
