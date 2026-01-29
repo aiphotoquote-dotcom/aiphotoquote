@@ -14,7 +14,7 @@ export async function getPlatformLlm(): Promise<{
   models: {
     estimatorModel: string;
     qaModel: string;
-    renderPromptModel: string;
+    renderModel: string;
   };
   prompts: {
     quoteEstimatorSystem: string;
@@ -32,7 +32,7 @@ export async function getPlatformLlm(): Promise<{
   // Defensive normalization (don’t trust storage blindly)
   const estimatorModel = String(cfg.models?.estimatorModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const qaModel = String(cfg.models?.qaModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
- const renderModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  const renderModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
 
   const quoteEstimatorSystem = String(cfg.promptSets?.quoteEstimatorSystem || "").trim();
   const qaQuestionGeneratorSystem = String(cfg.promptSets?.qaQuestionGeneratorSystem || "").trim();
@@ -43,9 +43,10 @@ export async function getPlatformLlm(): Promise<{
     : 900;
 
   const modeRaw = String(cfg.guardrails?.mode ?? "balanced");
-  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive"
-    ? modeRaw
-    : "balanced") as "strict" | "balanced" | "permissive";
+  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive" ? modeRaw : "balanced") as
+    | "strict"
+    | "balanced"
+    | "permissive";
 
   const piiRaw = String(cfg.guardrails?.piiHandling ?? "redact");
   const piiHandling = (piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact") as
@@ -59,7 +60,7 @@ export async function getPlatformLlm(): Promise<{
 
   return {
     cfg,
-    models: { estimatorModel, qaModel, renderPromptModel },
+    models: { estimatorModel, qaModel, renderModel },
     prompts: {
       quoteEstimatorSystem:
         quoteEstimatorSystem ||
