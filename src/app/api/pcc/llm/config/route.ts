@@ -1,4 +1,3 @@
-// src/app/api/pcc/llm/config/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requirePlatformRole } from "@/lib/rbac/guards";
@@ -6,6 +5,8 @@ import { loadPlatformLlmConfig, savePlatformLlmConfig } from "@/lib/pcc/llm/stor
 import type { PlatformLlmConfig } from "@/lib/pcc/llm/types";
 
 export const runtime = "nodejs";
+
+/* ----------------------------- schemas ----------------------------- */
 
 const GuardrailsSchema = z
   .object({
@@ -27,7 +28,6 @@ const ModelsSchema = z
   .partial()
   .optional();
 
-// Accept BOTH `prompts` and legacy `promptSets`
 const PromptsSchema = z
   .object({
     quoteEstimatorSystem: z.string().optional(),
@@ -46,8 +46,10 @@ const PlatformLlmConfigSchema = z.object({
   guardrails: GuardrailsSchema,
 });
 
+/* --------------------------- normalization -------------------------- */
+
 function normalizeConfig(input: any): PlatformLlmConfig {
-  const parsed = PlatformLlmConfigSchema.parse(input);
+  const parsed = PlatformLlmConfigSchema.parse(input ?? {});
 
   const models = parsed.models ?? {};
   const prompts = (parsed.prompts ?? parsed.promptSets ?? {}) as any;
@@ -67,13 +69,14 @@ function normalizeConfig(input: any): PlatformLlmConfig {
     ? Math.max(200, Math.min(4000, Math.floor(maxOutputTokensRaw)))
     : 900;
 
-  const modeRaw = String((guardrails as any).mode ?? "balanced");
-  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive"
-    ? modeRaw
-    : "balanced") as any;
+  const modeRaw = String(guardrails.mode ?? "balanced");
+  const mode =
+    modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive"
+      ? modeRaw
+      : "balanced";
 
-  const piiRaw = String((guardrails as any).piiHandling ?? "redact");
-  const piiHandling = (piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact") as any;
+  const piiRaw = String(guardrails.piiHandling ?? "redact");
+  const piiHandling = piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact";
 
   return {
     version: parsed.version ?? 1,
@@ -85,11 +88,10 @@ function normalizeConfig(input: any): PlatformLlmConfig {
       renderModel: String(models.renderModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
     },
 
-    // Your type uses `prompts` (per the TS error you saw). Keep that shape.
     prompts: {
       quoteEstimatorSystem: String(prompts.quoteEstimatorSystem ?? "").trim(),
       qaQuestionGeneratorSystem: String(prompts.qaQuestionGeneratorSystem ?? "").trim(),
-    } as any,
+    },
 
     guardrails: {
       mode,
@@ -97,54 +99,57 @@ function normalizeConfig(input: any): PlatformLlmConfig {
       blockedTopics,
       maxQaQuestions,
       maxOutputTokens,
-    } as any,
-  } as PlatformLlmConfig;
+    },
+  };
 }
 
-export async function GET(_req: Request) {
+/* ------------------------------- GET -------------------------------- */
+
+export async function GET() {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-  const cfg = await loadPlatformLlmConfig();
-  const normalized = normalizeConfig(cfg);
+  const stored = (await loadPlatformLlmConfig()) ?? {};
+  const normalized = normalizeConfig(stored);
 
   return NextResponse.json(
     { ok: true, config: normalized },
-    {
-      headers: {
-        "cache-control": "no-store",
-      },
-    }
+    { headers: { "cache-control": "no-store" } }
   );
 }
+
+/* ------------------------------- POST ------------------------------- */
 
 export async function POST(req: Request) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
   const body = await req.json().catch(() => null);
   if (!body) {
-    return NextResponse.json({ ok: false, error: "INVALID_BODY", message: "Missing JSON body." }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "INVALID_BODY" }, { status: 400 });
   }
 
-  // Accept either:
-  // 1) { config: <PlatformLlmConfig> }
-  // 2) <PlatformLlmConfig>
   const candidate = (body as any).config ?? body;
 
   try {
-    const normalized = normalizeConfig(candidate);
+    const incoming = normalizeConfig(candidate);
+    const existing = normalizeConfig((await loadPlatformLlmConfig()) ?? {});
 
-    await savePlatformLlmConfig(normalized);
+    const next: PlatformLlmConfig = {
+      ...incoming,
+      version: (existing.version ?? 1) + 1, // ✅ auto-bump
+      updatedAt: new Date().toISOString(),   // ✅ authoritative timestamp
+    };
 
-    // Re-load after save (single source of truth)
-    const saved = await loadPlatformLlmConfig();
-    const out = normalizeConfig(saved);
+    await savePlatformLlmConfig(next);
 
-    return NextResponse.json({ ok: true, config: out });
+    return NextResponse.json({ ok: true, config: next });
   } catch (e: any) {
-    // Zod errors will have .issues
-    const issues = e?.issues ?? undefined;
     return NextResponse.json(
-      { ok: false, error: "VALIDATION_FAILED", message: e?.message ?? String(e), issues },
+      {
+        ok: false,
+        error: "VALIDATION_FAILED",
+        message: e?.message ?? String(e),
+        issues: e?.issues,
+      },
       { status: 400 }
     );
   }

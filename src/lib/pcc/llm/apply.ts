@@ -4,13 +4,17 @@ import type { PlatformLlmConfig } from "./types";
 
 /**
  * Central “resolver” so routes stop hardcoding models/prompts.
+ * Routes can call:
+ *   const llm = await getPlatformLlm();
+ *   llm.models.estimatorModel
+ *   llm.prompts.quoteEstimatorSystem
  */
 export async function getPlatformLlm(): Promise<{
   cfg: PlatformLlmConfig;
   models: {
     estimatorModel: string;
     qaModel: string;
-    renderPromptModel: string;
+    renderModel: string;
   };
   prompts: {
     quoteEstimatorSystem: string;
@@ -20,44 +24,48 @@ export async function getPlatformLlm(): Promise<{
     mode: "strict" | "balanced" | "permissive";
     blockedTopics: string[];
     piiHandling: "redact" | "allow" | "deny";
+    maxQaQuestions: number;
     maxOutputTokens: number;
   };
 }> {
   const cfg = await loadPlatformLlmConfig();
 
-  // Models
+  // Defensive normalization (don’t trust storage blindly)
   const estimatorModel = String(cfg.models?.estimatorModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const qaModel = String(cfg.models?.qaModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
-  const renderPromptModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  const renderModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
 
-  // Prompts (NOTE: config uses `prompts`, not `promptSets`)
   const quoteEstimatorSystem = String(cfg.prompts?.quoteEstimatorSystem || "").trim();
   const qaQuestionGeneratorSystem = String(cfg.prompts?.qaQuestionGeneratorSystem || "").trim();
 
-  // Guardrails (be defensive: some fields may not exist in type yet)
-  const maxOutputTokensRaw = Number((cfg.guardrails as any)?.maxOutputTokens ?? 900);
+  const maxOutputTokensRaw = Number(cfg.guardrails?.maxOutputTokens ?? 900);
   const maxOutputTokens = Number.isFinite(maxOutputTokensRaw)
     ? Math.max(200, Math.min(4000, Math.floor(maxOutputTokensRaw)))
     : 900;
 
-  const modeRaw = String((cfg.guardrails as any)?.mode ?? "balanced");
+  const maxQaQuestionsRaw = Number(cfg.guardrails?.maxQaQuestions ?? 3);
+  const maxQaQuestions = Number.isFinite(maxQaQuestionsRaw)
+    ? Math.max(1, Math.min(10, Math.floor(maxQaQuestionsRaw)))
+    : 3;
+
+  const modeRaw = String(cfg.guardrails?.mode ?? "balanced");
   const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive"
     ? modeRaw
     : "balanced") as "strict" | "balanced" | "permissive";
 
-  const piiRaw = String((cfg.guardrails as any)?.piiHandling ?? "redact");
+  const piiRaw = String(cfg.guardrails?.piiHandling ?? "redact");
   const piiHandling = (piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact") as
     | "redact"
     | "allow"
     | "deny";
 
-  const blockedTopics = Array.isArray((cfg.guardrails as any)?.blockedTopics)
-    ? (cfg.guardrails as any).blockedTopics.map((s: any) => String(s)).filter(Boolean)
+  const blockedTopics = Array.isArray(cfg.guardrails?.blockedTopics)
+    ? cfg.guardrails.blockedTopics.map((s) => String(s)).filter(Boolean)
     : [];
 
   return {
     cfg,
-    models: { estimatorModel, qaModel, renderPromptModel },
+    models: { estimatorModel, qaModel, renderModel },
     prompts: {
       quoteEstimatorSystem:
         quoteEstimatorSystem ||
@@ -80,6 +88,7 @@ export async function getPlatformLlm(): Promise<{
       mode,
       blockedTopics,
       piiHandling,
+      maxQaQuestions,
       maxOutputTokens,
     },
   };
@@ -87,11 +96,13 @@ export async function getPlatformLlm(): Promise<{
 
 /**
  * Optional helper: quick safety “pre-filter” for text you might echo back.
+ * This is not a full safety system—just a cheap guard based on PCC settings.
  */
 export function applyBasicTextGuardrails(input: string, cfg: { piiHandling: "redact" | "allow" | "deny" }) {
   const s = String(input ?? "");
   if (cfg.piiHandling === "allow") return s;
 
+  // very basic email/phone redaction (good enough for UI / logs)
   const redacted = s
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
     .replace(/(\+?1[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g, "[redacted-phone]");

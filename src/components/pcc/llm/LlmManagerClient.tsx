@@ -1,4 +1,3 @@
-// src/components/pcc/llm/LlmManagerClient.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
@@ -28,7 +27,9 @@ export type PlatformLlmConfig = {
 };
 
 type ApiGetResp = { ok: true; config: PlatformLlmConfig } | { ok: false; error: string; message?: string };
-type ApiPostResp = { ok: true; config: PlatformLlmConfig } | { ok: false; error: string; message?: string; issues?: any };
+type ApiPostResp =
+  | { ok: true; config: PlatformLlmConfig }
+  | { ok: false; error: string; message?: string; issues?: any };
 
 async function apiGet(): Promise<ApiGetResp> {
   const res = await fetch("/api/pcc/llm/config", { method: "GET", cache: "no-store" });
@@ -61,6 +62,7 @@ function normalizeBlockedTopics(raw: string): string[] {
     .split(/\n|,/g)
     .map((s) => s.trim())
     .filter(Boolean);
+
   // de-dupe (case-insensitive)
   const seen = new Set<string>();
   const out: string[] = [];
@@ -73,49 +75,196 @@ function normalizeBlockedTopics(raw: string): string[] {
   return out;
 }
 
+function configToForm(cfg: PlatformLlmConfig) {
+  const models = cfg?.models ?? {};
+  const prompts = cfg?.prompts ?? {};
+  const guardrails = cfg?.guardrails ?? {};
+
+  return {
+    estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
+    qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
+    renderModel: safeStr(models.renderModel, "gpt-4o-mini"),
+
+    quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
+    qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
+
+    mode: (safeStr(guardrails.mode, "balanced") as GuardrailsMode) || "balanced",
+    piiHandling: (safeStr(guardrails.piiHandling, "redact") as PiiHandling) || "redact",
+
+    maxQaQuestions: numClamp(guardrails.maxQaQuestions, 1, 10, 3),
+    maxOutputTokens: numClamp(guardrails.maxOutputTokens, 200, 4000, 900),
+
+    blockedTopicsText: Array.isArray(guardrails.blockedTopics) ? guardrails.blockedTopics.join("\n") : "",
+  };
+}
+
+function formToConfig(args: {
+  base: PlatformLlmConfig;
+  estimatorModel: string;
+  qaModel: string;
+  renderModel: string;
+  quoteEstimatorSystem: string;
+  qaQuestionGeneratorSystem: string;
+  mode: GuardrailsMode;
+  piiHandling: PiiHandling;
+  maxQaQuestions: number;
+  maxOutputTokens: number;
+  blockedTopicsText: string;
+}): PlatformLlmConfig {
+  const {
+    base,
+    estimatorModel,
+    qaModel,
+    renderModel,
+    quoteEstimatorSystem,
+    qaQuestionGeneratorSystem,
+    mode,
+    piiHandling,
+    maxQaQuestions,
+    maxOutputTokens,
+    blockedTopicsText,
+  } = args;
+
+  return {
+    version: base?.version ?? 1,
+    updatedAt: base?.updatedAt ?? null,
+    models: {
+      estimatorModel: safeStr(estimatorModel, "gpt-4o-mini"),
+      qaModel: safeStr(qaModel, "gpt-4o-mini"),
+      renderModel: safeStr(renderModel, "gpt-4o-mini"),
+    },
+    prompts: {
+      quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
+      qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
+    },
+    guardrails: {
+      mode,
+      piiHandling,
+      maxQaQuestions: numClamp(maxQaQuestions, 1, 10, 3),
+      maxOutputTokens: numClamp(maxOutputTokens, 200, 4000, 900),
+      blockedTopics: normalizeBlockedTopics(blockedTopicsText),
+    },
+  };
+}
+
+function stableStringify(obj: any) {
+  // Good enough for UI dirty-check: normalize config -> JSON compare
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
+
 export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlmConfig }) {
   const [cfg, setCfg] = useState<PlatformLlmConfig>(initialConfig ?? {});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
-  // Form state (derived from cfg, editable)
-  const form = useMemo(() => {
-    const models = cfg?.models ?? {};
-    const prompts = cfg?.prompts ?? {};
-    const guardrails = cfg?.guardrails ?? {};
+  // baseline form snapshot derived from cfg
+  const baseline = useMemo(() => configToForm(cfg ?? {}), [cfg]);
 
-    return {
-      estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
-      qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
-      renderModel: safeStr(models.renderModel, "gpt-4o-mini"),
+  // editable inputs (start from baseline ONCE)
+  const [estimatorModel, setEstimatorModel] = useState(baseline.estimatorModel);
+  const [qaModel, setQaModel] = useState(baseline.qaModel);
+  const [renderModel, setRenderModel] = useState(baseline.renderModel);
 
-      quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
-      qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
+  const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(baseline.quoteEstimatorSystem);
+  const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(baseline.qaQuestionGeneratorSystem);
 
-      mode: (safeStr(guardrails.mode, "balanced") as GuardrailsMode) || "balanced",
-      piiHandling: (safeStr(guardrails.piiHandling, "redact") as PiiHandling) || "redact",
-      maxQaQuestions: numClamp(guardrails.maxQaQuestions, 1, 10, 3),
-      maxOutputTokens: numClamp(guardrails.maxOutputTokens, 200, 4000, 900),
+  const [mode, setMode] = useState<GuardrailsMode>(baseline.mode);
+  const [piiHandling, setPiiHandling] = useState<PiiHandling>(baseline.piiHandling);
+  const [maxQaQuestions, setMaxQaQuestions] = useState<number>(baseline.maxQaQuestions);
+  const [maxOutputTokens, setMaxOutputTokens] = useState<number>(baseline.maxOutputTokens);
+  const [blockedTopicsText, setBlockedTopicsText] = useState(baseline.blockedTopicsText);
 
-      blockedTopicsText: Array.isArray(guardrails.blockedTopics) ? guardrails.blockedTopics.join("\n") : "",
-    };
-  }, [cfg]);
+  // current form snapshot
+  const currentConfig = useMemo(() => {
+    return formToConfig({
+      base: cfg,
+      estimatorModel,
+      qaModel,
+      renderModel,
+      quoteEstimatorSystem,
+      qaQuestionGeneratorSystem,
+      mode,
+      piiHandling,
+      maxQaQuestions,
+      maxOutputTokens,
+      blockedTopicsText,
+    });
+  }, [
+    cfg,
+    estimatorModel,
+    qaModel,
+    renderModel,
+    quoteEstimatorSystem,
+    qaQuestionGeneratorSystem,
+    mode,
+    piiHandling,
+    maxQaQuestions,
+    maxOutputTokens,
+    blockedTopicsText,
+  ]);
 
-  const [estimatorModel, setEstimatorModel] = useState(form.estimatorModel);
-  const [qaModel, setQaModel] = useState(form.qaModel);
-  const [renderModel, setRenderModel] = useState(form.renderModel);
+  // dirty-check by comparing normalized “form-shaped” data, not timestamps/version
+  const isDirty = useMemo(() => {
+    const a = formToConfig({
+      base: { version: 1, updatedAt: null }, // ignore baseline version/updatedAt
+      ...baseline,
+      maxQaQuestions: baseline.maxQaQuestions,
+      maxOutputTokens: baseline.maxOutputTokens,
+      mode: baseline.mode,
+      piiHandling: baseline.piiHandling,
+      blockedTopicsText: baseline.blockedTopicsText,
+    } as any);
 
-  const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(form.quoteEstimatorSystem);
-  const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(form.qaQuestionGeneratorSystem);
+    const b = formToConfig({
+      base: { version: 1, updatedAt: null }, // ignore version/updatedAt
+      estimatorModel,
+      qaModel,
+      renderModel,
+      quoteEstimatorSystem,
+      qaQuestionGeneratorSystem,
+      mode,
+      piiHandling,
+      maxQaQuestions,
+      maxOutputTokens,
+      blockedTopicsText,
+    } as any);
 
-  const [mode, setMode] = useState<GuardrailsMode>(form.mode);
-  const [piiHandling, setPiiHandling] = useState<PiiHandling>(form.piiHandling);
-  const [maxQaQuestions, setMaxQaQuestions] = useState<number>(form.maxQaQuestions);
-  const [maxOutputTokens, setMaxOutputTokens] = useState<number>(form.maxOutputTokens);
-  const [blockedTopicsText, setBlockedTopicsText] = useState(form.blockedTopicsText);
+    // Only compare the “meaningful” payload portions
+    const aCmp = { models: a.models, prompts: a.prompts, guardrails: a.guardrails };
+    const bCmp = { models: b.models, prompts: b.prompts, guardrails: b.guardrails };
 
-  // When initialConfig changes (rare), let user keep edits; do nothing.
+    return stableStringify(aCmp) !== stableStringify(bCmp);
+  }, [
+    baseline,
+    estimatorModel,
+    qaModel,
+    renderModel,
+    quoteEstimatorSystem,
+    qaQuestionGeneratorSystem,
+    mode,
+    piiHandling,
+    maxQaQuestions,
+    maxOutputTokens,
+    blockedTopicsText,
+  ]);
+
+  function resetToSaved() {
+    setMsg(null);
+    const b = configToForm(cfg ?? {});
+    setEstimatorModel(b.estimatorModel);
+    setQaModel(b.qaModel);
+    setRenderModel(b.renderModel);
+
+    setQuoteEstimatorSystem(b.quoteEstimatorSystem);
+    setQaQuestionGeneratorSystem(b.qaQuestionGeneratorSystem);
+
+    setMode(b.mode);
+    setPiiHandling(b.piiHandling);
+    setMaxQaQuestions(b.maxQaQuestions);
+    setMaxOutputTokens(b.maxOutputTokens);
+    setBlockedTopicsText(b.blockedTopicsText);
+  }
 
   async function refresh() {
     setMsg(null);
@@ -126,24 +275,20 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
       setCfg(r.config ?? {});
       setMsg({ kind: "ok", text: "Loaded latest config." });
 
-      // Also refresh the form inputs to match newly loaded cfg
-      const c = r.config ?? {};
-      const m = c.models ?? {};
-      const p = c.prompts ?? {};
-      const g = c.guardrails ?? {};
+      // Reset inputs to match loaded config (authoritative)
+      const b = configToForm(r.config ?? {});
+      setEstimatorModel(b.estimatorModel);
+      setQaModel(b.qaModel);
+      setRenderModel(b.renderModel);
 
-      setEstimatorModel(safeStr(m.estimatorModel, "gpt-4o-mini"));
-      setQaModel(safeStr(m.qaModel, "gpt-4o-mini"));
-      setRenderModel(safeStr(m.renderModel, "gpt-4o-mini"));
+      setQuoteEstimatorSystem(b.quoteEstimatorSystem);
+      setQaQuestionGeneratorSystem(b.qaQuestionGeneratorSystem);
 
-      setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
-      setQaQuestionGeneratorSystem(safeStr(p.qaQuestionGeneratorSystem, ""));
-
-      setMode((safeStr(g.mode, "balanced") as GuardrailsMode) || "balanced");
-      setPiiHandling((safeStr(g.piiHandling, "redact") as PiiHandling) || "redact");
-      setMaxQaQuestions(numClamp(g.maxQaQuestions, 1, 10, 3));
-      setMaxOutputTokens(numClamp(g.maxOutputTokens, 200, 4000, 900));
-      setBlockedTopicsText(Array.isArray(g.blockedTopics) ? g.blockedTopics.join("\n") : "");
+      setMode(b.mode);
+      setPiiHandling(b.piiHandling);
+      setMaxQaQuestions(b.maxQaQuestions);
+      setMaxOutputTokens(b.maxOutputTokens);
+      setBlockedTopicsText(b.blockedTopicsText);
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
@@ -155,34 +300,30 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
     setMsg(null);
     setSaving(true);
     try {
-      const next: PlatformLlmConfig = {
-        version: cfg?.version ?? 1,
-        updatedAt: cfg?.updatedAt ?? null,
-        models: {
-          estimatorModel: safeStr(estimatorModel, "gpt-4o-mini"),
-          qaModel: safeStr(qaModel, "gpt-4o-mini"),
-          renderModel: safeStr(renderModel, "gpt-4o-mini"),
-        },
-        prompts: {
-          quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
-          qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
-        },
-        guardrails: {
-          mode,
-          piiHandling,
-          maxQaQuestions: numClamp(maxQaQuestions, 1, 10, 3),
-          maxOutputTokens: numClamp(maxOutputTokens, 200, 4000, 900),
-          blockedTopics: normalizeBlockedTopics(blockedTopicsText),
-        },
-      };
-
-      const r = await apiPost(next);
+      const r = await apiPost(currentConfig);
       if (!("ok" in r) || !r.ok) {
         const details = (r as any)?.message || (r as any)?.error || "Save failed.";
         throw new Error(details);
       }
 
-      setCfg(r.config ?? next);
+      // Server is authoritative (version bump + updatedAt)
+      setCfg(r.config ?? currentConfig);
+
+      // Snap inputs to saved config (so dirty resets cleanly)
+      const b = configToForm(r.config ?? currentConfig);
+      setEstimatorModel(b.estimatorModel);
+      setQaModel(b.qaModel);
+      setRenderModel(b.renderModel);
+
+      setQuoteEstimatorSystem(b.quoteEstimatorSystem);
+      setQaQuestionGeneratorSystem(b.qaQuestionGeneratorSystem);
+
+      setMode(b.mode);
+      setPiiHandling(b.piiHandling);
+      setMaxQaQuestions(b.maxQaQuestions);
+      setMaxOutputTokens(b.maxOutputTokens);
+      setBlockedTopicsText(b.blockedTopicsText);
+
       setMsg({ kind: "ok", text: "Saved." });
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
@@ -192,13 +333,21 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
   }
 
   const updatedAt = cfg?.updatedAt ? new Date(cfg.updatedAt).toLocaleString() : null;
+  const saveDisabled = saving || loading || !isDirty;
 
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Config</div>
+            <div className="flex items-center gap-2">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Config</div>
+              {isDirty ? (
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-100">
+                  Unsaved changes
+                </span>
+              ) : null}
+            </div>
             <div className="text-xs text-gray-600 dark:text-gray-300">
               Version {cfg?.version ?? 1}
               {updatedAt ? ` • Updated ${updatedAt}` : ""}
@@ -206,6 +355,15 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              onClick={resetToSaved}
+              disabled={loading || saving || !isDirty}
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              title="Reset form fields back to the last saved config"
+            >
+              Reset
+            </button>
+
             <button
               onClick={refresh}
               disabled={loading || saving}
@@ -216,8 +374,9 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
 
             <button
               onClick={save}
-              disabled={saving || loading}
+              disabled={saveDisabled}
               className="rounded-xl bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+              title={!isDirty ? "No changes to save" : "Save changes"}
             >
               {saving ? "Saving…" : "Save"}
             </button>
