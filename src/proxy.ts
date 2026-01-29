@@ -4,6 +4,7 @@ const isProtectedRoute = createRouteMatcher([
   "/admin(.*)",
   "/dashboard(.*)",
   "/onboarding(.*)",
+  "/pcc(.*)", // ✅ protect PCC
 ]);
 
 export default clerkMiddleware(async (auth, req) => {

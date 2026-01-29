@@ -8,23 +8,27 @@ export type PlatformRole = "super_admin" | "platform_admin" | "support" | "billi
 export type ActorContext = {
   clerkUserId: string;
   email: string | null;
-
-  // Platform-wide role (PCC). We'll wire this to DB later.
   platformRole: PlatformRole | null;
 };
 
+/**
+ * Actor = current signed-in Clerk user + platform role (later from DB).
+ * For now: role is null until we add platform_users bootstrap.
+ */
 export async function getActorContext(): Promise<ActorContext> {
-  // In your setup, auth() returns a Promise
-  const a = await auth();
+  const a = await auth(); // ✅ in your setup, this is async
   const clerkUserId = a?.userId;
 
-  if (!clerkUserId) throw new Error("UNAUTHENTICATED");
+  if (!clerkUserId) {
+    // Middleware should prevent reaching here for protected routes,
+    // but keep the error for correctness.
+    throw new Error("UNAUTHENTICATED");
+  }
 
-  // Optional: get email (nice for audit/debug)
   let email: string | null = null;
+
   try {
-    // IMPORTANT: in your Clerk types, clerkClient is a function returning the client
-    const client = await clerkClient();
+    const client = await clerkClient(); // ✅ your clerkClient is async
     const u = await client.users.getUser(clerkUserId);
 
     email =
@@ -32,11 +36,13 @@ export async function getActorContext(): Promise<ActorContext> {
       u.emailAddresses?.[0]?.emailAddress ??
       null;
   } catch {
-    // ignore (email is optional)
+    // Don’t fail the whole request if email lookup fails.
+    email = null;
   }
 
-  // TODO: load from DB (platform_users / platform_roles)
-  const platformRole: PlatformRole | null = null;
-
-  return { clerkUserId, email, platformRole };
+  return {
+    clerkUserId,
+    email,
+    platformRole: null, // ✅ v1: no DB role yet
+  };
 }
