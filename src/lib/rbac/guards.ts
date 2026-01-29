@@ -1,53 +1,25 @@
 // src/lib/rbac/guards.ts
-import type { ActorContext } from "./actor";
+import { getActorContext, type ActorContext } from "./actor";
 
-// Platform-wide roles (PCC)
 export type PlatformRole =
-  | "readonly"
   | "platform_owner"
   | "platform_admin"
   | "platform_support"
-  | "platform_billing";
-
-// Higher number = more privilege
-const PLATFORM_ROLE_RANK: Record<PlatformRole, number> = {
-  readonly: 0,
-  platform_support: 10,
-  platform_billing: 20,
-  platform_admin: 30,
-  platform_owner: 40,
-};
+  | "platform_billing"
+  | "readonly";
 
 export function hasPlatformRole(actor: ActorContext, roles: PlatformRole[]) {
-  const r = actor.platformRole ?? "readonly";
-  return roles.includes(r);
+  // Always safe (readonly is a valid role)
+  return roles.includes(actor.platformRole);
 }
 
-/**
- * Hierarchical check: allow any actor whose role rank >= any required role rank.
- * Example: requireMinPlatformRole("platform_admin") allows admin + owner.
- */
-export function hasMinPlatformRole(actor: ActorContext, minRole: PlatformRole) {
-  const r = actor.platformRole ?? "readonly";
-  return (PLATFORM_ROLE_RANK[r] ?? 0) >= (PLATFORM_ROLE_RANK[minRole] ?? 0);
+export async function requirePlatformRole(roles: PlatformRole[]) {
+  const actor = await getActorContext();
+  if (!hasPlatformRole(actor, roles)) throw new Error("FORBIDDEN");
+  return actor;
 }
 
-/**
- * Guard: throws FORBIDDEN if actor doesn't match one of the allowed roles.
- * Use this when a page/route is strict about specific roles.
- */
-export function assertPlatformRole(actor: ActorContext, roles: PlatformRole[]) {
-  if (!hasPlatformRole(actor, roles)) {
-    throw new Error("FORBIDDEN");
-  }
-}
-
-/**
- * Guard: throws FORBIDDEN if actor is below a minimum platform role.
- * Use this when you want hierarchy behavior.
- */
-export function assertMinPlatformRole(actor: ActorContext, minRole: PlatformRole) {
-  if (!hasMinPlatformRole(actor, minRole)) {
-    throw new Error("FORBIDDEN");
-  }
-}
+// Common presets (optional helpers)
+export const PCC_ADMIN_ROLES: PlatformRole[] = ["platform_owner", "platform_admin"];
+export const PCC_SUPPORT_ROLES: PlatformRole[] = ["platform_owner", "platform_admin", "platform_support"];
+export const PCC_BILLING_ROLES: PlatformRole[] = ["platform_owner", "platform_admin", "platform_billing"];
