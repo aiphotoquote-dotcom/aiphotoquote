@@ -1,100 +1,86 @@
 // src/app/pcc/page.tsx
-import { getActorContext } from "@/lib/rbac/actor";
-import { requirePlatformRole } from "@/lib/rbac/guards";
-import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
+import React from "react";
 
-export const runtime = "nodejs";
-
-export default async function PccHomePage() {
-  // PCC access gate (v1: owner/admin/support/billing can view)
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
-
-  const actor = await getActorContext();
-  const cfg = await getPlatformConfig();
-
-  const row = (label: string, value: React.ReactNode) => (
-    <div className="flex items-center justify-between gap-4 py-2">
-      <div className="text-sm text-gray-600 dark:text-gray-300">{label}</div>
-      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{value}</div>
-    </div>
-  );
-
-  const pill = (txt: string) => (
-    <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-      {txt}
-    </span>
-  );
-
+function PccCard({
+  title,
+  description,
+  status = "active",
+}: {
+  title: string;
+  description: string;
+  status?: "active" | "coming";
+}) {
   return (
-    <main className="mx-auto w-full max-w-5xl px-4 py-8 space-y-6">
-      {/* Header */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Platform Control Center</h1>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Control platform-wide settings, tenant governance, LLM guardrails, and (soon) billing.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {pill(`Actor: ${actor.clerkUserId.slice(0, 8)}`)}
-              {pill(`Role: ${actor.platformRole ?? "none"}`)}
-              {pill(`Env: ${process.env.VERCEL_ENV ?? "unknown"}`)}
-            </div>
-          </div>
+    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+            {title}
+          </h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            {description}
+          </p>
+        </div>
 
-          <div className="shrink-0 text-xs text-gray-500 dark:text-gray-400">
-            Updated: {cfg.updatedAt ? new Date(cfg.updatedAt).toLocaleString() : "—"}
-          </div>
+        <div className="shrink-0">
+          {status === "coming" ? (
+            <span className="rounded-full border border-gray-300 px-2 py-1 text-xs font-semibold text-gray-500 dark:border-gray-700 dark:text-gray-400">
+              Soon
+            </span>
+          ) : (
+            <span className="rounded-full border border-emerald-300 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-900/40 dark:bg-emerald-950/40 dark:text-emerald-300">
+              Active
+            </span>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* Platform flags */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Platform flags</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Read-only in v1. Next we’ll add toggles via server actions.
-            </p>
-          </div>
-        </div>
+export default function PccHomePage() {
+  return (
+    <div className="space-y-6">
+      {/* Overview */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+          Platform overview
+        </h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          This control center governs the entire AI Photo Quote platform —
+          cross-tenant settings, AI behavior, and future billing.
+        </p>
+      </div>
 
-        <div className="mt-4 divide-y divide-gray-100 dark:divide-gray-800">
-          {row("AI quoting", cfg.aiQuotingEnabled ? "Enabled" : "Disabled")}
-          {row("AI rendering", cfg.aiRenderingEnabled ? "Enabled" : "Disabled")}
-          {row("Maintenance mode", cfg.maintenanceEnabled ? "ON" : "Off")}
-          {cfg.maintenanceEnabled
-            ? row("Maintenance message", cfg.maintenanceMessage ? cfg.maintenanceMessage : "—")
-            : null}
-        </div>
-      </section>
+      {/* Primary controls */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <PccCard
+          title="Tenant & Access Control"
+          description="Manage tenants, users, roles, and platform-level permissions (RBAC)."
+        />
 
-      {/* Roadmap tiles (v1 placeholders) */}
-      <section className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry / Sub-industry manager</div>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Curate industries, sub-industries, defaults, and tenant eligibility.
-          </p>
-          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Coming next</div>
-        </div>
+        <PccCard
+          title="Industries & Sub-Industries"
+          description="Define global industries, tenant overrides, and category behavior."
+        />
 
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">LLM manager</div>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Guardrails, prompts, tool policies, and safety / compliance controls.
-          </p>
-          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Coming next</div>
-        </div>
+        <PccCard
+          title="LLM & AI Guardrails"
+          description="Control prompting, tone, safety rules, and model-level constraints."
+        />
 
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Environment controls</div>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Feature flags, freeze switches, rollout modes, and global throttles.
-          </p>
-          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Coming next</div>
-        </div>
-      </section>
-    </main>
+        <PccCard
+          title="Environment & Billing"
+          description="Environment flags, usage limits, and billing controls."
+          status="coming"
+        />
+      </div>
+
+      {/* Footer note */}
+      <div className="text-xs text-gray-500 dark:text-gray-400">
+        PCC v1 focuses on structure and governance. Feature depth will expand
+        incrementally.
+      </div>
+    </div>
   );
 }
