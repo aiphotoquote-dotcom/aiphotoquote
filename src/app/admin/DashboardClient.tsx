@@ -11,7 +11,13 @@ type TenantRow = {
 };
 
 type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
+  | {
+      ok: true;
+      activeTenantId: string | null;
+      tenants: TenantRow[];
+      needsTenantSelection?: boolean;
+      autoSelected?: boolean;
+    }
   | { ok: false; error: string; message?: string };
 
 type MetricsResp =
@@ -50,6 +56,7 @@ export default function DashboardClient() {
   const [metrics, setMetrics] = useState<MetricsResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [needsPick, setNeedsPick] = useState(false);
 
   const CONTEXT_URL = "/api/tenant/context";
   const METRICS_URL = "/api/admin/dashboard/metrics";
@@ -58,8 +65,11 @@ export default function DashboardClient() {
     const res = await fetch(CONTEXT_URL, { cache: "no-store" });
     const data = await safeJson<ContextResp>(res);
     if (!data.ok) throw new Error(data.message || data.error || "Failed to load tenant context");
+
     setContext({ activeTenantId: data.activeTenantId, tenants: data.tenants });
-    return data.activeTenantId;
+    setNeedsPick(!!data.needsTenantSelection);
+
+    return { activeTenantId: data.activeTenantId, tenants: data.tenants, needsTenantSelection: !!data.needsTenantSelection };
   }
 
   async function loadMetrics() {
@@ -72,7 +82,16 @@ export default function DashboardClient() {
     setErr(null);
     setLoading(true);
     try {
-      await loadContext();
+      const ctx = await loadContext();
+
+      // ✅ If user has multiple tenants and none is active yet, don't call tenant-scoped APIs.
+      if (!ctx.activeTenantId && (ctx.tenants?.length || 0) > 1) {
+        setMetrics(null);
+        setErr("No active tenant selected yet. Use the Tenant switcher in the top nav to pick one.");
+        return;
+      }
+
+      // If single-tenant, /api/tenant/context should auto-select and set cookies.
       await loadMetrics();
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -96,7 +115,6 @@ export default function DashboardClient() {
 
   return (
     <div className="space-y-6">
-      {/* HERO / CENTERPIECE */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-black">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -124,6 +142,12 @@ export default function DashboardClient() {
                 {err}
               </div>
             ) : null}
+
+            {needsPick ? (
+              <div className="mt-3 rounded-lg border border-yellow-200 bg-yellow-50 px-3 py-2 text-sm text-yellow-900 dark:border-yellow-900/40 dark:bg-yellow-950/40 dark:text-yellow-100">
+                You belong to multiple tenants. Please pick one in the top nav Tenant switcher.
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap gap-2">
@@ -149,18 +173,9 @@ export default function DashboardClient() {
           </div>
         </div>
 
-        {/* METRICS GRID */}
         <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
-            title="New leads"
-            value={loading ? "…" : String(m?.newLeads7d ?? 0)}
-            sub="Last 7 days"
-          />
-          <MetricCard
-            title="Quoted"
-            value={loading ? "…" : String(m?.quoted7d ?? 0)}
-            sub="Last 7 days"
-          />
+          <MetricCard title="New leads" value={loading ? "…" : String(m?.newLeads7d ?? 0)} sub="Last 7 days" />
+          <MetricCard title="Quoted" value={loading ? "…" : String(m?.quoted7d ?? 0)} sub="Last 7 days" />
           <MetricCard
             title="Avg response"
             value={
@@ -172,18 +187,11 @@ export default function DashboardClient() {
             }
             sub="Last 7 days"
           />
-          <MetricCard
-            title="Rendering"
-            value={loading ? "…" : m?.renderEnabled ? "On" : "Off"}
-            sub="Per-tenant"
-          />
+          <MetricCard title="Rendering" value={loading ? "…" : m?.renderEnabled ? "On" : "Off"} sub="Per-tenant" />
         </div>
 
-        {/* Workflow chips */}
         <div className="mt-6 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-            Workflow stages
-          </div>
+          <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Workflow stages</div>
           <div className="mt-2 flex flex-wrap gap-2 text-xs">
             <StageChip label="New" tone="blue" />
             <StageChip label="Read" tone="gray" />
@@ -194,7 +202,6 @@ export default function DashboardClient() {
         </div>
       </div>
 
-      {/* SECONDARY SECTION (placeholder for tenant switcher + sign out later) */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-black">
         <div className="text-sm font-semibold">Next</div>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
