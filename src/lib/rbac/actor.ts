@@ -18,11 +18,14 @@ async function ensureBootstrapOwner() {
   const count = Number(rows?.[0]?.c ?? 0);
   if (count > 0) return;
 
-  await db.insert(platformMembers).values({ clerkUserId: bootId, role: "platform_owner" }).onConflictDoNothing();
+  await db
+    .insert(platformMembers)
+    .values({ clerkUserId: bootId, role: "platform_owner" })
+    .onConflictDoNothing();
 }
 
 export async function getActorContext(): Promise<ActorContext> {
-  const a = auth();
+  const a = await auth(); // <-- FIX: auth() is async in this Clerk/Next setup
   const clerkUserId = a?.userId;
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
 
