@@ -1,3 +1,4 @@
+// src/components/quote/StatusBar.tsx
 "use client";
 
 import React from "react";
@@ -10,6 +11,7 @@ export function StatusBar({
   sticky,
   showRenderingMini,
   renderingLabel,
+  progressPct,
 }: {
   statusRef: React.RefObject<HTMLDivElement | null>;
   workingLabel: string;
@@ -18,7 +20,10 @@ export function StatusBar({
   sticky: boolean;
   showRenderingMini: boolean;
   renderingLabel: string;
+  progressPct: number; // 0..100
 }) {
+  const pct = Number.isFinite(progressPct) ? Math.max(0, Math.min(100, Math.round(progressPct))) : 0;
+
   // IMPORTANT:
   // - "min-w-0" on flex children prevents iOS overflow.
   // - right label gets truncation and cannot force viewport width.
@@ -27,10 +32,7 @@ export function StatusBar({
   return (
     <div
       ref={statusRef as any}
-      className={[
-        "max-w-full overflow-hidden",
-        sticky ? "sticky top-0 z-20" : "",
-      ].join(" ")}
+      className={["max-w-full overflow-hidden", sticky ? "sticky top-0 z-20" : ""].join(" ")}
     >
       <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-start justify-between gap-3">
@@ -40,9 +42,7 @@ export function StatusBar({
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100 truncate">
               {workingLabel}
             </div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300 break-words">
-              {workingSubtitle}
-            </div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300 break-words">{workingSubtitle}</div>
 
             {showRenderingMini ? (
               <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
@@ -53,15 +53,17 @@ export function StatusBar({
 
           {/* RIGHT */}
           <div className="min-w-0 max-w-[45%] text-right">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">
-              {workingRightLabel}
-            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">{workingRightLabel}</div>
           </div>
         </div>
 
         {/* Progress bar (green) */}
         <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-          <div className="h-full w-full bg-emerald-600" />
+          <div
+            className="h-full bg-emerald-600 transition-[width] duration-300 ease-out"
+            style={{ width: `${pct}%` }}
+            aria-hidden="true"
+          />
         </div>
       </div>
     </div>

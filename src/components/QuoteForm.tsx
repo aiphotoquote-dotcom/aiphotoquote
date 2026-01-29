@@ -224,6 +224,10 @@ export default function QuoteForm({
 
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
 
+  // Entry-mode nudges (avoid constant yanking)
+  const didNudgeToInfoRef = useRef(false);
+  const didNudgeToPhotosRef = useRef(false);
+
   // --- derived state ---
   const photoCount = photos.length;
 
@@ -274,10 +278,10 @@ export default function QuoteForm({
       const conf = String(result?.confidence ?? "").toLowerCase();
       const c =
         conf === "high" ? "High" : conf === "medium" ? "Medium" : conf === "low" ? "Low" : conf ? conf : "Unknown";
-      return `Confidence: ${c}${quoteLogId ? ` • Ref: ${String(quoteLogId).slice(0, 8)}` : ""}`;
+      return `Confidence: ${c}`;
     }
     return "Upload photos and add a quick note. We’ll return an estimate range.";
-  }, [working, workingStep.idx, photoCount, needsQa, hasEstimate, result?.confidence, quoteLogId]);
+  }, [working, workingStep.idx, photoCount, needsQa, hasEstimate, result?.confidence]);
 
   const showRenderingMini = useMemo(() => aiRenderingEnabled && renderOptIn, [aiRenderingEnabled, renderOptIn]);
 
@@ -299,6 +303,24 @@ export default function QuoteForm({
     return false;
   }, [working, needsQa, showRenderingMini, renderStatus]);
 
+  // MODE: show only one major “panel” at a time (removes button clutter)
+  const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
+
+  const progressPct = useMemo(() => {
+    if (working) {
+      const pct = Math.round((workingStep.idx / Math.max(1, workingStep.total)) * 100);
+      return Math.max(5, Math.min(95, pct));
+    }
+
+    if (mode === "results") return 100;
+    if (mode === "qa") return 80;
+
+    if (!photosOk) return 20;
+    if (!contactOk) return 45;
+
+    return 60;
+  }, [working, workingStep.idx, workingStep.total, mode, photosOk, contactOk]);
+
   // focus/scroll rules
   useEffect(() => {
     if (!error) return;
@@ -307,9 +329,32 @@ export default function QuoteForm({
     })();
   }, [error]);
 
+  // Entry: nudge to next task once (photos -> info)
+  useEffect(() => {
+    if (working) return;
+    if (mode !== "entry") return;
+
+    if (!photosOk) {
+      if (!didNudgeToPhotosRef.current) {
+        didNudgeToPhotosRef.current = true;
+        didNudgeToInfoRef.current = false;
+        queueMicrotask(() => focusAndScroll(photosSectionRef.current, { block: "start" }));
+      }
+      return;
+    }
+
+    if (photosOk && !contactOk) {
+      if (!didNudgeToInfoRef.current) {
+        didNudgeToInfoRef.current = true;
+        didNudgeToPhotosRef.current = false;
+        queueMicrotask(() => focusAndScroll(infoSectionRef.current, { block: "start" }));
+      }
+      return;
+    }
+  }, [working, mode, photosOk, contactOk]);
+
   useEffect(() => {
     if (!needsQa) return;
-    // IMPORTANT: only scroll/focus once when QA is first shown.
     (async () => {
       await sleep(75);
       await focusAndScroll(qaSectionRef.current, { block: "start" });
@@ -436,6 +481,10 @@ export default function QuoteForm({
     renderAttemptedForQuoteRef.current = null;
 
     if (!aiRenderingEnabled) setRenderOptIn(false);
+
+    // reset nudges
+    didNudgeToInfoRef.current = false;
+    didNudgeToPhotosRef.current = false;
 
     queueMicrotask(() => {
       focusAndScroll(statusRegionRef.current, { block: "start" });
@@ -771,11 +820,8 @@ export default function QuoteForm({
     await startRenderOnce(String(quoteLogId));
   }
 
-  // MODE: show only one major “panel” at a time (removes button clutter)
-  const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
-
   return (
-  <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6">
+    <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6">
       <StatusBar
         statusRef={statusRegionRef as any}
         workingLabel={workingLabel}
@@ -784,6 +830,7 @@ export default function QuoteForm({
         sticky={enableStickyStatus}
         showRenderingMini={showRenderingMini}
         renderingLabel={renderingLabel}
+        progressPct={progressPct}
       />
 
       {error ? (
@@ -875,7 +922,6 @@ export default function QuoteForm({
         />
       ) : null}
 
-      {/* ONE footer. If you still see it twice, it exists elsewhere too (see step 4 below). */}
       <p className="text-xs text-gray-600 dark:text-gray-300">
         By submitting, you agree we may contact you about this request. Photos are used only to prepare your estimate.
       </p>

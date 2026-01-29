@@ -68,7 +68,7 @@ export function ResultsSection({
   return (
     <section
       ref={sectionRef as any}
-      className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+      className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900 scroll-mt-24"
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
@@ -84,11 +84,7 @@ export function ResultsSection({
           </p>
         </div>
 
-        {quoteLogId ? (
-          <div className="shrink-0 text-[11px] font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">
-            Ref: {quoteLogId.slice(0, 8)}
-          </div>
-        ) : null}
+        {/* Ref intentionally removed from UI */}
       </div>
 
       {/* Primary card */}
@@ -165,7 +161,7 @@ export function ResultsSection({
       {showRenderBlock ? (
         <div
           ref={renderPreviewRef as any}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900"
+          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900 scroll-mt-24"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
