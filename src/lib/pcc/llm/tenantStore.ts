@@ -4,6 +4,9 @@ import { db } from "@/lib/db/client";
 import { sql } from "drizzle-orm";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "./tenantTypes";
 
+// ✅ Re-export for backwards compatibility (so imports from tenantStore keep working)
+export type { TenantLlmOverrides } from "./tenantTypes";
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -31,7 +34,10 @@ export async function loadTenantLlmOverrides(tenantId: string): Promise<TenantLl
   return out;
 }
 
-export async function saveTenantLlmOverrides(tenantId: string, overrides: TenantLlmOverrides): Promise<TenantLlmOverrides> {
+export async function saveTenantLlmOverrides(
+  tenantId: string,
+  overrides: TenantLlmOverrides
+): Promise<TenantLlmOverrides> {
   const tid = String(tenantId || "").trim();
   if (!tid) throw new Error("Missing tenantId");
 
