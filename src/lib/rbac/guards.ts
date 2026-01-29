@@ -1,15 +1,59 @@
 // src/lib/rbac/guards.ts
-import { getActorContext, type ActorContext } from "@/lib/rbac/actor";
-import type { PlatformRole } from "@/lib/db/pccSchema";
+import "server-only";
 
-export function hasPlatformRole(actor: ActorContext, roles: PlatformRole[]) {
-  if (!actor.platformRole) return false;
-  return roles.includes(actor.platformRole);
+import { getActorContext, type ActorContext } from "./actor";
+
+/**
+ * Canonical platform roles for the PCC.
+ * This is the SINGLE source of truth the guards enforce.
+ */
+export type GuardedPlatformRole =
+  | "platform_owner"
+  | "platform_admin"
+  | "platform_support"
+  | "platform_billing";
+
+/**
+ * Map actor.platformRole → guarded role space.
+ * This lets us evolve DB / auth vocab without breaking guards.
+ */
+function normalizePlatformRole(
+  role: ActorContext["platformRole"]
+): GuardedPlatformRole | null {
+  switch (role) {
+    case "super_admin":
+      return "platform_owner";
+    case "platform_admin":
+      return "platform_admin";
+    case "support":
+      return "platform_support";
+    case "billing":
+      return "platform_billing";
+    default:
+      return null; // readonly or unset
+  }
 }
 
-export async function requirePlatformRole(roles: PlatformRole[]) {
+export function hasPlatformRole(
+  actor: ActorContext,
+  allowed: GuardedPlatformRole[]
+): boolean {
+  if (!actor.platformRole) return false;
+
+  const normalized = normalizePlatformRole(actor.platformRole);
+  if (!normalized) return false;
+
+  return allowed.includes(normalized);
+}
+
+export async function requirePlatformRole(
+  allowed: GuardedPlatformRole[]
+): Promise<ActorContext> {
   const actor = await getActorContext();
-  if (!actor.platformRole) throw new Error("FORBIDDEN_PLATFORM_REQUIRED");
-  if (!roles.includes(actor.platformRole)) throw new Error("FORBIDDEN_PLATFORM_ROLE");
+
+  if (!hasPlatformRole(actor, allowed)) {
+    throw new Error("FORBIDDEN");
+  }
+
   return actor;
 }
