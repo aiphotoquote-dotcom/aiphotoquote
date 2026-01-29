@@ -2,16 +2,30 @@
 "use client";
 
 import React from "react";
-import { toneBadge } from "./ui";
+import { RenderPreview } from "./RenderPreview";
+import type { RenderStatus } from "./useQuoteFlow";
+
+// If you still have ./ui.ts helpers, keep using them; otherwise keep it simple:
+function badge(text: string) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+      {text}
+    </span>
+  );
+}
 
 export function ResultsSection({
   sectionRef,
   headingRef,
   renderPreviewRef,
+
   hasEstimate,
   result,
+  quoteLogId,
+
   aiRenderingEnabled,
   renderOptIn,
+
   renderStatus,
   renderImageUrl,
   renderError,
@@ -23,15 +37,15 @@ export function ResultsSection({
 
   hasEstimate: boolean;
   result: any;
+  quoteLogId: string | null;
 
   aiRenderingEnabled: boolean;
   renderOptIn: boolean;
 
-  renderStatus: "idle" | "running" | "rendered" | "failed";
+  renderStatus: RenderStatus;
   renderImageUrl: string | null;
   renderError: string | null;
-
-  renderProgressPct: number; // 0..100
+  renderProgressPct: number;
 }) {
   if (!hasEstimate) return null;
 
@@ -56,31 +70,7 @@ export function ResultsSection({
   const assumptions: string[] = Array.isArray(result?.assumptions) ? result.assumptions : [];
   const questions: string[] = Array.isArray(result?.questions) ? result.questions : [];
 
-  const confidenceTone =
-    confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
-
-  const showRenderBlock = aiRenderingEnabled && renderOptIn;
-
-  const rp = Number.isFinite(renderProgressPct) ? Math.max(0, Math.min(100, renderProgressPct)) : 0;
-
-  const renderTitle =
-    renderStatus === "rendered"
-      ? "Rendering ready"
-      : renderStatus === "failed"
-        ? "Rendering failed"
-        : renderStatus === "running"
-          ? "Rendering…"
-          : "Rendering queued";
-
-  const renderRight =
-    renderStatus === "rendered" ? "Done" : renderStatus === "failed" ? "Error" : renderStatus === "running" ? "Working" : "Waiting";
-
-  const renderSubtitle =
-    renderStatus === "failed"
-      ? "We couldn’t generate the preview this time."
-      : renderStatus === "rendered"
-        ? "Preview generated."
-        : "We’re generating a visual preview based on the uploaded photos and notes.";
+  const showRenderBlock = Boolean(aiRenderingEnabled && renderOptIn);
 
   return (
     <section
@@ -100,14 +90,19 @@ export function ResultsSection({
             Fast range based on your photos + notes. Final pricing may change after inspection.
           </p>
         </div>
+
+        {quoteLogId ? (
+          <div className="shrink-0 text-[11px] font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">
+            Ref: {quoteLogId.slice(0, 8)}
+          </div>
+        ) : null}
       </div>
 
-      {/* Primary card */}
       <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center gap-2">
-          {toneBadge(confidence ? `Confidence: ${confidence}` : "Confidence: unknown", confidenceTone as any)}
-          {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
-          {showRenderBlock ? toneBadge("Rendering requested", "blue") : null}
+          {badge(`Confidence: ${confidence || "unknown"}`)}
+          {badge(inspection ? "Inspection recommended" : "No inspection required")}
+          {showRenderBlock ? badge("Rendering requested") : null}
         </div>
 
         <div className="mt-4">
@@ -122,17 +117,14 @@ export function ResultsSection({
         </div>
       </div>
 
-      {/* Secondary details */}
-      {scope.length || assumptions.length || questions.length ? (
+      {(scope.length || assumptions.length || questions.length) ? (
         <div className="grid gap-3 lg:grid-cols-3">
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Visible scope</div>
-            <div className="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+            <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               {scope.length ? (
                 <ul className="list-disc pl-5 space-y-1">
-                  {scope.slice(0, 10).map((s, i) => (
-                    <li key={i}>{s}</li>
-                  ))}
+                  {scope.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
                 </ul>
               ) : (
                 <div className="text-gray-500 dark:text-gray-400 italic">Not enough detail yet.</div>
@@ -142,12 +134,10 @@ export function ResultsSection({
 
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Assumptions</div>
-            <div className="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+            <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               {assumptions.length ? (
                 <ul className="list-disc pl-5 space-y-1">
-                  {assumptions.slice(0, 10).map((s, i) => (
-                    <li key={i}>{s}</li>
-                  ))}
+                  {assumptions.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
                 </ul>
               ) : (
                 <div className="text-gray-500 dark:text-gray-400 italic">None.</div>
@@ -157,12 +147,10 @@ export function ResultsSection({
 
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Questions</div>
-            <div className="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+            <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               {questions.length ? (
                 <ul className="list-disc pl-5 space-y-1">
-                  {questions.slice(0, 10).map((s, i) => (
-                    <li key={i}>{s}</li>
-                  ))}
+                  {questions.slice(0, 10).map((s, i) => <li key={i}>{s}</li>)}
                 </ul>
               ) : (
                 <div className="text-gray-500 dark:text-gray-400 italic">No follow-ups needed.</div>
@@ -172,43 +160,16 @@ export function ResultsSection({
         </div>
       ) : null}
 
-      {/* Rendering status card (StatusBar-style) */}
       {showRenderBlock ? (
-        <div ref={renderPreviewRef as any} className="max-w-full overflow-hidden">
-          <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="text-xs text-gray-600 dark:text-gray-300">AI rendering preview</div>
-                <div className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100 truncate">{renderTitle}</div>
-                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300 break-words">{renderSubtitle}</div>
-              </div>
-
-              <div className="min-w-0 max-w-[45%] text-right">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">{renderRight}</div>
-              </div>
-            </div>
-
-            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-              <div className="h-full bg-emerald-600" style={{ width: `${rp}%` }} />
-            </div>
-
-            {renderError ? (
-              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                {renderError}
-              </div>
-            ) : null}
-
-            {renderImageUrl ? (
-              <div className="mt-4 rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
-              </div>
-            ) : null}
-          </div>
-        </div>
+        <RenderPreview
+          renderPreviewRef={renderPreviewRef}
+          status={renderStatus}
+          progressPct={renderProgressPct}
+          imageUrl={renderImageUrl}
+          error={renderError}
+        />
       ) : null}
 
-      {/* Debug */}
       <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
           Advanced: raw result (debug)
