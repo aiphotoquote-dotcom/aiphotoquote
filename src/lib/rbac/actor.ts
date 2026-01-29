@@ -1,120 +1,144 @@
 // src/lib/rbac/actor.ts
 import { auth, clerkClient } from "@clerk/nextjs/server";
-import { eq, and } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { appUsers } from "@/lib/db/schema";
 import type { PlatformRole } from "./guards";
 
 export type ActorContext = {
-  clerkUserId: string;
+  clerkUserId: string; // Clerk subject
+  appUserId: string; // app_users.id
   email: string | null;
-
-  // Internal portable user (app_users.id)
-  userId: string;
-
-  // Platform-wide RBAC (PCC)
-  platformRole: PlatformRole;
+  name: string | null;
+  platformRole: PlatformRole; // PCC role
 };
 
-/**
- * Resolve a platform role for the currently signed-in user.
- * PCC v1: role is derived from allowlists to avoid schema churn right now.
- *
- * Env options (comma-separated):
- * - PLATFORM_OWNER_EMAILS
- * - PLATFORM_ADMIN_EMAILS
- * - PLATFORM_SUPPORT_EMAILS
- * - PLATFORM_BILLING_EMAILS
- *
- * If none match, defaults to "readonly".
- */
-function derivePlatformRoleFromEmail(email: string | null): PlatformRole {
-  const e = (email ?? "").trim().toLowerCase();
-  if (!e) return "readonly";
+function parseEmailList(v: string | undefined) {
+  return (v ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
 
-  const list = (v?: string | null) =>
-    String(v ?? "")
-      .split(",")
-      .map((x) => x.trim().toLowerCase())
-      .filter(Boolean);
+function resolvePlatformRole(email: string | null): PlatformRole {
+  const e = (email ?? "").toLowerCase();
 
-  const owners = list(process.env.PLATFORM_OWNER_EMAILS);
-  const admins = list(process.env.PLATFORM_ADMIN_EMAILS);
-  const support = list(process.env.PLATFORM_SUPPORT_EMAILS);
-  const billing = list(process.env.PLATFORM_BILLING_EMAILS);
+  // Accept either naming convention so you can evolve envs without breaking.
+  const owners = new Set([
+    ...parseEmailList(process.env.PCC_OWNER_EMAILS),
+    ...parseEmailList(process.env.PLATFORM_OWNER_EMAILS),
+  ]);
+  const admins = new Set([
+    ...parseEmailList(process.env.PCC_ADMIN_EMAILS),
+    ...parseEmailList(process.env.PLATFORM_ADMIN_EMAILS),
+  ]);
+  const billing = new Set([
+    ...parseEmailList(process.env.PCC_BILLING_EMAILS),
+    ...parseEmailList(process.env.PLATFORM_BILLING_EMAILS),
+  ]);
+  const support = new Set([
+    ...parseEmailList(process.env.PCC_SUPPORT_EMAILS),
+    ...parseEmailList(process.env.PLATFORM_SUPPORT_EMAILS),
+  ]);
 
-  if (owners.includes(e)) return "platform_owner";
-  if (admins.includes(e)) return "platform_admin";
-  if (support.includes(e)) return "platform_support";
-  if (billing.includes(e)) return "platform_billing";
-
+  if (e && owners.has(e)) return "platform_owner";
+  if (e && admins.has(e)) return "platform_admin";
+  if (e && billing.has(e)) return "platform_billing";
+  if (e && support.has(e)) return "platform_support";
   return "readonly";
 }
 
-async function getClerkEmail(clerkUserId: string): Promise<string | null> {
+// Your Clerk import shape (in this project) behaves like an async factory.
+// This wrapper keeps TS happy and prevents “users does not exist on type () => Promise<ClerkClient>”.
+async function getClerk() {
+  // clerkClient is a function in your current setup
+  const anyClient: any = clerkClient as any;
+  return typeof anyClient === "function" ? await anyClient() : anyClient;
+}
+
+async function fetchClerkProfile(clerkUserId: string): Promise<{ email: string | null; name: string | null }> {
   try {
-    // Clerk SDK shape differs by version: sometimes clerkClient is a function, sometimes an object.
-    const client: any = typeof clerkClient === "function" ? await (clerkClient as any)() : (clerkClient as any);
+    const client = await getClerk();
     const u = await client.users.getUser(clerkUserId);
 
-    const primary = u.emailAddresses?.find((x: any) => x.id === u.primaryEmailAddressId)?.emailAddress;
-    return (primary ?? u.emailAddresses?.[0]?.emailAddress ?? null) as string | null;
+    const email =
+      u.emailAddresses?.find((e: any) => e.id === u.primaryEmailAddressId)?.emailAddress ??
+      u.emailAddresses?.[0]?.emailAddress ??
+      null;
+
+    const name =
+      [u.firstName, u.lastName].filter(Boolean).join(" ").trim() ||
+      (u.username ? String(u.username) : null) ||
+      null;
+
+    return { email: email ? String(email) : null, name: name ? String(name) : null };
   } catch {
-    return null;
+    return { email: null, name: null };
   }
 }
 
-async function getOrCreateAppUser(params: {
-  authProvider: string;
-  authSubject: string;
-  email: string | null;
-}): Promise<{ id: string }> {
-  const { authProvider, authSubject, email } = params;
-
-  const existing = await db
-    .select({ id: appUsers.id })
-    .from(appUsers)
-    .where(and(eq(appUsers.authProvider, authProvider), eq(appUsers.authSubject, authSubject)))
-    .limit(1);
-
-  if (existing[0]?.id) return { id: existing[0].id };
-
-  const inserted = await db
-    .insert(appUsers)
-    .values({
-      authProvider,
-      authSubject,
-      email: email ?? null,
-      // name can be filled later (or from Clerk user object if you want)
-    })
-    .returning({ id: appUsers.id });
-
-  return { id: inserted[0]!.id };
-}
-
+/**
+ * Actor context for RBAC:
+ * - ensures we have a durable app_users row
+ * - derives platformRole from allowlisted emails (env)
+ */
 export async function getActorContext(): Promise<ActorContext> {
-  // IMPORTANT: Clerk auth is async in your environment.
-  const a: any = await auth();
-  const clerkUserId: string | null | undefined = a?.userId;
+  const a = await auth();
+  const clerkUserId = a?.userId;
 
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
 
-  const email = await getClerkEmail(clerkUserId);
+  // Fetch email/name from Clerk (best-effort)
+  const { email, name } = await fetchClerkProfile(clerkUserId);
 
-  // Portable user record (app_users)
-  const appUser = await getOrCreateAppUser({
-    authProvider: "clerk",
-    authSubject: clerkUserId,
-    email,
-  });
+  // Upsert app_user (portable anchor)
+  const provider = "clerk";
+  const subject = clerkUserId;
 
-  const platformRole = derivePlatformRoleFromEmail(email);
+  // Try find existing
+  const existing = await db
+    .select({ id: appUsers.id })
+    .from(appUsers)
+    .where(and(eq(appUsers.authProvider, provider), eq(appUsers.authSubject, subject)))
+    .limit(1);
+
+  let appUserId: string;
+
+  if (existing.length) {
+    appUserId = existing[0]!.id;
+
+    // keep profile fresh (non-breaking)
+    await db
+      .update(appUsers)
+      .set({
+        email: email ?? null,
+        name: name ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(appUsers.id, appUserId));
+  } else {
+    const inserted = await db
+      .insert(appUsers)
+      .values({
+        authProvider: provider,
+        authSubject: subject,
+        email: email ?? null,
+        name: name ?? null,
+        updatedAt: new Date(),
+      })
+      .returning({ id: appUsers.id });
+
+    appUserId = inserted[0]!.id;
+  }
+
+  const platformRole = resolvePlatformRole(email);
 
   return {
     clerkUserId,
+    appUserId,
     email,
-    userId: appUser.id,
+    name,
     platformRole,
   };
 }
