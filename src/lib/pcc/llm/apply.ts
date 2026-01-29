@@ -34,8 +34,12 @@ export async function getPlatformLlm(): Promise<{
   const qaModel = String(cfg.models?.qaModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const renderModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
 
-  const quoteEstimatorSystem = String(cfg.promptSets?.quoteEstimatorSystem || "").trim();
-  const qaQuestionGeneratorSystem = String(cfg.promptSets?.qaQuestionGeneratorSystem || "").trim();
+  // Back-compat: older stored JSON may still be { promptSets: {...} }
+  const anyCfg = cfg as any;
+  const promptsObj = (cfg as any).prompts ?? anyCfg.promptSets ?? {};
+
+  const quoteEstimatorSystem = String(promptsObj?.quoteEstimatorSystem || "").trim();
+  const qaQuestionGeneratorSystem = String(promptsObj?.qaQuestionGeneratorSystem || "").trim();
 
   const maxOutputTokensRaw = Number(cfg.guardrails?.maxOutputTokens ?? 900);
   const maxOutputTokens = Number.isFinite(maxOutputTokensRaw)
