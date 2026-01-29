@@ -1,6 +1,9 @@
+// src/app/admin/setup/ai-policy/page.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import TenantLlmBehaviorAdvanced from "@/components/pcc/llm/TenantLlmBehaviorAdvanced";
 
 type AiMode = "assessment_only" | "range" | "fixed";
 type RenderingStyle = "photoreal" | "clean_oem" | "custom";
@@ -114,7 +117,9 @@ export default function AiPolicySetupPage() {
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
       setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
-      setRenderingMaxPerDay(Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20);
+      setRenderingMaxPerDay(
+        Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
+      );
       setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -158,7 +163,9 @@ export default function AiPolicySetupPage() {
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
       setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
-      setRenderingMaxPerDay(Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20);
+      setRenderingMaxPerDay(
+        Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
+      );
       setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -275,7 +282,8 @@ export default function AiPolicySetupPage() {
                 <div>
                   <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
                   <div className="mt-1 text-xs text-gray-600">
-                    Optional “concept render” image of the finished product. Costs more than text — keep this tenant-controlled.
+                    Optional “concept render” image of the finished product. Costs more than text — keep this
+                    tenant-controlled.
                   </div>
                 </div>
 
@@ -356,7 +364,7 @@ export default function AiPolicySetupPage() {
                           renderingOptInRequired
                             ? "border-green-300 bg-green-50 text-green-800"
                             : "border-gray-300 bg-white text-gray-800",
-                          (!canEdit || !renderingEnabled) ? "opacity-50" : "hover:bg-gray-50",
+                          !canEdit || !renderingEnabled ? "opacity-50" : "hover:bg-gray-50",
                         ].join(" ")}
                       >
                         {renderingOptInRequired ? "ON" : "OFF"}
@@ -368,13 +376,23 @@ export default function AiPolicySetupPage() {
                 <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-xs text-gray-700">
                   We’ll enforce this later in <span className="font-mono">/api/quote/submit</span>:
                   <ul className="list-disc pl-5 mt-2 space-y-1">
-                    <li>Only attempt rendering if <span className="font-mono">rendering_enabled</span> is true</li>
-                    <li>Require customer checkbox when <span className="font-mono">rendering_customer_opt_in_required</span> is true</li>
-                    <li>Rate limit using <span className="font-mono">rendering_max_per_day</span></li>
+                    <li>
+                      Only attempt rendering if <span className="font-mono">rendering_enabled</span> is true
+                    </li>
+                    <li>
+                      Require customer checkbox when{" "}
+                      <span className="font-mono">rendering_customer_opt_in_required</span> is true
+                    </li>
+                    <li>
+                      Rate limit using <span className="font-mono">rendering_max_per_day</span>
+                    </li>
                   </ul>
                 </div>
               </div>
             </div>
+
+            {/* LLM Behavior (Advanced) — platform read-only + tenant overrides */}
+            <TenantLlmBehaviorAdvanced />
 
             {/* Save */}
             <div className="flex items-center gap-4">
