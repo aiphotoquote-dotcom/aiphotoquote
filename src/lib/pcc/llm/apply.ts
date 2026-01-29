@@ -32,7 +32,7 @@ export async function getPlatformLlm(): Promise<{
   // Defensive normalization (don’t trust storage blindly)
   const estimatorModel = String(cfg.models?.estimatorModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const qaModel = String(cfg.models?.qaModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
-  const renderPromptModel = String(cfg.models?.renderPromptModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+ const renderModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
 
   const quoteEstimatorSystem = String(cfg.promptSets?.quoteEstimatorSystem || "").trim();
   const qaQuestionGeneratorSystem = String(cfg.promptSets?.qaQuestionGeneratorSystem || "").trim();
