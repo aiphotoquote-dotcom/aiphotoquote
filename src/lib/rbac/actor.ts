@@ -14,22 +14,25 @@ export type ActorContext = {
 };
 
 export async function getActorContext(): Promise<ActorContext> {
-  // Clerk auth() is async in your current setup
+  // In your setup, auth() returns a Promise
   const a = await auth();
   const clerkUserId = a?.userId;
 
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
 
-  // Optional: get email for audit/debug
+  // Optional: get email (nice for audit/debug)
   let email: string | null = null;
   try {
-    const u = await clerkClient.users.getUser(clerkUserId);
+    // IMPORTANT: in your Clerk types, clerkClient is a function returning the client
+    const client = await clerkClient();
+    const u = await client.users.getUser(clerkUserId);
+
     email =
       u.emailAddresses?.find((e) => e.id === u.primaryEmailAddressId)?.emailAddress ??
       u.emailAddresses?.[0]?.emailAddress ??
       null;
   } catch {
-    // ignore
+    // ignore (email is optional)
   }
 
   // TODO: load from DB (platform_users / platform_roles)
