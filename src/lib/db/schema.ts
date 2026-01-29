@@ -272,3 +272,17 @@ export const industries = pgTable(
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
   })
 );
+
+/**
+ * Platform controls (PCC)
+ * Single-row table: feature gates + maintenance controls.
+ */
+export const platformConfig = pgTable("platform_config", {
+  aiQuotingEnabled: boolean("ai_quoting_enabled").notNull().default(true),
+  aiRenderingEnabled: boolean("ai_rendering_enabled").notNull().default(false),
+
+  maintenanceEnabled: boolean("maintenance_enabled").notNull().default(false),
+  maintenanceMessage: text("maintenance_message"),
+
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
