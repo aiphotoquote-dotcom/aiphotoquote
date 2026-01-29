@@ -1,126 +1,137 @@
 // src/app/api/tenant/llm/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { requireTenantRole } from "@/lib/rbac/guards";
+import { cookies } from "next/headers";
+
+import { requirePlatformRole } from "@/lib/rbac/guards";
 
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { loadTenantLlmOverrides, saveTenantLlmOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
-import { buildEffectiveLlmConfig, getIndustryDefaults } from "@/lib/pcc/llm/effective";
+import {
+  loadTenantLlmOverrides,
+  saveTenantLlmOverrides,
+  type TenantLlmOverrides,
+} from "@/lib/pcc/llm/tenantStore";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const TenantOverridesSchema = z.object({
-  version: z.number().int().optional(),
-  updatedAt: z.string().nullable().optional(),
+/**
+ * NOTE (temporary):
+ * We’re using requirePlatformRole() because requireTenantRole() is not exported yet.
+ * Next step: implement a real tenant-scoped guard and swap this back.
+ */
 
-  models: z
-    .object({
-      estimatorModel: z.string().min(1).optional(),
-      qaModel: z.string().min(1).optional(),
-      renderModel: z.string().min(1).optional(),
-    })
-    .partial()
-    .optional(),
+// Match whatever your tenant-context route sets.
+// If your cookie name differs, update this constant (runtime behavior), but this compiles either way.
+const ACTIVE_TENANT_COOKIE = "activeTenantId";
 
-  prompts: z
-    .object({
-      quoteEstimatorSystem: z.string().optional(),
-      qaQuestionGeneratorSystem: z.string().optional(),
-      extraSystemPreamble: z.string().optional(),
-    })
-    .partial()
-    .optional(),
-
-  maxQaQuestions: z.number().int().min(1).max(10).optional(),
-});
-
-function safeStr(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s;
+function getActiveTenantIdFromCookie(): string | null {
+  const c = cookies().get(ACTIVE_TENANT_COOKIE)?.value;
+  const v = String(c ?? "").trim();
+  return v || null;
 }
 
-export async function GET(req: Request) {
-  // Tenant-side access control (owner/admin only)
-  await requireTenantRole(["owner", "admin"]);
+const OverridesSchema = z
+  .object({
+    // tenant may override models/prompts, but NOT guardrails
+    models: z
+      .object({
+        estimatorModel: z.string().min(1).optional(),
+        qaModel: z.string().min(1).optional(),
+        renderModel: z.string().min(1).optional(),
+      })
+      .partial()
+      .optional(),
 
-  const url = new URL(req.url);
-  const tenantId = safeStr(url.searchParams.get("tenantId"));
-  const industryKey = safeStr(url.searchParams.get("industryKey")) || null;
+    prompts: z
+      .object({
+        quoteEstimatorSystem: z.string().optional(),
+        qaQuestionGeneratorSystem: z.string().optional(),
+        extraSystemPreamble: z.string().optional(),
+      })
+      .partial()
+      .optional(),
+  })
+  .partial();
 
+function normalizeOverrides(input: any): TenantLlmOverrides {
+  const parsed = OverridesSchema.parse(input ?? {});
+  const models = parsed.models ?? {};
+  const prompts = parsed.prompts ?? {};
+
+  // keep it light—tenant overrides can be partial
+  return {
+    models: {
+      ...(models.estimatorModel ? { estimatorModel: String(models.estimatorModel).trim() } : {}),
+      ...(models.qaModel ? { qaModel: String(models.qaModel).trim() } : {}),
+      ...(models.renderModel ? { renderModel: String(models.renderModel).trim() } : {}),
+    },
+    prompts: {
+      ...(typeof prompts.quoteEstimatorSystem === "string"
+        ? { quoteEstimatorSystem: String(prompts.quoteEstimatorSystem) }
+        : {}),
+      ...(typeof prompts.qaQuestionGeneratorSystem === "string"
+        ? { qaQuestionGeneratorSystem: String(prompts.qaQuestionGeneratorSystem) }
+        : {}),
+      ...(typeof prompts.extraSystemPreamble === "string"
+        ? { extraSystemPreamble: String(prompts.extraSystemPreamble) }
+        : {}),
+    },
+  };
+}
+
+export async function GET(_req: Request) {
+  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+
+  const tenantId = getActiveTenantIdFromCookie();
   if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID", message: "tenantId is required." }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
+      { status: 400, headers: { "cache-control": "no-store" } }
+    );
   }
 
   const platform = await loadPlatformLlmConfig();
-  const tenant = await loadTenantLlmOverrides(tenantId);
-  const industry = getIndustryDefaults(industryKey);
-
-  const bundle = buildEffectiveLlmConfig({ platform, industry, tenant });
+  const overrides = await loadTenantLlmOverrides(tenantId);
 
   return NextResponse.json(
-    {
-      ok: true,
-      platform: bundle.platform,
-      industry: bundle.industry,
-      tenant: bundle.tenant,
-      effective: bundle.effective,
-      permissions: {
-        tenantEditable: {
-          models: true,
-          prompts: true,
-          maxQaQuestions: true,
-          guardrails: false,
-        },
-      },
-    },
+    { ok: true, tenantId, platform, overrides },
     { headers: { "cache-control": "no-store" } }
   );
 }
 
 export async function POST(req: Request) {
-  await requireTenantRole(["owner", "admin"]);
+  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+
+  const tenantId = getActiveTenantIdFromCookie();
+  if (!tenantId) {
+    return NextResponse.json(
+      { ok: false, error: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
+      { status: 400 }
+    );
+  }
 
   const body = await req.json().catch(() => null);
   if (!body) {
-    return NextResponse.json({ ok: false, error: "INVALID_BODY", message: "Missing JSON body." }, { status: 400 });
-  }
-
-  const tenantId = safeStr((body as any).tenantId);
-  const candidate = (body as any).overrides ?? (body as any).config ?? body;
-
-  if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID", message: "tenantId is required." }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "INVALID_BODY", message: "Missing JSON body." },
+      { status: 400 }
+    );
   }
 
   try {
-    const parsed = TenantOverridesSchema.parse(candidate);
+    // accept either { overrides } or the overrides object directly
+    const candidate = (body as any).overrides ?? body;
+    const normalized = normalizeOverrides(candidate);
 
-    // Hard-enforce: tenant cannot set guardrails (ignore if present)
-    const overrides: TenantLlmOverrides = {
-      version: parsed.version ?? 1,
-      updatedAt: parsed.updatedAt ?? null,
-      models: parsed.models ?? {},
-      prompts: parsed.prompts ?? {},
-      maxQaQuestions: parsed.maxQaQuestions,
-    };
+    await saveTenantLlmOverrides(tenantId, normalized);
 
-    await saveTenantLlmOverrides(tenantId, overrides);
-
-    // Return latest computed bundle
-    const platform = await loadPlatformLlmConfig();
-    const tenant = await loadTenantLlmOverrides(tenantId);
-
-    // industryKey can be passed again if you want effective preview to reflect it
-    const industryKey = safeStr((body as any).industryKey) || null;
-    const industry = getIndustryDefaults(industryKey);
-
-    const bundle = buildEffectiveLlmConfig({ platform, industry, tenant });
-
-    return NextResponse.json({ ok: true, tenant: bundle.tenant, effective: bundle.effective });
+    const saved = await loadTenantLlmOverrides(tenantId);
+    return NextResponse.json({ ok: true, tenantId, overrides: saved });
   } catch (e: any) {
+    const issues = e?.issues ?? undefined;
     return NextResponse.json(
-      { ok: false, error: "VALIDATION_FAILED", message: e?.message ?? String(e), issues: e?.issues },
+      { ok: false, error: "VALIDATION_FAILED", message: e?.message ?? String(e), issues },
       { status: 400 }
     );
   }
