@@ -4,17 +4,13 @@ import type { PlatformLlmConfig } from "./types";
 
 /**
  * Central “resolver” so routes stop hardcoding models/prompts.
- * Routes can call:
- *   const llm = await getPlatformLlm();
- *   llm.models.estimatorModel
- *   llm.prompts.quoteEstimatorSystem
  */
 export async function getPlatformLlm(): Promise<{
   cfg: PlatformLlmConfig;
   models: {
     estimatorModel: string;
     qaModel: string;
-    renderModel: string;
+    renderPromptModel: string;
   };
   prompts: {
     quoteEstimatorSystem: string;
@@ -29,45 +25,39 @@ export async function getPlatformLlm(): Promise<{
 }> {
   const cfg = await loadPlatformLlmConfig();
 
-  // Defensive normalization (don’t trust storage blindly)
+  // Models
   const estimatorModel = String(cfg.models?.estimatorModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
   const qaModel = String(cfg.models?.qaModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
-  const renderModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  const renderPromptModel = String(cfg.models?.renderModel || "gpt-4o-mini").trim() || "gpt-4o-mini";
 
-  // Back-compat: older stored JSON may still be { promptSets: {...} }
-  const anyCfg = cfg as any;
-  const promptsObj = anyCfg.prompts ?? anyCfg.promptSets ?? {};
+  // Prompts (NOTE: config uses `prompts`, not `promptSets`)
+  const quoteEstimatorSystem = String(cfg.prompts?.quoteEstimatorSystem || "").trim();
+  const qaQuestionGeneratorSystem = String(cfg.prompts?.qaQuestionGeneratorSystem || "").trim();
 
-  const quoteEstimatorSystem = String(promptsObj?.quoteEstimatorSystem || "").trim();
-  const qaQuestionGeneratorSystem = String(promptsObj?.qaQuestionGeneratorSystem || "").trim();
-
-  // Guardrails: types may lag behind stored JSON, so read via `any`
-  const guardAny = (anyCfg.guardrails ?? {}) as any;
-
-  const maxOutputTokensRaw = Number(guardAny.maxOutputTokens ?? 900);
+  // Guardrails (be defensive: some fields may not exist in type yet)
+  const maxOutputTokensRaw = Number((cfg.guardrails as any)?.maxOutputTokens ?? 900);
   const maxOutputTokens = Number.isFinite(maxOutputTokensRaw)
     ? Math.max(200, Math.min(4000, Math.floor(maxOutputTokensRaw)))
     : 900;
 
-  const modeRaw = String(guardAny.mode ?? "balanced");
-  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive" ? modeRaw : "balanced") as
-    | "strict"
-    | "balanced"
-    | "permissive";
+  const modeRaw = String((cfg.guardrails as any)?.mode ?? "balanced");
+  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive"
+    ? modeRaw
+    : "balanced") as "strict" | "balanced" | "permissive";
 
-  const piiRaw = String(guardAny.piiHandling ?? "redact");
+  const piiRaw = String((cfg.guardrails as any)?.piiHandling ?? "redact");
   const piiHandling = (piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact") as
     | "redact"
     | "allow"
     | "deny";
 
-  const blockedTopics = Array.isArray(guardAny.blockedTopics)
-    ? guardAny.blockedTopics.map((s: any) => String(s)).filter(Boolean)
+  const blockedTopics = Array.isArray((cfg.guardrails as any)?.blockedTopics)
+    ? (cfg.guardrails as any).blockedTopics.map((s: any) => String(s)).filter(Boolean)
     : [];
 
   return {
     cfg,
-    models: { estimatorModel, qaModel, renderModel },
+    models: { estimatorModel, qaModel, renderPromptModel },
     prompts: {
       quoteEstimatorSystem:
         quoteEstimatorSystem ||
@@ -97,19 +87,16 @@ export async function getPlatformLlm(): Promise<{
 
 /**
  * Optional helper: quick safety “pre-filter” for text you might echo back.
- * This is not a full safety system—just a cheap guard based on PCC settings.
  */
 export function applyBasicTextGuardrails(input: string, cfg: { piiHandling: "redact" | "allow" | "deny" }) {
   const s = String(input ?? "");
   if (cfg.piiHandling === "allow") return s;
 
-  // very basic email/phone redaction (good enough for UI / logs)
   const redacted = s
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
     .replace(/(\+?1[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g, "[redacted-phone]");
 
   if (cfg.piiHandling === "deny") {
-    // If it *looks* like we found PII, drop it.
     if (redacted !== s) return "";
   }
 
