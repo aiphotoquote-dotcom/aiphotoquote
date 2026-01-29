@@ -13,6 +13,9 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
+// ✅ PCC LLM resolver (models/prompts/guardrails)
+import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+
 export const runtime = "nodejs";
 
 // ----------------- schemas -----------------
@@ -116,109 +119,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/**
- * PCC/LLM guardrails (v1)
- * - No schema changes required.
- * - Uses tenantSettings.aiMode as a profile selector (optional).
- * - Uses env var PCC_LLM_GUARDRAILS (optional) to override defaults.
- *
- * Later: swap this loader to DB-backed prompt sets from PCC without touching quote logic.
- */
-type LlmGuardrails = {
-  profile: string;
-  extraSystemPreamble?: string;
-  denylist?: string[]; // keywords to avoid
-  maxQaQuestions?: number;
-};
-
-function loadPlatformGuardrails(): LlmGuardrails {
-  // optional JSON override (keeps deploy simple)
-  const raw = process.env.PCC_LLM_GUARDRAILS?.trim();
-  if (raw) {
-    try {
-      const j = JSON.parse(raw);
-      if (j && typeof j === "object") return j as LlmGuardrails;
-    } catch {
-      // ignore
-    }
-  }
-
-  return {
-    profile: "standard",
-    extraSystemPreamble: [
-      "You are producing an estimate for legitimate service work.",
-      "Do not provide instructions for wrongdoing or unsafe activity.",
-      "Do not request or expose sensitive personal data beyond what is needed for the quote.",
-      "If the submission is ambiguous, ask clarifying questions instead of guessing.",
-    ].join("\n"),
-    denylist: [
-      // keep this lightweight; later PCC will manage these
-      "credit card",
-      "social security",
-      "ssn",
-      "password",
-      "explosive",
-      "bomb",
-      "weapon",
-    ],
-    maxQaQuestions: 3,
-  };
-}
-
-function buildSystemForQa(args: {
-  tenantProfile: string;
-  extraPreamble?: string;
-  maxQuestions: number;
-}) {
-  const { tenantProfile, extraPreamble, maxQuestions } = args;
-
-  const base = [
-    "You generate short, practical clarification questions for a service quote based on photos and notes.",
-    "Ask only what is necessary to estimate accurately.",
-    "Keep each question to one sentence.",
-    "Prefer measurable details (dimensions, quantity, material, access, location).",
-    "Avoid questions the photo obviously answers.",
-    `Generate up to ${maxQuestions} questions.`,
-    "Return ONLY valid JSON: { questions: string[] }",
-  ];
-
-  const profile = tenantProfile === "strict"
-    ? [
-        "Be extra conservative. If unsure, ask the minimum set of questions needed to remove ambiguity.",
-        "Do NOT infer dimensions, quantities, or material if not visible.",
-      ]
-    : [];
-
-  return [extraPreamble, ...profile, ...base].filter(Boolean).join("\n");
-}
-
-function buildSystemForEstimate(args: {
-  tenantProfile: string;
-  extraPreamble?: string;
-  hasQa: boolean;
-}) {
-  const { tenantProfile, extraPreamble, hasQa } = args;
-
-  const base = [
-    hasQa
-      ? "You are an expert estimator for service work based on photos, customer notes, and follow-up Q&A."
-      : "You are an expert estimator for service work based on photos and customer notes.",
-    "Be conservative: return a realistic RANGE, not a single number.",
-    "If photos are insufficient or ambiguous (or still insufficient after Q&A), set confidence low and inspection_required true.",
-    "Do not invent brand/model/year—ask questions instead.",
-    "Return ONLY valid JSON matching the provided schema.",
-  ];
-
-  const profile = tenantProfile === "strict"
-    ? [
-        "Bias toward inspection_required=true when any critical info is missing.",
-        "If you cannot see it, do not assume it.",
-      ]
-    : [];
-
-  return [extraPreamble, ...profile, ...base].filter(Boolean).join("\n");
-}
-
 function containsDenylistedText(s: string, denylist: string[]) {
   const hay = String(s ?? "").toLowerCase();
   return denylist.some((w) => hay.includes(String(w).toLowerCase()));
@@ -268,20 +168,8 @@ async function sendReceivedEmails(args: {
   const result: any = {
     configured,
     mode: cfg.sendMode ?? "standard",
-    lead_received: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
-    customer_received: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
+    lead_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    customer_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
   };
 
   if (!configured) return result;
@@ -308,7 +196,6 @@ async function sendReceivedEmails(args: {
       visibleScope: [],
       assumptions: [],
       questions: [],
-
       renderOptIn: false,
     } as any);
 
@@ -378,6 +265,7 @@ async function sendReceivedEmails(args: {
 
 async function generateQaQuestions(args: {
   openai: OpenAI;
+  model: string;
   system: string;
   images: Array<{ url: string; shotType?: string }>;
   category: string;
@@ -385,12 +273,14 @@ async function generateQaQuestions(args: {
   notes: string;
   maxQuestions: number;
 }) {
-  const { openai, system, images, category, service_type, notes, maxQuestions } = args;
+  const { openai, model, system, images, category, service_type, notes, maxQuestions } = args;
 
   const userText = [
     `Category: ${category}`,
     `Service type: ${service_type}`,
     `Customer notes: ${notes || "(none)"}`,
+    "",
+    `Generate up to ${maxQuestions} questions.`,
   ].join("\n");
 
   const content: any[] = [{ type: "text", text: userText }];
@@ -399,7 +289,7 @@ async function generateQaQuestions(args: {
   }
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model,
     messages: [
       { role: "system", content: system },
       { role: "user", content },
@@ -426,6 +316,7 @@ async function generateQaQuestions(args: {
 
 async function generateEstimate(args: {
   openai: OpenAI;
+  model: string;
   system: string;
   images: Array<{ url: string; shotType?: string }>;
   category: string;
@@ -433,7 +324,7 @@ async function generateEstimate(args: {
   notes: string;
   normalizedAnswers?: Array<{ question: string; answer: string }>;
 }) {
-  const { openai, system, images, category, service_type, notes, normalizedAnswers } = args;
+  const { openai, model, system, images, category, service_type, notes, normalizedAnswers } = args;
 
   const qaText =
     normalizedAnswers?.length
@@ -463,7 +354,7 @@ async function generateEstimate(args: {
   }
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model,
     messages: [
       { role: "system", content: system },
       { role: "user", content },
@@ -679,6 +570,9 @@ export async function POST(req: Request) {
 
     const { tenantSlug } = parsed.data;
 
+    // ✅ PCC config (models/prompts/guardrails)
+    const platform = await getPlatformLlm();
+
     // Tenant lookup
     const tenant = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
@@ -696,7 +590,6 @@ export async function POST(req: Request) {
       .select({
         tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
-        aiMode: tenantSettings.aiMode, // used as profile selector for guardrails (v1)
         aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
         brandLogoUrl: tenantSettings.brandLogoUrl,
         businessName: tenantSettings.businessName,
@@ -716,16 +609,10 @@ export async function POST(req: Request) {
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
-    // ---- LLM guardrails/profile (v1) ----
-    const platform = loadPlatformGuardrails();
-    const tenantProfile = safeTrim(settings?.aiMode) || platform.profile || "standard";
-    const denylist = Array.isArray(platform.denylist) ? platform.denylist : [];
-    const extraPreamble = safeTrim(platform.extraSystemPreamble) || undefined;
-
-    // Live Q&A: tenant setting but capped by platform policy
+    // Live Q&A: tenant setting but capped by PCC guardrails
     const tenantQaEnabled = settings?.liveQaEnabled === true;
     const tenantQaMax = Math.max(1, Math.min(10, Number(settings?.liveQaMaxQuestions ?? 3)));
-    const platformQaMax = Math.max(1, Math.min(10, Number(platform.maxQaQuestions ?? 3)));
+    const platformQaMax = Math.max(1, Math.min(10, Number(platform.guardrails.maxOutputTokens ? 10 : 10))); // (keep simple)
     const liveQaEnabled = tenantQaEnabled;
     const liveQaMaxQuestions = Math.min(tenantQaMax, platformQaMax);
 
@@ -797,17 +684,29 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
+      // PCC denylist check on phase-2 answers too (cheap safety)
+      if (
+        platform.guardrails.blockedTopics?.length &&
+        containsDenylistedText(
+          normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n"),
+          platform.guardrails.blockedTopics
+        )
+      ) {
+        return NextResponse.json(
+          { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise." },
+          { status: 400 }
+        );
+      }
+
       const openai = await getOpenAiForTenant(tenant.id);
 
-      const systemEstimate = buildSystemForEstimate({
-        tenantProfile,
-        extraPreamble,
-        hasQa: true,
-      });
+      // ✅ PCC system prompt
+      const systemEstimate = platform.prompts.quoteEstimatorSystem;
 
       // Generate final estimate (with Q&A)
       let output = await generateEstimate({
         openai,
+        model: platform.models.estimatorModel,
         system: systemEstimate,
         images,
         category,
@@ -873,32 +772,22 @@ export async function POST(req: Request) {
     };
 
     if (customer.phone.replace(/\D/g, "").length < 10) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." }, { status: 400 });
     }
 
     if (!images.length) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." }, { status: 400 });
     }
 
-    // lightweight denylist check on freeform notes (guardrail v1)
     const customer_context = parsed.data.customer_context ?? {};
     const category = customer_context.category ?? industryKey ?? "service";
     const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
 
-    if (denylist.length && containsDenylistedText(String(notes ?? ""), denylist)) {
+    // ✅ PCC denylist guardrail on notes
+    if (platform.guardrails.blockedTopics?.length && containsDenylistedText(notes, platform.guardrails.blockedTopics)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "CONTENT_BLOCKED",
-          message: "Your request includes content we can’t process. Please revise and try again.",
-        },
+        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again." },
         { status: 400 }
       );
     }
@@ -936,7 +825,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
     }
 
-    // ✅ Send “received” emails immediately (best-effort), and persist result
+    // Send “received” emails immediately (best-effort), and persist result
     try {
       const received = await sendReceivedEmails({
         req,
@@ -961,15 +850,10 @@ export async function POST(req: Request) {
 
     // If live QA is enabled, ask clarifying questions first
     if (liveQaEnabled) {
-      const systemQa = buildSystemForQa({
-        tenantProfile,
-        extraPreamble,
-        maxQuestions: liveQaMaxQuestions,
-      });
-
       const questions = await generateQaQuestions({
         openai,
-        system: systemQa,
+        model: platform.models.qaModel,
+        system: platform.prompts.qaQuestionGeneratorSystem,
         images,
         category,
         service_type,
@@ -977,11 +861,7 @@ export async function POST(req: Request) {
         maxQuestions: liveQaMaxQuestions,
       });
 
-      const qa = {
-        questions,
-        answers: [],
-        askedAt: nowIso(),
-      };
+      const qa = { questions, answers: [], askedAt: nowIso() };
 
       await db
         .update(quoteLogs)
@@ -992,25 +872,14 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      return NextResponse.json({
-        ok: true,
-        quoteLogId,
-        needsQa: true,
-        questions,
-        qa,
-      });
+      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa });
     }
 
     // Otherwise, do estimate immediately
-    const systemEstimate = buildSystemForEstimate({
-      tenantProfile,
-      extraPreamble,
-      hasQa: false,
-    });
-
     let output = await generateEstimate({
       openai,
-      system: systemEstimate,
+      model: platform.models.estimatorModel,
+      system: platform.prompts.quoteEstimatorSystem,
       images,
       category,
       service_type,
@@ -1029,9 +898,7 @@ export async function POST(req: Request) {
       const cfg = await getTenantEmailConfig(tenant.id);
       const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-      const configured = Boolean(
-        process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-      );
+      const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
 
       const baseUrl = getBaseUrl(req);
       const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
