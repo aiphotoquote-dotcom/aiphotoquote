@@ -891,7 +891,6 @@ export default function QuoteForm({
           needsQa={needsQa}
           qaQuestions={qaQuestions}
           qaAnswers={qaAnswers}
-          quoteLogId={quoteLogId}
           onAnswer={(idx, v) => {
             setQaAnswers((prev) => {
               const next = [...prev];
