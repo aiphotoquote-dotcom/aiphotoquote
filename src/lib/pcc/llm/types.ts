@@ -1,5 +1,8 @@
 // src/lib/pcc/llm/types.ts
 
+export type GuardrailsMode = "strict" | "balanced" | "permissive";
+export type PiiHandling = "redact" | "allow" | "deny";
+
 export type PlatformLlmConfig = {
   version: number;
 
@@ -24,6 +27,10 @@ export type PlatformLlmConfig = {
   };
 
   guardrails: {
+    // UI/API expects these (safe to default)
+    mode?: GuardrailsMode;
+    piiHandling?: PiiHandling;
+
     // Simple keyword/topic blocks (V1). We'll evolve this later.
     blockedTopics: string[];
 
@@ -43,6 +50,8 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
     models: {
       estimatorModel: "gpt-4o-mini",
       qaModel: "gpt-4o-mini",
+
+      // NOTE: this is just a stored value; image generation is separate.
       renderModel: "gpt-image-1",
     },
     prompts: {
@@ -71,6 +80,8 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
       ].join("\n"),
     },
     guardrails: {
+      mode: "balanced",
+      piiHandling: "redact",
       blockedTopics: [
         "credit card",
         "social security",
