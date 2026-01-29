@@ -1,50 +1,101 @@
 // src/app/pcc/tenants/page.tsx
 import React from "react";
-import { db } from "@/lib/db/client";
-import { requirePlatformRole } from "@/lib/rbac/guards";
-import { tenants } from "@/lib/db/schema";
+import Link from "next/link";
 import { desc } from "drizzle-orm";
 
-export default async function PccTenantsPage() {
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
+import { db } from "@/lib/db/client";
+import { tenants } from "@/lib/db/schema";
+import { requirePlatformRole } from "@/lib/rbac/guards";
 
-  const rows = await db.select().from(tenants).orderBy(desc(tenants.createdAt)).limit(50);
+export const runtime = "nodejs";
+
+function fmtDate(d: any) {
+  try {
+    const dt = d instanceof Date ? d : new Date(d);
+    if (!Number.isFinite(dt.getTime())) return "";
+    return dt.toLocaleString();
+  } catch {
+    return "";
+  }
+}
+
+export default async function PccTenantsPage() {
+  // Gate the whole page
+  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+
+  const rows = await db
+    .select({
+      id: tenants.id,
+      name: tenants.name,
+      slug: tenants.slug,
+      ownerUserId: tenants.ownerUserId,
+      ownerClerkUserId: tenants.ownerClerkUserId,
+      createdAt: tenants.createdAt,
+    })
+    .from(tenants)
+    .orderBy(desc(tenants.createdAt))
+    .limit(100);
 
   return (
-    <main className="space-y-4">
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-        <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">Tenants</div>
-        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Latest 50 tenants (search UI next).</div>
-      </div>
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Tenants</h1>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Read-only list (v1). Click a tenant to view details.
+            </p>
+          </div>
 
-      <div className="rounded-2xl border border-gray-200 bg-white p-2 dark:border-gray-800 dark:bg-gray-900">
-        <div className="divide-y divide-gray-200 dark:divide-gray-800">
-          {rows.map((t: any) => (
-            <a
-              key={t.id}
-              href={`/pcc/tenants/${t.id}`}
-              className="block px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-950"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">
-                    {t.name ?? t.slug ?? t.id}
-                  </div>
-                  <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300 truncate">
-                    {t.slug ? `/${t.slug}` : t.id}
-                  </div>
-                </div>
-                <div className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                  {t.createdAt ? new Date(t.createdAt).toLocaleDateString() : ""}
-                </div>
-              </div>
-            </a>
-          ))}
-          {!rows.length ? (
-            <div className="px-4 py-6 text-sm text-gray-600 dark:text-gray-300">No tenants found.</div>
-          ) : null}
+          <div className="text-xs text-gray-500 dark:text-gray-400">
+            Showing {rows.length} {rows.length === 1 ? "tenant" : "tenants"}
+          </div>
         </div>
       </div>
-    </main>
+
+      <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden dark:border-gray-800 dark:bg-gray-950">
+        <div className="grid grid-cols-12 gap-0 border-b border-gray-200 bg-gray-50 px-4 py-3 text-xs font-semibold text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+          <div className="col-span-4">Tenant</div>
+          <div className="col-span-3">Slug</div>
+          <div className="col-span-3">Owner</div>
+          <div className="col-span-2 text-right">Created</div>
+        </div>
+
+        {rows.length ? (
+          <div className="divide-y divide-gray-200 dark:divide-gray-800">
+            {rows.map((t) => {
+              const owner = t.ownerUserId
+                ? `user:${String(t.ownerUserId).slice(0, 8)}`
+                : t.ownerClerkUserId
+                  ? `clerk:${String(t.ownerClerkUserId).slice(0, 8)}`
+                  : "—";
+
+              return (
+                <Link
+                  key={t.id}
+                  href={`/pcc/tenants/${t.id}`}
+                  className="grid grid-cols-12 gap-0 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-900"
+                >
+                  <div className="col-span-4 min-w-0">
+                    <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{String(t.id).slice(0, 8)}</div>
+                  </div>
+
+                  <div className="col-span-3 min-w-0 text-sm text-gray-700 dark:text-gray-200 truncate">{t.slug}</div>
+
+                  <div className="col-span-3 min-w-0 text-sm text-gray-700 dark:text-gray-200 truncate">{owner}</div>
+
+                  <div className="col-span-2 text-right text-xs text-gray-500 dark:text-gray-400">
+                    {fmtDate(t.createdAt)}
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="px-4 py-8 text-sm text-gray-600 dark:text-gray-300">No tenants found.</div>
+        )}
+      </div>
+    </div>
   );
 }
