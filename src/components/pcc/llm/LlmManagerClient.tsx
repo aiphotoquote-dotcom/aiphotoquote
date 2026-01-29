@@ -1,3 +1,4 @@
+// src/components/pcc/llm/LlmManagerClient.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
@@ -16,6 +17,7 @@ export type PlatformLlmConfig = {
   prompts?: {
     quoteEstimatorSystem?: string;
     qaQuestionGeneratorSystem?: string;
+    extraSystemPreamble?: string;
   };
   guardrails?: {
     mode?: GuardrailsMode;
@@ -23,6 +25,18 @@ export type PlatformLlmConfig = {
     blockedTopics?: string[];
     maxQaQuestions?: number;
     maxOutputTokens?: number;
+  };
+};
+
+type EffectivePreview = {
+  models: { estimatorModel: string; qaModel: string; renderModel: string };
+  prompts: { quoteEstimatorSystem: string; qaQuestionGeneratorSystem: string };
+  guardrails: {
+    mode: GuardrailsMode;
+    piiHandling: PiiHandling;
+    blockedTopics: string[];
+    maxQaQuestions: number;
+    maxOutputTokens: number;
   };
 };
 
@@ -57,13 +71,11 @@ function numClamp(v: unknown, min: number, max: number, fallback: number) {
 }
 
 function normalizeBlockedTopics(raw: string): string[] {
-  // one per line OR comma-separated
   const parts = raw
     .split(/\n|,/g)
     .map((s) => s.trim())
     .filter(Boolean);
 
-  // de-dupe (case-insensitive)
   const seen = new Set<string>();
   const out: string[] = [];
   for (const p of parts) {
@@ -75,196 +87,60 @@ function normalizeBlockedTopics(raw: string): string[] {
   return out;
 }
 
-function configToForm(cfg: PlatformLlmConfig) {
-  const models = cfg?.models ?? {};
-  const prompts = cfg?.prompts ?? {};
-  const guardrails = cfg?.guardrails ?? {};
-
-  return {
-    estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
-    qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
-    renderModel: safeStr(models.renderModel, "gpt-4o-mini"),
-
-    quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
-    qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
-
-    mode: (safeStr(guardrails.mode, "balanced") as GuardrailsMode) || "balanced",
-    piiHandling: (safeStr(guardrails.piiHandling, "redact") as PiiHandling) || "redact",
-
-    maxQaQuestions: numClamp(guardrails.maxQaQuestions, 1, 10, 3),
-    maxOutputTokens: numClamp(guardrails.maxOutputTokens, 200, 4000, 900),
-
-    blockedTopicsText: Array.isArray(guardrails.blockedTopics) ? guardrails.blockedTopics.join("\n") : "",
-  };
+function promptPreview(s: string, max = 220) {
+  const t = String(s ?? "");
+  if (t.length <= max) return t;
+  return t.slice(0, max) + "…";
 }
 
-function formToConfig(args: {
-  base: PlatformLlmConfig;
-  estimatorModel: string;
-  qaModel: string;
-  renderModel: string;
-  quoteEstimatorSystem: string;
-  qaQuestionGeneratorSystem: string;
-  mode: GuardrailsMode;
-  piiHandling: PiiHandling;
-  maxQaQuestions: number;
-  maxOutputTokens: number;
-  blockedTopicsText: string;
-}): PlatformLlmConfig {
-  const {
-    base,
-    estimatorModel,
-    qaModel,
-    renderModel,
-    quoteEstimatorSystem,
-    qaQuestionGeneratorSystem,
-    mode,
-    piiHandling,
-    maxQaQuestions,
-    maxOutputTokens,
-    blockedTopicsText,
-  } = args;
-
-  return {
-    version: base?.version ?? 1,
-    updatedAt: base?.updatedAt ?? null,
-    models: {
-      estimatorModel: safeStr(estimatorModel, "gpt-4o-mini"),
-      qaModel: safeStr(qaModel, "gpt-4o-mini"),
-      renderModel: safeStr(renderModel, "gpt-4o-mini"),
-    },
-    prompts: {
-      quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
-      qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
-    },
-    guardrails: {
-      mode,
-      piiHandling,
-      maxQaQuestions: numClamp(maxQaQuestions, 1, 10, 3),
-      maxOutputTokens: numClamp(maxOutputTokens, 200, 4000, 900),
-      blockedTopics: normalizeBlockedTopics(blockedTopicsText),
-    },
-  };
-}
-
-function stableStringify(obj: any) {
-  // Good enough for UI dirty-check: normalize config -> JSON compare
-  return JSON.stringify(obj, Object.keys(obj).sort());
-}
-
-export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlmConfig }) {
+export function LlmManagerClient({
+  initialConfig,
+  effective,
+}: {
+  initialConfig: PlatformLlmConfig;
+  effective?: EffectivePreview;
+}) {
   const [cfg, setCfg] = useState<PlatformLlmConfig>(initialConfig ?? {});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
-  // baseline form snapshot derived from cfg
-  const baseline = useMemo(() => configToForm(cfg ?? {}), [cfg]);
+  const form = useMemo(() => {
+    const models = cfg?.models ?? {};
+    const prompts = cfg?.prompts ?? {};
+    const guardrails = cfg?.guardrails ?? {};
 
-  // editable inputs (start from baseline ONCE)
-  const [estimatorModel, setEstimatorModel] = useState(baseline.estimatorModel);
-  const [qaModel, setQaModel] = useState(baseline.qaModel);
-  const [renderModel, setRenderModel] = useState(baseline.renderModel);
+    return {
+      estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
+      qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
+      renderModel: safeStr(models.renderModel, "gpt-4o-mini"),
 
-  const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(baseline.quoteEstimatorSystem);
-  const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(baseline.qaQuestionGeneratorSystem);
+      quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
+      qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
+      extraSystemPreamble: safeStr(prompts.extraSystemPreamble, ""),
 
-  const [mode, setMode] = useState<GuardrailsMode>(baseline.mode);
-  const [piiHandling, setPiiHandling] = useState<PiiHandling>(baseline.piiHandling);
-  const [maxQaQuestions, setMaxQaQuestions] = useState<number>(baseline.maxQaQuestions);
-  const [maxOutputTokens, setMaxOutputTokens] = useState<number>(baseline.maxOutputTokens);
-  const [blockedTopicsText, setBlockedTopicsText] = useState(baseline.blockedTopicsText);
+      mode: (safeStr(guardrails.mode, "balanced") as GuardrailsMode) || "balanced",
+      piiHandling: (safeStr(guardrails.piiHandling, "redact") as PiiHandling) || "redact",
+      maxQaQuestions: numClamp(guardrails.maxQaQuestions, 1, 10, 3),
+      maxOutputTokens: numClamp(guardrails.maxOutputTokens, 200, 4000, 900),
 
-  // current form snapshot
-  const currentConfig = useMemo(() => {
-    return formToConfig({
-      base: cfg,
-      estimatorModel,
-      qaModel,
-      renderModel,
-      quoteEstimatorSystem,
-      qaQuestionGeneratorSystem,
-      mode,
-      piiHandling,
-      maxQaQuestions,
-      maxOutputTokens,
-      blockedTopicsText,
-    });
-  }, [
-    cfg,
-    estimatorModel,
-    qaModel,
-    renderModel,
-    quoteEstimatorSystem,
-    qaQuestionGeneratorSystem,
-    mode,
-    piiHandling,
-    maxQaQuestions,
-    maxOutputTokens,
-    blockedTopicsText,
-  ]);
+      blockedTopicsText: Array.isArray(guardrails.blockedTopics) ? guardrails.blockedTopics.join("\n") : "",
+    };
+  }, [cfg]);
 
-  // dirty-check by comparing normalized “form-shaped” data, not timestamps/version
-  const isDirty = useMemo(() => {
-    const a = formToConfig({
-      base: { version: 1, updatedAt: null }, // ignore baseline version/updatedAt
-      ...baseline,
-      maxQaQuestions: baseline.maxQaQuestions,
-      maxOutputTokens: baseline.maxOutputTokens,
-      mode: baseline.mode,
-      piiHandling: baseline.piiHandling,
-      blockedTopicsText: baseline.blockedTopicsText,
-    } as any);
+  const [estimatorModel, setEstimatorModel] = useState(form.estimatorModel);
+  const [qaModel, setQaModel] = useState(form.qaModel);
+  const [renderModel, setRenderModel] = useState(form.renderModel);
 
-    const b = formToConfig({
-      base: { version: 1, updatedAt: null }, // ignore version/updatedAt
-      estimatorModel,
-      qaModel,
-      renderModel,
-      quoteEstimatorSystem,
-      qaQuestionGeneratorSystem,
-      mode,
-      piiHandling,
-      maxQaQuestions,
-      maxOutputTokens,
-      blockedTopicsText,
-    } as any);
+  const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(form.quoteEstimatorSystem);
+  const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(form.qaQuestionGeneratorSystem);
+  const [extraSystemPreamble, setExtraSystemPreamble] = useState(form.extraSystemPreamble);
 
-    // Only compare the “meaningful” payload portions
-    const aCmp = { models: a.models, prompts: a.prompts, guardrails: a.guardrails };
-    const bCmp = { models: b.models, prompts: b.prompts, guardrails: b.guardrails };
-
-    return stableStringify(aCmp) !== stableStringify(bCmp);
-  }, [
-    baseline,
-    estimatorModel,
-    qaModel,
-    renderModel,
-    quoteEstimatorSystem,
-    qaQuestionGeneratorSystem,
-    mode,
-    piiHandling,
-    maxQaQuestions,
-    maxOutputTokens,
-    blockedTopicsText,
-  ]);
-
-  function resetToSaved() {
-    setMsg(null);
-    const b = configToForm(cfg ?? {});
-    setEstimatorModel(b.estimatorModel);
-    setQaModel(b.qaModel);
-    setRenderModel(b.renderModel);
-
-    setQuoteEstimatorSystem(b.quoteEstimatorSystem);
-    setQaQuestionGeneratorSystem(b.qaQuestionGeneratorSystem);
-
-    setMode(b.mode);
-    setPiiHandling(b.piiHandling);
-    setMaxQaQuestions(b.maxQaQuestions);
-    setMaxOutputTokens(b.maxOutputTokens);
-    setBlockedTopicsText(b.blockedTopicsText);
-  }
+  const [mode, setMode] = useState<GuardrailsMode>(form.mode);
+  const [piiHandling, setPiiHandling] = useState<PiiHandling>(form.piiHandling);
+  const [maxQaQuestions, setMaxQaQuestions] = useState<number>(form.maxQaQuestions);
+  const [maxOutputTokens, setMaxOutputTokens] = useState<number>(form.maxOutputTokens);
+  const [blockedTopicsText, setBlockedTopicsText] = useState(form.blockedTopicsText);
 
   async function refresh() {
     setMsg(null);
@@ -275,20 +151,24 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
       setCfg(r.config ?? {});
       setMsg({ kind: "ok", text: "Loaded latest config." });
 
-      // Reset inputs to match loaded config (authoritative)
-      const b = configToForm(r.config ?? {});
-      setEstimatorModel(b.estimatorModel);
-      setQaModel(b.qaModel);
-      setRenderModel(b.renderModel);
+      const c = r.config ?? {};
+      const m = c.models ?? {};
+      const p = c.prompts ?? {};
+      const g = c.guardrails ?? {};
 
-      setQuoteEstimatorSystem(b.quoteEstimatorSystem);
-      setQaQuestionGeneratorSystem(b.qaQuestionGeneratorSystem);
+      setEstimatorModel(safeStr(m.estimatorModel, "gpt-4o-mini"));
+      setQaModel(safeStr(m.qaModel, "gpt-4o-mini"));
+      setRenderModel(safeStr(m.renderModel, "gpt-4o-mini"));
 
-      setMode(b.mode);
-      setPiiHandling(b.piiHandling);
-      setMaxQaQuestions(b.maxQaQuestions);
-      setMaxOutputTokens(b.maxOutputTokens);
-      setBlockedTopicsText(b.blockedTopicsText);
+      setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
+      setQaQuestionGeneratorSystem(safeStr(p.qaQuestionGeneratorSystem, ""));
+      setExtraSystemPreamble(safeStr(p.extraSystemPreamble, ""));
+
+      setMode((safeStr(g.mode, "balanced") as GuardrailsMode) || "balanced");
+      setPiiHandling((safeStr(g.piiHandling, "redact") as PiiHandling) || "redact");
+      setMaxQaQuestions(numClamp(g.maxQaQuestions, 1, 10, 3));
+      setMaxOutputTokens(numClamp(g.maxOutputTokens, 200, 4000, 900));
+      setBlockedTopicsText(Array.isArray(g.blockedTopics) ? g.blockedTopics.join("\n") : "");
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
@@ -300,30 +180,35 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
     setMsg(null);
     setSaving(true);
     try {
-      const r = await apiPost(currentConfig);
+      const next: PlatformLlmConfig = {
+        version: cfg?.version ?? 1,
+        updatedAt: cfg?.updatedAt ?? null,
+        models: {
+          estimatorModel: safeStr(estimatorModel, "gpt-4o-mini"),
+          qaModel: safeStr(qaModel, "gpt-4o-mini"),
+          renderModel: safeStr(renderModel, "gpt-4o-mini"),
+        },
+        prompts: {
+          extraSystemPreamble: String(extraSystemPreamble ?? ""),
+          quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
+          qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
+        },
+        guardrails: {
+          mode,
+          piiHandling,
+          maxQaQuestions: numClamp(maxQaQuestions, 1, 10, 3),
+          maxOutputTokens: numClamp(maxOutputTokens, 200, 4000, 900),
+          blockedTopics: normalizeBlockedTopics(blockedTopicsText),
+        },
+      };
+
+      const r = await apiPost(next);
       if (!("ok" in r) || !r.ok) {
         const details = (r as any)?.message || (r as any)?.error || "Save failed.";
         throw new Error(details);
       }
 
-      // Server is authoritative (version bump + updatedAt)
-      setCfg(r.config ?? currentConfig);
-
-      // Snap inputs to saved config (so dirty resets cleanly)
-      const b = configToForm(r.config ?? currentConfig);
-      setEstimatorModel(b.estimatorModel);
-      setQaModel(b.qaModel);
-      setRenderModel(b.renderModel);
-
-      setQuoteEstimatorSystem(b.quoteEstimatorSystem);
-      setQaQuestionGeneratorSystem(b.qaQuestionGeneratorSystem);
-
-      setMode(b.mode);
-      setPiiHandling(b.piiHandling);
-      setMaxQaQuestions(b.maxQaQuestions);
-      setMaxOutputTokens(b.maxOutputTokens);
-      setBlockedTopicsText(b.blockedTopicsText);
-
+      setCfg(r.config ?? next);
       setMsg({ kind: "ok", text: "Saved." });
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
@@ -333,21 +218,68 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
   }
 
   const updatedAt = cfg?.updatedAt ? new Date(cfg.updatedAt).toLocaleString() : null;
-  const saveDisabled = saving || loading || !isDirty;
 
   return (
     <div className="space-y-6">
+      {/* Effective preview (read-only) */}
+      {effective ? (
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective config (resolver output)</div>
+              <div className="text-xs text-gray-600 dark:text-gray-300">
+                This is what the quote pipeline will actually use right now (after defaults/normalization).
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-3">
+            <div className="rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-800">
+              <div className="font-semibold text-gray-900 dark:text-gray-100">Models</div>
+              <div className="mt-2 space-y-1 text-gray-700 dark:text-gray-200">
+                <div>Estimator: <span className="font-mono">{effective.models.estimatorModel}</span></div>
+                <div>Q&amp;A: <span className="font-mono">{effective.models.qaModel}</span></div>
+                <div>Render prompt: <span className="font-mono">{effective.models.renderModel}</span></div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-800">
+              <div className="font-semibold text-gray-900 dark:text-gray-100">Guardrails</div>
+              <div className="mt-2 space-y-1 text-gray-700 dark:text-gray-200">
+                <div>Mode: <span className="font-mono">{effective.guardrails.mode}</span></div>
+                <div>PII: <span className="font-mono">{effective.guardrails.piiHandling}</span></div>
+                <div>Max Q&amp;A: <span className="font-mono">{effective.guardrails.maxQaQuestions}</span></div>
+                <div>Max tokens: <span className="font-mono">{effective.guardrails.maxOutputTokens}</span></div>
+                <div>Blocked topics: <span className="font-mono">{effective.guardrails.blockedTopics.length}</span></div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-800">
+              <div className="font-semibold text-gray-900 dark:text-gray-100">Prompts (preview)</div>
+              <div className="mt-2 space-y-3 text-gray-700 dark:text-gray-200">
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Estimator</div>
+                  <div className="mt-1 whitespace-pre-wrap font-mono text-xs">
+                    {promptPreview(effective.prompts.quoteEstimatorSystem)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Q&amp;A</div>
+                  <div className="mt-1 whitespace-pre-wrap font-mono text-xs">
+                    {promptPreview(effective.prompts.qaQuestionGeneratorSystem)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Existing Config card */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Config</div>
-              {isDirty ? (
-                <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-100">
-                  Unsaved changes
-                </span>
-              ) : null}
-            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Stored config</div>
             <div className="text-xs text-gray-600 dark:text-gray-300">
               Version {cfg?.version ?? 1}
               {updatedAt ? ` • Updated ${updatedAt}` : ""}
@@ -355,15 +287,6 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              onClick={resetToSaved}
-              disabled={loading || saving || !isDirty}
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-              title="Reset form fields back to the last saved config"
-            >
-              Reset
-            </button>
-
             <button
               onClick={refresh}
               disabled={loading || saving}
@@ -374,9 +297,8 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
 
             <button
               onClick={save}
-              disabled={saveDisabled}
+              disabled={saving || loading}
               className="rounded-xl bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
-              title={!isDirty ? "No changes to save" : "Save changes"}
             >
               {saving ? "Saving…" : "Save"}
             </button>
@@ -400,8 +322,8 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Models</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            These are used by the quote pipeline + Q&A. (Rendering uses image generation, but we still store a model here
-            for text prompt generation later.)
+            Used by the quote pipeline + Q&amp;A. (Rendering uses image generation, but we store a model here for prompt
+            synthesis later.)
           </p>
 
           <div className="mt-4 space-y-4">
@@ -416,7 +338,7 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
             </div>
 
             <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A model</label>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&amp;A model</label>
               <input
                 value={qaModel}
                 onChange={(e) => setQaModel(e.target.value)}
@@ -434,8 +356,7 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
                 placeholder="gpt-4o-mini"
               />
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                This doesn’t change image generation (that uses the image model). We’ll use this for text prompt
-                synthesis later.
+                This doesn’t change image generation. We’ll use this for text prompt synthesis later.
               </div>
             </div>
           </div>
@@ -478,7 +399,7 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Max Q&A questions</label>
+                <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Max Q&amp;A questions</label>
                 <input
                   type="number"
                   value={maxQaQuestions}
@@ -510,9 +431,7 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
                 className="mt-1 h-32 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                 placeholder={"One per line (or comma-separated)\nexample:\ncredit card\nssn\npassword"}
               />
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                One per line (or comma-separated). Stored as an array.
-              </div>
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">One per line (or comma-separated).</div>
             </div>
           </div>
         </section>
@@ -521,28 +440,40 @@ export function LlmManagerClient({ initialConfig }: { initialConfig: PlatformLlm
       <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Prompt sets</h2>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-          These are full system prompts. Keep them tight and deterministic.
+          System prompts. Keep them tight and deterministic.
         </p>
 
-        <div className="mt-4 grid gap-6 lg:grid-cols-2">
+        <div className="mt-4 space-y-4">
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble</label>
             <textarea
-              value={quoteEstimatorSystem}
-              onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
-              className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              placeholder="System prompt used for estimate generation…"
+              value={extraSystemPreamble}
+              onChange={(e) => setExtraSystemPreamble(e.target.value)}
+              className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              placeholder="Prepended to BOTH prompts (optional)…"
             />
           </div>
 
-          <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A question generator system</label>
-            <textarea
-              value={qaQuestionGeneratorSystem}
-              onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
-              className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              placeholder="System prompt used to generate clarifying questions…"
-            />
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system</label>
+              <textarea
+                value={quoteEstimatorSystem}
+                onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
+                className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                placeholder="System prompt used for estimate generation…"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&amp;A question generator system</label>
+              <textarea
+                value={qaQuestionGeneratorSystem}
+                onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
+                className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                placeholder="System prompt used to generate clarifying questions…"
+              />
+            </div>
           </div>
         </div>
       </section>
