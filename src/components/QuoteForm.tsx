@@ -903,24 +903,25 @@ export default function QuoteForm({
       ) : null}
 
       {mode === "qa" ? (
-        <QaSection
-          sectionRef={qaSectionRef as any}
-          firstInputRef={qaFirstInputRef}
-          working={working}
-          needsQa={needsQa}
-          qaQuestions={qaQuestions}
-          qaAnswers={qaAnswers}
-          onAnswer={(idx, v) => {
-            setQaAnswers((prev) => {
-              const next = [...prev];
-              next[idx] = v;
-              return next;
-            });
-          }}
-          onSubmit={submitQaAnswers}
-          onStartOver={startOver}
-        />
-      ) : null}
+  <QaSection
+    sectionRef={qaSectionRef as any}
+    firstInputRef={qaFirstInputRef}
+    working={working}
+    needsQa={needsQa}
+    qaQuestions={qaQuestions}
+    qaAnswers={qaAnswers}
+    quoteLogId={quoteLogId}
+    onAnswer={(idx, v) => {
+      setQaAnswers((prev) => {
+        const next = [...prev];
+        next[idx] = v;
+        return next;
+      });
+    }}
+    onSubmit={submitQaAnswers}
+    onStartOver={startOver}
+  />
+) : null}
 
       {mode === "results" ? (
         <ResultsSection
