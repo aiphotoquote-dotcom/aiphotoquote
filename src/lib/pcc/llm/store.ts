@@ -126,10 +126,10 @@ export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<voi
   const payload = JSON.stringify(cfg, null, 2);
   // Overwrite by using same key (Vercel Blob will version internally; URL changes)
   await put(BLOB_KEY, payload, {
-    access: "private",
-    contentType: "application/json",
-    addRandomSuffix: false,
-  });
+  access: "public",
+  contentType: "application/json",
+  addRandomSuffix: false,
+});
 }
 
 /**
