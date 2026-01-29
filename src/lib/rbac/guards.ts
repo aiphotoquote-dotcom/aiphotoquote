@@ -1,47 +1,35 @@
 // src/lib/rbac/guards.ts
 import { getActorContext } from "./actor";
 
-export const PLATFORM_ROLES = [
-  "platform_owner",
-  "platform_admin",
-  "platform_support",
-  "platform_billing",
-  "readonly",
-] as const;
+export type PlatformRole =
+  | "platform_owner"
+  | "platform_admin"
+  | "platform_support"
+  | "platform_billing"
+  | "readonly";
 
-export type PlatformRole = (typeof PLATFORM_ROLES)[number];
+/**
+ * Returns true if actor has ANY of the required roles.
+ * Note: "platform_owner" implicitly satisfies all platform roles.
+ */
+export function hasPlatformRole(
+  actor: { platformRole: PlatformRole },
+  roles: PlatformRole[]
+) {
+  const r = actor.platformRole;
 
-export const PLATFORM_ELEVATED_ROLES = [
-  "platform_owner",
-  "platform_admin",
-  "platform_support",
-  "platform_billing",
-] as const;
-
-export type PlatformElevatedRole = (typeof PLATFORM_ELEVATED_ROLES)[number];
-
-export type ActorContext = {
-  clerkUserId: string;
-  appUserId: string;
-  email: string | null;
-  platformRole: PlatformRole | null; // null shouldn't really happen, but keep it safe
-};
-
-export function hasPlatformRole(actor: ActorContext, roles: PlatformElevatedRole[]) {
-  const r = actor.platformRole ?? "readonly";
-  // readonly is NOT elevated
-  if (r === "readonly") return false;
-  return roles.includes(r as PlatformElevatedRole);
+  if (r === "platform_owner") return true;
+  return roles.includes(r);
 }
 
-export async function requireSignedIn(): Promise<ActorContext> {
-  const actor = await getActorContext();
-  // getActorContext throws UNAUTHENTICATED if not signed in
-  return actor;
-}
-
-export async function requirePlatformRole(roles: PlatformElevatedRole[]): Promise<ActorContext> {
-  const actor = await getActorContext();
+/**
+ * Use inside Server Components / route handlers to enforce access.
+ * Throws:
+ * - UNAUTHENTICATED if user is not signed in
+ * - FORBIDDEN if signed in but role not allowed
+ */
+export async function requirePlatformRole(roles: PlatformRole[]) {
+  const actor = await getActorContext(); // may throw UNAUTHENTICATED
 
   if (!hasPlatformRole(actor, roles)) {
     throw new Error("FORBIDDEN");
