@@ -284,6 +284,17 @@ export default function QuoteForm({
     return 60;
   }, [working, workingStep.idx, workingStep.total, mode, photosOk, contactOk, showRenderingMini, renderStatus]);
 
+  // Rendering progress for ResultsSection (required prop)
+  const renderProgressPct = useMemo(() => {
+    if (!aiRenderingEnabled || !renderOptIn) return 0;
+    if (!quoteLogId) return 10;
+    if (renderStatus === "idle") return 15;
+    if (renderStatus === "running") return 65;
+    if (renderStatus === "rendered") return 100;
+    if (renderStatus === "failed") return 100;
+    return 10;
+  }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
+
   // Bottom dock copy + action
   const dock = useMemo(() => {
     if (working) {
@@ -844,7 +855,7 @@ export default function QuoteForm({
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
 
   async function retryRender() {
-    // keeping function for ResultsSection prop compatibility; you said you'll remove retry UI later.
+    // Keeping function for backwards compatibility with older ResultsSection; we won't pass it unless needed.
     if (!quoteLogId) return;
     renderAttemptedForQuoteRef.current = null;
     await startRenderOnce(String(quoteLogId));
@@ -903,25 +914,25 @@ export default function QuoteForm({
       ) : null}
 
       {mode === "qa" ? (
-  <QaSection
-    sectionRef={qaSectionRef as any}
-    firstInputRef={qaFirstInputRef}
-    working={working}
-    needsQa={needsQa}
-    qaQuestions={qaQuestions}
-    qaAnswers={qaAnswers}
-    quoteLogId={quoteLogId}
-    onAnswer={(idx, v) => {
-      setQaAnswers((prev) => {
-        const next = [...prev];
-        next[idx] = v;
-        return next;
-      });
-    }}
-    onSubmit={submitQaAnswers}
-    onStartOver={startOver}
-  />
-) : null}
+        <QaSection
+          sectionRef={qaSectionRef as any}
+          firstInputRef={qaFirstInputRef}
+          working={working}
+          needsQa={needsQa}
+          qaQuestions={qaQuestions}
+          qaAnswers={qaAnswers}
+          quoteLogId={quoteLogId}
+          onAnswer={(idx, v) => {
+            setQaAnswers((prev) => {
+              const next = [...prev];
+              next[idx] = v;
+              return next;
+            });
+          }}
+          onSubmit={submitQaAnswers}
+          onStartOver={startOver}
+        />
+      ) : null}
 
       {mode === "results" ? (
         <ResultsSection
@@ -930,14 +941,13 @@ export default function QuoteForm({
           renderPreviewRef={renderPreviewRef as any}
           hasEstimate={hasEstimate}
           result={result}
-          quoteLogId={quoteLogId}
           aiRenderingEnabled={aiRenderingEnabled}
           renderOptIn={renderOptIn}
           renderStatus={renderStatus}
           renderImageUrl={renderImageUrl}
           renderError={renderError}
+          renderProgressPct={renderProgressPct}
           working={working}
-          onRetryRender={retryRender}
         />
       ) : null}
 
