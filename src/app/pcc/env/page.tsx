@@ -1,71 +1,102 @@
 // src/app/pcc/env/page.tsx
+import React from "react";
 
-import { getActorContext } from "@/lib/rbac/actor";
-import { requirePlatformRole } from "@/lib/rbac/guards";
+export const runtime = "nodejs";
 
-export const dynamic = "force-dynamic";
-
-function SafeRow({ label, value }: { label: string; value: string }) {
+function Card({
+  title,
+  desc,
+  children,
+}: {
+  title: string;
+  desc?: string;
+  children?: React.ReactNode;
+}) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-gray-200 py-3 last:border-b-0 dark:border-gray-800">
-      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{label}</div>
-      <div className="min-w-0 text-right text-sm text-gray-700 dark:text-gray-200 break-all">{value}</div>
+    <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-950">
+      <div>
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
+        {desc ? <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{desc}</div> : null}
+      </div>
+      {children}
     </div>
   );
 }
 
-/**
- * PCC v1: Environment Controls
- * - v1 is intentionally "read-only + safe visibility" (no secrets)
- * - future: feature flags, maintenance mode, platform-level guardrails, kill-switches, etc.
- */
-export default async function PccEnvPage() {
-  // Access control: only platform roles can view PCC env
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
-  const actor = await getActorContext();
+function Row({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-900">
+      <div className="min-w-0">
+        <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{label}</div>
+        {hint ? <div className="mt-0.5 text-[11px] text-gray-600 dark:text-gray-300">{hint}</div> : null}
+      </div>
+      <div className="shrink-0 text-xs font-semibold text-gray-700 dark:text-gray-200">{value}</div>
+    </div>
+  );
+}
 
-  // Only expose SAFE, non-secret environment information
-  const safeEnv = {
-    NODE_ENV: process.env.NODE_ENV ?? "unknown",
-    VERCEL_ENV: process.env.VERCEL_ENV ?? "unknown",
-    VERCEL_REGION: process.env.VERCEL_REGION ?? "unknown",
-    VERCEL_URL: process.env.VERCEL_URL ?? "unknown",
-  };
-
+export default function PccEnvPage() {
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-900">
-        <div className="text-xs text-gray-600 dark:text-gray-300">Platform Control Center</div>
-        <h1 className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Environment</h1>
-        <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-          Signed in as <span className="font-semibold">{actor.clerkUserId}</span>
-        </div>
-        <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-          This page is intentionally <span className="font-semibold">read-only</span> in v1. It shows safe runtime
-          context (no secrets). Later we’ll add platform feature flags and maintenance controls.
-        </p>
-      </div>
-
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Runtime context</div>
-        <div className="mt-3">
-          <SafeRow label="NODE_ENV" value={safeEnv.NODE_ENV} />
-          <SafeRow label="VERCEL_ENV" value={safeEnv.VERCEL_ENV} />
-          <SafeRow label="VERCEL_REGION" value={safeEnv.VERCEL_REGION} />
-          <SafeRow label="VERCEL_URL" value={safeEnv.VERCEL_URL} />
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+        <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">Environment</div>
+        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          Platform-wide controls (safe defaults + guardrails). This is PCC v1 scaffolding — read-only for now.
         </div>
       </div>
 
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-900">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Planned controls (next)</div>
-        <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-gray-700 dark:text-gray-200">
-          <li>Platform feature flags (PCC-managed, DB-backed)</li>
-          <li>Maintenance mode + banner messaging</li>
-          <li>LLM kill-switch + model routing overrides</li>
-          <li>Rate limits / abuse controls</li>
-          <li>Billing enforcement toggles (future)</li>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card
+          title="Runtime"
+          desc="Helpful visibility into what the platform is currently running with."
+        >
+          <Row label="Next.js runtime" value="nodejs" hint="PCC routes run server-side." />
+          <Row label="Mode" value="Read-only (v1)" hint="We’ll add write controls after RBAC + audit logging." />
+        </Card>
+
+        <Card
+          title="Feature Flags"
+          desc="Global toggles that affect the platform (not tenant-specific)."
+        >
+          <Row label="Maintenance mode" value="Coming soon" hint="Show banner + disable quote submission." />
+          <Row label="PCC write access" value="Coming soon" hint="RBAC-backed enablement for platform admins." />
+        </Card>
+
+        <Card
+          title="LLM Defaults"
+          desc="Global defaults used when tenants do not override."
+        >
+          <Row label="Default model" value="Coming soon" hint="Central place to set default model + fallbacks." />
+          <Row label="Guardrails baseline" value="Coming soon" hint="Shared safety + formatting rules for all tenants." />
+        </Card>
+
+        <Card
+          title="Rate Limits"
+          desc="Platform throttles to protect cost and stability."
+        >
+          <Row label="Quote submit" value="Coming soon" hint="Per-IP and per-tenant request shaping." />
+          <Row label="AI rendering" value="Coming soon" hint="Global ceiling + per-tenant caps." />
+        </Card>
+      </div>
+
+      <Card
+        title="Next steps (we’ll implement next)"
+        desc="Small, safe, incremental build — no schema-risk changes."
+      >
+        <ul className="list-disc pl-5 space-y-2 text-sm text-gray-700 dark:text-gray-200">
+          <li>Add RBAC gating on PCC sections (platform roles) + a clean forbidden screen.</li>
+          <li>Add audit logging for any future mutations (who/what/when).</li>
+          <li>Promote Environment controls from read-only to editable (feature flags, rate limits, defaults).</li>
         </ul>
-      </div>
+      </Card>
     </div>
   );
 }
