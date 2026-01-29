@@ -22,12 +22,7 @@ export function StatusBar({
   renderingLabel: string;
   progressPct: number; // 0..100
 }) {
-  const pct = Number.isFinite(progressPct) ? Math.max(0, Math.min(100, Math.round(progressPct))) : 0;
-
-  // IMPORTANT:
-  // - "min-w-0" on flex children prevents iOS overflow.
-  // - right label gets truncation and cannot force viewport width.
-  // - container gets max-w-full + overflow-hidden as a safety net.
+  const pct = Number.isFinite(progressPct) ? Math.max(0, Math.min(100, progressPct)) : 0;
 
   return (
     <div
@@ -39,9 +34,7 @@ export function StatusBar({
           {/* LEFT */}
           <div className="min-w-0 flex-1">
             <div className="text-xs text-gray-600 dark:text-gray-300">Status</div>
-            <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100 truncate">
-              {workingLabel}
-            </div>
+            <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100 truncate">{workingLabel}</div>
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300 break-words">{workingSubtitle}</div>
 
             {showRenderingMini ? (
@@ -57,13 +50,9 @@ export function StatusBar({
           </div>
         </div>
 
-        {/* Progress bar (green) */}
-        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-          <div
-            className="h-full bg-emerald-600 transition-[width] duration-300 ease-out"
-            style={{ width: `${pct}%` }}
-            aria-hidden="true"
-          />
+        {/* Progress bar */}
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800" aria-hidden="true">
+          <div className="h-full bg-emerald-600" style={{ width: `${pct}%` }} />
         </div>
       </div>
     </div>

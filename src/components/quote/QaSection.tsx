@@ -1,7 +1,7 @@
 // src/components/quote/QaSection.tsx
 "use client";
 
-import React, { useCallback } from "react";
+import React from "react";
 
 export function QaSection({
   sectionRef,
@@ -10,6 +10,7 @@ export function QaSection({
   needsQa,
   qaQuestions,
   qaAnswers,
+  quoteLogId, // keep it in props for stability, but we do NOT display it
   onAnswer,
   onSubmit,
   onStartOver,
@@ -22,6 +23,7 @@ export function QaSection({
 
   qaQuestions: string[];
   qaAnswers: string[];
+  quoteLogId: string | null;
 
   onAnswer: (idx: number, v: string) => void;
   onSubmit: () => Promise<void>;
@@ -30,38 +32,15 @@ export function QaSection({
   if (!needsQa) return null;
 
   const inputCls =
-    "mt-2 w-full min-w-0 rounded-xl border border-gray-200 bg-white p-3 text-[16px] text-gray-900 outline-none focus:ring-2 focus:ring-emerald-300 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100";
-
-  const focusInput = useCallback((idx: number) => {
-    const el = document.getElementById(`qa-input-${idx}`) as HTMLInputElement | null;
-    if (el) el.focus();
-  }, []);
-
-  const onKeyDown = useCallback(
-    async (idx: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key !== "Enter") return;
-
-      e.preventDefault();
-
-      const isLast = idx >= qaQuestions.length - 1;
-      if (!isLast) {
-        focusInput(idx + 1);
-        return;
-      }
-
-      // last question: submit
-      await onSubmit();
-    },
-    [qaQuestions.length, focusInput, onSubmit]
-  );
+    "mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-[16px] text-gray-900 outline-none focus:ring-2 focus:ring-emerald-300 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100";
 
   return (
     <section
       ref={sectionRef as any}
-      className="w-full max-w-full min-w-0 overflow-x-hidden rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
+      className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+        <div>
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Quick questions</h2>
           <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">
             One more step — answer these and we’ll finalize your estimate.
@@ -86,8 +65,8 @@ export function QaSection({
           const val = String(qaAnswers?.[idx] ?? "");
 
           return (
-            <label key={`qa-${idx}`} className="block min-w-0">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 break-words">
+            <label key={`${quoteLogId || "noqid"}-${idx}-${q}`} className="block">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                 {idx + 1}. {q} <span className="text-red-600">*</span>
               </div>
 
@@ -97,7 +76,6 @@ export function QaSection({
                 className={inputCls}
                 value={val}
                 onChange={(e) => onAnswer(idx, e.target.value)}
-                onKeyDown={(e) => onKeyDown(idx, e)}
                 placeholder="Type your answer…"
                 disabled={working}
                 inputMode="text"

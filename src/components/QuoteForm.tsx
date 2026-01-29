@@ -208,6 +208,9 @@ export default function QuoteForm({
   const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
 
+  // Rendering progress (visual)
+  const [renderProgressPct, setRenderProgressPct] = useState(0);
+
   // --- refs ---
   const statusRegionRef = useRef<HTMLDivElement | null>(null);
   const errorSummaryRef = useRef<HTMLDivElement | null>(null);
@@ -306,20 +309,60 @@ export default function QuoteForm({
   // MODE: show only one major “panel” at a time (removes button clutter)
   const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
 
+  // Render progress: smooth ramp while running (caps at 95 until rendered)
+  useEffect(() => {
+    if (renderStatus !== "running") return;
+
+    setRenderProgressPct((p) => (p > 0 ? p : 12));
+
+    const t = setInterval(() => {
+      setRenderProgressPct((p) => {
+        const next = p + Math.max(1, Math.round((95 - p) * 0.08));
+        return Math.min(95, next);
+      });
+    }, 350);
+
+    return () => clearInterval(t);
+  }, [renderStatus]);
+
+  useEffect(() => {
+    if (renderStatus === "rendered") setRenderProgressPct(100);
+    if (renderStatus === "failed") setRenderProgressPct(0);
+    if (renderStatus === "idle") setRenderProgressPct(0);
+  }, [renderStatus]);
+
   const progressPct = useMemo(() => {
+    // Working (compress/upload/analyze): true step progress
     if (working) {
       const pct = Math.round((workingStep.idx / Math.max(1, workingStep.total)) * 100);
       return Math.max(5, Math.min(95, pct));
     }
 
-    if (mode === "results") return 100;
+    // Results mode: if rendering is running, don't look "done" yet
+    if (mode === "results") {
+      if (showRenderingMini && renderStatus === "running") return Math.max(80, Math.min(95, renderProgressPct || 80));
+      return 100;
+    }
+
+    // QA mode
     if (mode === "qa") return 80;
 
+    // Entry mode nudges
     if (!photosOk) return 20;
     if (!contactOk) return 45;
 
     return 60;
-  }, [working, workingStep.idx, workingStep.total, mode, photosOk, contactOk]);
+  }, [
+    working,
+    workingStep.idx,
+    workingStep.total,
+    mode,
+    photosOk,
+    contactOk,
+    showRenderingMini,
+    renderStatus,
+    renderProgressPct,
+  ]);
 
   // focus/scroll rules
   useEffect(() => {
@@ -478,6 +521,7 @@ export default function QuoteForm({
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
+    setRenderProgressPct(0);
     renderAttemptedForQuoteRef.current = null;
 
     if (!aiRenderingEnabled) setRenderOptIn(false);
@@ -529,6 +573,7 @@ export default function QuoteForm({
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
+    setRenderProgressPct(0);
     renderAttemptedForQuoteRef.current = null;
 
     queueMicrotask(() => {
@@ -751,6 +796,11 @@ export default function QuoteForm({
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
+
+      // IMPORTANT: when QA is done, jump focus back to the StatusBar
+      queueMicrotask(() => {
+        focusAndScroll(statusRegionRef.current, { block: "start" });
+      });
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
     } finally {
@@ -769,6 +819,7 @@ export default function QuoteForm({
     setRenderStatus("running");
     setRenderError(null);
     setRenderImageUrl(null);
+    setRenderProgressPct(12);
 
     try {
       const res = await fetch("/api/quote/render", {
@@ -793,6 +844,7 @@ export default function QuoteForm({
 
       setRenderImageUrl(url);
       setRenderStatus("rendered");
+      setRenderProgressPct(100);
 
       queueMicrotask(async () => {
         await sleep(50);
@@ -801,6 +853,7 @@ export default function QuoteForm({
     } catch (e: any) {
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
+      setRenderProgressPct(0);
     }
   }
 
@@ -813,12 +866,6 @@ export default function QuoteForm({
     startRenderOnce(quoteLogId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
-
-  async function retryRender() {
-    if (!quoteLogId) return;
-    renderAttemptedForQuoteRef.current = null;
-    await startRenderOnce(String(quoteLogId));
-  }
 
   return (
     <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6">
@@ -891,6 +938,7 @@ export default function QuoteForm({
           needsQa={needsQa}
           qaQuestions={qaQuestions}
           qaAnswers={qaAnswers}
+          quoteLogId={quoteLogId}
           onAnswer={(idx, v) => {
             setQaAnswers((prev) => {
               const next = [...prev];
@@ -910,14 +958,12 @@ export default function QuoteForm({
           renderPreviewRef={renderPreviewRef as any}
           hasEstimate={hasEstimate}
           result={result}
-          quoteLogId={quoteLogId}
           aiRenderingEnabled={aiRenderingEnabled}
           renderOptIn={renderOptIn}
           renderStatus={renderStatus}
           renderImageUrl={renderImageUrl}
           renderError={renderError}
-          working={working}
-          onRetryRender={retryRender}
+          renderProgressPct={renderProgressPct}
         />
       ) : null}
 

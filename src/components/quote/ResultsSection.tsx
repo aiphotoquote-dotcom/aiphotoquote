@@ -10,14 +10,12 @@ export function ResultsSection({
   renderPreviewRef,
   hasEstimate,
   result,
-  quoteLogId,
   aiRenderingEnabled,
   renderOptIn,
   renderStatus,
   renderImageUrl,
   renderError,
-  working,
-  onRetryRender,
+  renderProgressPct,
 }: {
   sectionRef: React.RefObject<HTMLElement | null>;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
@@ -25,7 +23,6 @@ export function ResultsSection({
 
   hasEstimate: boolean;
   result: any;
-  quoteLogId: string | null;
 
   aiRenderingEnabled: boolean;
   renderOptIn: boolean;
@@ -34,8 +31,7 @@ export function ResultsSection({
   renderImageUrl: string | null;
   renderError: string | null;
 
-  working: boolean;
-  onRetryRender: () => Promise<void>;
+  renderProgressPct: number; // 0..100
 }) {
   if (!hasEstimate) return null;
 
@@ -65,10 +61,31 @@ export function ResultsSection({
 
   const showRenderBlock = aiRenderingEnabled && renderOptIn;
 
+  const rp = Number.isFinite(renderProgressPct) ? Math.max(0, Math.min(100, renderProgressPct)) : 0;
+
+  const renderTitle =
+    renderStatus === "rendered"
+      ? "Rendering ready"
+      : renderStatus === "failed"
+        ? "Rendering failed"
+        : renderStatus === "running"
+          ? "Rendering…"
+          : "Rendering queued";
+
+  const renderRight =
+    renderStatus === "rendered" ? "Done" : renderStatus === "failed" ? "Error" : renderStatus === "running" ? "Working" : "Waiting";
+
+  const renderSubtitle =
+    renderStatus === "failed"
+      ? "We couldn’t generate the preview this time."
+      : renderStatus === "rendered"
+        ? "Preview generated."
+        : "We’re generating a visual preview based on the uploaded photos and notes.";
+
   return (
     <section
       ref={sectionRef as any}
-      className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900 scroll-mt-24"
+      className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-900"
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
@@ -83,8 +100,6 @@ export function ResultsSection({
             Fast range based on your photos + notes. Final pricing may change after inspection.
           </p>
         </div>
-
-        {/* Ref intentionally removed from UI */}
       </div>
 
       {/* Primary card */}
@@ -107,7 +122,7 @@ export function ResultsSection({
         </div>
       </div>
 
-      {/* Secondary details (de-emphasized, calmer on mobile) */}
+      {/* Secondary details */}
       {scope.length || assumptions.length || questions.length ? (
         <div className="grid gap-3 lg:grid-cols-3">
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
@@ -157,48 +172,43 @@ export function ResultsSection({
         </div>
       ) : null}
 
-      {/* AI Rendering preview (calm, no extra motion; reserve space for message) */}
+      {/* Rendering status card (StatusBar-style) */}
       {showRenderBlock ? (
-        <div
-          ref={renderPreviewRef as any}
-          className="rounded-2xl border border-gray-200 bg-white p-5 space-y-3 dark:border-gray-800 dark:bg-gray-900 scroll-mt-24"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI rendering preview</div>
-              <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">Status: {renderStatus}</div>
+        <div ref={renderPreviewRef as any} className="max-w-full overflow-hidden">
+          <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs text-gray-600 dark:text-gray-300">AI rendering preview</div>
+                <div className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100 truncate">{renderTitle}</div>
+                <div className="mt-1 text-sm text-gray-600 dark:text-gray-300 break-words">{renderSubtitle}</div>
+              </div>
+
+              <div className="min-w-0 max-w-[45%] text-right">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">{renderRight}</div>
+              </div>
             </div>
 
-            <button
-              type="button"
-              className="shrink-0 rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold disabled:opacity-50 dark:border-gray-800"
-              onClick={() => onRetryRender()}
-              disabled={!quoteLogId || working || renderStatus === "running"}
-            >
-              Retry
-            </button>
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+              <div className="h-full bg-emerald-600" style={{ width: `${rp}%` }} />
+            </div>
+
+            {renderError ? (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                {renderError}
+              </div>
+            ) : null}
+
+            {renderImageUrl ? (
+              <div className="mt-4 rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
+              </div>
+            ) : null}
           </div>
-
-          {renderError ? (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-              {renderError}
-            </div>
-          ) : null}
-
-          {renderImageUrl ? (
-            <div className="rounded-xl border border-gray-200 overflow-hidden dark:border-gray-800">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={renderImageUrl} alt="AI rendering" className="w-full object-cover" />
-            </div>
-          ) : (
-            <div className="text-sm text-gray-600 dark:text-gray-300 min-h-[2.25rem] flex items-center">
-              If enabled, your visual concept will appear here when ready.
-            </div>
-          )}
         </div>
       ) : null}
 
-      {/* Debug: de-emphasize (still available, but clearly not part of the main flow) */}
+      {/* Debug */}
       <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold text-gray-700 dark:text-gray-200">
           Advanced: raw result (debug)
