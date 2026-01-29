@@ -26,10 +26,59 @@ function safeErr(e: unknown) {
   return msg.slice(0, 2000);
 }
 
-function getBaseUrlFromHeaders(h: Headers) {
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
-  return host ? `${proto}://${host}` : "";
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function containsDenylistedText(s: string, denylist: string[]) {
+  const hay = String(s ?? "").toLowerCase();
+  return denylist.some((w) => hay.includes(String(w).toLowerCase()));
+}
+
+type RenderGuardrails = {
+  enabledByPlatform: boolean;
+  denylist?: string[];
+  extraPromptPreamble?: string;
+  maxDailyPerTenant?: number;
+};
+
+function loadRenderGuardrails(): RenderGuardrails {
+  // optional JSON override
+  const raw = process.env.PCC_RENDER_GUARDRAILS?.trim();
+  if (raw) {
+    try {
+      const j = JSON.parse(raw);
+      if (j && typeof j === "object") return j as RenderGuardrails;
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    enabledByPlatform: true,
+    extraPromptPreamble: [
+      "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
+      "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
+      "No nudity, no explicit content, no weapons, no illegal activity.",
+    ].join("\n"),
+    denylist: ["weapon", "gun", "bomb", "explosive", "nude", "porn", "sex", "credit card", "ssn", "social security"],
+    maxDailyPerTenant: 250, // soft cap; later PCC will be per-tenant billing
+  };
+}
+
+function getBaseUrl(req: Request) {
+  const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
+  if (envBase) return envBase.replace(/\/+$/, "");
+
+  const vercel = process.env.VERCEL_URL?.trim();
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
+
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  return "";
 }
 
 export async function POST(req: Request) {
@@ -49,7 +98,7 @@ export async function POST(req: Request) {
 
     // 1) Resolve tenant
     const tenant = await db
-      .select({ id: tenants.id })
+      .select({ id: tenants.id, name: tenants.name })
       .from(tenants)
       .where(eq(tenants.slug, tenantSlug))
       .limit(1)
@@ -107,6 +156,80 @@ export async function POST(req: Request) {
       });
     }
 
+    // ---- platform/tenant rendering policy (v1) ----
+    const platform = loadRenderGuardrails();
+    if (!platform.enabledByPlatform) {
+      await db
+        .update(quoteLogs)
+        .set({ renderStatus: "failed", renderError: "Rendering disabled by platform policy." })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+      return NextResponse.json(
+        { ok: false, error: "RENDERING_DISABLED", message: "Rendering is currently disabled.", debugId },
+        { status: 403 }
+      );
+    }
+
+    const settings = await db
+      .select({
+        renderingEnabled: tenantSettings.renderingEnabled,
+        renderingStyle: tenantSettings.renderingStyle,
+        renderingNotes: tenantSettings.renderingNotes,
+        renderingMaxPerDay: tenantSettings.renderingMaxPerDay,
+        businessName: tenantSettings.businessName,
+        brandLogoUrl: tenantSettings.brandLogoUrl,
+        leadToEmail: tenantSettings.leadToEmail,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenant.id))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    // Tenant must allow rendering too (separate from "aiRenderingEnabled" used for opt-in)
+    if (settings?.renderingEnabled === false) {
+      await db
+        .update(quoteLogs)
+        .set({ renderStatus: "failed", renderError: "Rendering disabled by tenant settings." })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+      return NextResponse.json(
+        { ok: false, error: "RENDERING_DISABLED", message: "Tenant has disabled rendering.", debugId },
+        { status: 403 }
+      );
+    }
+
+    // Optional per-tenant/per-platform daily cap (no schema change; soft enforcement)
+    const tenantCap = Number(settings?.renderingMaxPerDay ?? 0) || 0;
+    const platformCap = Number(platform.maxDailyPerTenant ?? 0) || 0;
+    const effectiveCap =
+      tenantCap > 0 && platformCap > 0 ? Math.min(tenantCap, platformCap) : tenantCap > 0 ? tenantCap : platformCap;
+
+    if (effectiveCap > 0) {
+      // count rendered today for this tenant
+      const day = new Date();
+      day.setHours(0, 0, 0, 0);
+      const rows: any[] = await db.execute(sql`
+        select count(*)::int as n
+        from quote_logs
+        where tenant_id = ${tenant.id}::uuid
+          and render_status = 'rendered'
+          and rendered_at >= ${day.toISOString()}::timestamptz
+      `);
+
+      const n = Number((rows as any)?.[0]?.n ?? (rows as any)?.rows?.[0]?.n ?? 0);
+      if (Number.isFinite(n) && n >= effectiveCap) {
+        await db
+          .update(quoteLogs)
+          .set({ renderStatus: "failed", renderError: `Render daily cap reached (${effectiveCap}).` })
+          .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+        return NextResponse.json(
+          { ok: false, error: "RENDER_LIMIT", message: "Daily render limit reached.", debugId },
+          { status: 429 }
+        );
+      }
+    }
+
     // Mark running
     await db
       .update(quoteLogs)
@@ -153,13 +276,36 @@ export async function POST(req: Request) {
     const summary = typeof outAny?.summary === "string" ? outAny.summary : "";
     const inputAny: any = q.input ?? {};
     const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
+    const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
+
+    const style = safeTrim(settings?.renderingStyle) || "realistic, clean lighting, product photography feel";
+    const tenantRenderNotes = safeTrim(settings?.renderingNotes) || "";
+
+    const denylist = Array.isArray(platform.denylist) ? platform.denylist : [];
+    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes].filter(Boolean).join("\n");
+    if (denylist.length && containsDenylistedText(combinedTextForScan, denylist)) {
+      await db
+        .update(quoteLogs)
+        .set({
+          renderStatus: "failed",
+          renderError: "Blocked by platform rendering denylist.",
+        })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+      return NextResponse.json(
+        { ok: false, error: "CONTENT_BLOCKED", message: "This request can’t be rendered.", debugId },
+        { status: 400 }
+      );
+    }
 
     const prompt = [
+      platform.extraPromptPreamble ? platform.extraPromptPreamble : "",
       "Generate a realistic 'after' concept rendering based on the customer's photos.",
       "Do NOT add text or watermarks.",
-      "Style: realistic, clean lighting, product photography feel.",
+      `Style: ${style}`,
       serviceType ? `Service type: ${serviceType}` : "",
       summary ? `Estimate summary context: ${summary}` : "",
+      tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -202,33 +348,19 @@ export async function POST(req: Request) {
     try {
       const cfg = await getTenantEmailConfig(tenant.id);
 
-      const branding = await db
-        .select({
-          businessName: tenantSettings.businessName,
-          brandLogoUrl: tenantSettings.brandLogoUrl,
-          leadToEmail: tenantSettings.leadToEmail,
-        })
-        .from(tenantSettings)
-        .where(eq(tenantSettings.tenantId, tenant.id))
-        .limit(1)
-        .then((r) => r[0] ?? null);
+      const businessName = (cfg.businessName || settings?.businessName || tenant.name || "Your Business").trim();
+      const brandLogoUrl = settings?.brandLogoUrl ?? null;
 
-      const businessName = (cfg.businessName || branding?.businessName || "Your Business").trim();
-      const brandLogoUrl = branding?.brandLogoUrl ?? null;
-
-      const inputAny2: any = q.input ?? {};
-      const customer = inputAny2?.customer ?? inputAny2?.contact ?? null;
-
+      const customer = inputAny?.customer ?? inputAny?.contact ?? null;
       const customerName = String(customer?.name ?? "Customer").trim();
       const customerEmail = String(customer?.email ?? "").trim().toLowerCase();
       const customerPhone = String(customer?.phone ?? "").trim();
 
-      const outAny2: any = q.output ?? {};
-      const estimateLow = typeof outAny2?.estimate_low === "number" ? outAny2.estimate_low : null;
-      const estimateHigh = typeof outAny2?.estimate_high === "number" ? outAny2.estimate_high : null;
-      const summary2 = typeof outAny2?.summary === "string" ? outAny2.summary : "";
+      const estimateLow = typeof outAny?.estimate_low === "number" ? outAny.estimate_low : null;
+      const estimateHigh = typeof outAny?.estimate_high === "number" ? outAny.estimate_high : null;
+      const summary2 = typeof outAny?.summary === "string" ? outAny.summary : "";
 
-      const baseUrl = getBaseUrlFromHeaders(req.headers);
+      const baseUrl = getBaseUrl(req);
       const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
       const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
 
@@ -315,7 +447,7 @@ export async function POST(req: Request) {
 
       // Persist into output.render_email (best effort)
       try {
-        const nextOutput = { ...(outAny2 ?? {}), render_email: renderEmailResult };
+        const nextOutput = { ...(outAny ?? {}), render_email: renderEmailResult };
         await db.execute(sql`
           update quote_logs
           set output = ${JSON.stringify(nextOutput)}::jsonb
