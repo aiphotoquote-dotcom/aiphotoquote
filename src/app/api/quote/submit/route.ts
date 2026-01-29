@@ -116,25 +116,112 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function normalizeConfidence(v: any): "high" | "medium" | "low" | "unknown" {
-  const s = String(v ?? "").toLowerCase();
-  if (s === "high" || s === "medium" || s === "low") return s;
-  return "unknown";
+/**
+ * PCC/LLM guardrails (v1)
+ * - No schema changes required.
+ * - Uses tenantSettings.aiMode as a profile selector (optional).
+ * - Uses env var PCC_LLM_GUARDRAILS (optional) to override defaults.
+ *
+ * Later: swap this loader to DB-backed prompt sets from PCC without touching quote logic.
+ */
+type LlmGuardrails = {
+  profile: string;
+  extraSystemPreamble?: string;
+  denylist?: string[]; // keywords to avoid
+  maxQaQuestions?: number;
+};
+
+function loadPlatformGuardrails(): LlmGuardrails {
+  // optional JSON override (keeps deploy simple)
+  const raw = process.env.PCC_LLM_GUARDRAILS?.trim();
+  if (raw) {
+    try {
+      const j = JSON.parse(raw);
+      if (j && typeof j === "object") return j as LlmGuardrails;
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    profile: "standard",
+    extraSystemPreamble: [
+      "You are producing an estimate for legitimate service work.",
+      "Do not provide instructions for wrongdoing or unsafe activity.",
+      "Do not request or expose sensitive personal data beyond what is needed for the quote.",
+      "If the submission is ambiguous, ask clarifying questions instead of guessing.",
+    ].join("\n"),
+    denylist: [
+      // keep this lightweight; later PCC will manage these
+      "credit card",
+      "social security",
+      "ssn",
+      "password",
+      "explosive",
+      "bomb",
+      "weapon",
+    ],
+    maxQaQuestions: 3,
+  };
 }
 
-function confidenceRank(v: "high" | "medium" | "low" | "unknown") {
-  if (v === "high") return 3;
-  if (v === "medium") return 2;
-  if (v === "low") return 1;
-  return 0;
+function buildSystemForQa(args: {
+  tenantProfile: string;
+  extraPreamble?: string;
+  maxQuestions: number;
+}) {
+  const { tenantProfile, extraPreamble, maxQuestions } = args;
+
+  const base = [
+    "You generate short, practical clarification questions for a service quote based on photos and notes.",
+    "Ask only what is necessary to estimate accurately.",
+    "Keep each question to one sentence.",
+    "Prefer measurable details (dimensions, quantity, material, access, location).",
+    "Avoid questions the photo obviously answers.",
+    `Generate up to ${maxQuestions} questions.`,
+    "Return ONLY valid JSON: { questions: string[] }",
+  ];
+
+  const profile = tenantProfile === "strict"
+    ? [
+        "Be extra conservative. If unsure, ask the minimum set of questions needed to remove ambiguity.",
+        "Do NOT infer dimensions, quantities, or material if not visible.",
+      ]
+    : [];
+
+  return [extraPreamble, ...profile, ...base].filter(Boolean).join("\n");
 }
 
-function minConfidenceRank(setting: string | null | undefined) {
-  const s = String(setting ?? "").toLowerCase().trim();
-  if (s === "high") return 3;
-  if (s === "medium") return 2;
-  if (s === "low") return 1;
-  return 2; // default: medium
+function buildSystemForEstimate(args: {
+  tenantProfile: string;
+  extraPreamble?: string;
+  hasQa: boolean;
+}) {
+  const { tenantProfile, extraPreamble, hasQa } = args;
+
+  const base = [
+    hasQa
+      ? "You are an expert estimator for service work based on photos, customer notes, and follow-up Q&A."
+      : "You are an expert estimator for service work based on photos and customer notes.",
+    "Be conservative: return a realistic RANGE, not a single number.",
+    "If photos are insufficient or ambiguous (or still insufficient after Q&A), set confidence low and inspection_required true.",
+    "Do not invent brand/model/year—ask questions instead.",
+    "Return ONLY valid JSON matching the provided schema.",
+  ];
+
+  const profile = tenantProfile === "strict"
+    ? [
+        "Bias toward inspection_required=true when any critical info is missing.",
+        "If you cannot see it, do not assume it.",
+      ]
+    : [];
+
+  return [extraPreamble, ...profile, ...base].filter(Boolean).join("\n");
+}
+
+function containsDenylistedText(s: string, denylist: string[]) {
+  const hay = String(s ?? "").toLowerCase();
+  return denylist.some((w) => hay.includes(String(w).toLowerCase()));
 }
 
 async function getOpenAiForTenant(tenantId: string) {
@@ -199,7 +286,7 @@ async function sendReceivedEmails(args: {
 
   if (!configured) return result;
 
-  // Lead “received” (uses leadNew template but with “pending” content)
+  // Lead “received”
   try {
     result.lead_received.attempted = true;
 
@@ -291,29 +378,19 @@ async function sendReceivedEmails(args: {
 
 async function generateQaQuestions(args: {
   openai: OpenAI;
+  system: string;
   images: Array<{ url: string; shotType?: string }>;
   category: string;
   service_type: string;
   notes: string;
   maxQuestions: number;
 }) {
-  const { openai, images, category, service_type, notes, maxQuestions } = args;
-
-  const system = [
-    "You generate short, practical clarification questions for a service quote based on photos and notes.",
-    "Ask only what is necessary to estimate accurately.",
-    "Return ONLY valid JSON: { questions: string[] }",
-  ].join("\n");
+  const { openai, system, images, category, service_type, notes, maxQuestions } = args;
 
   const userText = [
     `Category: ${category}`,
     `Service type: ${service_type}`,
     `Customer notes: ${notes || "(none)"}`,
-    "",
-    `Generate up to ${maxQuestions} questions.`,
-    "- Keep each question short (1 sentence).",
-    "- Prefer measurable details (dimensions, quantity, material, access, location).",
-    "- Avoid questions the photo obviously answers.",
   ].join("\n");
 
   const content: any[] = [{ type: "text", text: userText }];
@@ -349,23 +426,14 @@ async function generateQaQuestions(args: {
 
 async function generateEstimate(args: {
   openai: OpenAI;
+  system: string;
   images: Array<{ url: string; shotType?: string }>;
   category: string;
   service_type: string;
   notes: string;
   normalizedAnswers?: Array<{ question: string; answer: string }>;
 }) {
-  const { openai, images, category, service_type, notes, normalizedAnswers } = args;
-
-  const system = [
-    normalizedAnswers?.length
-      ? "You are an expert estimator for service work based on photos, customer notes, and follow-up Q&A."
-      : "You are an expert estimator for service work based on photos and customer notes.",
-    "Be conservative: return a realistic RANGE, not a single number.",
-    "If photos are insufficient or ambiguous (or still insufficient after Q&A), set confidence low and inspection_required true.",
-    "Do not invent brand/model/year—ask questions instead.",
-    "Return ONLY valid JSON matching the provided schema.",
-  ].join("\n");
+  const { openai, system, images, category, service_type, notes, normalizedAnswers } = args;
 
   const qaText =
     normalizedAnswers?.length
@@ -505,20 +573,8 @@ async function sendFinalEstimateEmails(args: {
   const emailResult: any = {
     configured,
     mode: cfg.sendMode ?? "standard",
-    lead_new: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
-    customer_receipt: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
+    lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
   };
 
   if (!configured) return emailResult;
@@ -618,10 +674,7 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "INVALID_BODY", issues: parsed.error.issues }, { status: 400 });
     }
 
     const { tenantSlug } = parsed.data;
@@ -643,6 +696,7 @@ export async function POST(req: Request) {
       .select({
         tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
+        aiMode: tenantSettings.aiMode, // used as profile selector for guardrails (v1)
         aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
         brandLogoUrl: tenantSettings.brandLogoUrl,
         businessName: tenantSettings.businessName,
@@ -659,11 +713,21 @@ export async function POST(req: Request) {
     const industryKey = settings?.industryKey ?? "service";
     const aiRenderingEnabled = settings?.aiRenderingEnabled === true;
 
-    const liveQaEnabled = settings?.liveQaEnabled === true;
-    const liveQaMaxQuestions = Math.max(1, Math.min(10, Number(settings?.liveQaMaxQuestions ?? 3)));
-
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
+
+    // ---- LLM guardrails/profile (v1) ----
+    const platform = loadPlatformGuardrails();
+    const tenantProfile = safeTrim(settings?.aiMode) || platform.profile || "standard";
+    const denylist = Array.isArray(platform.denylist) ? platform.denylist : [];
+    const extraPreamble = safeTrim(platform.extraSystemPreamble) || undefined;
+
+    // Live Q&A: tenant setting but capped by platform policy
+    const tenantQaEnabled = settings?.liveQaEnabled === true;
+    const tenantQaMax = Math.max(1, Math.min(10, Number(settings?.liveQaMaxQuestions ?? 3)));
+    const platformQaMax = Math.max(1, Math.min(10, Number(platform.maxQaQuestions ?? 3)));
+    const liveQaEnabled = tenantQaEnabled;
+    const liveQaMaxQuestions = Math.min(tenantQaMax, platformQaMax);
 
     // -------------------------
     // Phase 2: finalize after QA
@@ -735,9 +799,16 @@ export async function POST(req: Request) {
 
       const openai = await getOpenAiForTenant(tenant.id);
 
+      const systemEstimate = buildSystemForEstimate({
+        tenantProfile,
+        extraPreamble,
+        hasQa: true,
+      });
+
       // Generate final estimate (with Q&A)
       let output = await generateEstimate({
         openai,
+        system: systemEstimate,
         images,
         category,
         service_type,
@@ -779,7 +850,6 @@ export async function POST(req: Request) {
         output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
       }
 
-      // ✅ Phase 2 returns final output only
       return NextResponse.json({ ok: true, quoteLogId, output });
     }
 
@@ -816,12 +886,24 @@ export async function POST(req: Request) {
       );
     }
 
-    const openai = await getOpenAiForTenant(tenant.id);
-
+    // lightweight denylist check on freeform notes (guardrail v1)
     const customer_context = parsed.data.customer_context ?? {};
     const category = customer_context.category ?? industryKey ?? "service";
     const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
+
+    if (denylist.length && containsDenylistedText(String(notes ?? ""), denylist)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "CONTENT_BLOCKED",
+          message: "Your request includes content we can’t process. Please revise and try again.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const openai = await getOpenAiForTenant(tenant.id);
 
     // Only allow render opt-in if tenant enabled it
     const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
@@ -855,7 +937,6 @@ export async function POST(req: Request) {
     }
 
     // ✅ Send “received” emails immediately (best-effort), and persist result
-    // This is what fixes your report: “no initial email, but render email arrived”
     try {
       const received = await sendReceivedEmails({
         req,
@@ -880,50 +961,21 @@ export async function POST(req: Request) {
 
     // If live QA is enabled, ask clarifying questions first
     if (liveQaEnabled) {
-      const system = [
-        "You generate short, practical clarification questions for a service quote based on photos and notes.",
-        "Ask only what is necessary to estimate accurately.",
-        "Return ONLY valid JSON: { questions: string[] }",
-      ].join("\n");
-
-      const userText = [
-        `Category: ${category}`,
-        `Service type: ${service_type}`,
-        `Customer notes: ${notes || "(none)"}`,
-        "",
-        `Generate up to ${liveQaMaxQuestions} questions.`,
-        "- Keep each question short (1 sentence).",
-        "- Prefer measurable details (dimensions, quantity, material, access, location).",
-        "- Avoid questions the photo obviously answers.",
-      ].join("\n");
-
-      const content: any[] = [{ type: "text", text: userText }];
-      for (const img of images) {
-        if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-      }
-
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content },
-        ],
-        temperature: 0.2,
+      const systemQa = buildSystemForQa({
+        tenantProfile,
+        extraPreamble,
+        maxQuestions: liveQaMaxQuestions,
       });
 
-      const raw = completion.choices?.[0]?.message?.content ?? "{}";
-
-      let parsedQa: any = null;
-      try {
-        parsedQa = JSON.parse(raw);
-      } catch {
-        parsedQa = null;
-      }
-
-      const safeQa = QaQuestionsSchema.safeParse(parsedQa);
-      const questions = safeQa.success
-        ? safeQa.data.questions.slice(0, liveQaMaxQuestions)
-        : ["Can you describe what you want done (repair vs full replacement) and any material preference?"];
+      const questions = await generateQaQuestions({
+        openai,
+        system: systemQa,
+        images,
+        category,
+        service_type,
+        notes,
+        maxQuestions: liveQaMaxQuestions,
+      });
 
       const qa = {
         questions,
@@ -940,7 +992,6 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      // ✅ IMPORTANT: frontend expects `questions` at top-level
       return NextResponse.json({
         ok: true,
         quoteLogId,
@@ -950,112 +1001,21 @@ export async function POST(req: Request) {
       });
     }
 
-    // Otherwise, do estimate immediately (old behavior, but now with “received” emails already sent)
-    const system = [
-      "You are an expert estimator for service work based on photos and customer notes.",
-      "Be conservative: return a realistic RANGE, not a single number.",
-      "If photos are insufficient or ambiguous, set confidence low and inspection_required true.",
-      "Do not invent brand/model/year—ask questions instead.",
-      "Return ONLY valid JSON matching the provided schema.",
-    ].join("\n");
-
-    const userText = [
-      `Category: ${category}`,
-      `Service type: ${service_type}`,
-      `Customer notes: ${notes || "(none)"}`,
-      "",
-      "Instructions:",
-      "- Use the photos to identify the item, material type, and visible damage/wear.",
-      "- Provide estimate_low and estimate_high (whole dollars).",
-      "- Provide visible_scope as short bullet-style strings.",
-      "- Provide assumptions and questions (3–8 items each is fine).",
-    ].join("\n");
-
-    const content: any[] = [{ type: "text", text: userText }];
-    for (const img of images) {
-      if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-    }
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content },
-      ],
-      temperature: 0.2,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "quote_estimate",
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              confidence: { type: "string", enum: ["high", "medium", "low"] },
-              inspection_required: { type: "boolean" },
-              estimate_low: { type: "number" },
-              estimate_high: { type: "number" },
-              currency: { type: "string" },
-              summary: { type: "string" },
-              visible_scope: { type: "array", items: { type: "string" } },
-              assumptions: { type: "array", items: { type: "string" } },
-              questions: { type: "array", items: { type: "string" } },
-            },
-            required: [
-              "confidence",
-              "inspection_required",
-              "estimate_low",
-              "estimate_high",
-              "summary",
-              "visible_scope",
-              "assumptions",
-              "questions",
-            ],
-          },
-        },
-      } as any,
+    // Otherwise, do estimate immediately
+    const systemEstimate = buildSystemForEstimate({
+      tenantProfile,
+      extraPreamble,
+      hasQa: false,
     });
 
-    const raw = completion.choices?.[0]?.message?.content ?? "{}";
-
-    let outputParsed: any = null;
-    try {
-      outputParsed = JSON.parse(raw);
-    } catch {
-      outputParsed = null;
-    }
-
-    let output: any;
-    const safe = AiOutputSchema.safeParse(outputParsed);
-    if (!safe.success) {
-      output = {
-        confidence: "low",
-        inspection_required: true,
-        estimate_low: 0,
-        estimate_high: 0,
-        currency: "USD",
-        summary:
-          "We couldn't generate a structured estimate from this submission. Please add 2–6 clear photos and any details you can.",
-        visible_scope: [],
-        assumptions: [],
-        questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
-        _raw: raw,
-      };
-    } else {
-      const v = safe.data;
-      const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
-      output = {
-        confidence: v.confidence,
-        inspection_required: Boolean(v.inspection_required),
-        estimate_low: low,
-        estimate_high: high,
-        currency: v.currency || "USD",
-        summary: String(v.summary || "").trim(),
-        visible_scope: Array.isArray(v.visible_scope) ? v.visible_scope : [],
-        assumptions: Array.isArray(v.assumptions) ? v.assumptions : [],
-        questions: Array.isArray(v.questions) ? v.questions : [],
-      };
-    }
+    let output = await generateEstimate({
+      openai,
+      system: systemEstimate,
+      images,
+      category,
+      service_type,
+      notes,
+    });
 
     // Persist estimate output
     await db.execute(sql`
@@ -1079,20 +1039,8 @@ export async function POST(req: Request) {
       const emailResult: any = {
         configured,
         mode: cfg.sendMode ?? "standard",
-        lead_new: {
-          attempted: false,
-          ok: false,
-          provider: "resend",
-          id: null as string | null,
-          error: null as string | null,
-        },
-        customer_receipt: {
-          attempted: false,
-          ok: false,
-          provider: "resend",
-          id: null as string | null,
-          error: null as string | null,
-        },
+        lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+        customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
       };
 
       if (configured) {
@@ -1194,7 +1142,6 @@ export async function POST(req: Request) {
     } catch (e: any) {
       output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
     }
-
 
     return NextResponse.json({ ok: true, quoteLogId, output });
   } catch (e: any) {
