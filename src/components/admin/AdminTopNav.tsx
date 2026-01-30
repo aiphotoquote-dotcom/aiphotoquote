@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { UserButton } from "@clerk/nextjs";
 
 import AdminTenantSwitcher from "@/components/admin/AdminTenantSwitcher";
@@ -28,6 +28,34 @@ function activeFromPath(pathname: string): NavKey {
   return "dashboard";
 }
 
+type TenantRow = { tenantId: string; slug: string; name: string | null; role: string };
+type TenantContextResp =
+  | {
+      ok: true;
+      activeTenantId: string | null;
+      tenants: TenantRow[];
+      needsTenantSelection?: boolean;
+      autoSelected?: boolean;
+      clearedStaleCookie?: boolean;
+    }
+  | { ok: false; error: string; message?: string };
+
+function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "warn" }) {
+  const tone = props.tone ?? "neutral";
+  const cls =
+    tone === "good"
+      ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200"
+      : tone === "warn"
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
+      : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
+
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
+      {props.children}
+    </span>
+  );
+}
+
 export default function AdminTopNav() {
   const pathname = usePathname() || "";
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -47,6 +75,66 @@ export default function AdminTopNav() {
     { key: "setup", href: "/admin/setup", label: "AI Setup" },
     { key: "widgets", href: "/admin/setup/widget", label: "Widgets" },
   ];
+
+  // ---- Tenant context (read-only, no side effects) ----
+  const [ctx, setCtx] = useState<TenantContextResp | null>(null);
+  const [ctxLoading, setCtxLoading] = useState(true);
+
+  // Prevent repeat-fetch spam in fast remount scenarios
+  const fetchedRef = useRef(false);
+
+  useEffect(() => {
+    let alive = true;
+    const ac = new AbortController();
+
+    async function loadContextOnce() {
+      if (fetchedRef.current) return;
+      fetchedRef.current = true;
+
+      setCtxLoading(true);
+      try {
+        const res = await fetch("/api/tenant/context", {
+          cache: "no-store",
+          signal: ac.signal,
+        });
+        const data = (await res.json().catch(() => null)) as TenantContextResp | null;
+        if (!alive) return;
+
+        setCtx(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid tenant context response" });
+      } catch (e: any) {
+        if (!alive) return;
+        // Don’t blow up the nav; just hide tenant UI
+        setCtx({ ok: false, error: "CONTEXT_FETCH_FAILED", message: e?.message ?? String(e) });
+      } finally {
+        if (!alive) return;
+        setCtxLoading(false);
+      }
+    }
+
+    loadContextOnce();
+    return () => {
+      alive = false;
+      ac.abort();
+    };
+  }, []);
+
+  // Close mobile drawer on route change
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  const activeTenant =
+    ctx && "ok" in ctx && ctx.ok && ctx.activeTenantId
+      ? (ctx.tenants || []).find((t) => t.tenantId === ctx.activeTenantId) ?? null
+      : null;
+
+  const shouldShowSwitcher =
+    !ctxLoading &&
+    ctx &&
+    "ok" in ctx &&
+    ctx.ok &&
+    Array.isArray(ctx.tenants) &&
+    ctx.tenants.length > 0;
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/70 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/70">
@@ -74,11 +162,26 @@ export default function AdminTopNav() {
               </Link>
             ))}
           </nav>
+
+          {/* Tenant pill (desktop) */}
+          <div className="hidden md:flex items-center">
+            {ctxLoading ? (
+              <Pill>Tenant: …</Pill>
+            ) : activeTenant ? (
+              <Pill tone="good">
+                Tenant: <span className="ml-1 font-mono">{activeTenant.slug}</span>
+              </Pill>
+            ) : (
+              <Pill tone="warn">Tenant: none</Pill>
+            )}
+          </div>
         </div>
 
         {/* Right: tenant switcher + account (desktop) */}
         <div className="hidden md:flex items-center gap-3">
-          <AdminTenantSwitcher />
+          {/* IMPORTANT: don’t render the switcher until context is loaded */}
+          {shouldShowSwitcher ? <AdminTenantSwitcher /> : null}
+
           <div className="rounded-xl border border-gray-200 bg-white/70 px-2 py-1 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
             <UserButton afterSignOutUrl="/" />
           </div>
@@ -102,6 +205,20 @@ export default function AdminTopNav() {
       {mobileOpen ? (
         <div className="md:hidden border-t border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/80">
           <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-2">
+            {/* Tenant pill (mobile) */}
+            <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white/70 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant</div>
+              {ctxLoading ? (
+                <Pill>…</Pill>
+              ) : activeTenant ? (
+                <Pill tone="good">
+                  <span className="font-mono">{activeTenant.slug}</span>
+                </Pill>
+              ) : (
+                <Pill tone="warn">none</Pill>
+              )}
+            </div>
+
             {/* account */}
             <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white/70 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Account</div>
@@ -115,7 +232,6 @@ export default function AdminTopNav() {
                   key={l.key}
                   href={l.href}
                   className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}
-                  onClick={() => setMobileOpen(false)}
                 >
                   {l.label}
                 </Link>
