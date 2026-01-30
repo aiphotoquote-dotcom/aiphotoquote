@@ -3,9 +3,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@clerk/nextjs/server";
-import { cookies } from "next/headers";
-import { db } from "@/lib/db/client";
 import { sql } from "drizzle-orm";
+
+import { db } from "@/lib/db/client";
+import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
@@ -13,22 +14,15 @@ import { loadTenantLlmOverrides, saveTenantLlmOverrides } from "@/lib/pcc/llm/te
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const ACTIVE_TENANT_COOKIE = "apq_active_tenant_id"; // must match /api/tenant/context cookie name
+type TenantRole = "owner" | "admin" | "member";
 
-function isAdminRole(role: string | null | undefined) {
+function isAdminRole(role: TenantRole | null | undefined) {
   return role === "owner" || role === "admin";
 }
 
-async function getActiveTenantId(): Promise<string | null> {
-  // Next 16 route handlers can have async cookies()
-  const jar = await cookies();
-  const v = jar.get(ACTIVE_TENANT_COOKIE)?.value;
-  const tid = String(v ?? "").trim();
-  return tid || null;
-}
-
-async function getTenantRole(userId: string, tenantId: string): Promise<"owner" | "admin" | "member" | null> {
+async function getTenantRole(userId: string, tenantId: string): Promise<TenantRole | null> {
   const rows = await db.execute(sql`
     SELECT role
     FROM tenant_members
@@ -43,44 +37,84 @@ async function getTenantRole(userId: string, tenantId: string): Promise<"owner" 
   return null;
 }
 
-const OverridesSchema = z.object({
-  models: z
-    .object({
-      estimatorModel: z.string().optional(),
-      qaModel: z.string().optional(),
-    })
-    .partial()
-    .optional(),
-  prompts: z
-    .object({
-      quoteEstimatorSystem: z.string().optional(),
-      qaQuestionGeneratorSystem: z.string().optional(),
-      extraSystemPreamble: z.string().optional(),
-    })
-    .partial()
-    .optional(),
-}).partial();
+function deny(status: number, error: string, message?: string) {
+  return NextResponse.json({ ok: false, error, ...(message ? { message } : {}) }, { status });
+}
 
-export async function GET() {
+/**
+ * Resolve tenantId:
+ * - Prefer explicit tenantId (query/body)
+ * - Fallback to cookie via shared reader (supports multiple cookie keys)
+ */
+async function resolveTenantId(explicitTenantId?: string | null): Promise<string | null> {
+  const t = String(explicitTenantId ?? "").trim();
+  if (t) return t;
+  return await readActiveTenantIdFromCookies();
+}
+
+/* -----------------------------
+   Schemas
+------------------------------ */
+
+const GetQuery = z.object({
+  tenantId: z.string().uuid().optional(),
+  industryKey: z.string().optional(), // not used server-side here, but allowed
+});
+
+const OverridesSchema = z
+  .object({
+    models: z
+      .object({
+        estimatorModel: z.string().optional(),
+        qaModel: z.string().optional(),
+      })
+      .partial()
+      .optional(),
+    prompts: z
+      .object({
+        quoteEstimatorSystem: z.string().optional(),
+        qaQuestionGeneratorSystem: z.string().optional(),
+        extraSystemPreamble: z.string().optional(),
+      })
+      .partial()
+      .optional(),
+  })
+  .partial();
+
+const PostBody = z.object({
+  tenantId: z.string().uuid().optional(),
+  industryKey: z.string().nullable().optional(), // allowed, ignored here
+  overrides: OverridesSchema.optional(),
+});
+
+/* -----------------------------
+   GET
+------------------------------ */
+
+export async function GET(req: Request) {
   const { userId } = await auth();
-  if (!userId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+  if (!userId) return deny(401, "UNAUTHENTICATED");
 
-  const tenantId = await getActiveTenantId();
-  if (!tenantId) {
-    return NextResponse.json(
-      { ok: false, error: "NO_ACTIVE_TENANT", message: "Select a tenant first." },
-      { status: 400 }
-    );
-  }
+  // Parse query (tenantId can be passed explicitly by client)
+  const url = new URL(req.url);
+  const parsed = GetQuery.safeParse({
+    tenantId: url.searchParams.get("tenantId") || undefined,
+    industryKey: url.searchParams.get("industryKey") || undefined,
+  });
+  if (!parsed.success) return deny(400, "BAD_REQUEST", "Invalid query parameters.");
+
+  const tenantId = await resolveTenantId(parsed.data.tenantId ?? null);
+  if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
   const role = await getTenantRole(userId, tenantId);
-  if (!role) return NextResponse.json({ ok: false, error: "FORBIDDEN" }, { status: 403 });
+  if (!role) return deny(403, "FORBIDDEN");
 
   const platformCfg = await loadPlatformLlmConfig();
   const overrides = (await loadTenantLlmOverrides(tenantId)) ?? null;
 
-  // Effective = platform + tenant overrides (no tenant guardrails)
-  const effective = await getPlatformLlm(); // already normalizes platform config
+  // Effective = platform + tenant overrides (guardrails remain platform-only)
+  const effective = await getPlatformLlm(); // platform normalized
+
   const effModels = {
     estimatorModel: overrides?.models?.estimatorModel?.trim() || effective.models.estimatorModel,
     qaModel: overrides?.models?.qaModel?.trim() || effective.models.qaModel,
@@ -91,8 +125,11 @@ export async function GET() {
     quoteEstimatorSystem:
       (overrides?.prompts?.quoteEstimatorSystem ?? "").trim() || effective.prompts.quoteEstimatorSystem,
     qaQuestionGeneratorSystem:
-      (overrides?.prompts?.qaQuestionGeneratorSystem ?? "").trim() || effective.prompts.qaQuestionGeneratorSystem,
-    extraSystemPreamble: (overrides?.prompts?.extraSystemPreamble ?? "").trim() || platformCfg.prompts?.extraSystemPreamble || "",
+      (overrides?.prompts?.qaQuestionGeneratorSystem ?? "").trim() ||
+      effective.prompts.qaQuestionGeneratorSystem,
+    extraSystemPreamble:
+      (overrides?.prompts?.extraSystemPreamble ?? "").trim() ||
+      (platformCfg.prompts?.extraSystemPreamble ?? ""),
   };
 
   return NextResponse.json({
@@ -109,34 +146,45 @@ export async function GET() {
   });
 }
 
+/* -----------------------------
+   POST
+------------------------------ */
+
 export async function POST(req: Request) {
   const { userId } = await auth();
-  if (!userId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+  if (!userId) return deny(401, "UNAUTHENTICATED");
 
-  const tenantId = await getActiveTenantId();
-  if (!tenantId) {
-    return NextResponse.json(
-      { ok: false, error: "NO_ACTIVE_TENANT", message: "Select a tenant first." },
-      { status: 400 }
-    );
+  const body = await req.json().catch(() => null);
+  if (!body) return deny(400, "INVALID_BODY", "Missing JSON body.");
+
+  // Accept either:
+  // - { tenantId, overrides, industryKey }
+  // - or legacy: { ...overridesFields } (no wrapper)
+  const parsed = PostBody.safeParse(body);
+
+  let explicitTenantId: string | null = null;
+  let overridesInput: unknown = body;
+
+  if (parsed.success) {
+    explicitTenantId = parsed.data.tenantId ?? null;
+    overridesInput = parsed.data.overrides ?? (body as any)?.overrides ?? body;
+  } else {
+    // legacy fallback: try tenantId on root
+    explicitTenantId = typeof (body as any)?.tenantId === "string" ? (body as any).tenantId : null;
+    overridesInput = (body as any)?.overrides ?? body;
   }
+
+  const tenantId = await resolveTenantId(explicitTenantId);
+  if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
   const role = await getTenantRole(userId, tenantId);
   if (!isAdminRole(role)) {
-    return NextResponse.json(
-      { ok: false, error: "FORBIDDEN", message: "Only owner/admin can edit LLM settings." },
-      { status: 403 }
-    );
-  }
-
-  const body = await req.json().catch(() => null);
-  if (!body) {
-    return NextResponse.json({ ok: false, error: "INVALID_BODY", message: "Missing JSON body." }, { status: 400 });
+    return deny(403, "FORBIDDEN", "Only owner/admin can edit LLM settings.");
   }
 
   try {
-    const parsed = OverridesSchema.parse((body as any)?.overrides ?? body);
-    const normalized = normalizeTenantOverrides(parsed) as TenantLlmOverrides;
+    const parsedOverrides = OverridesSchema.parse(overridesInput);
+    const normalized = normalizeTenantOverrides(parsedOverrides) as TenantLlmOverrides;
 
     // Guardrails are platform-only; ignore if client tries to send them
     const saved = await saveTenantLlmOverrides(tenantId, normalized);
