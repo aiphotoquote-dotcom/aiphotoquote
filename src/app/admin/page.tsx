@@ -3,6 +3,7 @@
 
 import Link from "next/link";
 import React, { useEffect, useMemo, useState } from "react";
+import { usePathname } from "next/navigation";
 
 type MetricsResp =
   | {
@@ -87,13 +88,42 @@ function ClickCard({
         className
       )}
     >
-      {/* inner wrapper so hover can be applied consistently */}
       <div className={cn("rounded-2xl", "hover:shadow-md")}>{children}</div>
     </Link>
   );
 }
 
+function num(v: any, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function normalizeMetrics(r: any): MetricsResp {
+  if (!r || typeof r !== "object") return { ok: false, error: "BAD_RESPONSE", message: "Metrics returned invalid JSON." };
+  if (r.ok !== true) return { ok: false, error: r.error || "FETCH_FAILED", message: r.message };
+
+  // IMPORTANT: Prevent “blank” render by forcing numbers
+  return {
+    ok: true,
+    totalLeads: num(r.totalLeads),
+    unread: num(r.unread),
+    stageNew: num(r.stageNew),
+    inProgress: num(r.inProgress),
+    todayNew: num(r.todayNew),
+    yesterdayNew: num(r.yesterdayNew),
+    staleUnread: num(r.staleUnread),
+  };
+}
+
+function normalizeRecent(r: any): RecentResp {
+  if (!r || typeof r !== "object") return { ok: false, error: "BAD_RESPONSE", message: "Recent returned invalid JSON." };
+  if (r.ok !== true) return { ok: false, error: r.error || "FETCH_FAILED", message: r.message };
+  return { ok: true, leads: Array.isArray(r.leads) ? r.leads : [] };
+}
+
 export default function AdminDashboardPage() {
+  const pathname = usePathname() || "";
+
   const [metrics, setMetrics] = useState<MetricsResp | null>(null);
   const [recent, setRecent] = useState<RecentResp | null>(null);
   const [loading, setLoading] = useState(true);
@@ -101,12 +131,16 @@ export default function AdminDashboardPage() {
   async function load() {
     setLoading(true);
     try {
-      const [m, r] = await Promise.all([
-        fetch("/api/admin/dashboard/metrics", { cache: "no-store" }).then((x) => x.json()) as Promise<MetricsResp>,
-        fetch("/api/admin/dashboard/recent", { cache: "no-store" }).then((x) => x.json()) as Promise<RecentResp>,
+      const [mRes, rRes] = await Promise.all([
+        fetch("/api/admin/dashboard/metrics", { cache: "no-store" }),
+        fetch("/api/admin/dashboard/recent", { cache: "no-store" }),
       ]);
-      setMetrics(m);
-      setRecent(r);
+
+      const mJson = await mRes.json().catch(() => null);
+      const rJson = await rRes.json().catch(() => null);
+
+      setMetrics(normalizeMetrics(mJson));
+      setRecent(normalizeRecent(rJson));
     } catch (e: any) {
       setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
       setRecent({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
@@ -115,12 +149,39 @@ export default function AdminDashboardPage() {
     }
   }
 
+  // 1) initial mount
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const mOk = Boolean(metrics && "ok" in metrics && metrics.ok);
-  const rOk = Boolean(recent && "ok" in recent && recent.ok);
+  // 2) reload when route becomes active again (router cache can keep component alive)
+  useEffect(() => {
+    if (pathname === "/admin") load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  // 3) reload when page is restored from bfcache (Safari/iOS does this a LOT)
+  useEffect(() => {
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) load();
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") load();
+    };
+
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const mOk = Boolean(metrics && "ok" in metrics && (metrics as any).ok);
+  const rOk = Boolean(recent && "ok" in recent && (recent as any).ok);
 
   const todayDelta = useMemo(() => {
     if (!mOk) return { label: "—", tone: "gray" as const };
@@ -152,7 +213,6 @@ export default function AdminDashboardPage() {
             View Quotes
           </Link>
 
-          {/* Pills (clickable) */}
           {mOk ? (
             <div className="flex flex-wrap items-center gap-2">
               <Link href="/admin/quotes?view=unread" className="hover:opacity-90">
@@ -183,7 +243,7 @@ export default function AdminDashboardPage() {
         </div>
       </div>
 
-      {/* Cards (NOW CLICKABLE) */}
+      {/* Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <ClickCard
           href="/admin/quotes"
