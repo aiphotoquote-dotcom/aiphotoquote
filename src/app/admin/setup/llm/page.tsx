@@ -1,18 +1,10 @@
-// src/app/admin/setup/llm/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
 import { TenantLlmManagerClient } from "@/components/pcc/llm/TenantLlmManagerClient";
 
-type TenantRow = {
-  tenantId: string;
-  slug: string;
-  name: string | null;
-  role: "owner" | "admin" | "member";
-};
-
 type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: TenantRow[]; message?: string }
+  | { ok: true; activeTenantId: string | null; tenants: Array<any> }
   | { ok: false; error: string; message?: string };
 
 type MeSettingsResponse =
@@ -42,40 +34,6 @@ async function safeJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-/**
- * ✅ Deterministic tenant activation:
- * - If activeTenantId exists → use it
- * - Else if exactly 1 tenant → POST select it, then hard reload (so server reads cookie)
- * - Else require user selection
- */
-async function ensureActiveTenant(): Promise<string> {
-  const ctxRes = await fetch("/api/tenant/context", { cache: "no-store" });
-  const ctx = await safeJson<ContextResp>(ctxRes);
-  if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
-
-  if (ctx.activeTenantId) return ctx.activeTenantId;
-
-  const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
-
-  if (tenants.length === 1) {
-    const t0 = tenants[0];
-    const setRes = await fetch("/api/tenant/context", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tenantId: t0.tenantId }),
-    });
-    const setJson = await safeJson<any>(setRes);
-    if (!setJson?.ok) throw new Error(setJson?.message || setJson?.error || "Failed to auto-select tenant");
-
-    // Hard reload ensures ALL server reads see cookie immediately
-    window.location.reload();
-    // This line won't realistically run, but TS wants a return:
-    return t0.tenantId;
-  }
-
-  throw new Error("No active tenant selected. Use the tenant switcher to pick a tenant.");
-}
-
 export default function AdminSetupLlmPage() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [industryKey, setIndustryKey] = useState<string | null>(null);
@@ -88,17 +46,17 @@ export default function AdminSetupLlmPage() {
       setErr(null);
 
       try {
-        const tid = await ensureActiveTenant();
+        const res1 = await fetch("/api/tenant/context", { cache: "no-store" });
+        const ctx = await safeJson<ContextResp>(res1);
+        if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
+        if (!ctx.activeTenantId) throw new Error("No active tenant selected. Use the tenant switcher.");
+
         if (cancelled) return;
-        setTenantId(tid);
+        setTenantId(ctx.activeTenantId);
 
         const res2 = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const ms = await safeJson<MeSettingsResponse>(res2);
-
-        if (!cancelled) {
-          if (!("ok" in ms) || !ms.ok) setIndustryKey(null);
-          else setIndustryKey(ms.settings?.industry_key ?? null);
-        }
+        if (!cancelled) setIndustryKey(ms && "ok" in ms && ms.ok ? ms.settings?.industry_key ?? null : null);
       } catch (e: any) {
         if (!cancelled) setErr(e?.message ?? String(e));
       }
@@ -139,7 +97,15 @@ export default function AdminSetupLlmPage() {
         </p>
       </div>
 
-      <TenantLlmManagerClient tenantId={tenantId} industryKey={industryKey} />
+      {/* KEY IS IMPORTANT: forces a clean remount whenever tenantId changes */}
+      <TenantLlmManagerClient
+        key={tenantId}
+        tenantId={tenantId}
+        // Some versions of this component expect a different prop name internally.
+        // Passing both prevents “tenant not selected” bugs without changing layout.
+        activeTenantId={tenantId as any}
+        industryKey={industryKey}
+      />
     </div>
   );
 }
