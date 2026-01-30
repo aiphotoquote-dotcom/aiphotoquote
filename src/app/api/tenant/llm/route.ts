@@ -22,23 +22,11 @@ function isAdminRole(role: TenantRole | null | undefined) {
   return role === "owner" || role === "admin";
 }
 
-async function getTenantRole(userId: string, tenantId: string): Promise<TenantRole | null> {
-  const rows = await db.execute(sql`
-    SELECT role
-    FROM tenant_members
-    WHERE tenant_id = ${tenantId}::uuid
-      AND clerk_user_id = ${userId}
-    LIMIT 1
-  `);
-
-  const r: any = (rows as any)?.rows?.[0] ?? null;
-  const role = String(r?.role ?? "").trim();
-  if (role === "owner" || role === "admin" || role === "member") return role;
-  return null;
-}
-
-function deny(status: number, error: string, message?: string) {
-  return NextResponse.json({ ok: false, error, ...(message ? { message } : {}) }, { status });
+function deny(status: number, error: string, message?: string, extra?: Record<string, any>) {
+  return NextResponse.json(
+    { ok: false, error, ...(message ? { message } : {}), ...(extra ? extra : {}) },
+    { status }
+  );
 }
 
 /**
@@ -52,13 +40,34 @@ async function resolveTenantId(explicitTenantId?: string | null): Promise<string
   return await readActiveTenantIdFromCookies();
 }
 
+/**
+ * RBAC: find role from tenant_members
+ * IMPORTANT: enforce status='active' since your table has status and you showed active rows.
+ */
+async function getTenantRole(userId: string, tenantId: string): Promise<TenantRole | null> {
+  const rows = await db.execute(sql`
+    SELECT role, status
+    FROM tenant_members
+    WHERE tenant_id = ${tenantId}::uuid
+      AND clerk_user_id = ${userId}
+      AND status = 'active'
+    LIMIT 1
+  `);
+
+  const r: any = (rows as any)?.rows?.[0] ?? null;
+  const role = String(r?.role ?? "").trim();
+
+  if (role === "owner" || role === "admin" || role === "member") return role;
+  return null;
+}
+
 /* -----------------------------
    Schemas
 ------------------------------ */
 
 const GetQuery = z.object({
   tenantId: z.string().uuid().optional(),
-  industryKey: z.string().optional(), // not used server-side here, but allowed
+  industryKey: z.string().optional(), // allowed for clients; ignored server-side here
 });
 
 const OverridesSchema = z
@@ -83,7 +92,7 @@ const OverridesSchema = z
 
 const PostBody = z.object({
   tenantId: z.string().uuid().optional(),
-  industryKey: z.string().nullable().optional(), // allowed, ignored here
+  industryKey: z.string().nullable().optional(), // allowed; ignored here
   overrides: OverridesSchema.optional(),
 });
 
@@ -107,7 +116,10 @@ export async function GET(req: Request) {
   if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
   const role = await getTenantRole(userId, tenantId);
-  if (!role) return deny(403, "FORBIDDEN");
+  if (!role) {
+    // include lightweight debug info so you can see what tenantId the API thinks it’s using
+    return deny(403, "FORBIDDEN", "No active tenant membership found for this user.", { tenantId });
+  }
 
   const platformCfg = await loadPlatformLlmConfig();
   const overrides = (await loadTenantLlmOverrides(tenantId)) ?? null;
@@ -179,14 +191,13 @@ export async function POST(req: Request) {
 
   const role = await getTenantRole(userId, tenantId);
   if (!isAdminRole(role)) {
-    return deny(403, "FORBIDDEN", "Only owner/admin can edit LLM settings.");
+    return deny(403, "FORBIDDEN", "Only owner/admin can edit LLM settings.", { tenantId });
   }
 
   try {
     const parsedOverrides = OverridesSchema.parse(overridesInput);
     const normalized = normalizeTenantOverrides(parsedOverrides) as TenantLlmOverrides;
 
-    // Guardrails are platform-only; ignore if client tries to send them
     const saved = await saveTenantLlmOverrides(tenantId, normalized);
 
     return NextResponse.json({ ok: true, tenantId, role, overrides: saved });
