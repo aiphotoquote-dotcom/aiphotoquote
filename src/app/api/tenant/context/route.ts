@@ -47,8 +47,9 @@ function clearTenantCookies(res: NextResponse) {
   return res;
 }
 
-function readActiveTenantIdFromCookies(): string | null {
-  const jar = cookies();
+async function readActiveTenantIdFromCookies(): Promise<string | null> {
+  // In this repo's Next typings, cookies() returns a Promise.
+  const jar = await cookies();
   for (const k of COOKIE_KEYS) {
     const v = jar.get(k)?.value;
     if (v) return v;
@@ -70,7 +71,7 @@ export async function GET() {
 
     await requireAppUserId();
 
-    const cookieTenantId = readActiveTenantIdFromCookies();
+    const cookieTenantId = await readActiveTenantIdFromCookies();
 
     // (For now) tenants = those owned by this Clerk user.
     const rows = await db
