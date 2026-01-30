@@ -1,5 +1,4 @@
 // src/app/admin/setup/ai-policy/page.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -7,6 +6,17 @@ import TenantLlmBehaviorAdvanced from "@/components/pcc/llm/TenantLlmBehaviorAdv
 
 type AiMode = "assessment_only" | "range" | "fixed";
 type RenderingStyle = "photoreal" | "clean_oem" | "custom";
+
+type TenantRow = {
+  tenantId: string;
+  slug: string;
+  name: string | null;
+  role: "owner" | "admin" | "member";
+};
+
+type ContextResp =
+  | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
+  | { ok: false; error: string; message?: string };
 
 type PolicyResp =
   | {
@@ -55,6 +65,7 @@ function Card({
         "w-full text-left rounded-xl border p-4 hover:bg-gray-50",
         selected ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white",
       ].join(" ")}
+      type="button"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -96,14 +107,52 @@ export default function AiPolicySetupPage() {
 
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
+  async function ensureActiveTenantCookie() {
+    const res = await fetch("/api/tenant/context", { cache: "no-store" });
+    const ctx = await safeJson<ContextResp>(res);
+    if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
+
+    const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
+    const activeTenantId = ctx.activeTenantId ?? null;
+
+    // ✅ Option B: if only one tenant, auto-select it
+    if (!activeTenantId && tenants.length === 1) {
+      const only = tenants[0];
+      const resSet = await fetch("/api/tenant/context", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tenantId: only.tenantId }),
+      });
+
+      const setResp = await safeJson<any>(resSet);
+      if (!setResp?.ok) {
+        throw new Error(setResp?.message || setResp?.error || "Failed to auto-select tenant");
+      }
+
+      // Hard reload so everything reads fresh cookies
+      window.location.reload();
+      return { reloaded: true as const };
+    }
+
+    if (!activeTenantId) {
+      throw new Error(
+        tenants.length > 1
+          ? "Select a tenant using the tenant switcher."
+          : "No tenant found for this user."
+      );
+    }
+
+    return { reloaded: false as const };
+  }
+
   async function load() {
     setErr(null);
     setMsg(null);
     setLoading(true);
 
     try {
-      // Ensure active tenant cookie exists
-      await fetch("/api/tenant/context", { cache: "no-store" });
+      const ensured = await ensureActiveTenantCookie();
+      if (ensured.reloaded) return;
 
       const res = await fetch("/api/admin/ai-policy", { cache: "no-store" });
       const data = await safeJson<PolicyResp>(res);
@@ -115,7 +164,7 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
-      setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
+      setRenderingStyle((data.ai_policy.rendering_style as RenderingStyle) ?? "photoreal");
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
@@ -134,6 +183,9 @@ export default function AiPolicySetupPage() {
     setSaving(true);
 
     try {
+      const ensured = await ensureActiveTenantCookie();
+      if (ensured.reloaded) return;
+
       const payload = {
         ai_mode: aiMode,
         pricing_enabled: pricingEnabled,
@@ -161,7 +213,7 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
-      setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
+      setRenderingStyle((data.ai_policy.rendering_style as RenderingStyle) ?? "photoreal");
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
@@ -206,6 +258,7 @@ export default function AiPolicySetupPage() {
           <button
             onClick={load}
             className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
+            type="button"
           >
             Refresh
           </button>
@@ -224,7 +277,7 @@ export default function AiPolicySetupPage() {
               </div>
             ) : null}
 
-            {/* ✅ NEW: Tenant LLM behavior (your circled section) */}
+            {/* Tenant LLM behavior */}
             <TenantLlmBehaviorAdvanced />
 
             {/* AI Mode */}
@@ -273,6 +326,7 @@ export default function AiPolicySetupPage() {
                       : "border-gray-300 bg-white text-gray-800",
                     !canEdit ? "opacity-50" : "hover:bg-gray-50",
                   ].join(" ")}
+                  type="button"
                 >
                   {pricingEnabled ? "ON" : "OFF"}
                 </button>
@@ -299,6 +353,7 @@ export default function AiPolicySetupPage() {
                       : "border-gray-300 bg-white text-gray-800",
                     !canEdit ? "opacity-50" : "hover:bg-gray-50",
                   ].join(" ")}
+                  type="button"
                 >
                   {renderingEnabled ? "Enabled" : "Disabled"}
                 </button>
@@ -365,6 +420,7 @@ export default function AiPolicySetupPage() {
                             : "border-gray-300 bg-white text-gray-800",
                           (!canEdit || !renderingEnabled) ? "opacity-50" : "hover:bg-gray-50",
                         ].join(" ")}
+                        type="button"
                       >
                         {renderingOptInRequired ? "ON" : "OFF"}
                       </button>
@@ -380,6 +436,7 @@ export default function AiPolicySetupPage() {
                 onClick={save}
                 disabled={!canEdit || saving}
                 className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                type="button"
               >
                 {saving ? "Saving…" : "Save Policy"}
               </button>

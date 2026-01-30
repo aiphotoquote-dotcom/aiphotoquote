@@ -7,15 +7,27 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+type Totals = {
+  totalLeads: number;
+  unread: number;
+  stageNew: number;
+  inProgress: number;
+};
+
 type MetricsResp =
   | {
       ok: true;
-      totals: {
-        totalLeads: number;
-        unread: number;
-        stageNew: number;
-        inProgress: number; // read/estimate/quoted bucket
-      };
+      // Newer shape
+      totals?: Totals;
+
+      // Older/current route shape (flat)
+      totalLeads?: number;
+      unread?: number;
+      stageNew?: number;
+      inProgress?: number;
+
+      // extra fields may exist
+      [k: string]: any;
     }
   | { ok: false; error: string; message?: string };
 
@@ -34,6 +46,17 @@ type RecentResp =
     }
   | { ok: false; error: string; message?: string };
 
+async function safeJson<T>(res: Response): Promise<T> {
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 80 chars: ${text.slice(0, 80)}`
+    );
+  }
+  return (await res.json()) as T;
+}
+
 function normalizeStage(v: any) {
   const s = String(v ?? "").trim().toLowerCase();
   if (!s) return "new";
@@ -42,16 +65,6 @@ function normalizeStage(v: any) {
   if (s === "new") return "new";
   if (s === "estimate" || s === "estimated") return "estimate";
   return s;
-}
-
-function stageLabel(s: string) {
-  const st = normalizeStage(s);
-  if (st === "new") return "New";
-  if (st === "read") return "Read";
-  if (st === "estimate") return "Estimate";
-  if (st === "quoted") return "Quoted";
-  if (st === "closed") return "Closed";
-  return st.charAt(0).toUpperCase() + st.slice(1);
 }
 
 function stageChip(st: string) {
@@ -116,23 +129,30 @@ export default function AdminDashboardClient() {
   const [metrics, setMetrics] = useState<MetricsResp | null>(null);
   const [recent, setRecent] = useState<RecentResp | null>(null);
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
   async function loadAll() {
     setLoading(true);
+    setErr(null);
     try {
       const [mRes, rRes] = await Promise.all([
         fetch("/api/admin/dashboard/metrics", { cache: "no-store" }),
         fetch("/api/admin/dashboard/recent?limit=8", { cache: "no-store" }),
       ]);
 
-      const mJson = (await mRes.json()) as MetricsResp;
-      const rJson = (await rRes.json()) as RecentResp;
+      const mJson = await safeJson<MetricsResp>(mRes);
+      const rJson = await safeJson<RecentResp>(rRes);
 
       setMetrics(mJson);
       setRecent(rJson);
+
+      if (!mJson.ok) setErr(mJson.message || mJson.error || "Failed to load metrics");
+      else if (!rJson.ok) setErr(rJson.message || rJson.error || "Failed to load recent leads");
     } catch (e: any) {
-      setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
-      setRecent({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+      const msg = e?.message ?? String(e);
+      setErr(msg);
+      setMetrics({ ok: false, error: "FETCH_FAILED", message: msg });
+      setRecent({ ok: false, error: "FETCH_FAILED", message: msg });
     } finally {
       setLoading(false);
     }
@@ -143,9 +163,28 @@ export default function AdminDashboardClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const totals = useMemo(() => {
-    if (metrics && "ok" in metrics && metrics.ok) return metrics.totals;
-    return { totalLeads: 0, unread: 0, stageNew: 0, inProgress: 0 };
+  const totals: Totals = useMemo(() => {
+    if (!metrics || !("ok" in metrics) || !metrics.ok) {
+      return { totalLeads: 0, unread: 0, stageNew: 0, inProgress: 0 };
+    }
+
+    // Prefer totals shape if present
+    if (metrics.totals && typeof metrics.totals === "object") {
+      return {
+        totalLeads: Number(metrics.totals.totalLeads ?? 0) || 0,
+        unread: Number(metrics.totals.unread ?? 0) || 0,
+        stageNew: Number(metrics.totals.stageNew ?? 0) || 0,
+        inProgress: Number(metrics.totals.inProgress ?? 0) || 0,
+      };
+    }
+
+    // Fall back to flat shape
+    return {
+      totalLeads: Number((metrics as any).totalLeads ?? 0) || 0,
+      unread: Number((metrics as any).unread ?? 0) || 0,
+      stageNew: Number((metrics as any).stageNew ?? 0) || 0,
+      inProgress: Number((metrics as any).inProgress ?? 0) || 0,
+    };
   }, [metrics]);
 
   return (
@@ -163,6 +202,12 @@ export default function AdminDashboardClient() {
             <p className="mt-2 max-w-2xl text-sm text-gray-600 dark:text-gray-300">
               Quick snapshot of inbound leads and where they are in your pipeline.
             </p>
+
+            {err ? (
+              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                {err}
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap gap-2">
@@ -210,6 +255,7 @@ export default function AdminDashboardClient() {
             <button
               onClick={loadAll}
               className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+              type="button"
             >
               Refresh
             </button>
@@ -242,9 +288,7 @@ export default function AdminDashboardClient() {
                       key={l.id}
                       className={cn(
                         "grid grid-cols-12 items-center px-4 py-4 transition-colors",
-                        unread
-                          ? "bg-blue-50/60 dark:bg-blue-950/25"
-                          : "bg-white dark:bg-gray-950"
+                        unread ? "bg-blue-50/60 dark:bg-blue-950/25" : "bg-white dark:bg-gray-950"
                       )}
                     >
                       <div className="col-span-5 min-w-0">
