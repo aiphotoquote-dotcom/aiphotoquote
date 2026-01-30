@@ -1,6 +1,5 @@
 // src/app/api/tenant/context/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
@@ -8,6 +7,11 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
 import { requireAppUserId } from "@/lib/auth/requireAppUser";
+import {
+  readActiveTenantIdFromCookies,
+  setActiveTenantCookie,
+  clearActiveTenantCookies,
+} from "@/lib/tenant/activeTenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,63 +21,27 @@ const Body = z.object({
   tenantSlug: z.string().min(3).optional(),
 });
 
-const COOKIE_KEYS = ["activeTenantId", "active_tenant_id", "tenantId", "tenant_id"] as const;
-
-function setTenantCookies(res: NextResponse, tenantId: string) {
-  const isProd = process.env.NODE_ENV === "production";
-
-  const opts = {
-    httpOnly: true,
-    sameSite: "lax" as const,
-    secure: isProd,
-    path: "/",
-    maxAge: 60 * 60 * 24 * 30, // 30 days
-  };
-
-  // Keep multiple keys for backwards compat (we can prune later)
-  for (const k of COOKIE_KEYS) {
-    res.cookies.set(k, tenantId, opts);
-  }
-
-  return res;
-}
-
-function clearTenantCookies(res: NextResponse) {
-  // ✅ Most compatible signature across Next versions/types:
-  // NextResponse.cookies.delete(name: string)
-  for (const k of COOKIE_KEYS) {
-    res.cookies.delete(k);
-  }
-  return res;
-}
-
-async function readActiveTenantIdFromCookies(): Promise<string | null> {
-  // In this repo's Next typings, cookies() returns a Promise.
-  const jar = await cookies();
-  for (const k of COOKIE_KEYS) {
-    const v = jar.get(k)?.value;
-    if (v) return v;
-  }
-  return null;
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
 }
 
 /**
  * GET: returns tenant context for the signed-in user.
- * Also sets cookie automatically when there's exactly one tenant.
- * Validates stale cookies (cookie must belong to returned tenant list).
+ * - Reads active tenant from cookies (canonical + legacy)
+ * - Validates cookie tenant is in the returned list
+ * - Auto-selects when exactly 1 tenant exists (sets canonical cookie)
  */
 export async function GET() {
   try {
     const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
+    if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
 
+    // Mobility layer
     await requireAppUserId();
 
     const cookieTenantId = await readActiveTenantIdFromCookies();
 
-    // (For now) tenants = those owned by this Clerk user.
+    // Owner-only model for now (RBAC later via tenant_members)
     const rows = await db
       .select({
         tenantId: tenants.id,
@@ -92,11 +60,11 @@ export async function GET() {
       role: "owner" as const,
     }));
 
-    // If cookie exists, ensure it is valid for this user
+    // If cookie exists, validate it belongs to this user’s tenant list
     if (cookieTenantId) {
       const isValid = tenantList.some((t) => t.tenantId === cookieTenantId);
       if (isValid) {
-        return NextResponse.json({
+        return json({
           ok: true,
           activeTenantId: cookieTenantId,
           tenants: tenantList,
@@ -104,8 +72,8 @@ export async function GET() {
         });
       }
 
-      // Stale/bad cookie: clear it, then continue as if missing
-      const res = NextResponse.json({
+      // Stale/bad cookie: clear canonical + legacy keys
+      const res = json({
         ok: true,
         activeTenantId: null,
         tenants: tenantList,
@@ -113,17 +81,22 @@ export async function GET() {
         clearedStaleCookie: true,
       });
 
-      clearTenantCookies(res);
+      clearActiveTenantCookies(res);
 
-      // If exactly 1 tenant, immediately set correct one
-      if (tenantList.length === 1) return setTenantCookies(res, tenantList[0].tenantId);
+      // If exactly 1 tenant exists, set the correct one right away
+      if (tenantList.length === 1) {
+        setActiveTenantCookie(res, tenantList[0].tenantId);
+        // reflect the new active tenant in response
+        (res as any)._body = undefined; // no-op safeguard; NextResponse ignores
+        return res;
+      }
 
       return res;
     }
 
     // No cookie:
     if (tenantList.length === 0) {
-      return NextResponse.json({
+      return json({
         ok: true,
         activeTenantId: null,
         tenants: [],
@@ -132,62 +105,56 @@ export async function GET() {
     }
 
     if (tenantList.length === 1) {
-      const res = NextResponse.json({
+      const res = json({
         ok: true,
         activeTenantId: tenantList[0].tenantId,
         tenants: tenantList,
         needsTenantSelection: false,
         autoSelected: true,
       });
-      return setTenantCookies(res, tenantList[0].tenantId);
+
+      return setActiveTenantCookie(res, tenantList[0].tenantId);
     }
 
-    return NextResponse.json({
+    return json({
       ok: true,
       activeTenantId: null,
       tenants: tenantList,
       needsTenantSelection: true,
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, 500);
   }
 }
 
 /**
- * POST: set active tenant cookie (must be owned by this user for now)
+ * POST: sets active tenant cookie (must be owned by this user for now)
+ * - Writes ONLY canonical cookie key (apq_tenant)
  */
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
+    if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
 
     await requireAppUserId();
 
-    const json = await req.json().catch(() => null);
-    const parsed = Body.safeParse(json);
+    const body = await req.json().catch(() => null);
+    const parsed = Body.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
-        { status: 400 }
-      );
+      return json({ ok: false, error: "INVALID_BODY", issues: parsed.error.issues }, 400);
     }
 
     const { tenantId, tenantSlug } = parsed.data;
     if (!tenantId && !tenantSlug) {
-      return NextResponse.json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, { status: 400 });
+      return json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, 400);
     }
 
     const where =
       tenantId && tenantSlug
         ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId))
         : tenantId
-        ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
-        : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
+          ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
+          : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
 
     const t = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
@@ -197,15 +164,12 @@ export async function POST(req: Request) {
       .then((r) => r[0] ?? null);
 
     if (!t) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
+      return json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, 404);
     }
 
-    const res = NextResponse.json({ ok: true, activeTenantId: t.id, tenant: t });
-    return setTenantCookies(res, t.id);
+    const res = json({ ok: true, activeTenantId: t.id, tenant: t });
+    return setActiveTenantCookie(res, t.id);
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, 500);
   }
 }
