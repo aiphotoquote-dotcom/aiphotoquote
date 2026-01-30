@@ -1,117 +1,79 @@
+// src/lib/auth/tenant.ts
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { sql } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
+
 import { db } from "@/lib/db/client";
+import { tenants } from "@/lib/db/schema";
+import { requireAppUserId } from "@/lib/auth/requireAppUser";
+
+export const runtime = "nodejs";
 
 export type TenantRole = "owner" | "admin" | "member";
 
-export const ACTIVE_TENANT_COOKIE = "apq_tenant";
+type GateOk = { ok: true; status: 200; tenantId: string; role: TenantRole };
+type GateBad = { ok: false; status: number; error: string; message?: string };
+export type TenantGate = GateOk | GateBad;
 
-/**
- * Reads active tenant from cookie.
- * This is the *single source* for which tenant is currently being administered.
- */
-export async function getActiveTenantId(): Promise<string | null> {
-  const c = await cookies();
-  const v = c.get(ACTIVE_TENANT_COOKIE)?.value?.trim();
-  return v || null;
-}
+const COOKIE_KEYS = ["activeTenantId", "active_tenant_id", "tenantId", "tenant_id"] as const;
 
-/**
- * List tenants for current user based on tenant_members.
- * Also returns role.
- */
-export async function listUserTenants(): Promise<
-  Array<{ tenantId: string; slug: string; name: string | null; role: TenantRole }>
-> {
-  const { userId } = await auth();
-  if (!userId) return [];
-
-  const r = await db.execute(sql`
-    select
-      t.id as "tenantId",
-      t.slug as "slug",
-      t.name as "name",
-      tm.role as "role"
-    from tenant_members tm
-    join tenants t on t.id = tm.tenant_id
-    where tm.clerk_user_id = ${userId}
-      and tm.status = 'active'
-    order by t.created_at desc
-  `);
-
-  const rows: any[] =
-    (r as any)?.rows ?? (Array.isArray(r) ? (r as any) : []);
-
-  return rows.map((x) => ({
-    tenantId: String(x.tenantId),
-    slug: String(x.slug),
-    name: x.name == null ? null : String(x.name),
-    role: x.role as TenantRole,
-  }));
-}
-
-/**
- * Validates that the current user is a member of the active tenant
- * and has one of the allowed roles.
- *
- * Returns tenantId + role.
- */
-export async function requireTenantRole(allowed: TenantRole[]) {
-  const { userId } = await auth();
-  if (!userId) {
-    return { ok: false as const, status: 401 as const, error: "UNAUTHENTICATED" };
+async function readActiveTenantIdFromCookies(): Promise<string | null> {
+  const jar = await cookies();
+  for (const k of COOKIE_KEYS) {
+    const v = jar.get(k)?.value;
+    if (v && String(v).trim()) return String(v).trim();
   }
+  return null;
+}
 
-  const tenantId = await getActiveTenantId();
+function deny(status: number, error: string, message?: string): GateBad {
+  return { ok: false, status, error, ...(message ? { message } : {}) };
+}
+
+/**
+ * requireTenantRole:
+ * - Ensures user is authenticated
+ * - Ensures app_user exists (mobility layer)
+ * - Reads active tenant from cookie
+ * - Validates tenant belongs to user (owner model for now)
+ * - Returns role (owner/admin/member)
+ *
+ * IMPORTANT: This function must NOT mutate cookies.
+ * Only /api/tenant/context should set/clear tenant cookies.
+ */
+export async function requireTenantRole(allowed: TenantRole[]): Promise<TenantGate> {
+  const { userId } = await auth();
+  if (!userId) return deny(401, "UNAUTHENTICATED");
+
+  // Mobility layer (you already use this pattern)
+  await requireAppUserId();
+
+  const tenantId = await readActiveTenantIdFromCookies();
   if (!tenantId) {
-    return { ok: false as const, status: 400 as const, error: "NO_ACTIVE_TENANT" };
+    // Do NOT try to auto-pick here. The context endpoint is responsible for auto-select.
+    return deny(400, "NO_ACTIVE_TENANT", "No active tenant selected.");
   }
 
-  const r = await db.execute(sql`
-    select role, status
-    from tenant_members
-    where tenant_id = ${tenantId}::uuid
-      and clerk_user_id = ${userId}
-    limit 1
-  `);
+  // For now: tenant must be owned by this user (matches /api/tenant/context logic)
+  const owned = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(and(eq(tenants.id, tenantId as any), eq(tenants.ownerClerkUserId, userId)))
+    .limit(1)
+    .then((r) => r[0]?.id ?? null);
 
-  const row: any =
-    (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-
-  if (!row || row.status !== "active") {
-    return { ok: false as const, status: 403 as const, error: "NOT_A_MEMBER" };
+  if (!owned) {
+    // Tenant cookie exists but not valid for this user.
+    // Do NOT clear cookies here; just deny.
+    return deny(403, "TENANT_NOT_FOUND_OR_NOT_OWNED", "Active tenant is not accessible by this user.");
   }
 
-  const role = row.role as TenantRole;
+  // Owner-only model for now
+  const role: TenantRole = "owner";
+
   if (!allowed.includes(role)) {
-    return { ok: false as const, status: 403 as const, error: "INSUFFICIENT_ROLE", role };
+    return deny(403, "FORBIDDEN", `Role "${role}" is not allowed for this action.`);
   }
 
-  return { ok: true as const, tenantId, role };
-}
-
-/**
- * Bootstraps membership: if user owns a tenant (legacy model),
- * ensure tenant_members has an owner row for them.
- *
- * This keeps your system compatible if some tenants were created before tenant_members existed.
- */
-export async function ensureOwnerMembershipForLegacyTenants() {
-  const { userId } = await auth();
-  if (!userId) return;
-
-  // Find tenants where user is owner but not in tenant_members yet
-  await db.execute(sql`
-    insert into tenant_members (tenant_id, clerk_user_id, role, status)
-    select t.id, ${userId}, 'owner', 'active'
-    from tenants t
-    where t.owner_clerk_user_id = ${userId}
-      and not exists (
-        select 1
-        from tenant_members tm
-        where tm.tenant_id = t.id
-          and tm.clerk_user_id = ${userId}
-      )
-  `);
+  return { ok: true, status: 200, tenantId, role };
 }
