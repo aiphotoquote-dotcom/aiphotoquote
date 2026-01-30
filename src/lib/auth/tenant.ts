@@ -20,9 +20,8 @@ const COOKIE_KEYS = ["activeTenantId", "active_tenant_id", "tenantId", "tenant_i
 async function readActiveTenantIdFromCookies(): Promise<string | null> {
   const jar = await cookies();
   for (const k of COOKIE_KEYS) {
-    const raw = jar.get(k)?.value;
-    const v = typeof raw === "string" ? raw.trim() : "";
-    if (v) return v;
+    const v = jar.get(k)?.value;
+    if (v && String(v).trim()) return String(v).trim();
   }
   return null;
 }
@@ -32,12 +31,29 @@ function deny(status: number, error: string, message?: string): GateBad {
 }
 
 /**
+ * If cookie is missing, try to infer tenant:
+ * - If the user owns exactly ONE tenant, treat it as active (do not mutate cookies here).
+ * - If they own 0 or >1, require explicit selection via /api/tenant/context.
+ */
+async function inferSingleOwnedTenantId(userId: string): Promise<string | null> {
+  const rows = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.ownerClerkUserId, userId))
+    .limit(2);
+
+  if (rows.length === 1) return rows[0].id as any;
+  return null;
+}
+
+/**
  * requireTenantRole:
  * - Ensures user is authenticated
  * - Ensures app_user exists (mobility layer)
- * - Reads active tenant from cookie (if present)
+ * - Reads active tenant from cookie
+ * - If cookie missing and user owns exactly one tenant, infers it (WITHOUT setting cookies)
  * - Validates tenant belongs to user (owner model for now)
- * - If cookie is missing/stale AND user has exactly 1 tenant, falls back to that tenant (WITHOUT mutating cookies)
+ * - Returns role (owner/admin/member)
  *
  * IMPORTANT: This function must NOT mutate cookies.
  * Only /api/tenant/context should set/clear tenant cookies.
@@ -46,58 +62,39 @@ export async function requireTenantRole(allowed: TenantRole[]): Promise<TenantGa
   const { userId } = await auth();
   if (!userId) return deny(401, "UNAUTHENTICATED");
 
-  // Mobility layer (you already use this pattern)
+  // Mobility layer
   await requireAppUserId();
 
-  const cookieTenantId = await readActiveTenantIdFromCookies();
+  // 1) Prefer cookie
+  let tenantId = await readActiveTenantIdFromCookies();
 
-  // Load owned tenants (owner-only model for now, same as /api/tenant/context)
-  const ownedTenants = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(eq(tenants.ownerClerkUserId, userId));
-
-  if (ownedTenants.length === 0) {
-    return deny(403, "NO_TENANTS", "No tenants found for this user.");
+  // 2) If missing, infer only if exactly one owned tenant exists
+  if (!tenantId) {
+    tenantId = await inferSingleOwnedTenantId(userId);
   }
 
-  // Helper: if user has exactly one tenant, use it as a safe fallback without cookies
-  const singleOwnedTenantId = ownedTenants.length === 1 ? ownedTenants[0]!.id : null;
+  if (!tenantId) {
+    return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
+  }
 
-  // If we have a cookie tenant id, validate it is owned by user
-  if (cookieTenantId) {
-    const owned = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(and(eq(tenants.id, cookieTenantId), eq(tenants.ownerClerkUserId, userId)))
-      .limit(1)
-      .then((r) => r[0]?.id ?? null);
+  // Validate ownership (matches /api/tenant/context logic today)
+  const owned = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(and(eq(tenants.id, tenantId as any), eq(tenants.ownerClerkUserId, userId)))
+    .limit(1)
+    .then((r) => r[0]?.id ?? null);
 
-    if (owned) {
-      const role: TenantRole = "owner";
-      if (!allowed.includes(role)) return deny(403, "FORBIDDEN", `Role "${role}" is not allowed for this action.`);
-      return { ok: true, status: 200, tenantId: owned, role };
-    }
-
-    // Cookie exists but is stale/invalid for this user.
-    // Do NOT clear cookies here; just fall back if we can.
-    if (singleOwnedTenantId) {
-      const role: TenantRole = "owner";
-      if (!allowed.includes(role)) return deny(403, "FORBIDDEN", `Role "${role}" is not allowed for this action.`);
-      return { ok: true, status: 200, tenantId: singleOwnedTenantId, role };
-    }
-
+  if (!owned) {
     return deny(403, "TENANT_NOT_FOUND_OR_NOT_OWNED", "Active tenant is not accessible by this user.");
   }
 
-  // No cookie tenant id:
-  // If user only has one tenant, use it (without mutating cookies)
-  if (singleOwnedTenantId) {
-    const role: TenantRole = "owner";
-    if (!allowed.includes(role)) return deny(403, "FORBIDDEN", `Role "${role}" is not allowed for this action.`);
-    return { ok: true, status: 200, tenantId: singleOwnedTenantId, role };
+  // Owner-only model for now
+  const role: TenantRole = "owner";
+
+  if (!allowed.includes(role)) {
+    return deny(403, "FORBIDDEN", `Role "${role}" is not allowed for this action.`);
   }
 
-  // Multiple tenants + no cookie => must select via /api/tenant/context
-  return deny(400, "NO_ACTIVE_TENANT", "No active tenant selected. Use the tenant switcher.");
+  return { ok: true, status: 200, tenantId, role };
 }
