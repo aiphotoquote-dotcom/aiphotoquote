@@ -1,12 +1,24 @@
+// src/lib/tenant/activeTenant.ts
 import { cookies } from "next/headers";
 
-const KEYS = ["active_tenant_id", "activeTenantId", "tenant_id", "tenantId"] as const;
+export const ACTIVE_TENANT_COOKIE_KEYS = [
+  "activeTenantId",
+  "active_tenant_id",
+  "tenantId",
+  "tenant_id",
+] as const;
 
-export function getActiveTenantIdFromCookies(): string | null {
-  const jar = cookies();
-  for (const k of KEYS) {
+/**
+ * Reads the active tenant id from cookies.
+ * Next.js 16 types cookies() as Promise<ReadonlyRequestCookies>, so we must await it.
+ */
+export async function readActiveTenantIdFromCookies(): Promise<string | null> {
+  const jar = await cookies();
+
+  for (const k of ACTIVE_TENANT_COOKIE_KEYS) {
     const v = jar.get(k)?.value;
     if (v) return v;
   }
+
   return null;
 }
