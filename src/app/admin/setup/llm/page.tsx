@@ -1,3 +1,4 @@
+// src/app/admin/setup/llm/page.tsx
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -56,7 +57,9 @@ export default function AdminSetupLlmPage() {
 
         const res2 = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const ms = await safeJson<MeSettingsResponse>(res2);
-        if (!cancelled) setIndustryKey(ms && "ok" in ms && ms.ok ? ms.settings?.industry_key ?? null : null);
+        if (cancelled) return;
+
+        setIndustryKey(ms && "ok" in ms && ms.ok ? ms.settings?.industry_key ?? null : null);
       } catch (e: any) {
         if (!cancelled) setErr(e?.message ?? String(e));
       }
@@ -97,13 +100,10 @@ export default function AdminSetupLlmPage() {
         </p>
       </div>
 
-      {/* KEY IS IMPORTANT: forces a clean remount whenever tenantId changes */}
+      {/* Key forces a clean remount whenever tenantId/industryKey changes */}
       <TenantLlmManagerClient
-        key={tenantId}
+        key={`${tenantId}:${industryKey ?? ""}`}
         tenantId={tenantId}
-        // Some versions of this component expect a different prop name internally.
-        // Passing both prevents “tenant not selected” bugs without changing layout.
-        activeTenantId={tenantId as any}
         industryKey={industryKey}
       />
     </div>
