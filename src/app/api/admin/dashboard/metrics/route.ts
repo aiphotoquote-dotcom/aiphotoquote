@@ -22,6 +22,13 @@ function json(data: any, status = 200) {
   });
 }
 
+function firstRow(r: any): any | null {
+  // Supports both:
+  // - { rows: [...] }
+  // - [...]
+  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+}
+
 async function getTenantRole(userId: string, tenantId: string): Promise<TenantRole | null> {
   const r = await db.execute(sql`
     SELECT role
@@ -32,7 +39,7 @@ async function getTenantRole(userId: string, tenantId: string): Promise<TenantRo
     LIMIT 1
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? null;
+  const row = firstRow(r);
   const role = String(row?.role ?? "").trim();
   if (role === "owner" || role === "admin" || role === "member") return role;
   return null;
@@ -40,8 +47,8 @@ async function getTenantRole(userId: string, tenantId: string): Promise<TenantRo
 
 /**
  * IMPORTANT:
- * This endpoint must NEVER return ok:true with partial fields.
- * Always return the full metrics payload with numbers (0 if none).
+ * Never return ok:true with missing fields.
+ * Always return complete numeric metrics (0 if none).
  */
 export async function GET() {
   const { userId } = await auth();
@@ -52,17 +59,32 @@ export async function GET() {
 
   const role = await getTenantRole(userId, tenantId);
   if (!role) {
+    // TEMP DEBUG (keep until stable)
+    const dbg = await db.execute(sql`
+      SELECT tenant_id, clerk_user_id, role, status
+      FROM tenant_members
+      WHERE clerk_user_id = ${userId}
+      LIMIT 5
+    `);
+
     return json(
-      { ok: false, error: "FORBIDDEN", message: "No tenant access found for this user.", tenantId },
+      {
+        ok: false,
+        error: "FORBIDDEN",
+        message: "No tenant access found for this user.",
+        tenantId,
+        debug: {
+          userId,
+          sampleMembershipRows: (dbg as any)?.rows ?? (Array.isArray(dbg) ? dbg : []),
+        },
+      },
       403
     );
   }
 
   try {
-    // NOTE: This assumes your leads live in "quote_logs" with these columns:
-    // tenant_id, submitted_at, is_read, stage
-    // If your table name/columns differ, tell me and I’ll adapt in one file.
-    const res = await db.execute(sql`
+    // Assumes quote_logs has: tenant_id, submitted_at, is_read, stage
+    const r = await db.execute(sql`
       WITH base AS (
         SELECT
           tenant_id,
@@ -97,17 +119,16 @@ export async function GET() {
         ), 0) AS "staleUnread"
     `);
 
-    const row: any = (res as any)?.rows?.[0] ?? null;
+    const row = firstRow(r) ?? {};
 
-    // Hard guarantee types + presence (never return partial ok:true)
     const metrics = {
-      totalLeads: Number(row?.totalLeads ?? 0),
-      unread: Number(row?.unread ?? 0),
-      stageNew: Number(row?.stageNew ?? 0),
-      inProgress: Number(row?.inProgress ?? 0),
-      todayNew: Number(row?.todayNew ?? 0),
-      yesterdayNew: Number(row?.yesterdayNew ?? 0),
-      staleUnread: Number(row?.staleUnread ?? 0),
+      totalLeads: Number(row.totalLeads ?? 0),
+      unread: Number(row.unread ?? 0),
+      stageNew: Number(row.stageNew ?? 0),
+      inProgress: Number(row.inProgress ?? 0),
+      todayNew: Number(row.todayNew ?? 0),
+      yesterdayNew: Number(row.yesterdayNew ?? 0),
+      staleUnread: Number(row.staleUnread ?? 0),
     };
 
     return json({ ok: true, ...metrics });
