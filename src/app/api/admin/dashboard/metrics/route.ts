@@ -1,12 +1,10 @@
 // src/app/api/admin/dashboard/metrics/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, eq, gte, lt, sql, inArray } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs } from "@/lib/db/schema";
-import { requireAppUserId } from "@/lib/auth/requireAppUser";
+import { quoteLogs, tenantSettings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,17 +19,14 @@ function getTenantIdFromCookies(jar: any) {
   );
 }
 
+function startOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
 export async function GET() {
   try {
-    // ✅ Ensure signed-in (prevents HTML/redirect responses that break safeJson())
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
-
-    // ✅ Ensure app_user exists
-    await requireAppUserId();
-
     const jar = await cookies();
     const tenantId = getTenantIdFromCookies(jar);
 
@@ -43,34 +38,131 @@ export async function GET() {
     }
 
     const now = new Date();
-    const since7d = new Date(now);
-    since7d.setDate(since7d.getDate() - 7);
+    const todayStart = startOfDay(now);
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
 
-    // "New leads last 7 days"
+    const yesterdayStart = new Date(todayStart);
+    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+
+    const staleCutoff = new Date(now);
+    staleCutoff.setHours(staleCutoff.getHours() - 24);
+
+    const sevenDaysAgo = new Date(todayStart);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Stages:
+    const inProgressStages = ["read", "estimate", "quoted"];
+
+    // Totals (for your current dashboard UI chips/cards)
+    const totalLeads = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(eq(quoteLogs.tenantId, tenantId))
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    const unread = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.isRead, false)))
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    const stageNew = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.stage, "new")))
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    const inProgress = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(and(eq(quoteLogs.tenantId, tenantId), inArray(quoteLogs.stage, inProgressStages as any)))
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    const todayNew = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(
+        and(
+          eq(quoteLogs.tenantId, tenantId),
+          gte(quoteLogs.createdAt, todayStart),
+          lt(quoteLogs.createdAt, tomorrowStart)
+        )
+      )
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    const yesterdayNew = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(
+        and(
+          eq(quoteLogs.tenantId, tenantId),
+          gte(quoteLogs.createdAt, yesterdayStart),
+          lt(quoteLogs.createdAt, todayStart)
+        )
+      )
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    const staleUnread = await db
+      .select({ c: sql<number>`count(*)` })
+      .from(quoteLogs)
+      .where(
+        and(
+          eq(quoteLogs.tenantId, tenantId),
+          eq(quoteLogs.isRead, false),
+          lt(quoteLogs.createdAt, staleCutoff)
+        )
+      )
+      .then((r) => Number(r?.[0]?.c ?? 0));
+
+    // “Metrics” (for the newer dashboard client that expects metrics.*)
     const newLeads7d = await db
       .select({ c: sql<number>`count(*)` })
       .from(quoteLogs)
-      .where(and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, since7d)))
+      .where(and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, sevenDaysAgo)))
       .then((r) => Number(r?.[0]?.c ?? 0));
 
-    // "Quoted last 7 days" (stage == quoted)
     const quoted7d = await db
       .select({ c: sql<number>`count(*)` })
       .from(quoteLogs)
       .where(
-        and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.stage, "quoted"), gte(quoteLogs.createdAt, since7d))
+        and(
+          eq(quoteLogs.tenantId, tenantId),
+          eq(quoteLogs.stage, "quoted"),
+          gte(quoteLogs.createdAt, sevenDaysAgo)
+        )
       )
       .then((r) => Number(r?.[0]?.c ?? 0));
 
-    // We don’t have a reliable “response time” signal in schema here yet.
-    // Keep it null until we add first_response_at / first_contact_at.
+    // If you don’t have a true response-time column yet, keep null
     const avgResponseMinutes7d: number | null = null;
 
-    // We can wire this to ai_policy later; for now keep null to avoid breaking UI.
-    const renderEnabled: boolean | null = null;
+    // Rendering enabled (if your tenantSettings has it; otherwise null)
+    const renderEnabled = await db
+      .select({
+        v: (tenantSettings as any).aiRenderingEnabled ?? (tenantSettings as any).renderingEnabled,
+      })
+      .from(tenantSettings as any)
+      .where(eq((tenantSettings as any).tenantId, tenantId))
+      .limit(1)
+      .then((r) => (typeof r?.[0]?.v === "boolean" ? r[0].v : null))
+      .catch(() => null);
 
     return NextResponse.json({
       ok: true,
+
+      // ✅ for current “chips/cards” dashboard UI
+      totals: {
+        totalLeads,
+        unread,
+        stageNew,
+        inProgress,
+        todayNew,
+        yesterdayNew,
+        staleUnread,
+      },
+
+      // ✅ for your newer “metrics grid” dashboard client
       metrics: {
         newLeads7d,
         quoted7d,

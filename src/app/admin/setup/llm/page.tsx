@@ -4,8 +4,15 @@
 import React, { useEffect, useState } from "react";
 import { TenantLlmManagerClient } from "@/components/pcc/llm/TenantLlmManagerClient";
 
+type TenantRow = {
+  tenantId: string;
+  slug: string;
+  name: string | null;
+  role: "owner" | "admin" | "member";
+};
+
 type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: Array<any> }
+  | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
   | { ok: false; error: string; message?: string };
 
 type MeSettingsResponse =
@@ -47,25 +54,56 @@ export default function AdminSetupLlmPage() {
       setErr(null);
 
       try {
-        // 1) active tenant (cookie-backed)
+        // 1) Load context (cookie-backed)
         const res1 = await fetch("/api/tenant/context", { cache: "no-store" });
         const ctx = await safeJson<ContextResp>(res1);
         if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
-        if (!ctx.activeTenantId) throw new Error("No active tenant selected. Use the tenant switcher.");
 
-        if (cancelled) return;
-        setTenantId(ctx.activeTenantId);
+        let activeTenantId = ctx.activeTenantId ?? null;
+        const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
 
-        // 2) industry key (also cookie-backed active tenant)
-        const res2 = await fetch("/api/tenant/me-settings", { cache: "no-store" });
-        const ms = await safeJson<MeSettingsResponse>(res2);
-        if (!("ok" in ms) || !ms.ok) {
-          // Not fatal — we can still load the manager with no industry defaults
-          if (!cancelled) setIndustryKey(null);
+        // ✅ Option B: if no active tenant BUT exactly one tenant exists, auto-select it
+        if (!activeTenantId && tenants.length === 1) {
+          const only = tenants[0];
+          const resSet = await fetch("/api/tenant/context", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ tenantId: only.tenantId }),
+          });
+
+          const setResp = await safeJson<any>(resSet);
+          if (!setResp?.ok) {
+            throw new Error(setResp?.message || setResp?.error || "Failed to auto-select tenant");
+          }
+
+          // After setting cookie, force a reload so everything downstream reads it
+          window.location.reload();
           return;
         }
 
-        if (!cancelled) setIndustryKey(ms.settings?.industry_key ?? null);
+        // If still no active tenant, user is truly multi-tenant or has none
+        if (!activeTenantId) {
+          throw new Error(
+            tenants.length > 1
+              ? "Select a tenant using the tenant switcher."
+              : "No tenant found for this user."
+          );
+        }
+
+        if (cancelled) return;
+        setTenantId(activeTenantId);
+
+        // 2) Load me-settings (industry key) — not fatal if it fails
+        const res2 = await fetch("/api/tenant/me-settings", { cache: "no-store" });
+        const ms = await safeJson<MeSettingsResponse>(res2);
+
+        if (!cancelled) {
+          if (ms && "ok" in ms && ms.ok) {
+            setIndustryKey(ms.settings?.industry_key ?? null);
+          } else {
+            setIndustryKey(null);
+          }
+        }
       } catch (e: any) {
         if (!cancelled) setErr(e?.message ?? String(e));
       }
