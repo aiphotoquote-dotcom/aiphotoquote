@@ -1,179 +1,127 @@
 // src/app/api/admin/dashboard/metrics/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { and, eq, gte, lt, sql, inArray } from "drizzle-orm";
+import { auth } from "@clerk/nextjs/server";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenantSettings } from "@/lib/db/schema";
+import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function getTenantIdFromCookies(jar: any) {
-  return (
-    jar.get("activeTenantId")?.value ||
-    jar.get("active_tenant_id")?.value ||
-    jar.get("tenantId")?.value ||
-    jar.get("tenant_id")?.value ||
-    null
-  );
+type TenantRole = "owner" | "admin" | "member";
+
+function json(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    },
+  });
 }
 
-function startOfDay(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+async function getTenantRole(userId: string, tenantId: string): Promise<TenantRole | null> {
+  const r = await db.execute(sql`
+    SELECT role
+    FROM tenant_members
+    WHERE tenant_id = ${tenantId}::uuid
+      AND clerk_user_id = ${userId}
+      AND (status IS NULL OR status = 'active')
+    LIMIT 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? null;
+  const role = String(row?.role ?? "").trim();
+  if (role === "owner" || role === "admin" || role === "member") return role;
+  return null;
 }
 
+/**
+ * IMPORTANT:
+ * This endpoint must NEVER return ok:true with partial fields.
+ * Always return the full metrics payload with numbers (0 if none).
+ */
 export async function GET() {
+  const { userId } = await auth();
+  if (!userId) return json({ ok: false, error: "UNAUTHENTICATED" }, 401);
+
+  const tenantId = await readActiveTenantIdFromCookies();
+  if (!tenantId) return json({ ok: false, error: "NO_ACTIVE_TENANT", message: "Select a tenant first." }, 400);
+
+  const role = await getTenantRole(userId, tenantId);
+  if (!role) {
+    return json(
+      { ok: false, error: "FORBIDDEN", message: "No tenant access found for this user.", tenantId },
+      403
+    );
+  }
+
   try {
-    const jar = await cookies();
-    const tenantId = getTenantIdFromCookies(jar);
-
-    if (!tenantId) {
-      return NextResponse.json(
-        { ok: false, error: "NO_ACTIVE_TENANT", message: "No active tenant selected." },
-        { status: 400 }
-      );
-    }
-
-    const now = new Date();
-    const todayStart = startOfDay(now);
-    const tomorrowStart = new Date(todayStart);
-    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-
-    const yesterdayStart = new Date(todayStart);
-    yesterdayStart.setDate(yesterdayStart.getDate() - 1);
-
-    const staleCutoff = new Date(now);
-    staleCutoff.setHours(staleCutoff.getHours() - 24);
-
-    const sevenDaysAgo = new Date(todayStart);
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-    // Stages:
-    const inProgressStages = ["read", "estimate", "quoted"];
-
-    // Totals (for your current dashboard UI chips/cards)
-    const totalLeads = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(eq(quoteLogs.tenantId, tenantId))
-      .then((r) => Number(r?.[0]?.c ?? 0));
-
-    const unread = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.isRead, false)))
-      .then((r) => Number(r?.[0]?.c ?? 0));
-
-    const stageNew = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(and(eq(quoteLogs.tenantId, tenantId), eq(quoteLogs.stage, "new")))
-      .then((r) => Number(r?.[0]?.c ?? 0));
-
-    const inProgress = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(and(eq(quoteLogs.tenantId, tenantId), inArray(quoteLogs.stage, inProgressStages as any)))
-      .then((r) => Number(r?.[0]?.c ?? 0));
-
-    const todayNew = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(
-        and(
-          eq(quoteLogs.tenantId, tenantId),
-          gte(quoteLogs.createdAt, todayStart),
-          lt(quoteLogs.createdAt, tomorrowStart)
-        )
+    // NOTE: This assumes your leads live in "quote_logs" with these columns:
+    // tenant_id, submitted_at, is_read, stage
+    // If your table name/columns differ, tell me and I’ll adapt in one file.
+    const res = await db.execute(sql`
+      WITH base AS (
+        SELECT
+          tenant_id,
+          submitted_at,
+          COALESCE(is_read, false) AS is_read,
+          COALESCE(stage, 'new') AS stage
+        FROM quote_logs
+        WHERE tenant_id = ${tenantId}::uuid
       )
-      .then((r) => Number(r?.[0]?.c ?? 0));
+      SELECT
+        COALESCE((SELECT COUNT(*)::int FROM base), 0) AS "totalLeads",
+        COALESCE((SELECT COUNT(*)::int FROM base WHERE is_read = false), 0) AS "unread",
+        COALESCE((SELECT COUNT(*)::int FROM base WHERE lower(stage) = 'new'), 0) AS "stageNew",
+        COALESCE((SELECT COUNT(*)::int FROM base WHERE lower(stage) IN ('read','estimate','quoted')), 0) AS "inProgress",
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM base
+          WHERE submitted_at >= date_trunc('day', now())
+            AND submitted_at <  date_trunc('day', now()) + interval '1 day'
+        ), 0) AS "todayNew",
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM base
+          WHERE submitted_at >= date_trunc('day', now()) - interval '1 day'
+            AND submitted_at <  date_trunc('day', now())
+        ), 0) AS "yesterdayNew",
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM base
+          WHERE is_read = false
+            AND submitted_at < now() - interval '24 hours'
+        ), 0) AS "staleUnread"
+    `);
 
-    const yesterdayNew = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(
-        and(
-          eq(quoteLogs.tenantId, tenantId),
-          gte(quoteLogs.createdAt, yesterdayStart),
-          lt(quoteLogs.createdAt, todayStart)
-        )
-      )
-      .then((r) => Number(r?.[0]?.c ?? 0));
+    const row: any = (res as any)?.rows?.[0] ?? null;
 
-    const staleUnread = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(
-        and(
-          eq(quoteLogs.tenantId, tenantId),
-          eq(quoteLogs.isRead, false),
-          lt(quoteLogs.createdAt, staleCutoff)
-        )
-      )
-      .then((r) => Number(r?.[0]?.c ?? 0));
+    // Hard guarantee types + presence (never return partial ok:true)
+    const metrics = {
+      totalLeads: Number(row?.totalLeads ?? 0),
+      unread: Number(row?.unread ?? 0),
+      stageNew: Number(row?.stageNew ?? 0),
+      inProgress: Number(row?.inProgress ?? 0),
+      todayNew: Number(row?.todayNew ?? 0),
+      yesterdayNew: Number(row?.yesterdayNew ?? 0),
+      staleUnread: Number(row?.staleUnread ?? 0),
+    };
 
-    // “Metrics” (for the newer dashboard client that expects metrics.*)
-    const newLeads7d = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, sevenDaysAgo)))
-      .then((r) => Number(r?.[0]?.c ?? 0));
-
-    const quoted7d = await db
-      .select({ c: sql<number>`count(*)` })
-      .from(quoteLogs)
-      .where(
-        and(
-          eq(quoteLogs.tenantId, tenantId),
-          eq(quoteLogs.stage, "quoted"),
-          gte(quoteLogs.createdAt, sevenDaysAgo)
-        )
-      )
-      .then((r) => Number(r?.[0]?.c ?? 0));
-
-    // If you don’t have a true response-time column yet, keep null
-    const avgResponseMinutes7d: number | null = null;
-
-    // Rendering enabled (if your tenantSettings has it; otherwise null)
-    const renderEnabled = await db
-      .select({
-        v: (tenantSettings as any).aiRenderingEnabled ?? (tenantSettings as any).renderingEnabled,
-      })
-      .from(tenantSettings as any)
-      .where(eq((tenantSettings as any).tenantId, tenantId))
-      .limit(1)
-      .then((r) => (typeof r?.[0]?.v === "boolean" ? r[0].v : null))
-      .catch(() => null);
-
-    return NextResponse.json({
-      ok: true,
-
-      // ✅ for current “chips/cards” dashboard UI
-      totals: {
-        totalLeads,
-        unread,
-        stageNew,
-        inProgress,
-        todayNew,
-        yesterdayNew,
-        staleUnread,
-      },
-
-      // ✅ for your newer “metrics grid” dashboard client
-      metrics: {
-        newLeads7d,
-        quoted7d,
-        avgResponseMinutes7d,
-        renderEnabled,
-      },
-    });
+    return json({ ok: true, ...metrics });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
+    return json(
+      {
+        ok: false,
+        error: "METRICS_QUERY_FAILED",
+        message: e?.message ?? String(e),
+        code: e?.code,
+        detail: e?.detail,
+        hint: e?.hint,
+      },
+      500
     );
   }
 }
