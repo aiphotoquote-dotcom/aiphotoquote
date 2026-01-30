@@ -3,9 +3,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@clerk/nextjs/server";
-import { sql } from "drizzle-orm";
+import { sql, eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
+import { tenants } from "@/lib/db/schema";
 import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
@@ -29,11 +30,6 @@ function deny(status: number, error: string, message?: string, extra?: Record<st
   );
 }
 
-/**
- * Resolve tenantId:
- * - Prefer explicit tenantId (query/body)
- * - Fallback to cookie via shared reader (supports multiple cookie keys)
- */
 async function resolveTenantId(explicitTenantId?: string | null): Promise<string | null> {
   const t = String(explicitTenantId ?? "").trim();
   if (t) return t;
@@ -43,11 +39,21 @@ async function resolveTenantId(explicitTenantId?: string | null): Promise<string
 /**
  * RBAC role resolution:
  * 1) Prefer tenant_members (status='active')
- * 2) Migration fallback: if no membership exists yet, allow owners via tenants.owner_clerk_user_id
+ * 2) Migration fallback: allow owners via tenants.ownerClerkUserId
  *
- * This prevents "site breaks" during rollout while we backfill tenant_members.
+ * Returns role + debug so we can see exactly why it denied.
  */
-async function resolveRole(userId: string, tenantId: string): Promise<{ role: TenantRole | null; source: "member" | "owner_fallback" | "none" }> {
+async function resolveRoleWithDebug(userId: string, tenantId: string): Promise<{
+  role: TenantRole | null;
+  debug: {
+    userId: string;
+    tenantId: string;
+    membershipFound: boolean;
+    membershipRole: string | null;
+    tenantRowFound: boolean;
+    ownerClerkUserId: string | null;
+  };
+}> {
   // 1) Try tenant_members first
   const memRows = await db.execute(sql`
     SELECT role, status
@@ -60,25 +66,57 @@ async function resolveRole(userId: string, tenantId: string): Promise<{ role: Te
 
   const mem: any = (memRows as any)?.rows?.[0] ?? null;
   const memRole = String(mem?.role ?? "").trim();
+  const membershipFound = !!memRole;
+
   if (memRole === "owner" || memRole === "admin" || memRole === "member") {
-    return { role: memRole, source: "member" };
+    return {
+      role: memRole,
+      debug: {
+        userId,
+        tenantId,
+        membershipFound: true,
+        membershipRole: memRole,
+        tenantRowFound: true, // doesn't matter if membership exists
+        ownerClerkUserId: null,
+      },
+    };
   }
 
-  // 2) Migration fallback: owner in tenants table
-  const tRows = await db.execute(sql`
-    SELECT owner_clerk_user_id
-    FROM tenants
-    WHERE id = ${tenantId}::uuid
-    LIMIT 1
-  `);
+  // 2) Owner fallback via Drizzle schema (safer than raw SQL column guessing)
+  const tenantRow = await db
+    .select({ ownerClerkUserId: tenants.ownerClerkUserId })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId as any))
+    .limit(1)
+    .then((r) => r[0] ?? null);
 
-  const t: any = (tRows as any)?.rows?.[0] ?? null;
-  const ownerId = String(t?.owner_clerk_user_id ?? "").trim();
+  const ownerId = String(tenantRow?.ownerClerkUserId ?? "").trim() || null;
+
   if (ownerId && ownerId === userId) {
-    return { role: "owner", source: "owner_fallback" };
+    return {
+      role: "owner",
+      debug: {
+        userId,
+        tenantId,
+        membershipFound,
+        membershipRole: memRole || null,
+        tenantRowFound: true,
+        ownerClerkUserId: ownerId,
+      },
+    };
   }
 
-  return { role: null, source: "none" };
+  return {
+    role: null,
+    debug: {
+      userId,
+      tenantId,
+      membershipFound,
+      membershipRole: memRole || null,
+      tenantRowFound: !!tenantRow,
+      ownerClerkUserId: ownerId,
+    },
+  };
 }
 
 /* -----------------------------
@@ -87,7 +125,7 @@ async function resolveRole(userId: string, tenantId: string): Promise<{ role: Te
 
 const GetQuery = z.object({
   tenantId: z.string().uuid().optional(),
-  industryKey: z.string().optional(), // allowed; ignored here
+  industryKey: z.string().optional(),
 });
 
 const OverridesSchema = z
@@ -134,8 +172,13 @@ export async function GET(req: Request) {
   const tenantId = await resolveTenantId(parsed.data.tenantId ?? null);
   if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
-  const { role, source } = await resolveRole(userId, tenantId);
-  if (!role) return deny(403, "FORBIDDEN", "No tenant access found for this user.", { tenantId });
+  const gate = await resolveRoleWithDebug(userId, tenantId);
+  if (!gate.role) {
+    return deny(403, "FORBIDDEN", "No tenant access found for this user.", {
+      tenantId,
+      debug: gate.debug,
+    });
+  }
 
   const platformCfg = await loadPlatformLlmConfig();
   const overrides = (await loadTenantLlmOverrides(tenantId)) ?? null;
@@ -162,8 +205,7 @@ export async function GET(req: Request) {
   return NextResponse.json({
     ok: true,
     tenantId,
-    role,
-    roleSource: source, // "member" or "owner_fallback"
+    role: gate.role,
     platform: platformCfg,
     overrides,
     effective: {
@@ -201,9 +243,12 @@ export async function POST(req: Request) {
   const tenantId = await resolveTenantId(explicitTenantId);
   if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
-  const { role } = await resolveRole(userId, tenantId);
-  if (!isAdminRole(role)) {
-    return deny(403, "FORBIDDEN", "Only owner/admin can edit LLM settings.", { tenantId });
+  const gate = await resolveRoleWithDebug(userId, tenantId);
+  if (!isAdminRole(gate.role)) {
+    return deny(403, "FORBIDDEN", "Only owner/admin can edit LLM settings.", {
+      tenantId,
+      debug: gate.debug,
+    });
   }
 
   try {
@@ -212,7 +257,7 @@ export async function POST(req: Request) {
 
     const saved = await saveTenantLlmOverrides(tenantId, normalized);
 
-    return NextResponse.json({ ok: true, tenantId, role, overrides: saved });
+    return NextResponse.json({ ok: true, tenantId, role: gate.role, overrides: saved });
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "VALIDATION_FAILED", message: e?.message ?? String(e), issues: e?.issues },
