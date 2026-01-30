@@ -37,11 +37,16 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
 }
 
 function clearTenantCookies(res: NextResponse) {
+  // NextResponse.cookies.delete() expects either:
+  // - delete("name")
+  // - delete({ name: "name", path: "/" })
   const opts = { path: "/" };
-  res.cookies.delete("activeTenantId", opts);
-  res.cookies.delete("active_tenant_id", opts);
-  res.cookies.delete("tenantId", opts);
-  res.cookies.delete("tenant_id", opts);
+
+  res.cookies.delete({ name: "activeTenantId", ...opts });
+  res.cookies.delete({ name: "active_tenant_id", ...opts });
+  res.cookies.delete({ name: "tenantId", ...opts });
+  res.cookies.delete({ name: "tenant_id", ...opts });
+
   return res;
 }
 
