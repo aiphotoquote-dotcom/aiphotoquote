@@ -41,11 +41,15 @@ async function resolveTenantId(explicitTenantId?: string | null): Promise<string
 }
 
 /**
- * RBAC: find role from tenant_members
- * IMPORTANT: enforce status='active' since your table has status and you showed active rows.
+ * RBAC role resolution:
+ * 1) Prefer tenant_members (status='active')
+ * 2) Migration fallback: if no membership exists yet, allow owners via tenants.owner_clerk_user_id
+ *
+ * This prevents "site breaks" during rollout while we backfill tenant_members.
  */
-async function getTenantRole(userId: string, tenantId: string): Promise<TenantRole | null> {
-  const rows = await db.execute(sql`
+async function resolveRole(userId: string, tenantId: string): Promise<{ role: TenantRole | null; source: "member" | "owner_fallback" | "none" }> {
+  // 1) Try tenant_members first
+  const memRows = await db.execute(sql`
     SELECT role, status
     FROM tenant_members
     WHERE tenant_id = ${tenantId}::uuid
@@ -54,11 +58,27 @@ async function getTenantRole(userId: string, tenantId: string): Promise<TenantRo
     LIMIT 1
   `);
 
-  const r: any = (rows as any)?.rows?.[0] ?? null;
-  const role = String(r?.role ?? "").trim();
+  const mem: any = (memRows as any)?.rows?.[0] ?? null;
+  const memRole = String(mem?.role ?? "").trim();
+  if (memRole === "owner" || memRole === "admin" || memRole === "member") {
+    return { role: memRole, source: "member" };
+  }
 
-  if (role === "owner" || role === "admin" || role === "member") return role;
-  return null;
+  // 2) Migration fallback: owner in tenants table
+  const tRows = await db.execute(sql`
+    SELECT owner_clerk_user_id
+    FROM tenants
+    WHERE id = ${tenantId}::uuid
+    LIMIT 1
+  `);
+
+  const t: any = (tRows as any)?.rows?.[0] ?? null;
+  const ownerId = String(t?.owner_clerk_user_id ?? "").trim();
+  if (ownerId && ownerId === userId) {
+    return { role: "owner", source: "owner_fallback" };
+  }
+
+  return { role: null, source: "none" };
 }
 
 /* -----------------------------
@@ -67,7 +87,7 @@ async function getTenantRole(userId: string, tenantId: string): Promise<TenantRo
 
 const GetQuery = z.object({
   tenantId: z.string().uuid().optional(),
-  industryKey: z.string().optional(), // allowed for clients; ignored server-side here
+  industryKey: z.string().optional(), // allowed; ignored here
 });
 
 const OverridesSchema = z
@@ -92,7 +112,7 @@ const OverridesSchema = z
 
 const PostBody = z.object({
   tenantId: z.string().uuid().optional(),
-  industryKey: z.string().nullable().optional(), // allowed; ignored here
+  industryKey: z.string().nullable().optional(),
   overrides: OverridesSchema.optional(),
 });
 
@@ -104,7 +124,6 @@ export async function GET(req: Request) {
   const { userId } = await auth();
   if (!userId) return deny(401, "UNAUTHENTICATED");
 
-  // Parse query (tenantId can be passed explicitly by client)
   const url = new URL(req.url);
   const parsed = GetQuery.safeParse({
     tenantId: url.searchParams.get("tenantId") || undefined,
@@ -115,22 +134,18 @@ export async function GET(req: Request) {
   const tenantId = await resolveTenantId(parsed.data.tenantId ?? null);
   if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
-  const role = await getTenantRole(userId, tenantId);
-  if (!role) {
-    // include lightweight debug info so you can see what tenantId the API thinks it’s using
-    return deny(403, "FORBIDDEN", "No active tenant membership found for this user.", { tenantId });
-  }
+  const { role, source } = await resolveRole(userId, tenantId);
+  if (!role) return deny(403, "FORBIDDEN", "No tenant access found for this user.", { tenantId });
 
   const platformCfg = await loadPlatformLlmConfig();
   const overrides = (await loadTenantLlmOverrides(tenantId)) ?? null;
 
-  // Effective = platform + tenant overrides (guardrails remain platform-only)
-  const effective = await getPlatformLlm(); // platform normalized
+  const effective = await getPlatformLlm();
 
   const effModels = {
     estimatorModel: overrides?.models?.estimatorModel?.trim() || effective.models.estimatorModel,
     qaModel: overrides?.models?.qaModel?.trim() || effective.models.qaModel,
-    renderModel: effective.models.renderModel, // platform-only
+    renderModel: effective.models.renderModel,
   };
 
   const effPrompts = {
@@ -148,12 +163,13 @@ export async function GET(req: Request) {
     ok: true,
     tenantId,
     role,
+    roleSource: source, // "member" or "owner_fallback"
     platform: platformCfg,
     overrides,
     effective: {
       models: effModels,
       prompts: effPrompts,
-      guardrails: effective.guardrails, // read-only for tenant UI
+      guardrails: effective.guardrails,
     },
   });
 }
@@ -169,9 +185,6 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => null);
   if (!body) return deny(400, "INVALID_BODY", "Missing JSON body.");
 
-  // Accept either:
-  // - { tenantId, overrides, industryKey }
-  // - or legacy: { ...overridesFields } (no wrapper)
   const parsed = PostBody.safeParse(body);
 
   let explicitTenantId: string | null = null;
@@ -181,7 +194,6 @@ export async function POST(req: Request) {
     explicitTenantId = parsed.data.tenantId ?? null;
     overridesInput = parsed.data.overrides ?? (body as any)?.overrides ?? body;
   } else {
-    // legacy fallback: try tenantId on root
     explicitTenantId = typeof (body as any)?.tenantId === "string" ? (body as any).tenantId : null;
     overridesInput = (body as any)?.overrides ?? body;
   }
@@ -189,7 +201,7 @@ export async function POST(req: Request) {
   const tenantId = await resolveTenantId(explicitTenantId);
   if (!tenantId) return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
 
-  const role = await getTenantRole(userId, tenantId);
+  const { role } = await resolveRole(userId, tenantId);
   if (!isAdminRole(role)) {
     return deny(403, "FORBIDDEN", "Only owner/admin can edit LLM settings.", { tenantId });
   }
