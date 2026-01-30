@@ -4,6 +4,7 @@ import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 
 import AdminTopNav from "@/components/admin/AdminTopNav";
+import { AdminTenantGateShell } from "@/components/tenant/AdminTenantGateShell";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +16,9 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-neutral-950 dark:text-gray-100">
       <AdminTopNav />
-      <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">{children}</div>
+      <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+        <AdminTenantGateShell>{children}</AdminTenantGateShell>
+      </div>
     </div>
   );
 }
