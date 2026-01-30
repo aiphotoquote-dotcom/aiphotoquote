@@ -15,7 +15,7 @@ type TenantRow = {
 };
 
 type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
+  | { ok: true; activeTenantId: string | null; tenants: TenantRow[]; message?: string }
   | { ok: false; error: string; message?: string };
 
 type PolicyResp =
@@ -47,6 +47,31 @@ async function safeJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function ensureActiveTenant(): Promise<string> {
+  const ctxRes = await fetch("/api/tenant/context", { cache: "no-store" });
+  const ctx = await safeJson<ContextResp>(ctxRes);
+  if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
+
+  if (ctx.activeTenantId) return ctx.activeTenantId;
+
+  const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
+  if (tenants.length === 1) {
+    const t0 = tenants[0];
+    const setRes = await fetch("/api/tenant/context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenantId: t0.tenantId }),
+    });
+    const setJson = await safeJson<any>(setRes);
+    if (!setJson?.ok) throw new Error(setJson?.message || setJson?.error || "Failed to auto-select tenant");
+
+    window.location.reload();
+    return t0.tenantId;
+  }
+
+  throw new Error("No active tenant selected. Use the tenant switcher to pick a tenant.");
+}
+
 function Card({
   title,
   desc,
@@ -65,7 +90,6 @@ function Card({
         "w-full text-left rounded-xl border p-4 hover:bg-gray-50",
         selected ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white",
       ].join(" ")}
-      type="button"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -91,11 +115,9 @@ export default function AiPolicySetupPage() {
 
   const [role, setRole] = useState<"owner" | "admin" | "member" | null>(null);
 
-  // Existing policy
   const [aiMode, setAiMode] = useState<AiMode>("assessment_only");
   const [pricingEnabled, setPricingEnabled] = useState(false);
 
-  // Rendering policy
   const [renderingEnabled, setRenderingEnabled] = useState(false);
   const [renderingStyle, setRenderingStyle] = useState<RenderingStyle>("photoreal");
   const [renderingNotes, setRenderingNotes] = useState("");
@@ -107,52 +129,13 @@ export default function AiPolicySetupPage() {
 
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
-  async function ensureActiveTenantCookie() {
-    const res = await fetch("/api/tenant/context", { cache: "no-store" });
-    const ctx = await safeJson<ContextResp>(res);
-    if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
-
-    const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
-    const activeTenantId = ctx.activeTenantId ?? null;
-
-    // ✅ Option B: if only one tenant, auto-select it
-    if (!activeTenantId && tenants.length === 1) {
-      const only = tenants[0];
-      const resSet = await fetch("/api/tenant/context", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tenantId: only.tenantId }),
-      });
-
-      const setResp = await safeJson<any>(resSet);
-      if (!setResp?.ok) {
-        throw new Error(setResp?.message || setResp?.error || "Failed to auto-select tenant");
-      }
-
-      // Hard reload so everything reads fresh cookies
-      window.location.reload();
-      return { reloaded: true as const };
-    }
-
-    if (!activeTenantId) {
-      throw new Error(
-        tenants.length > 1
-          ? "Select a tenant using the tenant switcher."
-          : "No tenant found for this user."
-      );
-    }
-
-    return { reloaded: false as const };
-  }
-
   async function load() {
     setErr(null);
     setMsg(null);
     setLoading(true);
 
     try {
-      const ensured = await ensureActiveTenantCookie();
-      if (ensured.reloaded) return;
+      await ensureActiveTenant();
 
       const res = await fetch("/api/admin/ai-policy", { cache: "no-store" });
       const data = await safeJson<PolicyResp>(res);
@@ -164,7 +147,7 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
-      setRenderingStyle((data.ai_policy.rendering_style as RenderingStyle) ?? "photoreal");
+      setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
@@ -183,8 +166,7 @@ export default function AiPolicySetupPage() {
     setSaving(true);
 
     try {
-      const ensured = await ensureActiveTenantCookie();
-      if (ensured.reloaded) return;
+      await ensureActiveTenant();
 
       const payload = {
         ai_mode: aiMode,
@@ -213,7 +195,7 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
-      setRenderingStyle((data.ai_policy.rendering_style as RenderingStyle) ?? "photoreal");
+      setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
@@ -258,7 +240,6 @@ export default function AiPolicySetupPage() {
           <button
             onClick={load}
             className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-            type="button"
           >
             Refresh
           </button>
@@ -277,10 +258,8 @@ export default function AiPolicySetupPage() {
               </div>
             ) : null}
 
-            {/* Tenant LLM behavior */}
             <TenantLlmBehaviorAdvanced />
 
-            {/* AI Mode */}
             <div className="grid gap-3">
               <div className="text-sm font-semibold text-gray-900">AI Mode</div>
 
@@ -306,7 +285,6 @@ export default function AiPolicySetupPage() {
               />
             </div>
 
-            {/* Pricing enabled */}
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
               <div className="flex items-center justify-between gap-4">
                 <div>
@@ -326,138 +304,23 @@ export default function AiPolicySetupPage() {
                       : "border-gray-300 bg-white text-gray-800",
                     !canEdit ? "opacity-50" : "hover:bg-gray-50",
                   ].join(" ")}
-                  type="button"
                 >
                   {pricingEnabled ? "ON" : "OFF"}
                 </button>
               </div>
             </div>
 
-            {/* Rendering policy */}
-            <div className="rounded-xl border border-gray-200 bg-white p-5">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
-                  <div className="mt-1 text-xs text-gray-600">
-                    Optional “concept render” image of the finished product. Costs more than text — keep this tenant-controlled.
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => canEdit && setRenderingEnabled((v) => !v)}
-                  disabled={!canEdit}
-                  className={[
-                    "rounded-md border px-3 py-2 text-sm font-semibold",
-                    renderingEnabled
-                      ? "border-green-300 bg-green-50 text-green-800"
-                      : "border-gray-300 bg-white text-gray-800",
-                    !canEdit ? "opacity-50" : "hover:bg-gray-50",
-                  ].join(" ")}
-                  type="button"
-                >
-                  {renderingEnabled ? "Enabled" : "Disabled"}
-                </button>
-              </div>
-
-              <div className="mt-4 grid gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-800">Rendering style</label>
-                  <select
-                    value={renderingStyle}
-                    onChange={(e) => setRenderingStyle(e.target.value as RenderingStyle)}
-                    disabled={!canEdit || !renderingEnabled}
-                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
-                  >
-                    <option value="photoreal">Photoreal concept</option>
-                    <option value="clean_oem">Clean OEM refresh</option>
-                    <option value="custom">Custom / show-style</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-800">House style notes (optional)</label>
-                  <textarea
-                    value={renderingNotes}
-                    onChange={(e) => setRenderingNotes(e.target.value)}
-                    disabled={!canEdit || !renderingEnabled}
-                    rows={4}
-                    placeholder="Example: Keep original stitching pattern; show clean restored bolsters; avoid changing color unless requested…"
-                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-800">Max renderings per day</label>
-                    <input
-                      type="number"
-                      value={renderingMaxPerDay}
-                      onChange={(e) => setRenderingMaxPerDay(parseInt(e.target.value || "0", 10))}
-                      disabled={!canEdit || !renderingEnabled}
-                      min={0}
-                      max={1000}
-                      className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
-                    />
-                    <p className="mt-1 text-xs text-gray-500">0 means disabled by rate limit.</p>
-                  </div>
-
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900">Customer opt-in required</div>
-                        <div className="mt-1 text-xs text-gray-600">
-                          If ON, the public form shows a checkbox and only renders when the customer opts in.
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => canEdit && setRenderingOptInRequired((v) => !v)}
-                        disabled={!canEdit || !renderingEnabled}
-                        className={[
-                          "rounded-md border px-3 py-2 text-sm font-semibold",
-                          renderingOptInRequired
-                            ? "border-green-300 bg-green-50 text-green-800"
-                            : "border-gray-300 bg-white text-gray-800",
-                          (!canEdit || !renderingEnabled) ? "opacity-50" : "hover:bg-gray-50",
-                        ].join(" ")}
-                        type="button"
-                      >
-                        {renderingOptInRequired ? "ON" : "OFF"}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Save */}
             <div className="flex items-center gap-4">
               <button
                 onClick={save}
                 disabled={!canEdit || saving}
                 className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
-                type="button"
               >
                 {saving ? "Saving…" : "Save Policy"}
               </button>
 
               {msg && <span className="text-sm text-green-700">{msg}</span>}
               {err && <span className="text-sm text-red-700 whitespace-pre-wrap">{err}</span>}
-            </div>
-
-            <div className="flex gap-2">
-              <a
-                href="/admin/setup/widget"
-                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-              >
-                Next: Widget setup →
-              </a>
-              <a
-                href="/quote"
-                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-              >
-                Run a test quote →
-              </a>
             </div>
           </div>
         )}

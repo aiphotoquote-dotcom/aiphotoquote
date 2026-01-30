@@ -12,7 +12,7 @@ type TenantRow = {
 };
 
 type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
+  | { ok: true; activeTenantId: string | null; tenants: TenantRow[]; message?: string }
   | { ok: false; error: string; message?: string };
 
 type MeSettingsResponse =
@@ -42,6 +42,40 @@ async function safeJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * ✅ Deterministic tenant activation:
+ * - If activeTenantId exists → use it
+ * - Else if exactly 1 tenant → POST select it, then hard reload (so server reads cookie)
+ * - Else require user selection
+ */
+async function ensureActiveTenant(): Promise<string> {
+  const ctxRes = await fetch("/api/tenant/context", { cache: "no-store" });
+  const ctx = await safeJson<ContextResp>(ctxRes);
+  if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
+
+  if (ctx.activeTenantId) return ctx.activeTenantId;
+
+  const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
+
+  if (tenants.length === 1) {
+    const t0 = tenants[0];
+    const setRes = await fetch("/api/tenant/context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenantId: t0.tenantId }),
+    });
+    const setJson = await safeJson<any>(setRes);
+    if (!setJson?.ok) throw new Error(setJson?.message || setJson?.error || "Failed to auto-select tenant");
+
+    // Hard reload ensures ALL server reads see cookie immediately
+    window.location.reload();
+    // This line won't realistically run, but TS wants a return:
+    return t0.tenantId;
+  }
+
+  throw new Error("No active tenant selected. Use the tenant switcher to pick a tenant.");
+}
+
 export default function AdminSetupLlmPage() {
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [industryKey, setIndustryKey] = useState<string | null>(null);
@@ -54,55 +88,16 @@ export default function AdminSetupLlmPage() {
       setErr(null);
 
       try {
-        // 1) Load context (cookie-backed)
-        const res1 = await fetch("/api/tenant/context", { cache: "no-store" });
-        const ctx = await safeJson<ContextResp>(res1);
-        if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
-
-        let activeTenantId = ctx.activeTenantId ?? null;
-        const tenants = Array.isArray(ctx.tenants) ? ctx.tenants : [];
-
-        // ✅ Option B: if no active tenant BUT exactly one tenant exists, auto-select it
-        if (!activeTenantId && tenants.length === 1) {
-          const only = tenants[0];
-          const resSet = await fetch("/api/tenant/context", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ tenantId: only.tenantId }),
-          });
-
-          const setResp = await safeJson<any>(resSet);
-          if (!setResp?.ok) {
-            throw new Error(setResp?.message || setResp?.error || "Failed to auto-select tenant");
-          }
-
-          // After setting cookie, force a reload so everything downstream reads it
-          window.location.reload();
-          return;
-        }
-
-        // If still no active tenant, user is truly multi-tenant or has none
-        if (!activeTenantId) {
-          throw new Error(
-            tenants.length > 1
-              ? "Select a tenant using the tenant switcher."
-              : "No tenant found for this user."
-          );
-        }
-
+        const tid = await ensureActiveTenant();
         if (cancelled) return;
-        setTenantId(activeTenantId);
+        setTenantId(tid);
 
-        // 2) Load me-settings (industry key) — not fatal if it fails
         const res2 = await fetch("/api/tenant/me-settings", { cache: "no-store" });
         const ms = await safeJson<MeSettingsResponse>(res2);
 
         if (!cancelled) {
-          if (ms && "ok" in ms && ms.ok) {
-            setIndustryKey(ms.settings?.industry_key ?? null);
-          } else {
-            setIndustryKey(null);
-          }
+          if (!("ok" in ms) || !ms.ok) setIndustryKey(null);
+          else setIndustryKey(ms.settings?.industry_key ?? null);
         }
       } catch (e: any) {
         if (!cancelled) setErr(e?.message ?? String(e));
