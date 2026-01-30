@@ -1,9 +1,8 @@
 // src/lib/auth/tenant.ts
 import { auth } from "@clerk/nextjs/server";
-import { eq, and } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants } from "@/lib/db/schema";
 import { requireAppUserId } from "@/lib/auth/requireAppUser";
 import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 
@@ -19,49 +18,54 @@ function deny(status: number, error: string, message?: string): GateBad {
   return { ok: false, status, error, ...(message ? { message } : {}) };
 }
 
+function normalizeRole(v: unknown): TenantRole | null {
+  const r = String(v ?? "").trim();
+  if (r === "owner" || r === "admin" || r === "member") return r;
+  return null;
+}
+
+async function getMembershipRole(userId: string, tenantId: string): Promise<TenantRole | null> {
+  // NOTE: We do not assume an "id" column exists on tenant_members.
+  // We only rely on tenant_id, clerk_user_id, role, status.
+  const r = await db.execute(sql`
+    SELECT role
+    FROM tenant_members
+    WHERE tenant_id = ${tenantId}::uuid
+      AND clerk_user_id = ${userId}
+      AND (status IS NULL OR status = 'active')
+    LIMIT 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  return normalizeRole(row?.role);
+}
+
 /**
  * requireTenantRole:
- * - Ensures Clerk auth
+ * - Ensures user is authenticated
  * - Ensures app_user exists (mobility layer)
- * - Reads active tenant from cookie (single canonical reader)
- * - Validates tenant belongs to user (owner-only model for now)
- * - Returns role
+ * - Reads active tenant from cookie (shared cookie reader)
+ * - Validates tenant membership via tenant_members (status active/null)
+ * - Returns role (owner/admin/member)
  *
- * IMPORTANT: Must NOT mutate cookies. Only /api/tenant/context writes cookies.
- *
- * RBAC note:
- * - Today: owner-only (tenants.ownerClerkUserId)
- * - Later: swap validation to tenant_members (user can have owner/admin/member per tenant)
+ * IMPORTANT: This function must NOT mutate cookies.
+ * Only /api/tenant/context should set/clear tenant cookies.
  */
 export async function requireTenantRole(allowed: TenantRole[]): Promise<TenantGate> {
   const { userId } = await auth();
   if (!userId) return deny(401, "UNAUTHENTICATED");
 
-  // Mobility layer (you already use this pattern)
   await requireAppUserId();
 
   const tenantId = await readActiveTenantIdFromCookies();
   if (!tenantId) {
-    // do not auto-select here; context endpoint owns selection + cookie set
     return deny(400, "NO_ACTIVE_TENANT", "Select a tenant first.");
   }
 
-  // Owner-only model for now: tenant must be owned by this Clerk user
-  const owned = await db
-    .select({ id: tenants.id })
-    .from(tenants)
-    .where(and(eq(tenants.id, tenantId as any), eq(tenants.ownerClerkUserId, userId)))
-    .limit(1)
-    .then((r) => r[0]?.id ?? null);
-
-  if (!owned) {
-    // Cookie exists but tenant isn't accessible by this user (stale or wrong account)
-    // DO NOT clear cookies here.
-    return deny(403, "TENANT_NOT_FOUND_OR_NOT_OWNED", "Active tenant is not accessible by this user.");
+  const role = await getMembershipRole(userId, tenantId);
+  if (!role) {
+    return deny(403, "FORBIDDEN", "No active tenant membership found for this user.");
   }
-
-  // Owner-only role until tenant_members is implemented
-  const role: TenantRole = "owner";
 
   if (!allowed.includes(role)) {
     return deny(403, "FORBIDDEN", `Role "${role}" is not allowed for this action.`);
