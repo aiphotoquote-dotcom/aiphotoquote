@@ -3,28 +3,21 @@ import { cookies } from "next/headers";
 import type { NextResponse } from "next/server";
 
 /**
- * Canonical active-tenant cookie name for the whole platform.
- * This is the ONLY cookie key we should write going forward.
+ * Canonical cookie key (new).
+ * We read legacy keys for backwards compatibility, but we only WRITE the canonical key going forward.
  */
 export const ACTIVE_TENANT_COOKIE = "apq_tenant" as const;
 
-/**
- * Legacy keys we previously wrote. We'll keep reading them for a while
- * to avoid breaking existing users, but we will STOP writing them.
- */
-export const LEGACY_ACTIVE_TENANT_COOKIE_KEYS = [
+export const ACTIVE_TENANT_LEGACY_KEYS = [
   "activeTenantId",
   "active_tenant_id",
   "tenantId",
   "tenant_id",
 ] as const;
 
-export const ALL_ACTIVE_TENANT_COOKIE_KEYS = [
-  ACTIVE_TENANT_COOKIE,
-  ...LEGACY_ACTIVE_TENANT_COOKIE_KEYS,
-] as const;
+export const ACTIVE_TENANT_COOKIE_KEYS = [ACTIVE_TENANT_COOKIE, ...ACTIVE_TENANT_LEGACY_KEYS] as const;
 
-function cookieOptions() {
+function cookieOpts() {
   const isProd = process.env.NODE_ENV === "production";
   return {
     httpOnly: true,
@@ -36,13 +29,13 @@ function cookieOptions() {
 }
 
 /**
- * Read active tenant from cookies (canonical first, then legacy).
- * Next.js 16 types cookies() as Promise<ReadonlyRequestCookies> -> must await.
+ * Reads the active tenant id from cookies.
+ * Next.js 16 types cookies() as Promise<ReadonlyRequestCookies>, so we must await it.
  */
 export async function readActiveTenantIdFromCookies(): Promise<string | null> {
   const jar = await cookies();
 
-  for (const k of ALL_ACTIVE_TENANT_COOKIE_KEYS) {
+  for (const k of ACTIVE_TENANT_COOKIE_KEYS) {
     const v = jar.get(k)?.value;
     if (v && String(v).trim()) return String(v).trim();
   }
@@ -51,27 +44,26 @@ export async function readActiveTenantIdFromCookies(): Promise<string | null> {
 }
 
 /**
- * Write the canonical cookie to the response.
- * NOTE: We do NOT write legacy keys anymore.
+ * Writes ONLY the canonical cookie key (apq_tenant).
  */
-export function setActiveTenantCookie(res: NextResponse, tenantId: string) {
-  res.cookies.set(ACTIVE_TENANT_COOKIE, tenantId, cookieOptions());
+export function setActiveTenantCookie(res: NextResponse, tenantId: string): NextResponse {
+  res.cookies.set(ACTIVE_TENANT_COOKIE, tenantId, cookieOpts());
   return res;
 }
 
 /**
- * Clear canonical + legacy keys (for cleanup / stale cookie recovery).
+ * Clears canonical + legacy keys.
+ * Important for cleaning up stale cookies that cause “flashing then NO_ACTIVE_TENANT”.
  */
-export function clearActiveTenantCookies(res: NextResponse) {
-  const base = { path: "/" as const };
+export function clearActiveTenantCookies(res: NextResponse): NextResponse {
+  const path = "/";
 
-  // delete() in NextResponse expects either:
-  // - delete("name")
-  // - delete({ name: "name", path: "/" })
-  res.cookies.delete({ name: ACTIVE_TENANT_COOKIE, ...base });
+  // Canonical
+  res.cookies.delete({ name: ACTIVE_TENANT_COOKIE, path });
 
-  for (const k of LEGACY_ACTIVE_TENANT_COOKIE_KEYS) {
-    res.cookies.delete({ name: k, ...base });
+  // Legacy keys (cleanup only)
+  for (const k of ACTIVE_TENANT_LEGACY_KEYS) {
+    res.cookies.delete({ name: k, path });
   }
 
   return res;
