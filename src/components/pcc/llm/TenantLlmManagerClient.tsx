@@ -28,7 +28,11 @@ type TenantOverrides = {
   version?: number;
   updatedAt?: string | null;
   models?: { estimatorModel?: string; qaModel?: string; renderModel?: string };
-  prompts?: { quoteEstimatorSystem?: string; qaQuestionGeneratorSystem?: string; extraSystemPreamble?: string };
+  prompts?: {
+    quoteEstimatorSystem?: string;
+    qaQuestionGeneratorSystem?: string;
+    extraSystemPreamble?: string;
+  };
   maxQaQuestions?: number;
 };
 
@@ -40,7 +44,11 @@ type ApiGetResp =
       tenant: TenantOverrides | null;
       effective: {
         models: { estimatorModel: string; qaModel: string; renderModel: string };
-        prompts: { extraSystemPreamble?: string; quoteEstimatorSystem: string; qaQuestionGeneratorSystem: string };
+        prompts: {
+          extraSystemPreamble?: string;
+          quoteEstimatorSystem: string;
+          qaQuestionGeneratorSystem: string;
+        };
         guardrails: {
           mode: GuardrailsMode;
           piiHandling: PiiHandling;
@@ -57,6 +65,17 @@ type ApiPostResp =
   | { ok: true; tenant: TenantOverrides | null; effective: any }
   | { ok: false; error: string; message?: string; issues?: any };
 
+async function safeJson<T>(res: Response): Promise<T> {
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 80 chars: ${text.slice(0, 80)}`
+    );
+  }
+  return (await res.json()) as T;
+}
+
 function safeStr(v: unknown, fallback = "") {
   const s = String(v ?? "").trim();
   return s || fallback;
@@ -66,15 +85,6 @@ function numClamp(v: unknown, min: number, max: number, fallback: number) {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-async function safeJson<T>(res: Response): Promise<T> {
-  const ct = res.headers.get("content-type") || "";
-  if (!ct.includes("application/json")) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`);
-  }
-  return (await res.json()) as T;
 }
 
 export function TenantLlmManagerClient(props: { tenantId: string; industryKey: string | null }) {
@@ -101,15 +111,21 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
+  async function ensureTenantCookie(): Promise<void> {
+    // This endpoint is the ONLY thing that should auto-select and/or refresh tenant cookie.
+    // credentials: "include" is critical for mobile Safari consistency.
+    await safeJson<any>(
+      await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" })
+    );
+  }
+
   async function apiGet(): Promise<ApiGetResp> {
     const qs = new URLSearchParams({ tenantId, industryKey: industryKey ?? "" });
-
     const res = await fetch(`/api/tenant/llm?${qs.toString()}`, {
       method: "GET",
       cache: "no-store",
-      credentials: "include", // ✅ critical for iOS/Safari cookie consistency
+      credentials: "include",
     });
-
     return safeJson<ApiGetResp>(res);
   }
 
@@ -118,18 +134,30 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tenantId, industryKey, overrides }),
-      credentials: "include", // ✅ critical
+      credentials: "include",
     });
-
     return safeJson<ApiPostResp>(res);
   }
 
   async function refresh() {
     setMsg(null);
     setLoading(true);
+
     try {
-      const r = await apiGet();
-      if (!("ok" in r) || !r.ok) throw new Error((r as any).message || (r as any).error || "Failed to load.");
+      let r = await apiGet();
+
+      // If the API says NO_ACTIVE_TENANT, force a cookie refresh via context and retry once.
+      if (!("ok" in r) || !r.ok) {
+        if ((r as any).error === "NO_ACTIVE_TENANT") {
+          await ensureTenantCookie();
+          r = await apiGet();
+        }
+      }
+
+      if (!("ok" in r) || !r.ok) {
+        throw new Error((r as any).message || (r as any).error || "Failed to load.");
+      }
+
       setData(r);
 
       const t = (r as any).tenant ?? {};
@@ -171,8 +199,18 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
         maxQaQuestions: numClamp(maxQaQuestions, 1, 10, 3),
       };
 
-      const r = await apiPost(overrides);
-      if (!("ok" in r) || !r.ok) throw new Error((r as any).message || (r as any).error || "Save failed.");
+      let r = await apiPost(overrides);
+
+      if (!("ok" in r) || !r.ok) {
+        if ((r as any).error === "NO_ACTIVE_TENANT") {
+          await ensureTenantCookie();
+          r = await apiPost(overrides);
+        }
+      }
+
+      if (!("ok" in r) || !r.ok) {
+        throw new Error((r as any).message || (r as any).error || "Save failed.");
+      }
 
       await refresh();
       setMsg({ kind: "ok", text: "Saved tenant overrides." });
@@ -304,11 +342,15 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Mode</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">{platform?.guardrails?.mode ?? "balanced"}</span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">
+                {platform?.guardrails?.mode ?? "balanced"}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">PII handling</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">{platform?.guardrails?.piiHandling ?? "redact"}</span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">
+                {platform?.guardrails?.piiHandling ?? "redact"}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
@@ -328,7 +370,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Extra system preamble override
+            </label>
             <textarea
               value={extraSystemPreamble}
               onChange={(e) => setExtraSystemPreamble(e.target.value)}
@@ -338,7 +382,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Quote estimator system override
+            </label>
             <textarea
               value={quoteEstimatorSystem}
               onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
@@ -348,7 +394,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A generator system override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Q&A generator system override
+            </label>
             <textarea
               value={qaQuestionGeneratorSystem}
               onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
@@ -363,7 +411,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective preview</div>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div>
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Effective estimator system</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  Effective estimator system
+                </div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {effective.prompts?.quoteEstimatorSystem ?? ""}
                 </pre>
