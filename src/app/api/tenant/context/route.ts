@@ -1,4 +1,3 @@
-// src/app/api/tenant/context/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -37,6 +36,15 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
   return res;
 }
 
+function clearTenantCookies(res: NextResponse) {
+  const opts = { path: "/" };
+  res.cookies.delete("activeTenantId", opts);
+  res.cookies.delete("active_tenant_id", opts);
+  res.cookies.delete("tenantId", opts);
+  res.cookies.delete("tenant_id", opts);
+  return res;
+}
+
 async function readActiveTenantIdFromCookies(): Promise<string | null> {
   const jar = await cookies();
   return (
@@ -51,6 +59,7 @@ async function readActiveTenantIdFromCookies(): Promise<string | null> {
 /**
  * GET: returns tenant context for the signed-in user.
  * Also sets cookie automatically when there's exactly one tenant.
+ * Validates stale cookies (cookie must belong to returned tenant list).
  */
 export async function GET() {
   try {
@@ -59,18 +68,17 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
-    // Ensure app_user exists (mobility layer)
     await requireAppUserId();
 
-    const activeTenantId = await readActiveTenantIdFromCookies();
+    const cookieTenantId = await readActiveTenantIdFromCookies();
 
-    // For now: treat "tenants" as those owned by this Clerk user.
-    // (Extend to tenant_members later.)
+    // (For now) tenants = those owned by this Clerk user.
     const rows = await db
       .select({
         tenantId: tenants.id,
         slug: tenants.slug,
         name: tenants.name,
+        createdAt: tenants.createdAt,
       })
       .from(tenants)
       .where(eq(tenants.ownerClerkUserId, userId))
@@ -83,18 +91,33 @@ export async function GET() {
       role: "owner" as const,
     }));
 
-    // If already have an active tenant cookie, just return it
-    if (activeTenantId) {
-      return NextResponse.json({
+    // If cookie exists, ensure it is valid for this user
+    if (cookieTenantId) {
+      const isValid = tenantList.some((t) => t.tenantId === cookieTenantId);
+      if (isValid) {
+        return NextResponse.json({
+          ok: true,
+          activeTenantId: cookieTenantId,
+          tenants: tenantList,
+          needsTenantSelection: false,
+        });
+      }
+
+      // Stale/bad cookie: clear it, then continue as if missing
+      const res = NextResponse.json({
         ok: true,
-        activeTenantId,
+        activeTenantId: null,
         tenants: tenantList,
-        needsTenantSelection: false,
+        needsTenantSelection: tenantList.length !== 1,
+        clearedStaleCookie: true,
       });
+      clearTenantCookies(res);
+      // if exactly 1 tenant, immediately set correct one
+      if (tenantList.length === 1) return setTenantCookies(res, tenantList[0].tenantId);
+      return res;
     }
 
     // No cookie:
-    // - 0 tenants => needs selection, but there is nothing to select
     if (tenantList.length === 0) {
       return NextResponse.json({
         ok: true,
@@ -104,7 +127,6 @@ export async function GET() {
       });
     }
 
-    // - 1 tenant => auto-select and set cookie
     if (tenantList.length === 1) {
       const res = NextResponse.json({
         ok: true,
@@ -116,7 +138,6 @@ export async function GET() {
       return setTenantCookies(res, tenantList[0].tenantId);
     }
 
-    // - multiple tenants => user must choose
     return NextResponse.json({
       ok: true,
       activeTenantId: null,
@@ -141,7 +162,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
-    // Ensure app_user exists (mobility layer)
     await requireAppUserId();
 
     const json = await req.json().catch(() => null);
@@ -162,8 +182,8 @@ export async function POST(req: Request) {
       tenantId && tenantSlug
         ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId))
         : tenantId
-          ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
-          : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
+        ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
+        : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
 
     const t = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
