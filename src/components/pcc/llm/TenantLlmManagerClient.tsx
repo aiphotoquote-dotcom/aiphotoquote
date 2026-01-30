@@ -1,3 +1,4 @@
+// src/components/pcc/llm/TenantLlmManagerClient.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -67,25 +68,13 @@ function numClamp(v: unknown, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
-async function safeJson<T>(res: Response): Promise<T> {
+async function safeJson(res: Response) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 120 chars: ${text.slice(0, 120)}`
-    );
+    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ${text.slice(0, 120)}`);
   }
-  return (await res.json()) as T;
-}
-
-function looksLikeNoTenant(msg: string) {
-  const s = (msg || "").toLowerCase();
-  return (
-    s.includes("no_active_tenant") ||
-    s.includes("select a tenant") ||
-    s.includes("no active tenant") ||
-    s.includes("missing tenant")
-  );
+  return res.json();
 }
 
 export function TenantLlmManagerClient(props: { tenantId: string; industryKey: string | null }) {
@@ -113,70 +102,41 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
-  function buildQs() {
+  async function apiGet(): Promise<ApiGetResp> {
     const qs = new URLSearchParams();
     qs.set("tenantId", tenantId);
-    // IMPORTANT: do not send industryKey="" (some APIs treat empty string as invalid)
     if (industryKey && industryKey.trim()) qs.set("industryKey", industryKey.trim());
-    return qs;
-  }
 
-  async function apiGetOnce(): Promise<ApiGetResp> {
-    const qs = buildQs();
     const res = await fetch(`/api/tenant/llm?${qs.toString()}`, {
       method: "GET",
       cache: "no-store",
       credentials: "include",
+      headers: { "cache-control": "no-cache" },
     });
-    return await safeJson<ApiGetResp>(res);
-  }
 
-  async function apiGetWithOneTenantRetry(): Promise<ApiGetResp> {
-    try {
-      const r1 = await apiGetOnce();
-      if (r1 && "ok" in r1 && !r1.ok && looksLikeNoTenant(r1.message || r1.error || "")) {
-        // Force cookie-backed context hydration once, then retry
-        await fetch("/api/tenant/context", { cache: "no-store", credentials: "include" }).catch(() => {});
-        return await apiGetOnce();
-      }
-      return r1;
-    } catch (e: any) {
-      const m = e?.message ?? String(e);
-      if (looksLikeNoTenant(m)) {
-        await fetch("/api/tenant/context", { cache: "no-store", credentials: "include" }).catch(() => {});
-        return await apiGetOnce();
-      }
-      throw e;
-    }
+    return (await safeJson(res)) as ApiGetResp;
   }
 
   async function apiPost(overrides: TenantOverrides): Promise<ApiPostResp> {
     const res = await fetch("/api/tenant/llm", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      cache: "no-store",
       credentials: "include",
-      body: JSON.stringify({
-        tenantId,
-        // IMPORTANT: don’t send empty string
-        industryKey: industryKey && industryKey.trim() ? industryKey.trim() : null,
-        overrides,
-      }),
+      headers: { "content-type": "application/json", "cache-control": "no-cache" },
+      body: JSON.stringify({ tenantId, industryKey: industryKey && industryKey.trim() ? industryKey.trim() : null, overrides }),
     });
-    return await safeJson<ApiPostResp>(res);
+
+    return (await safeJson(res)) as ApiPostResp;
   }
 
   async function refresh() {
     setMsg(null);
     setLoading(true);
     try {
-      if (!tenantId || !tenantId.trim()) {
-        setMsg({ kind: "err", text: "Select a tenant first." });
-        return;
-      }
+      if (!tenantId || !tenantId.trim()) throw new Error("Missing tenantId prop.");
 
-      const r = await apiGetWithOneTenantRetry();
+      const r = await apiGet();
       if (!("ok" in r) || !r.ok) throw new Error((r as any).message || (r as any).error || "Failed to load.");
-
       setData(r);
 
       const t = (r as any).tenant ?? {};
@@ -192,12 +152,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
       setMsg({ kind: "ok", text: "Loaded tenant LLM settings." });
     } catch (e: any) {
-      // Add useful context to the error so we stop flying blind
-      const m = e?.message ?? String(e);
-      setMsg({
-        kind: "err",
-        text: `${m}\n\nDebug:\n tenantId=${tenantId}\n industryKey=${industryKey ?? "(null)"}`,
-      });
+      setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
       setLoading(false);
     }
@@ -229,11 +184,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       await refresh();
       setMsg({ kind: "ok", text: "Saved tenant overrides." });
     } catch (e: any) {
-      const m = e?.message ?? String(e);
-      setMsg({
-        kind: "err",
-        text: `${m}\n\nDebug:\n tenantId=${tenantId}\n industryKey=${industryKey ?? "(null)"}`,
-      });
+      setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
       setSaving(false);
     }
@@ -280,7 +231,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         {msg ? (
           <div
-            className={`mt-4 rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${
+            className={`mt-4 rounded-xl border px-3 py-2 text-sm ${
               msg.kind === "ok"
                 ? "border-green-200 bg-green-50 text-green-900 dark:border-green-900/40 dark:bg-green-900/20 dark:text-green-100"
                 : "border-red-200 bg-red-50 text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200"
