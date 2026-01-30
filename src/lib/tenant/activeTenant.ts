@@ -16,7 +16,8 @@ export async function readActiveTenantIdFromCookies(): Promise<string | null> {
   const jar = await cookies();
 
   for (const k of ACTIVE_TENANT_COOKIE_KEYS) {
-    const v = jar.get(k)?.value;
+    const raw = jar.get(k)?.value;
+    const v = typeof raw === "string" ? raw.trim() : "";
     if (v) return v;
   }
 
