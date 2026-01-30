@@ -1,5 +1,4 @@
 // src/app/admin/setup/ai-policy/page.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -7,17 +6,6 @@ import TenantLlmBehaviorAdvanced from "@/components/pcc/llm/TenantLlmBehaviorAdv
 
 type AiMode = "assessment_only" | "range" | "fixed";
 type RenderingStyle = "photoreal" | "clean_oem" | "custom";
-
-type TenantRow = {
-  tenantId: string;
-  slug: string;
-  name: string | null;
-  role: "owner" | "admin" | "member";
-};
-
-type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: TenantRow[]; needsTenantSelection?: boolean }
-  | { ok: false; error: string; message?: string };
 
 type PolicyResp =
   | {
@@ -42,40 +30,10 @@ async function safeJson<T>(res: Response): Promise<T> {
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
     throw new Error(
-      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 80 chars: ${text.slice(0, 80)}`
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`
     );
   }
   return (await res.json()) as T;
-}
-
-/**
- * Deterministic tenant activation:
- * - If activeTenantId exists => good
- * - If missing but exactly 1 tenant => POST select it, then hard reload
- * - If multiple => require selection (don't guess)
- */
-async function ensureActiveTenant(): Promise<string> {
-  const res = await fetch("/api/tenant/context", { cache: "no-store" });
-  const ctx = await safeJson<ContextResp>(res);
-  if (!ctx.ok) throw new Error(ctx.message || ctx.error || "Failed to load tenant context");
-
-  if (ctx.activeTenantId) return ctx.activeTenantId;
-
-  const list = Array.isArray(ctx.tenants) ? ctx.tenants : [];
-  if (list.length === 1) {
-    const t0 = list[0];
-    const setRes = await fetch("/api/tenant/context", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tenantId: t0.tenantId }),
-    });
-    const setJson = await safeJson<any>(setRes);
-    if (!setJson?.ok) throw new Error(setJson?.message || setJson?.error || "Failed to set active tenant");
-    window.location.reload(); // ensures all subsequent reads see cookie
-    return t0.tenantId;
-  }
-
-  throw new Error("No active tenant selected. Use the tenant switcher to pick a tenant.");
 }
 
 function Card({
@@ -143,10 +101,10 @@ export default function AiPolicySetupPage() {
     setLoading(true);
 
     try {
-      // ✅ NEW: deterministically ensure tenant is set (no “GET maybe sets cookie” reliance)
-      await ensureActiveTenant();
+      // ✅ Important: ensure cookies are sent/received on iOS Safari
+      await fetch("/api/tenant/context", { cache: "no-store", credentials: "include" });
 
-      const res = await fetch("/api/admin/ai-policy", { cache: "no-store" });
+      const res = await fetch("/api/admin/ai-policy", { cache: "no-store", credentials: "include" });
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to load AI policy");
 
@@ -175,9 +133,6 @@ export default function AiPolicySetupPage() {
     setSaving(true);
 
     try {
-      // ✅ NEW: ensure tenant is set before saving too
-      await ensureActiveTenant();
-
       const payload = {
         ai_mode: aiMode,
         pricing_enabled: pricingEnabled,
@@ -193,6 +148,7 @@ export default function AiPolicySetupPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        credentials: "include", // ✅ critical
       });
 
       const data = await safeJson<PolicyResp>(res);
@@ -268,7 +224,7 @@ export default function AiPolicySetupPage() {
               </div>
             ) : null}
 
-            {/* ✅ Tenant LLM behavior */}
+            {/* Tenant LLM behavior */}
             <TenantLlmBehaviorAdvanced />
 
             {/* AI Mode */}
