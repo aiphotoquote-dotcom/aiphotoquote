@@ -2,21 +2,21 @@
 "use client";
 
 import Link from "next/link";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 
-type MetricsResp =
-  | {
-      ok: true;
-      totalLeads: number;
-      unread: number;
-      stageNew: number;
-      inProgress: number;
-      todayNew: number;
-      yesterdayNew: number;
-      staleUnread: number;
-    }
-  | { ok: false; error: string; message?: string };
+type MetricsOk = {
+  ok: true;
+  totalLeads: number;
+  unread: number;
+  stageNew: number;
+  inProgress: number;
+  todayNew: number;
+  yesterdayNew: number;
+  staleUnread: number;
+};
+
+type MetricsResp = MetricsOk | { ok: false; error: string; message?: string };
 
 type RecentResp =
   | {
@@ -93,26 +93,20 @@ function ClickCard({
   );
 }
 
-function num(v: any, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
+function isFiniteNumber(x: any): x is number {
+  return typeof x === "number" && Number.isFinite(x);
 }
 
-function normalizeMetrics(r: any): MetricsResp {
-  if (!r || typeof r !== "object") return { ok: false, error: "BAD_RESPONSE", message: "Metrics returned invalid JSON." };
-  if (r.ok !== true) return { ok: false, error: r.error || "FETCH_FAILED", message: r.message };
+function validateMetricsPayload(r: any): MetricsOk | null {
+  if (!r || typeof r !== "object") return null;
+  if (r.ok !== true) return null;
 
-  // IMPORTANT: Prevent “blank” render by forcing numbers
-  return {
-    ok: true,
-    totalLeads: num(r.totalLeads),
-    unread: num(r.unread),
-    stageNew: num(r.stageNew),
-    inProgress: num(r.inProgress),
-    todayNew: num(r.todayNew),
-    yesterdayNew: num(r.yesterdayNew),
-    staleUnread: num(r.staleUnread),
-  };
+  const keys = ["totalLeads", "unread", "stageNew", "inProgress", "todayNew", "yesterdayNew", "staleUnread"] as const;
+  for (const k of keys) {
+    if (!isFiniteNumber(r[k])) return null;
+  }
+
+  return r as MetricsOk;
 }
 
 function normalizeRecent(r: any): RecentResp {
@@ -128,21 +122,46 @@ export default function AdminDashboardPage() {
   const [recent, setRecent] = useState<RecentResp | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // last known-good metrics so we never overwrite with junk/empty payloads
+  const lastGoodMetricsRef = useRef<MetricsOk | null>(null);
+
   async function load() {
     setLoading(true);
     try {
+      const bust = Date.now().toString(); // cache-bust helps iOS/Safari weirdness
       const [mRes, rRes] = await Promise.all([
-        fetch("/api/admin/dashboard/metrics", { cache: "no-store" }),
-        fetch("/api/admin/dashboard/recent", { cache: "no-store" }),
+        fetch(`/api/admin/dashboard/metrics?bust=${bust}`, { cache: "no-store" }),
+        fetch(`/api/admin/dashboard/recent?bust=${bust}`, { cache: "no-store" }),
       ]);
 
       const mJson = await mRes.json().catch(() => null);
       const rJson = await rRes.json().catch(() => null);
 
-      setMetrics(normalizeMetrics(mJson));
-      setRecent(normalizeRecent(rJson));
+      // ✅ Metrics: only accept payload if it's complete + numeric.
+      const valid = validateMetricsPayload(mJson);
+      if (valid) {
+        lastGoodMetricsRef.current = valid;
+        setMetrics(valid);
+      } else {
+        // If server gave an error, surface it. If it gave incomplete ok:true, keep last good.
+        if (mJson && typeof mJson === "object" && mJson.ok === false) {
+          setMetrics({ ok: false, error: mJson.error || "FETCH_FAILED", message: mJson.message });
+        } else if (lastGoodMetricsRef.current) {
+          // keep prior good metrics (do not overwrite with zeros)
+          setMetrics(lastGoodMetricsRef.current);
+        } else {
+          setMetrics({ ok: false, error: "BAD_RESPONSE", message: "Metrics response incomplete." });
+        }
+      }
+
+      // Recent list can safely default to empty; still keep normal behavior
+      const rNorm = normalizeRecent(rJson);
+      setRecent(rNorm);
     } catch (e: any) {
-      setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+      // do not clobber good metrics on transient fetch failure
+      if (lastGoodMetricsRef.current) setMetrics(lastGoodMetricsRef.current);
+      else setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
+
       setRecent({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
     } finally {
       setLoading(false);
@@ -155,13 +174,13 @@ export default function AdminDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) reload when route becomes active again (router cache can keep component alive)
+  // 2) reload when route becomes active again
   useEffect(() => {
     if (pathname === "/admin") load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
-  // 3) reload when page is restored from bfcache (Safari/iOS does this a LOT)
+  // 3) reload when page is restored from bfcache
   useEffect(() => {
     const onPageShow = (e: PageTransitionEvent) => {
       if (e.persisted) load();
@@ -204,7 +223,6 @@ export default function AdminDashboardPage() {
           Quick snapshot of inbound leads and where they are in your pipeline.
         </p>
 
-        {/* ACTION ROW */}
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <Link
             href="/admin/quotes"
@@ -347,7 +365,9 @@ export default function AdminDashboardPage() {
                 >
                   <div className="col-span-5">
                     <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{x.customerName}</div>
-                    {x.customerPhone ? <div className="text-xs text-gray-600 dark:text-gray-300">{x.customerPhone}</div> : null}
+                    {x.customerPhone ? (
+                      <div className="text-xs text-gray-600 dark:text-gray-300">{x.customerPhone}</div>
+                    ) : null}
                   </div>
 
                   <div className="col-span-2">{chip(stageLabel(x.stage), stageLabel(x.stage) === "new" ? "blue" : "gray")}</div>
@@ -361,9 +381,7 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
-        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-          Tip: unread rows are lightly highlighted so you can scan faster.
-        </div>
+        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Tip: unread rows are lightly highlighted so you can scan faster.</div>
       </div>
     </div>
   );
