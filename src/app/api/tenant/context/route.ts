@@ -1,3 +1,4 @@
+// src/app/api/tenant/context/route.ts
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -16,6 +17,8 @@ const Body = z.object({
   tenantSlug: z.string().min(3).optional(),
 });
 
+const COOKIE_KEYS = ["activeTenantId", "active_tenant_id", "tenantId", "tenant_id"] as const;
+
 function setTenantCookies(res: NextResponse, tenantId: string) {
   const isProd = process.env.NODE_ENV === "production";
 
@@ -27,38 +30,30 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
     maxAge: 60 * 60 * 24 * 30, // 30 days
   };
 
-  // keep multiple keys for backwards compat
-  res.cookies.set("activeTenantId", tenantId, opts);
-  res.cookies.set("active_tenant_id", tenantId, opts);
-  res.cookies.set("tenantId", tenantId, opts);
-  res.cookies.set("tenant_id", tenantId, opts);
+  // Keep multiple keys for backwards compat (we can prune later)
+  for (const k of COOKIE_KEYS) {
+    res.cookies.set(k, tenantId, opts);
+  }
 
   return res;
 }
 
 function clearTenantCookies(res: NextResponse) {
-  // NextResponse.cookies.delete() expects either:
-  // - delete("name")
-  // - delete({ name: "name", path: "/" })
-  const opts = { path: "/" };
-
-  res.cookies.delete({ name: "activeTenantId", ...opts });
-  res.cookies.delete({ name: "active_tenant_id", ...opts });
-  res.cookies.delete({ name: "tenantId", ...opts });
-  res.cookies.delete({ name: "tenant_id", ...opts });
-
+  // ✅ Most compatible signature across Next versions/types:
+  // NextResponse.cookies.delete(name: string)
+  for (const k of COOKIE_KEYS) {
+    res.cookies.delete(k);
+  }
   return res;
 }
 
-async function readActiveTenantIdFromCookies(): Promise<string | null> {
-  const jar = await cookies();
-  return (
-    jar.get("activeTenantId")?.value ||
-    jar.get("active_tenant_id")?.value ||
-    jar.get("tenantId")?.value ||
-    jar.get("tenant_id")?.value ||
-    null
-  );
+function readActiveTenantIdFromCookies(): string | null {
+  const jar = cookies();
+  for (const k of COOKIE_KEYS) {
+    const v = jar.get(k)?.value;
+    if (v) return v;
+  }
+  return null;
 }
 
 /**
@@ -75,7 +70,7 @@ export async function GET() {
 
     await requireAppUserId();
 
-    const cookieTenantId = await readActiveTenantIdFromCookies();
+    const cookieTenantId = readActiveTenantIdFromCookies();
 
     // (For now) tenants = those owned by this Clerk user.
     const rows = await db
@@ -116,9 +111,12 @@ export async function GET() {
         needsTenantSelection: tenantList.length !== 1,
         clearedStaleCookie: true,
       });
+
       clearTenantCookies(res);
-      // if exactly 1 tenant, immediately set correct one
+
+      // If exactly 1 tenant, immediately set correct one
       if (tenantList.length === 1) return setTenantCookies(res, tenantList[0].tenantId);
+
       return res;
     }
 
