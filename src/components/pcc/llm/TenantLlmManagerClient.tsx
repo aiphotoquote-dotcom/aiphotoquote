@@ -68,13 +68,13 @@ function numClamp(v: unknown, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
-async function safeJson(res: Response) {
+async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ${text.slice(0, 120)}`);
+    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`);
   }
-  return res.json();
+  return (await res.json()) as T;
 }
 
 export function TenantLlmManagerClient(props: { tenantId: string; industryKey: string | null }) {
@@ -86,7 +86,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
   const [data, setData] = useState<ApiGetResp | null>(null);
 
-  // Editable tenant overrides
   const tenant = useMemo<TenantOverrides>(() => {
     if (data && (data as any).ok) return ((data as any).tenant ?? {}) as TenantOverrides;
     return {};
@@ -103,38 +102,32 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
   async function apiGet(): Promise<ApiGetResp> {
-    const qs = new URLSearchParams();
-    qs.set("tenantId", tenantId);
-    if (industryKey && industryKey.trim()) qs.set("industryKey", industryKey.trim());
+    const qs = new URLSearchParams({ tenantId, industryKey: industryKey ?? "" });
 
     const res = await fetch(`/api/tenant/llm?${qs.toString()}`, {
       method: "GET",
       cache: "no-store",
-      credentials: "include",
-      headers: { "cache-control": "no-cache" },
+      credentials: "include", // ✅ critical for iOS/Safari cookie consistency
     });
 
-    return (await safeJson(res)) as ApiGetResp;
+    return safeJson<ApiGetResp>(res);
   }
 
   async function apiPost(overrides: TenantOverrides): Promise<ApiPostResp> {
     const res = await fetch("/api/tenant/llm", {
       method: "POST",
-      cache: "no-store",
-      credentials: "include",
-      headers: { "content-type": "application/json", "cache-control": "no-cache" },
-      body: JSON.stringify({ tenantId, industryKey: industryKey && industryKey.trim() ? industryKey.trim() : null, overrides }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId, industryKey, overrides }),
+      credentials: "include", // ✅ critical
     });
 
-    return (await safeJson(res)) as ApiPostResp;
+    return safeJson<ApiPostResp>(res);
   }
 
   async function refresh() {
     setMsg(null);
     setLoading(true);
     try {
-      if (!tenantId || !tenantId.trim()) throw new Error("Missing tenantId prop.");
-
       const r = await apiGet();
       if (!("ok" in r) || !r.ok) throw new Error((r as any).message || (r as any).error || "Failed to load.");
       setData(r);
