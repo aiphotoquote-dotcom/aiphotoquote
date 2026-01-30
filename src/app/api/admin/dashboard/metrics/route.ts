@@ -83,12 +83,12 @@ export async function GET() {
   }
 
   try {
-    // Assumes quote_logs has: tenant_id, submitted_at, is_read, stage
+    // quote_logs is assumed to have: tenant_id, created_at, is_read, stage
     const r = await db.execute(sql`
       WITH base AS (
         SELECT
           tenant_id,
-          submitted_at,
+          created_at,
           COALESCE(is_read, false) AS is_read,
           COALESCE(stage, 'new') AS stage
         FROM quote_logs
@@ -102,20 +102,20 @@ export async function GET() {
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
-          WHERE submitted_at >= date_trunc('day', now())
-            AND submitted_at <  date_trunc('day', now()) + interval '1 day'
+          WHERE created_at >= date_trunc('day', now())
+            AND created_at <  date_trunc('day', now()) + interval '1 day'
         ), 0) AS "todayNew",
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
-          WHERE submitted_at >= date_trunc('day', now()) - interval '1 day'
-            AND submitted_at <  date_trunc('day', now())
+          WHERE created_at >= date_trunc('day', now()) - interval '1 day'
+            AND created_at <  date_trunc('day', now())
         ), 0) AS "yesterdayNew",
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
           WHERE is_read = false
-            AND submitted_at < now() - interval '24 hours'
+            AND created_at < now() - interval '24 hours'
         ), 0) AS "staleUnread"
     `);
 
