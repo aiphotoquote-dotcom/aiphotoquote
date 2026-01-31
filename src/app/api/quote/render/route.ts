@@ -392,31 +392,56 @@ export async function POST(req: Request) {
     // 8) Generate image (model comes from PCC)
     const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
 
-    // ✅ DEBUG: persist proof (gated)
-    let renderDebug: any = null;
-    if (debugEnabled) {
-      renderDebug = buildRenderDebugPayload({
-        debugId,
-        renderModel,
-        tenantStyleKey,
-        styleText,
-        renderPromptPreamble,
-        renderPromptTemplate,
-        finalPrompt: prompt,
-        serviceType,
-        summary,
-        customerNotes,
-        tenantRenderNotes,
-        images,
-      });
+// ✅ DEBUG: persist proof (gated)
+// We also persist a tiny env snapshot so you can prove Vercel is injecting the var.
+let renderDebug: any = null;
 
-      // Persist to quote_logs.output.render_debug (jsonb_set; no overwrite)
-      try {
-        await setRenderDebug({ db: db as any, quoteLogId, tenantId: tenant.id, debug: renderDebug });
-      } catch {
-        // best effort
-      }
+const debugEnvRaw = String(process.env.PCC_RENDER_DEBUG ?? "").trim();
+// If this is "1" we consider debug enabled
+const debugEnabledRuntime = debugEnvRaw === "1";
+
+if (debugEnabledRuntime) {
+  renderDebug = buildRenderDebugPayload({
+    debugId,
+    renderModel,
+    tenantStyleKey,
+    styleText,
+    renderPromptPreamble,
+    renderPromptTemplate,
+    finalPrompt: prompt,
+    serviceType,
+    summary,
+    customerNotes,
+    tenantRenderNotes,
+    images,
+  });
+
+  // Attach env proof so DB can tell us what runtime saw
+  renderDebug.env = {
+    PCC_RENDER_DEBUG: debugEnvRaw || null,
+    VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
+    VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
+  };
+
+  // 1) Try writing to dedicated columns first (if your schema has them)
+  try {
+    await db.execute(sql`
+      update quote_logs
+      set
+        has_render_debug = true,
+        render_debug = ${JSON.stringify(renderDebug)}::jsonb
+      where id = ${quoteLogId}::uuid
+        and tenant_id = ${tenant.id}::uuid
+    `);
+  } catch {
+    // 2) Fallback to output.render_debug (jsonb_set via helper)
+    try {
+      await setRenderDebug({ db: db as any, quoteLogId, tenantId: tenant.id, debug: renderDebug });
+    } catch {
+      // last resort: swallow (but at this point, the env proof in response will tell us runtime)
     }
+  }
+}
 
     const imgResp: any = await openai.images.generate({
       model: renderModel,
@@ -562,14 +587,18 @@ export async function POST(req: Request) {
       // ignore
     }
 
-    return NextResponse.json({
-      ok: true,
-      quoteLogId,
-      status: "rendered",
-      imageUrl,
-      debugId,
-      ...(debugEnabled ? { render_debug: renderDebug } : {}),
-    });
+  return NextResponse.json({
+  ok: true,
+  quoteLogId,
+  status: "rendered",
+  imageUrl,
+  debugId,
+  debug: {
+    enabled: debugEnabledRuntime,
+    envRaw: debugEnvRaw || null,
+  },
+  ...(debugEnabledRuntime ? { render_debug: renderDebug } : {}),
+});
   } catch (e) {
     const msg = safeErr(e);
 
