@@ -23,10 +23,25 @@ function safeParse(json: string | null): PlatformLlmConfig | null {
   }
 }
 
-async function getBlobUrlIfExists(): Promise<string | null> {
+type BlobPointer = {
+  url: string;
+  // used only to bust CDN / fetch caches
+  versionToken: string;
+};
+
+async function getBlobPointerIfExists(): Promise<BlobPointer | null> {
   try {
-    const meta = await head(BLOB_KEY);
-    return meta?.url ?? null;
+    const meta: any = await head(BLOB_KEY);
+
+    const url = String(meta?.url ?? "").trim();
+    if (!url) return null;
+
+    // Prefer uploadedAt if available; fall back to size; last resort Date.now()
+    const uploadedAt = meta?.uploadedAt ? String(meta.uploadedAt) : "";
+    const size = Number.isFinite(meta?.size) ? String(meta.size) : "";
+    const versionToken = uploadedAt || size || String(Date.now());
+
+    return { url, versionToken };
   } catch {
     return null;
   }
@@ -39,10 +54,21 @@ export async function loadPlatformLlmConfig(): Promise<PlatformLlmConfig> {
   if (envCfg) return envCfg;
 
   // 2) Blob (persistent)
-  const url = await getBlobUrlIfExists();
-  if (url) {
+  const ptr = await getBlobPointerIfExists();
+  if (ptr) {
     try {
-      const res = await fetch(url, { cache: "no-store" });
+      // Cache-bust: ensures fresh bytes even if CDN holds onto the object briefly.
+      const bustUrl = `${ptr.url}${ptr.url.includes("?") ? "&" : "?"}v=${encodeURIComponent(ptr.versionToken)}`;
+
+      const res = await fetch(bustUrl, {
+        cache: "no-store",
+        // Extra belt-and-suspenders for Next fetch caching:
+        // (works in App Router environments)
+        next: { revalidate: 0 },
+      });
+
+      if (!res.ok) throw new Error(`Failed to fetch LLM config: ${res.status}`);
+
       const txt = await res.text();
       const cfg = safeParse(txt);
       if (cfg) return cfg;
@@ -59,18 +85,18 @@ export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<voi
   // Always stamp updatedAt on save (single source of truth)
   const next: PlatformLlmConfig = {
     ...cfg,
-    version: Number.isFinite(cfg?.version) ? cfg.version : 1,
+    version: Number.isFinite((cfg as any)?.version) ? (cfg as any).version : 1,
     updatedAt: nowIso(),
   };
 
   const payload = JSON.stringify(next, null, 2);
 
-  // Overwrite by using same key (Vercel Blob will version internally; URL changes)
+  // Overwrite by using same key
   await put(BLOB_KEY, payload, {
     access: "public",
     contentType: "application/json",
     addRandomSuffix: false,
-    allowOverwrite: true, // ✅ FIX: enables repeated saves to the same blob key
+    allowOverwrite: true,
   });
 }
 
