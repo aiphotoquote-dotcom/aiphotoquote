@@ -1,65 +1,74 @@
 // src/lib/pcc/llm/tenantStore.ts
-
-import { db } from "@/lib/db/client";
 import { sql } from "drizzle-orm";
-import { normalizeTenantOverrides, type TenantLlmOverrides } from "./tenantTypes";
+import { db } from "@/lib/db/client";
 
-// ✅ Re-export for backwards compatibility (so imports from tenantStore keep working)
-export type { TenantLlmOverrides } from "./tenantTypes";
+/**
+ * IMPORTANT:
+ * tenant_llm_overrides schema is:
+ * - tenant_id (uuid) PRIMARY KEY
+ * - models (jsonb)
+ * - prompts (jsonb)
+ * - updated_at (timestamptz)
+ *
+ * There is NO version column.
+ */
 
-function nowIso() {
-  return new Date().toISOString();
+export type TenantLlmOverridesRow = {
+  tenantId: string;
+  models: Record<string, any>;
+  prompts: Record<string, any>;
+  updatedAt: string | null;
+};
+
+function asObj(v: unknown): Record<string, any> {
+  if (v && typeof v === "object" && !Array.isArray(v)) return v as any;
+  return {};
 }
 
-export async function loadTenantLlmOverrides(tenantId: string): Promise<TenantLlmOverrides | null> {
-  const tid = String(tenantId || "").trim();
-  if (!tid) return null;
-
-  const rows = await db.execute(sql`
-    SELECT tenant_id, models, prompts, updated_at
-    FROM tenant_llm_overrides
-    WHERE tenant_id = ${tid}::uuid
-    LIMIT 1
+export async function getTenantLlmOverrides(tenantId: string): Promise<TenantLlmOverridesRow | null> {
+  const rows: any = await db.execute(sql`
+    select
+      tenant_id,
+      coalesce(models, '{}'::jsonb) as models,
+      coalesce(prompts, '{}'::jsonb) as prompts,
+      updated_at
+    from tenant_llm_overrides
+    where tenant_id = ${tenantId}::uuid
+    limit 1
   `);
 
-  const r: any = (rows as any)?.rows?.[0] ?? null;
+  const r = (rows as any)?.[0] ?? (rows as any)?.rows?.[0] ?? null;
   if (!r) return null;
 
-  const out = normalizeTenantOverrides({
-    models: r.models ?? {},
-    prompts: r.prompts ?? {},
-    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : undefined,
-  });
-
-  return out;
+  return {
+    tenantId: String(r.tenant_id),
+    models: asObj(r.models),
+    prompts: asObj(r.prompts),
+    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
+  };
 }
 
-export async function saveTenantLlmOverrides(
-  tenantId: string,
-  overrides: TenantLlmOverrides
-): Promise<TenantLlmOverrides> {
-  const tid = String(tenantId || "").trim();
-  if (!tid) throw new Error("Missing tenantId");
-
-  const normalized = normalizeTenantOverrides(overrides);
-  const models = normalized.models ?? {};
-  const prompts = normalized.prompts ?? {};
-  const updatedAt = nowIso();
+export async function upsertTenantLlmOverrides(args: {
+  tenantId: string;
+  models?: unknown;
+  prompts?: unknown;
+}): Promise<void> {
+  const tenantId = args.tenantId;
+  const models = asObj(args.models);
+  const prompts = asObj(args.prompts);
 
   await db.execute(sql`
-    INSERT INTO tenant_llm_overrides (tenant_id, models, prompts, updated_at)
-    VALUES (
-      ${tid}::uuid,
+    insert into tenant_llm_overrides (tenant_id, models, prompts, updated_at)
+    values (
+      ${tenantId}::uuid,
       ${JSON.stringify(models)}::jsonb,
       ${JSON.stringify(prompts)}::jsonb,
-      ${updatedAt}::timestamptz
+      now()
     )
-    ON CONFLICT (tenant_id)
-    DO UPDATE SET
-      models = EXCLUDED.models,
-      prompts = EXCLUDED.prompts,
-      updated_at = EXCLUDED.updated_at
+    on conflict (tenant_id) do update
+    set
+      models = excluded.models,
+      prompts = excluded.prompts,
+      updated_at = now()
   `);
-
-  return { ...normalized, updatedAt };
 }
