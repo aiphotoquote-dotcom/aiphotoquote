@@ -18,9 +18,12 @@ function isUndefinedColumn(e: any) {
 }
 
 /**
- * Best-effort: persist render debug in the most visible place.
- * 1) Try real columns: has_render_debug + render_debug + debug_* columns
+ * Best-effort: persist render debug.
+ * Priority:
+ * 1) Dedicated columns that already exist in your DB: render_debug + debug_* + final_prompt_prefix
  * 2) Fallback: quote_logs.output.render_debug
+ *
+ * NOTE: We DO NOT reference has_render_debug because your schema does not include it.
  */
 export async function setRenderDebug(args: {
   db: DbLike;
@@ -36,12 +39,11 @@ export async function setRenderDebug(args: {
   const finalPrompt = String(debug?.finalPrompt ?? "");
   const finalPromptPrefix = finalPrompt ? finalPrompt.slice(0, 240) : null;
 
-  // 1) Prefer the dedicated columns (matches your DB query: has_render_debug/render_debug)
+  // 1) Try dedicated columns that exist in your DB
   try {
     await db.execute(sql`
       update quote_logs
       set
-        has_render_debug = true,
         render_debug = ${payload}::jsonb,
         debug_render_model = ${renderModel},
         debug_tenant_style_key = ${tenantStyleKey},
@@ -55,7 +57,7 @@ export async function setRenderDebug(args: {
     }
   }
 
-  // 2) Fallback: store under output.render_debug
+  // 2) Fallback to output.render_debug (portable)
   try {
     await db.execute(sql`
       update quote_logs
