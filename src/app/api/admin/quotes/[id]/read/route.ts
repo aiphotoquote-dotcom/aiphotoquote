@@ -1,56 +1,42 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
 import { and, eq } from "drizzle-orm";
+import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenants } from "@/lib/db/schema";
+import { quoteLogs } from "@/lib/db/schema";
+import { requireTenantRole } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
-
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-
-  return candidates[0] || null;
-}
 
 export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> | { id: string } }
 ) {
+  // Clerk auth (kept for redirect behavior)
   const { userId } = await auth();
-  if (!userId) return NextResponse.redirect(new URL("/sign-in", req.url));
-
-  const p = await ctx.params;
-  const id = String((p as any)?.id ?? "").trim();
-  if (!id) return NextResponse.redirect(new URL("/admin/quotes", req.url));
-
-  const jar = await cookies();
-  let tenantIdMaybe = getCookieTenantId(jar);
-
-  if (!tenantIdMaybe) {
-    const t = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    tenantIdMaybe = t?.id ?? null;
+  if (!userId) {
+    return NextResponse.redirect(new URL("/sign-in", req.url));
   }
 
-  if (!tenantIdMaybe) return NextResponse.redirect(new URL("/admin/quotes", req.url));
-  const tenantId = tenantIdMaybe;
+  // Resolve quote id
+  const p = await ctx.params;
+  const id = String((p as any)?.id ?? "").trim();
+  if (!id) {
+    return NextResponse.redirect(new URL("/admin/quotes", req.url));
+  }
 
-  // Parse desired read state from form POST (preferred)
+  // ✅ Centralized RBAC + active tenant resolution
+  const gate = await requireTenantRole(["owner", "admin", "member"]);
+  if (!gate.ok) {
+    return NextResponse.redirect(new URL("/admin/quotes", req.url));
+  }
+
+  const tenantId = gate.tenantId;
+
+  // Parse desired read state
   let isRead: boolean | null = null;
-
   const contentType = req.headers.get("content-type") || "";
+
   try {
     if (contentType.includes("application/json")) {
       const body = await req.json().catch(() => null);
@@ -62,20 +48,19 @@ export async function POST(
       if (v != null) isRead = String(v) === "1";
     }
   } catch {
-    // ignore
+    // ignore parse errors
   }
 
-  // Default: if someone hits endpoint without payload, mark unread
+  // Default: mark unread if no payload
   if (isRead === null) isRead = false;
 
+  // Update quote read state (tenant-scoped)
   await db
     .update(quoteLogs)
     .set({ isRead } as any)
     .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
-  // Key behavior:
-  // - If user explicitly marks unread, keep them on the page but prevent auto-read by adding stay_unread=1
-  // - If marks read, return to clean URL
+  // Redirect behavior preserved
   const redirectUrl = new URL(`/admin/quotes/${id}`, req.url);
   if (!isRead) redirectUrl.searchParams.set("stay_unread", "1");
 
