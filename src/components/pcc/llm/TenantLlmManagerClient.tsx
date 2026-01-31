@@ -125,6 +125,8 @@ function ModelSelect(props: {
   // - custom text => "__custom__" sentinel (so select stays stable)
   const selectValue = valueIsEmpty ? "" : valueIsKnown ? value : "__custom__";
 
+  // IMPORTANT: inherited label is based on EFFECTIVE value returned by API
+  // so if PCC defaults change, a refresh will update this label.
   const inheritedLabel = `Inherited — ${prettyModelLabel(effectiveValue, options)} (default)`;
 
   return (
@@ -135,15 +137,18 @@ function ModelSelect(props: {
         value={selectValue}
         onChange={(e) => {
           const v = e.target.value;
+
           if (v === "") {
             onChange(""); // inherit
             return;
           }
+
           if (v === "__custom__") {
             // keep current custom text if present, otherwise blank
             onChange(valueIsCustom ? value : "");
             return;
           }
+
           onChange(v);
         }}
         className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
@@ -163,7 +168,7 @@ function ModelSelect(props: {
 
       {help ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{help}</div> : null}
 
-      {(selectValue === "__custom__") ? (
+      {selectValue === "__custom__" ? (
         <input
           value={valueIsCustom ? value : ""}
           onChange={(e) => onChange(e.target.value)}
