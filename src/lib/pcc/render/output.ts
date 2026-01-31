@@ -1,7 +1,12 @@
 // src/lib/pcc/render/output.ts
-import { sql, and, eq } from "drizzle-orm";
-import type { AnyPgDatabase } from "drizzle-orm/pg-core";
-import { quoteLogs } from "@/lib/db/schema";
+import { sql } from "drizzle-orm";
+
+/**
+ * Minimal DB shape we need (your `db` from "@/lib/db/client" already matches this).
+ */
+type DbExec = {
+  execute: (q: any) => Promise<any>;
+};
 
 /**
  * Safely sets a nested key under quote_logs.output using jsonb_set,
@@ -10,7 +15,7 @@ import { quoteLogs } from "@/lib/db/schema";
  * Example path: ["render_debug"] or ["render_email"]
  */
 export async function setQuoteOutputPath(args: {
-  db: AnyPgDatabase;
+  db: DbExec;
   quoteLogId: string;
   tenantId: string;
   path: string[];
@@ -38,7 +43,7 @@ export async function setQuoteOutputPath(args: {
  * Convenience: attach render_debug payload.
  */
 export async function setRenderDebug(args: {
-  db: AnyPgDatabase;
+  db: DbExec;
   quoteLogId: string;
   tenantId: string;
   debug: unknown;
@@ -56,7 +61,7 @@ export async function setRenderDebug(args: {
  * Convenience: attach render_email payload.
  */
 export async function setRenderEmailResult(args: {
-  db: AnyPgDatabase;
+  db: DbExec;
   quoteLogId: string;
   tenantId: string;
   email: unknown;
