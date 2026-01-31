@@ -2,7 +2,6 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import TenantLlmBehaviorAdvanced from "@/components/pcc/llm/TenantLlmBehaviorAdvanced";
 
 type AiMode = "assessment_only" | "range" | "fixed";
 type RenderingStyle = "photoreal" | "clean_oem" | "custom";
@@ -224,8 +223,7 @@ export default function AiPolicySetupPage() {
               </div>
             ) : null}
 
-            {/* Tenant LLM behavior */}
-            <TenantLlmBehaviorAdvanced />
+            
 
             {/* AI Mode */}
             <div className="grid gap-3">
