@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { IMAGE_MODEL_OPTIONS, TEXT_MODEL_OPTIONS } from "@/components/pcc/llm/helpers/modelOptions";
+import { TEXT_MODEL_OPTIONS, IMAGE_MODEL_OPTIONS } from "@/components/pcc/llm/helpers/modelOptions";
 
 type GuardrailsMode = "strict" | "balanced" | "permissive";
 type PiiHandling = "redact" | "allow" | "deny";
@@ -26,7 +26,6 @@ type PlatformLlmConfig = {
 };
 
 type TenantOverrides = {
-  version?: number;
   updatedAt?: string | null;
   models?: { estimatorModel?: string; qaModel?: string; renderModel?: string };
   prompts?: {
@@ -88,10 +87,101 @@ function numClamp(v: unknown, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
-function isKnownOption(value: string, options: Array<{ value: string }>) {
-  const v = String(value || "").trim();
-  if (!v) return true; // blank => inherit
-  return options.some((o) => o.value === v);
+function isInOptions(value: string, options: Array<{ value: string }>) {
+  return options.some((o) => o.value === value);
+}
+
+function prettyModelLabel(value: string, options: Array<{ value: string; label: string }>) {
+  const found = options.find((o) => o.value === value);
+  return found?.label ?? value;
+}
+
+/**
+ * Model select behavior:
+ * - stored override value is either "" (inherit) OR a concrete model id (including custom text)
+ * - UI shows a first row: "Inherited — <effective> (default)" with value ""
+ * - if selected value isn't in options and isn't empty -> treat as custom
+ */
+function ModelSelect(props: {
+  label: string;
+  help?: string;
+  options: Array<{ value: string; label: string }>;
+  value: string; // stored override value ("" means inherit)
+  onChange: (next: string) => void;
+
+  effectiveValue: string; // resolved effective model id
+  showEffectiveLine?: boolean;
+}) {
+  const { label, help, options, value, onChange, effectiveValue, showEffectiveLine } = props;
+
+  // Determine if current value is custom (non-empty but not in option list)
+  const valueIsEmpty = !safeStr(value);
+  const valueIsKnown = !valueIsEmpty && isInOptions(value, options.filter((o) => o.value !== "custom"));
+  const valueIsCustom = !valueIsEmpty && !valueIsKnown;
+
+  // Select value mapping:
+  // - empty => "" (inherit)
+  // - known option => that value
+  // - custom text => "__custom__" sentinel (so select stays stable)
+  const selectValue = valueIsEmpty ? "" : valueIsKnown ? value : "__custom__";
+
+  const inheritedLabel = `Inherited — ${prettyModelLabel(effectiveValue, options)} (default)`;
+
+  return (
+    <div>
+      <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">{label}</label>
+
+      <select
+        value={selectValue}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "") {
+            onChange(""); // inherit
+            return;
+          }
+          if (v === "__custom__") {
+            // keep current custom text if present, otherwise blank
+            onChange(valueIsCustom ? value : "");
+            return;
+          }
+          onChange(v);
+        }}
+        className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+      >
+        <option value="">{inheritedLabel}</option>
+
+        {options
+          .filter((o) => o.value !== "custom")
+          .map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+
+        <option value="__custom__">Custom…</option>
+      </select>
+
+      {help ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{help}</div> : null}
+
+      {(selectValue === "__custom__") ? (
+        <input
+          value={valueIsCustom ? value : ""}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+          placeholder="Enter custom model id…"
+        />
+      ) : null}
+
+      {showEffectiveLine ? (
+        <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+          Effective:{" "}
+          <span className="font-mono text-gray-900 dark:text-gray-100">
+            {safeStr(value) ? safeStr(value) : safeStr(effectiveValue)}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function TenantLlmManagerClient(props: { tenantId: string; industryKey: string | null }) {
@@ -108,13 +198,10 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     return {};
   }, [data]);
 
-  // tenant override state (raw text)
+  // Stored override values ("" means inherit)
   const [estimatorModel, setEstimatorModel] = useState("");
   const [qaModel, setQaModel] = useState("");
-
-  // render image model override (select + optional custom input)
-  const [renderImageModelSelect, setRenderImageModelSelect] = useState<string>(""); // "" => inherit
-  const [renderImageModelCustom, setRenderImageModelCustom] = useState<string>("");
+  const [renderModel, setRenderModel] = useState("");
 
   const [extraSystemPreamble, setExtraSystemPreamble] = useState("");
   const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState("");
@@ -123,7 +210,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
   async function ensureTenantCookie(): Promise<void> {
-    await safeJson<any>(await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" }));
+    await safeJson<any>(
+      await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" })
+    );
   }
 
   async function apiGet(): Promise<ApiGetResp> {
@@ -169,19 +258,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       const t = (r as any).tenant ?? {};
       setEstimatorModel(safeStr(t.models?.estimatorModel, ""));
       setQaModel(safeStr(t.models?.qaModel, ""));
-
-      // render image model: if value matches known list, select it; else "custom" + custom text
-      const rawRender = safeStr(t.models?.renderModel, "");
-      if (!rawRender) {
-        setRenderImageModelSelect("");
-        setRenderImageModelCustom("");
-      } else if (isKnownOption(rawRender, IMAGE_MODEL_OPTIONS)) {
-        setRenderImageModelSelect(rawRender);
-        setRenderImageModelCustom("");
-      } else {
-        setRenderImageModelSelect("custom");
-        setRenderImageModelCustom(rawRender);
-      }
+      setRenderModel(safeStr(t.models?.renderModel, ""));
 
       setExtraSystemPreamble(safeStr(t.prompts?.extraSystemPreamble, ""));
       setQuoteEstimatorSystem(safeStr(t.prompts?.quoteEstimatorSystem, ""));
@@ -200,20 +277,13 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   async function save() {
     setMsg(null);
     setSaving(true);
-
     try {
-      const resolvedRenderModel =
-        renderImageModelSelect === "custom"
-          ? safeStr(renderImageModelCustom, "")
-          : safeStr(renderImageModelSelect, ""); // "" means inherit
-
       const overrides: TenantOverrides = {
-        version: tenant?.version ?? 1,
         updatedAt: tenant?.updatedAt ?? null,
         models: {
           estimatorModel: safeStr(estimatorModel, "") || undefined,
           qaModel: safeStr(qaModel, "") || undefined,
-          renderModel: resolvedRenderModel || undefined,
+          renderModel: safeStr(renderModel, "") || undefined,
         },
         prompts: {
           extraSystemPreamble: String(extraSystemPreamble || "") || undefined,
@@ -253,6 +323,10 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const okData = data && (data as any).ok ? (data as any) : null;
   const effective = okData?.effective ?? null;
   const platform = okData?.platform ?? null;
+
+  const effectiveEstimator = safeStr(effective?.models?.estimatorModel, "gpt-4o-mini");
+  const effectiveQa = safeStr(effective?.models?.qaModel, "gpt-4o-mini");
+  const effectiveRender = safeStr(effective?.models?.renderModel, "gpt-image-1");
 
   return (
     <div className="space-y-6">
@@ -305,70 +379,36 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </p>
 
           <div className="mt-4 space-y-4">
-            <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Estimator model override</label>
-              <input
-                value={estimatorModel}
-                onChange={(e) => setEstimatorModel(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="(inherit)"
-              />
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Common options: {TEXT_MODEL_OPTIONS.filter((o) => o.value !== "custom").map((o) => o.value).join(", ")}
-              </div>
-            </div>
+            <ModelSelect
+              label="Estimator model override"
+              options={TEXT_MODEL_OPTIONS}
+              value={estimatorModel}
+              onChange={setEstimatorModel}
+              effectiveValue={effectiveEstimator}
+              showEffectiveLine={false}
+              help={`Common options: ${TEXT_MODEL_OPTIONS.filter((o) => o.value !== "custom")
+                .map((o) => o.value)
+                .join(", ")}`}
+            />
 
-            <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A model override</label>
-              <input
-                value={qaModel}
-                onChange={(e) => setQaModel(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="(inherit)"
-              />
-            </div>
+            <ModelSelect
+              label="Q&A model override"
+              options={TEXT_MODEL_OPTIONS}
+              value={qaModel}
+              onChange={setQaModel}
+              effectiveValue={effectiveQa}
+              showEffectiveLine={false}
+            />
 
-            <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render image model override</label>
-              <select
-                value={renderImageModelSelect}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setRenderImageModelSelect(v);
-                  if (v !== "custom") setRenderImageModelCustom("");
-                }}
-                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                <option value="">(inherit)</option>
-                {IMAGE_MODEL_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-
-              {renderImageModelSelect === "custom" ? (
-                <input
-                  value={renderImageModelCustom}
-                  onChange={(e) => setRenderImageModelCustom(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  placeholder="Enter custom image model id…"
-                />
-              ) : null}
-
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                This controls what <span className="font-mono">/api/quote/render</span> uses for image generation.
-              </div>
-
-              {effective ? (
-                <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-                  Effective render model:{" "}
-                  <span className="font-mono text-gray-900 dark:text-gray-100">
-                    {effective.models?.renderModel ?? ""}
-                  </span>
-                </div>
-              ) : null}
-            </div>
+            <ModelSelect
+              label="Render image model override"
+              options={IMAGE_MODEL_OPTIONS}
+              value={renderModel}
+              onChange={setRenderModel}
+              effectiveValue={effectiveRender}
+              showEffectiveLine={true}
+              help="This controls what /api/quote/render uses for image generation."
+            />
 
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -398,7 +438,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Mode</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">{platform?.guardrails?.mode ?? "balanced"}</span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">
+                {platform?.guardrails?.mode ?? "balanced"}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">PII handling</span>
@@ -424,7 +466,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Extra system preamble override
+            </label>
             <textarea
               value={extraSystemPreamble}
               onChange={(e) => setExtraSystemPreamble(e.target.value)}
@@ -434,7 +478,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Quote estimator system override
+            </label>
             <textarea
               value={quoteEstimatorSystem}
               onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
@@ -444,7 +490,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A generator system override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Q&A generator system override
+            </label>
             <textarea
               value={qaQuestionGeneratorSystem}
               onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
@@ -459,7 +507,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective preview</div>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div>
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Effective estimator system</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
+                  Effective estimator system
+                </div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {effective.prompts?.quoteEstimatorSystem ?? ""}
                 </pre>
