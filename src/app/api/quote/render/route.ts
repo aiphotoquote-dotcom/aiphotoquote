@@ -14,6 +14,9 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteCustomer";
 import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
 
+// ✅ NEW: PCC config (render prompt template + style presets live here)
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+
 export const runtime = "nodejs";
 
 const Req = z.object({
@@ -79,6 +82,39 @@ function getBaseUrl(req: Request) {
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
 
   return "";
+}
+
+function joinDedupeStrings(...lists: Array<Array<string> | undefined | null>) {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const arr of lists) {
+    if (!Array.isArray(arr)) continue;
+    for (const raw of arr) {
+      const s = String(raw ?? "").trim();
+      if (!s) continue;
+      const key = s.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+function fillTemplate(template: string, vars: Record<string, string>) {
+  let t = String(template ?? "");
+  for (const [k, v] of Object.entries(vars)) {
+    t = t.split(`{${k}}`).join(v ?? "");
+  }
+  // remove repeated blank lines
+  t = t
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
+    .join("\n")
+    .trim();
+
+  return t;
 }
 
 export async function POST(req: Request) {
@@ -185,7 +221,7 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // Tenant must allow rendering too (separate from "aiRenderingEnabled" used for opt-in)
+    // Tenant must allow rendering too
     if (settings?.renderingEnabled === false) {
       await db
         .update(quoteLogs)
@@ -198,16 +234,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Optional per-tenant/per-platform daily cap (no schema change; soft enforcement)
+    // Optional per-tenant/per-platform daily cap (soft enforcement)
     const tenantCap = Number(settings?.renderingMaxPerDay ?? 0) || 0;
     const platformCap = Number(platform.maxDailyPerTenant ?? 0) || 0;
     const effectiveCap =
       tenantCap > 0 && platformCap > 0 ? Math.min(tenantCap, platformCap) : tenantCap > 0 ? tenantCap : platformCap;
 
     if (effectiveCap > 0) {
-      // count rendered today for this tenant
       const day = new Date();
       day.setHours(0, 0, 0, 0);
+
       const rows: any[] = await db.execute(sql`
         select count(*)::int as n
         from quote_logs
@@ -223,10 +259,7 @@ export async function POST(req: Request) {
           .set({ renderStatus: "failed", renderError: `Render daily cap reached (${effectiveCap}).` })
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-        return NextResponse.json(
-          { ok: false, error: "RENDER_LIMIT", message: "Daily render limit reached.", debugId },
-          { status: 429 }
-        );
+        return NextResponse.json({ ok: false, error: "RENDER_LIMIT", message: "Daily render limit reached.", debugId }, { status: 429 });
       }
     }
 
@@ -271,18 +304,38 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey });
 
-    // 6) Build prompt
+    // ✅ 6) Load PCC config (render prompt + presets + model)
+    const pcc = await loadPlatformLlmConfig();
+
+    // 7) Build prompt inputs
     const outAny: any = q.output ?? {};
     const summary = typeof outAny?.summary === "string" ? outAny.summary : "";
     const inputAny: any = q.input ?? {};
     const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
     const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
 
-    const style = safeTrim(settings?.renderingStyle) || "realistic, clean lighting, product photography feel";
+    // Tenant-controlled selector + notes
+    const tenantStyleKey = safeTrim(settings?.renderingStyle) || "photoreal";
     const tenantRenderNotes = safeTrim(settings?.renderingNotes) || "";
 
-    const denylist = Array.isArray(platform.denylist) ? platform.denylist : [];
-    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes].filter(Boolean).join("\n");
+    // PCC-controlled presets (text)
+    const presets = pcc?.prompts?.renderStylePresets ?? ({} as any);
+    const presetText =
+      tenantStyleKey === "clean_oem"
+        ? safeTrim(presets.clean_oem)
+        : tenantStyleKey === "custom"
+        ? safeTrim(presets.custom)
+        : safeTrim(presets.photoreal);
+
+    // final style text fallback (should never be empty)
+    const styleText =
+      presetText ||
+      "photorealistic, natural colors, clean lighting, product photography look, high detail";
+
+    // Denylist = env/platform denylist + PCC blockedTopics (dedupe)
+    const denylist = joinDedupeStrings(platform.denylist, pcc?.guardrails?.blockedTopics);
+
+    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes, styleText].filter(Boolean).join("\n");
     if (denylist.length && containsDenylistedText(combinedTextForScan, denylist)) {
       await db
         .update(quoteLogs)
@@ -298,26 +351,46 @@ export async function POST(req: Request) {
       );
     }
 
-    const prompt = [
-      platform.extraPromptPreamble ? platform.extraPromptPreamble : "",
-      "Generate a realistic 'after' concept rendering based on the customer's photos.",
-      "Do NOT add text or watermarks.",
-      `Style: ${style}`,
-      serviceType ? `Service type: ${serviceType}` : "",
-      summary ? `Estimate summary context: ${summary}` : "",
-      tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    // PCC-owned render preamble + template (fallback to env/platform defaults)
+    const renderPromptPreamble =
+      safeTrim(pcc?.prompts?.renderPromptPreamble) ||
+      safeTrim(platform.extraPromptPreamble) ||
+      "";
+
+    const renderPromptTemplate =
+      safeTrim(pcc?.prompts?.renderPromptTemplate) ||
+      [
+        "{renderPromptPreamble}",
+        "Generate a realistic 'after' concept rendering based on the customer's photos.",
+        "Do NOT add text or watermarks.",
+        "Style: {style}",
+        "{serviceTypeLine}",
+        "{summaryLine}",
+        "{customerNotesLine}",
+        "{tenantRenderNotesLine}",
+      ].join("\n");
+
+    const prompt = fillTemplate(renderPromptTemplate, {
+      renderPromptPreamble,
+
+      style: styleText,
+
+      serviceTypeLine: serviceType ? `Service type: ${serviceType}` : "",
+      summaryLine: summary ? `Estimate summary context: ${summary}` : "",
+      customerNotesLine: customerNotes ? `Customer notes: ${customerNotes}` : "",
+      tenantRenderNotesLine: tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "",
+    });
 
     await db
       .update(quoteLogs)
       .set({ renderPrompt: prompt })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    // 7) Generate image
+    // 8) Generate image (model comes from PCC)
+    const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
+
     const imgResp: any = await openai.images.generate({
-      model: "gpt-image-1",
+      model: renderModel,
       prompt,
       size: "1024x1024",
     });
@@ -327,13 +400,13 @@ export async function POST(req: Request) {
 
     const bytes = Buffer.from(b64, "base64");
 
-    // 8) Upload to Vercel Blob
+    // 9) Upload to Vercel Blob
     const key = `renders/${tenantSlug}/${quoteLogId}-${Date.now()}.png`;
     const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
     const imageUrl = blob?.url;
     if (!imageUrl) throw new Error("Blob upload returned no url.");
 
-    // 9) Save to DB + mark rendered
+    // 10) Save to DB + mark rendered
     await db
       .update(quoteLogs)
       .set({
@@ -344,7 +417,7 @@ export async function POST(req: Request) {
       })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    // 10) Send render-complete emails (best-effort)
+    // 11) Send render-complete emails (best-effort)
     try {
       const cfg = await getTenantEmailConfig(tenant.id);
 

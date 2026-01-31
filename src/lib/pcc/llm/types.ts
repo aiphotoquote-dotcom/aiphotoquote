@@ -24,6 +24,21 @@ export type PlatformLlmConfig = {
 
     // Optional extra preamble prepended to BOTH system prompts
     extraSystemPreamble?: string;
+
+    // ✅ NEW: used by /api/quote/render
+    renderPromptPreamble?: string;
+
+    // ✅ NEW: template used by /api/quote/render
+    // Supports placeholders:
+    // {renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}
+    renderPromptTemplate?: string;
+
+    // ✅ NEW: PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
+    renderStylePresets?: {
+      photoreal?: string;
+      clean_oem?: string;
+      custom?: string;
+    };
   };
 
   guardrails: {
@@ -78,19 +93,37 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "Do not invent brand/model/year—ask questions instead.",
         "Return ONLY valid JSON matching the provided schema.",
       ].join("\n"),
+
+      // ✅ NEW defaults for render prompting
+      renderPromptPreamble: [
+        "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
+        "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
+        "No nudity, no explicit content, no weapons, no illegal activity.",
+      ].join("\n"),
+
+      renderStylePresets: {
+        photoreal: "photorealistic, natural colors, clean lighting, product photography look, high detail",
+        clean_oem:
+          "clean OEM refresh, factory-correct look, subtle improvements, accurate seams, realistic materials, neutral lighting",
+        custom:
+          "custom show-style finish, premium materials, elevated stitching detail, tasteful upgrades, studio lighting, high detail",
+      },
+
+      renderPromptTemplate: [
+        "{renderPromptPreamble}",
+        "Generate a realistic 'after' concept rendering based on the customer's photos.",
+        "Do NOT add text or watermarks.",
+        "Style: {style}",
+        "{serviceTypeLine}",
+        "{summaryLine}",
+        "{customerNotesLine}",
+        "{tenantRenderNotesLine}",
+      ].join("\n"),
     },
     guardrails: {
       mode: "balanced",
       piiHandling: "redact",
-      blockedTopics: [
-        "credit card",
-        "social security",
-        "ssn",
-        "password",
-        "explosive",
-        "bomb",
-        "weapon",
-      ],
+      blockedTopics: ["credit card", "social security", "ssn", "password", "explosive", "bomb", "weapon"],
       maxQaQuestions: 3,
       maxOutputTokens: 1200,
     },

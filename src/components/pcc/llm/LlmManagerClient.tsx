@@ -6,6 +6,8 @@ import React, { useMemo, useState } from "react";
 type GuardrailsMode = "strict" | "balanced" | "permissive";
 type PiiHandling = "redact" | "allow" | "deny";
 
+type RenderStyleKey = "photoreal" | "clean_oem" | "custom";
+
 export type PlatformLlmConfig = {
   version?: number;
   updatedAt?: string | null;
@@ -18,6 +20,17 @@ export type PlatformLlmConfig = {
     quoteEstimatorSystem?: string;
     qaQuestionGeneratorSystem?: string;
     extraSystemPreamble?: string;
+
+    // ✅ Render prompt controls (PCC)
+    renderPromptPreamble?: string;
+    // {renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}
+    renderPromptTemplate?: string;
+    renderStylePresets?: {
+      photoreal?: string;
+      clean_oem?: string;
+      custom?: string;
+      [k: string]: any;
+    };
   };
   guardrails?: {
     mode?: GuardrailsMode;
@@ -93,6 +106,33 @@ function promptPreview(s: string, max = 220) {
   return t.slice(0, max) + "…";
 }
 
+function defaultRenderPromptPreamble() {
+  return [
+    "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
+    "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
+    "No nudity, no explicit content, no weapons, no illegal activity.",
+  ].join("\n");
+}
+
+function defaultRenderPromptTemplate() {
+  return [
+    "{renderPromptPreamble}",
+    "Generate a realistic 'after' concept rendering based on the customer's photos.",
+    "Do NOT add text or watermarks.",
+    "Style: {style}",
+    "{serviceTypeLine}",
+    "{summaryLine}",
+    "{customerNotesLine}",
+    "{tenantRenderNotesLine}",
+  ].join("\n");
+}
+
+function defaultStylePreset(key: RenderStyleKey) {
+  if (key === "clean_oem") return "clean OEM refresh, factory-correct look, neutral lighting, product photo feel";
+  if (key === "custom") return "custom show-style upgrade, premium materials, dramatic but tasteful lighting";
+  return "photorealistic, clean lighting, product photography feel";
+}
+
 export function LlmManagerClient({
   initialConfig,
   effective,
@@ -110,6 +150,8 @@ export function LlmManagerClient({
     const prompts = cfg?.prompts ?? {};
     const guardrails = cfg?.guardrails ?? {};
 
+    const presets = (prompts as any)?.renderStylePresets ?? {};
+
     return {
       estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
       qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
@@ -118,6 +160,13 @@ export function LlmManagerClient({
       quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
       qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
       extraSystemPreamble: safeStr(prompts.extraSystemPreamble, ""),
+
+      // ✅ Render prompt controls (PCC)
+      renderPromptPreamble: safeStr((prompts as any)?.renderPromptPreamble, ""),
+      renderPromptTemplate: safeStr((prompts as any)?.renderPromptTemplate, ""),
+      renderStylePhotoreal: safeStr(presets?.photoreal, ""),
+      renderStyleCleanOem: safeStr(presets?.clean_oem, ""),
+      renderStyleCustom: safeStr(presets?.custom, ""),
 
       mode: (safeStr(guardrails.mode, "balanced") as GuardrailsMode) || "balanced",
       piiHandling: (safeStr(guardrails.piiHandling, "redact") as PiiHandling) || "redact",
@@ -135,6 +184,13 @@ export function LlmManagerClient({
   const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(form.quoteEstimatorSystem);
   const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(form.qaQuestionGeneratorSystem);
   const [extraSystemPreamble, setExtraSystemPreamble] = useState(form.extraSystemPreamble);
+
+  // ✅ Render prompt controls (PCC)
+  const [renderPromptPreamble, setRenderPromptPreamble] = useState(form.renderPromptPreamble);
+  const [renderPromptTemplate, setRenderPromptTemplate] = useState(form.renderPromptTemplate);
+  const [renderStylePhotoreal, setRenderStylePhotoreal] = useState(form.renderStylePhotoreal);
+  const [renderStyleCleanOem, setRenderStyleCleanOem] = useState(form.renderStyleCleanOem);
+  const [renderStyleCustom, setRenderStyleCustom] = useState(form.renderStyleCustom);
 
   const [mode, setMode] = useState<GuardrailsMode>(form.mode);
   const [piiHandling, setPiiHandling] = useState<PiiHandling>(form.piiHandling);
@@ -155,6 +211,7 @@ export function LlmManagerClient({
       const m = c.models ?? {};
       const p = c.prompts ?? {};
       const g = c.guardrails ?? {};
+      const presets = (p as any)?.renderStylePresets ?? {};
 
       setEstimatorModel(safeStr(m.estimatorModel, "gpt-4o-mini"));
       setQaModel(safeStr(m.qaModel, "gpt-4o-mini"));
@@ -163,6 +220,13 @@ export function LlmManagerClient({
       setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
       setQaQuestionGeneratorSystem(safeStr(p.qaQuestionGeneratorSystem, ""));
       setExtraSystemPreamble(safeStr(p.extraSystemPreamble, ""));
+
+      // ✅ Render prompt controls (PCC)
+      setRenderPromptPreamble(safeStr((p as any)?.renderPromptPreamble, ""));
+      setRenderPromptTemplate(safeStr((p as any)?.renderPromptTemplate, ""));
+      setRenderStylePhotoreal(safeStr(presets?.photoreal, ""));
+      setRenderStyleCleanOem(safeStr(presets?.clean_oem, ""));
+      setRenderStyleCustom(safeStr(presets?.custom, ""));
 
       setMode((safeStr(g.mode, "balanced") as GuardrailsMode) || "balanced");
       setPiiHandling((safeStr(g.piiHandling, "redact") as PiiHandling) || "redact");
@@ -192,6 +256,15 @@ export function LlmManagerClient({
           extraSystemPreamble: String(extraSystemPreamble ?? ""),
           quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
           qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
+
+          // ✅ Render prompt controls (PCC)
+          renderPromptPreamble: String(renderPromptPreamble ?? ""),
+          renderPromptTemplate: String(renderPromptTemplate ?? ""),
+          renderStylePresets: {
+            photoreal: String(renderStylePhotoreal ?? ""),
+            clean_oem: String(renderStyleCleanOem ?? ""),
+            custom: String(renderStyleCustom ?? ""),
+          },
         },
         guardrails: {
           mode,
@@ -237,20 +310,36 @@ export function LlmManagerClient({
             <div className="rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-800">
               <div className="font-semibold text-gray-900 dark:text-gray-100">Models</div>
               <div className="mt-2 space-y-1 text-gray-700 dark:text-gray-200">
-                <div>Estimator: <span className="font-mono">{effective.models.estimatorModel}</span></div>
-                <div>Q&amp;A: <span className="font-mono">{effective.models.qaModel}</span></div>
-                <div>Render prompt: <span className="font-mono">{effective.models.renderModel}</span></div>
+                <div>
+                  Estimator: <span className="font-mono">{effective.models.estimatorModel}</span>
+                </div>
+                <div>
+                  Q&amp;A: <span className="font-mono">{effective.models.qaModel}</span>
+                </div>
+                <div>
+                  Render prompt: <span className="font-mono">{effective.models.renderModel}</span>
+                </div>
               </div>
             </div>
 
             <div className="rounded-xl border border-gray-200 p-4 text-sm dark:border-gray-800">
               <div className="font-semibold text-gray-900 dark:text-gray-100">Guardrails</div>
               <div className="mt-2 space-y-1 text-gray-700 dark:text-gray-200">
-                <div>Mode: <span className="font-mono">{effective.guardrails.mode}</span></div>
-                <div>PII: <span className="font-mono">{effective.guardrails.piiHandling}</span></div>
-                <div>Max Q&amp;A: <span className="font-mono">{effective.guardrails.maxQaQuestions}</span></div>
-                <div>Max tokens: <span className="font-mono">{effective.guardrails.maxOutputTokens}</span></div>
-                <div>Blocked topics: <span className="font-mono">{effective.guardrails.blockedTopics.length}</span></div>
+                <div>
+                  Mode: <span className="font-mono">{effective.guardrails.mode}</span>
+                </div>
+                <div>
+                  PII: <span className="font-mono">{effective.guardrails.piiHandling}</span>
+                </div>
+                <div>
+                  Max Q&amp;A: <span className="font-mono">{effective.guardrails.maxQaQuestions}</span>
+                </div>
+                <div>
+                  Max tokens: <span className="font-mono">{effective.guardrails.maxOutputTokens}</span>
+                </div>
+                <div>
+                  Blocked topics: <span className="font-mono">{effective.guardrails.blockedTopics.length}</span>
+                </div>
               </div>
             </div>
 
@@ -322,8 +411,7 @@ export function LlmManagerClient({
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Models</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Used by the quote pipeline + Q&amp;A. (Rendering uses image generation, but we store a model here for prompt
-            synthesis later.)
+            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render.
           </p>
 
           <div className="mt-4 space-y-4">
@@ -348,15 +436,15 @@ export function LlmManagerClient({
             </div>
 
             <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render prompt model</label>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render model</label>
               <input
                 value={renderModel}
                 onChange={(e) => setRenderModel(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="gpt-4o-mini"
+                placeholder="gpt-image-1"
               />
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                This doesn’t change image generation. We’ll use this for text prompt synthesis later.
+                This is what /api/quote/render uses for image generation.
               </div>
             </div>
           </div>
@@ -439,9 +527,7 @@ export function LlmManagerClient({
 
       <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Prompt sets</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-          System prompts. Keep them tight and deterministic.
-        </p>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">System prompts. Keep them tight and deterministic.</p>
 
         <div className="mt-4 space-y-4">
           <div>
@@ -473,6 +559,130 @@ export function LlmManagerClient({
                 className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                 placeholder="System prompt used to generate clarifying questions…"
               />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ✅ NEW: Render Prompt Controls */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Rendering prompts</h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          Controls used by <span className="font-mono">/api/quote/render</span>. Tenant chooses style key in AI Policy
+          (photoreal / clean_oem / custom) and we map that key to these presets.
+        </p>
+
+        <div className="mt-4 space-y-6">
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render prompt preamble</label>
+              <button
+                type="button"
+                onClick={() => setRenderPromptPreamble(defaultRenderPromptPreamble())}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Reset default
+              </button>
+            </div>
+            <textarea
+              value={renderPromptPreamble}
+              onChange={(e) => setRenderPromptPreamble(e.target.value)}
+              className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              placeholder={defaultRenderPromptPreamble()}
+            />
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Prepended to the final render prompt. Keep it safety-focused and “no text/watermark”.
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render prompt template</label>
+              <button
+                type="button"
+                onClick={() => setRenderPromptTemplate(defaultRenderPromptTemplate())}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Reset default
+              </button>
+            </div>
+            <textarea
+              value={renderPromptTemplate}
+              onChange={(e) => setRenderPromptTemplate(e.target.value)}
+              className="mt-1 h-56 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              placeholder={defaultRenderPromptTemplate()}
+            />
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 space-y-1">
+              <div className="font-semibold">Available tokens</div>
+              <div className="font-mono">
+                {"{renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}"}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Style presets</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              These map tenant style keys to a style string injected into the prompt as <span className="font-mono">{"{style}"}</span>.
+            </div>
+
+            <div className="mt-4 grid gap-6 lg:grid-cols-3">
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">photoreal</label>
+                  <button
+                    type="button"
+                    onClick={() => setRenderStylePhotoreal(defaultStylePreset("photoreal"))}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  >
+                    Default
+                  </button>
+                </div>
+                <textarea
+                  value={renderStylePhotoreal}
+                  onChange={(e) => setRenderStylePhotoreal(e.target.value)}
+                  className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder={defaultStylePreset("photoreal")}
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">clean_oem</label>
+                  <button
+                    type="button"
+                    onClick={() => setRenderStyleCleanOem(defaultStylePreset("clean_oem"))}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  >
+                    Default
+                  </button>
+                </div>
+                <textarea
+                  value={renderStyleCleanOem}
+                  onChange={(e) => setRenderStyleCleanOem(e.target.value)}
+                  className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder={defaultStylePreset("clean_oem")}
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">custom</label>
+                  <button
+                    type="button"
+                    onClick={() => setRenderStyleCustom(defaultStylePreset("custom"))}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  >
+                    Default
+                  </button>
+                </div>
+                <textarea
+                  value={renderStyleCustom}
+                  onChange={(e) => setRenderStyleCustom(e.target.value)}
+                  className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder={defaultStylePreset("custom")}
+                />
+              </div>
             </div>
           </div>
         </div>

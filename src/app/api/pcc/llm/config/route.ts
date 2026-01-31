@@ -1,3 +1,4 @@
+// src/app/api/pcc/llm/config/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requirePlatformRole } from "@/lib/rbac/guards";
@@ -26,11 +27,26 @@ const ModelsSchema = z
   .partial()
   .optional();
 
+const RenderStylePresetsSchema = z
+  .object({
+    photoreal: z.string().optional(),
+    clean_oem: z.string().optional(),
+    custom: z.string().optional(),
+  })
+  .partial()
+  .optional();
+
 // Accept BOTH `prompts` and legacy `promptSets`
 const PromptsSchema = z
   .object({
     quoteEstimatorSystem: z.string().optional(),
     qaQuestionGeneratorSystem: z.string().optional(),
+    extraSystemPreamble: z.string().optional(),
+
+    // ✅ NEW: used by /api/quote/render
+    renderPromptPreamble: z.string().optional(),
+    renderPromptTemplate: z.string().optional(),
+    renderStylePresets: RenderStylePresetsSchema,
   })
   .partial()
   .optional();
@@ -69,15 +85,20 @@ function normalizeConfig(input: any): PlatformLlmConfig {
     : 900;
 
   const modeRaw = String((guardrails as any).mode ?? "balanced");
-  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive"
-    ? modeRaw
-    : "balanced") as any;
+  const mode = (modeRaw === "strict" || modeRaw === "balanced" || modeRaw === "permissive" ? modeRaw : "balanced") as any;
 
   const piiRaw = String((guardrails as any).piiHandling ?? "redact");
   const piiHandling = (piiRaw === "redact" || piiRaw === "allow" || piiRaw === "deny" ? piiRaw : "redact") as any;
 
   // ensure we never return null for updatedAt
   const updatedAt = typeof parsed.updatedAt === "string" && parsed.updatedAt.trim() ? parsed.updatedAt : undefined;
+
+  const renderPresetsIn = (prompts.renderStylePresets ?? {}) as any;
+  const renderStylePresets = {
+    photoreal: String(renderPresetsIn.photoreal ?? "").trim() || undefined,
+    clean_oem: String(renderPresetsIn.clean_oem ?? "").trim() || undefined,
+    custom: String(renderPresetsIn.custom ?? "").trim() || undefined,
+  };
 
   return {
     version: parsed.version ?? 1,
@@ -86,14 +107,20 @@ function normalizeConfig(input: any): PlatformLlmConfig {
     models: {
       estimatorModel: String(models.estimatorModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
       qaModel: String(models.qaModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
-      renderModel: String(models.renderModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
+      renderModel: String(models.renderModel ?? "gpt-image-1").trim() || "gpt-image-1",
     },
 
-    // Your type uses `prompts`. Keep that shape.
+    // Keep shape aligned with PlatformLlmConfig typing
     prompts: {
       quoteEstimatorSystem: String(prompts.quoteEstimatorSystem ?? "").trim(),
       qaQuestionGeneratorSystem: String(prompts.qaQuestionGeneratorSystem ?? "").trim(),
-    } as any,
+      extraSystemPreamble: String(prompts.extraSystemPreamble ?? "").trim() || undefined,
+
+      // ✅ NEW
+      renderPromptPreamble: String(prompts.renderPromptPreamble ?? "").trim() || undefined,
+      renderPromptTemplate: String(prompts.renderPromptTemplate ?? "").trim() || undefined,
+      renderStylePresets,
+    },
 
     guardrails: {
       mode,
@@ -101,7 +128,7 @@ function normalizeConfig(input: any): PlatformLlmConfig {
       blockedTopics,
       maxQaQuestions,
       maxOutputTokens,
-    } as any,
+    },
   } as PlatformLlmConfig;
 }
 
