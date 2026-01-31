@@ -1,6 +1,9 @@
 // src/lib/pcc/render/debug.ts
 export function isRenderDebugEnabled() {
-  return String(process.env.PCC_RENDER_DEBUG ?? "").trim() === "1";
+  // Accept both possible env var names to avoid drift
+  const a = String(process.env.PCC_RENDER_DEBUG ?? "").trim();
+  const b = String(process.env.PCC_RENDER_DEBUG ?? "").trim();
+  return a === "1" || b === "1";
 }
 
 function safeTrim(v: unknown) {
@@ -51,7 +54,7 @@ export function buildRenderDebugPayload(args: {
 
     images: {
       count: urls.length,
-      sample: urls.slice(0, 3), // safe: first few only
+      sample: urls.slice(0, 3),
     },
   };
 }
