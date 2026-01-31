@@ -549,12 +549,12 @@ export async function POST(req: Request) {
 
       // ✅ Persist into output.render_email WITHOUT overwriting output (jsonb_set)
       try {
-        await setRenderEmailResult({
-          db: db as any,
-          quoteLogId,
-          tenantId: tenant.id,
-          email: renderEmailResult,
-        });
+       await setRenderEmailResult({
+  db: db as any,
+  quoteLogId,
+  tenantId: tenant.id,
+  emailResult: renderEmailResult,
+});
       } catch {
         // ignore
       }
