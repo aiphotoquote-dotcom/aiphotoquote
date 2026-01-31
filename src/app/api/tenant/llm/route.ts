@@ -2,17 +2,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { requireAdmin } from "@/lib/auth/requireAdmin";
+import { requirePlatformRole } from "@/lib/rbac/guards";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
-import { loadTenantIndustryConfig } from "@/lib/pcc/llm/tenantTypes"; // if you already had this elsewhere, keep it consistent
 
 export const runtime = "nodejs";
 
 const GetQuery = z.object({
   tenantId: z.string().uuid(),
+  // keep for future layering, but we won't try to load industry config (it doesn't exist in repo)
   industryKey: z.string().optional(),
 });
 
@@ -22,9 +22,15 @@ const PostBody = z.object({
   overrides: z.any(),
 });
 
+function safeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
+  return msg.slice(0, 2000);
+}
+
 export async function GET(req: Request) {
   try {
-    await requireAdmin();
+    // PCC-only endpoint (platform admins/support)
+    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
     const url = new URL(req.url);
     const parsed = GetQuery.safeParse({
@@ -39,47 +45,53 @@ export async function GET(req: Request) {
       );
     }
 
-    const { tenantId, industryKey } = parsed.data;
+    const { tenantId } = parsed.data;
 
     const platform = await loadPlatformLlmConfig();
-    const industry = industryKey ? await loadTenantIndustryConfig(industryKey) : null;
+
+    // ✅ No industry loader exists in this repo yet — return empty object for now.
+    const industry: Partial<typeof platform> = {};
 
     const tenantRow = await getTenantLlmOverrides(tenantId);
     const tenant: TenantLlmOverrides | null = tenantRow
       ? normalizeTenantOverrides({
           models: tenantRow.models ?? {},
           prompts: tenantRow.prompts ?? {},
-          // tenantStore is not responsible for maxQaQuestions unless you store it; keep normalize logic consistent
+          updatedAt: tenantRow.updatedAt ?? undefined,
         })
       : null;
 
     const effective = getPlatformLlm({
       platform,
-      industry: industry ?? undefined,
+      industry: industry as any,
       tenant: tenant ?? undefined,
     });
 
     return NextResponse.json({
       ok: true,
       platform,
-      industry: industry ?? {},
+      industry,
       tenant,
       effective,
       permissions: { canEdit: true },
     });
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    const code = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: code });
+  } catch (e) {
+    const msg = safeErr(e);
+
+    // Guards may throw; treat as forbidden unless you intentionally throw "NO_ACTIVE_TENANT"
+    const status = msg === "NO_ACTIVE_TENANT" ? 401 : 403;
+
+    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status });
   }
 }
 
 export async function POST(req: Request) {
   try {
-    await requireAdmin();
+    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
     const body = await req.json().catch(() => null);
     const parsed = PostBody.safeParse(body);
+
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues },
@@ -87,12 +99,12 @@ export async function POST(req: Request) {
       );
     }
 
-    const { tenantId, industryKey, overrides } = parsed.data;
+    const { tenantId, overrides } = parsed.data;
 
-    // Normalize tenant overrides (models/prompts only)
+    // Normalize tenant overrides (models/prompts/maxQaQuestions/updatedAt)
+    // BUT: DB only stores models+prompts+updated_at today.
     const normalized = normalizeTenantOverrides(overrides ?? {});
 
-    // Persist only what the DB supports today: models + prompts (+ updated_at handled by store)
     await upsertTenantLlmOverrides({
       tenantId,
       models: normalized.models ?? {},
@@ -101,26 +113,27 @@ export async function POST(req: Request) {
 
     // Return fresh effective view after save
     const platform = await loadPlatformLlmConfig();
-    const industry = industryKey ? await loadTenantIndustryConfig(String(industryKey)) : null;
+    const industry: Partial<typeof platform> = {};
 
     const tenantRow = await getTenantLlmOverrides(tenantId);
     const tenant: TenantLlmOverrides | null = tenantRow
       ? normalizeTenantOverrides({
           models: tenantRow.models ?? {},
           prompts: tenantRow.prompts ?? {},
+          updatedAt: tenantRow.updatedAt ?? undefined,
         })
       : null;
 
     const effective = getPlatformLlm({
       platform,
-      industry: industry ?? undefined,
+      industry: industry as any,
       tenant: tenant ?? undefined,
     });
 
     return NextResponse.json({ ok: true, tenant, effective });
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    const code = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: code });
+  } catch (e) {
+    const msg = safeErr(e);
+    const status = msg === "NO_ACTIVE_TENANT" ? 401 : 403;
+    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status });
   }
 }
