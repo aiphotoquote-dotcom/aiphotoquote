@@ -1,6 +1,6 @@
 // src/lib/pcc/llm/effective.ts
 import type { PlatformLlmConfig } from "@/lib/pcc/llm/types";
-import type { TenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
+import type { TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
 /**
  * Industry defaults are "locked templates" that sit between platform and tenant.
