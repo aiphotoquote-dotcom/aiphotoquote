@@ -70,6 +70,7 @@ export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<voi
     access: "public",
     contentType: "application/json",
     addRandomSuffix: false,
+    allowOverwrite: true, // ✅ FIX: enables repeated saves to the same blob key
   });
 }
 
