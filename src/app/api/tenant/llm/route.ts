@@ -2,12 +2,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { requirePlatformRole } from "@/lib/rbac/guards";
+import { requireTenantRole } from "@/lib/auth/tenant";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
+import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
-import { upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 
 export const runtime = "nodejs";
 
@@ -22,21 +21,10 @@ const PostBody = z.object({
   overrides: z.any(),
 });
 
-function noStoreJson(data: any, init?: { status?: number }) {
-  return NextResponse.json(data, {
-    status: init?.status ?? 200,
-    headers: {
-      "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-      pragma: "no-cache",
-      expires: "0",
-    },
-  });
-}
-
 export async function GET(req: Request) {
   try {
-    // PCC UI is platform-only
-    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+    // Gate: tenant admin roles (matches the PCC tenant editing intent)
+    await requireTenantRole(["owner", "admin"]);
 
     const url = new URL(req.url);
     const parsed = GetQuery.safeParse({
@@ -45,7 +33,7 @@ export async function GET(req: Request) {
     });
 
     if (!parsed.success) {
-      return noStoreJson(
+      return NextResponse.json(
         { ok: false, error: "BAD_REQUEST", message: "Invalid query params", issues: parsed.error.issues },
         { status: 400 }
       );
@@ -65,34 +53,44 @@ export async function GET(req: Request) {
         })
       : null;
 
-    const effectiveBundle = buildEffectiveLlmConfig({
+    // Effective WITH tenant overrides
+    const effective = buildEffectiveLlmConfig({
       platform,
       industry,
-      tenant,
-    });
+      tenant: tenant ?? null,
+    }).effective;
 
-    return noStoreJson({
+    // Effective BASELINE (platform + industry only) — used for "Inherited — <default>" labels
+    const effectiveBase = buildEffectiveLlmConfig({
+      platform,
+      industry,
+      tenant: null,
+    }).effective;
+
+    return NextResponse.json({
       ok: true,
       platform,
       industry,
       tenant,
-      effective: effectiveBundle.effective,
+      effective,
+      effectiveBase,
       permissions: { canEdit: true },
     });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    return noStoreJson({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
+    const code = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
+    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: code });
   }
 }
 
 export async function POST(req: Request) {
   try {
-    await requirePlatformRole(["platform_owner", "platform_admin"]);
+    await requireTenantRole(["owner", "admin"]);
 
     const body = await req.json().catch(() => null);
     const parsed = PostBody.safeParse(body);
     if (!parsed.success) {
-      return noStoreJson(
+      return NextResponse.json(
         { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues },
         { status: 400 }
       );
@@ -120,15 +118,22 @@ export async function POST(req: Request) {
         })
       : null;
 
-    const effectiveBundle = buildEffectiveLlmConfig({
+    const effective = buildEffectiveLlmConfig({
       platform,
       industry,
-      tenant,
-    });
+      tenant: tenant ?? null,
+    }).effective;
 
-    return noStoreJson({ ok: true, tenant, effective: effectiveBundle.effective });
+    const effectiveBase = buildEffectiveLlmConfig({
+      platform,
+      industry,
+      tenant: null,
+    }).effective;
+
+    return NextResponse.json({ ok: true, tenant, effective, effectiveBase });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    return noStoreJson({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
+    const code = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
+    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: code });
   }
 }

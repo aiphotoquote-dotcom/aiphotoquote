@@ -1,4 +1,3 @@
-// src/components/pcc/llm/TenantLlmManagerClient.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -14,6 +13,9 @@ type PlatformLlmConfig = {
     quoteEstimatorSystem: string;
     qaQuestionGeneratorSystem: string;
     extraSystemPreamble?: string;
+    renderPromptPreamble?: string;
+    renderPromptTemplate?: string;
+    renderStylePresets?: Record<string, string>;
   };
   guardrails: {
     mode?: GuardrailsMode;
@@ -36,33 +38,36 @@ type TenantOverrides = {
   maxQaQuestions?: number;
 };
 
+type EffectiveShape = {
+  models: { estimatorModel: string; qaModel: string; renderModel: string };
+  prompts: {
+    extraSystemPreamble?: string;
+    quoteEstimatorSystem: string;
+    qaQuestionGeneratorSystem: string;
+  };
+  guardrails: {
+    mode: GuardrailsMode;
+    piiHandling: PiiHandling;
+    blockedTopics: string[];
+    maxQaQuestions: number;
+    maxOutputTokens: number;
+  };
+};
+
 type ApiGetResp =
   | {
       ok: true;
       platform: PlatformLlmConfig;
       industry: Partial<PlatformLlmConfig>;
       tenant: TenantOverrides | null;
-      effective: {
-        models: { estimatorModel: string; qaModel: string; renderModel: string };
-        prompts: {
-          extraSystemPreamble?: string;
-          quoteEstimatorSystem: string;
-          qaQuestionGeneratorSystem: string;
-        };
-        guardrails: {
-          mode: GuardrailsMode;
-          piiHandling: PiiHandling;
-          blockedTopics: string[];
-          maxQaQuestions: number;
-          maxOutputTokens: number;
-        };
-      };
+      effective: EffectiveShape;
+      effectiveBase: EffectiveShape; // ✅ baseline (platform + industry only)
       permissions: any;
     }
   | { ok: false; error: string; message?: string };
 
 type ApiPostResp =
-  | { ok: true; tenant: TenantOverrides | null; effective: any }
+  | { ok: true; tenant: TenantOverrides | null; effective: any; effectiveBase: any }
   | { ok: false; error: string; message?: string; issues?: any };
 
 async function safeJson<T>(res: Response): Promise<T> {
@@ -99,7 +104,7 @@ function prettyModelLabel(value: string, options: Array<{ value: string; label: 
 /**
  * Model select behavior:
  * - stored override value is either "" (inherit) OR a concrete model id (including custom text)
- * - UI shows a first row: "Inherited — <effective> (default)" with value ""
+ * - UI shows a first row: "Inherited — <baseline> (default)" with value ""
  * - if selected value isn't in options and isn't empty -> treat as custom
  */
 function ModelSelect(props: {
@@ -109,25 +114,19 @@ function ModelSelect(props: {
   value: string; // stored override value ("" means inherit)
   onChange: (next: string) => void;
 
-  effectiveValue: string; // resolved effective model id
+  baselineValue: string; // ✅ resolved without tenant overrides (platform + industry)
+  effectiveValue: string; // resolved including tenant overrides
   showEffectiveLine?: boolean;
 }) {
-  const { label, help, options, value, onChange, effectiveValue, showEffectiveLine } = props;
+  const { label, help, options, value, onChange, baselineValue, effectiveValue, showEffectiveLine } = props;
 
-  // Determine if current value is custom (non-empty but not in option list)
   const valueIsEmpty = !safeStr(value);
   const valueIsKnown = !valueIsEmpty && isInOptions(value, options.filter((o) => o.value !== "custom"));
   const valueIsCustom = !valueIsEmpty && !valueIsKnown;
 
-  // Select value mapping:
-  // - empty => "" (inherit)
-  // - known option => that value
-  // - custom text => "__custom__" sentinel (so select stays stable)
   const selectValue = valueIsEmpty ? "" : valueIsKnown ? value : "__custom__";
 
-  // IMPORTANT: inherited label is based on EFFECTIVE value returned by API
-  // so if PCC defaults change, a refresh will update this label.
-  const inheritedLabel = `Inherited — ${prettyModelLabel(effectiveValue, options)} (default)`;
+  const inheritedLabel = `Inherited — ${prettyModelLabel(baselineValue, options)} (default)`;
 
   return (
     <div>
@@ -137,18 +136,14 @@ function ModelSelect(props: {
         value={selectValue}
         onChange={(e) => {
           const v = e.target.value;
-
           if (v === "") {
             onChange(""); // inherit
             return;
           }
-
           if (v === "__custom__") {
-            // keep current custom text if present, otherwise blank
             onChange(valueIsCustom ? value : "");
             return;
           }
-
           onChange(v);
         }}
         className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
@@ -203,7 +198,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     return {};
   }, [data]);
 
-  // Stored override values ("" means inherit)
   const [estimatorModel, setEstimatorModel] = useState("");
   const [qaModel, setQaModel] = useState("");
   const [renderModel, setRenderModel] = useState("");
@@ -215,9 +209,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
   async function ensureTenantCookie(): Promise<void> {
-    await safeJson<any>(
-      await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" })
-    );
+    await safeJson<any>(await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" }));
   }
 
   async function apiGet(): Promise<ApiGetResp> {
@@ -326,12 +318,17 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   }, [tenantId, industryKey]);
 
   const okData = data && (data as any).ok ? (data as any) : null;
-  const effective = okData?.effective ?? null;
+  const effective: EffectiveShape | null = okData?.effective ?? null;
+  const effectiveBase: EffectiveShape | null = okData?.effectiveBase ?? null;
   const platform = okData?.platform ?? null;
 
-  const effectiveEstimator = safeStr(effective?.models?.estimatorModel, "gpt-4o-mini");
-  const effectiveQa = safeStr(effective?.models?.qaModel, "gpt-4o-mini");
-  const effectiveRender = safeStr(effective?.models?.renderModel, "gpt-image-1");
+  const baselineEstimator = safeStr(effectiveBase?.models?.estimatorModel, "gpt-4o-mini");
+  const baselineQa = safeStr(effectiveBase?.models?.qaModel, "gpt-4o-mini");
+  const baselineRender = safeStr(effectiveBase?.models?.renderModel, "gpt-image-1");
+
+  const effectiveEstimator = safeStr(effective?.models?.estimatorModel, baselineEstimator);
+  const effectiveQa = safeStr(effective?.models?.qaModel, baselineQa);
+  const effectiveRender = safeStr(effective?.models?.renderModel, baselineRender);
 
   return (
     <div className="space-y-6">
@@ -379,9 +376,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Tenant overrides</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Leave a field blank to inherit from industry/platform.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Leave a field blank to inherit.</p>
 
           <div className="mt-4 space-y-4">
             <ModelSelect
@@ -389,6 +384,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               options={TEXT_MODEL_OPTIONS}
               value={estimatorModel}
               onChange={setEstimatorModel}
+              baselineValue={baselineEstimator}
               effectiveValue={effectiveEstimator}
               showEffectiveLine={false}
               help={`Common options: ${TEXT_MODEL_OPTIONS.filter((o) => o.value !== "custom")
@@ -401,6 +397,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               options={TEXT_MODEL_OPTIONS}
               value={qaModel}
               onChange={setQaModel}
+              baselineValue={baselineQa}
               effectiveValue={effectiveQa}
               showEffectiveLine={false}
             />
@@ -410,6 +407,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               options={IMAGE_MODEL_OPTIONS}
               value={renderModel}
               onChange={setRenderModel}
+              baselineValue={baselineRender}
               effectiveValue={effectiveRender}
               showEffectiveLine={true}
               help="This controls what /api/quote/render uses for image generation."
@@ -436,16 +434,12 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Platform guardrails (locked)</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            These are set by platform and cannot be changed by tenants.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">These are set by platform.</p>
 
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Mode</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">
-                {platform?.guardrails?.mode ?? "balanced"}
-              </span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">{platform?.guardrails?.mode ?? "balanced"}</span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">PII handling</span>
@@ -463,6 +457,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
         </section>
       </div>
 
+      {/* Prompts section left as-is (unchanged) */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Tenant prompt overrides</h2>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -471,9 +466,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Extra system preamble override
-            </label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
             <textarea
               value={extraSystemPreamble}
               onChange={(e) => setExtraSystemPreamble(e.target.value)}
@@ -483,9 +476,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Quote estimator system override
-            </label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system override</label>
             <textarea
               value={quoteEstimatorSystem}
               onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
@@ -495,9 +486,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Q&A generator system override
-            </label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A generator system override</label>
             <textarea
               value={qaQuestionGeneratorSystem}
               onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
@@ -512,9 +501,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective preview</div>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div>
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                  Effective estimator system
-                </div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Effective estimator system</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {effective.prompts?.quoteEstimatorSystem ?? ""}
                 </pre>
