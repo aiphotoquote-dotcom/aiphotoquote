@@ -15,6 +15,7 @@ function json(data: any, status = 200) {
 const AiMode = z.enum(["assessment_only", "range", "fixed"]);
 const RenderingStyle = z.enum(["photoreal", "clean_oem", "custom"]);
 
+// NOTE: Live Q&A fields are OPTIONAL to avoid breaking older clients that POST without them.
 const PostBody = z.object({
   ai_mode: AiMode,
   pricing_enabled: z.boolean(),
@@ -25,6 +26,10 @@ const PostBody = z.object({
   rendering_notes: z.string().max(2000),
   rendering_max_per_day: z.number().int().min(0).max(1000),
   rendering_customer_opt_in_required: z.boolean(),
+
+  // Live Q&A (tenant-level)
+  live_qa_enabled: z.boolean().optional().default(false),
+  live_qa_max_questions: z.number().int().min(1).max(10).optional().default(3),
 });
 
 async function getRow(tenantId: string) {
@@ -36,7 +41,9 @@ async function getRow(tenantId: string) {
       rendering_style,
       rendering_notes,
       rendering_max_per_day,
-      rendering_customer_opt_in_required
+      rendering_customer_opt_in_required,
+      live_qa_enabled,
+      live_qa_max_questions
     from tenant_settings
     where tenant_id = ${tenantId}::uuid
     limit 1
@@ -44,6 +51,12 @@ async function getRow(tenantId: string) {
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   return row ?? null;
+}
+
+function clampInt(n: any, fallback: number, min: number, max: number) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(v)));
 }
 
 function normalizeRow(row: any) {
@@ -65,6 +78,10 @@ function normalizeRow(row: any) {
 
   const rendering_customer_opt_in_required = !!(row?.rendering_customer_opt_in_required ?? true);
 
+  // Live Q&A
+  const live_qa_enabled = !!(row?.live_qa_enabled ?? false);
+  const live_qa_max_questions = clampInt(row?.live_qa_max_questions, 3, 1, 10);
+
   return {
     ai_mode,
     pricing_enabled,
@@ -73,6 +90,9 @@ function normalizeRow(row: any) {
     rendering_notes,
     rendering_max_per_day,
     rendering_customer_opt_in_required,
+
+    live_qa_enabled,
+    live_qa_max_questions,
   };
 }
 
@@ -116,6 +136,9 @@ export async function POST(req: Request) {
         rendering_max_per_day = ${data.rendering_max_per_day},
         rendering_customer_opt_in_required = ${data.rendering_customer_opt_in_required},
 
+        live_qa_enabled = ${data.live_qa_enabled},
+        live_qa_max_questions = ${data.live_qa_max_questions},
+
         updated_at = now()
       where tenant_id = ${gate.tenantId}::uuid
       returning tenant_id
@@ -130,10 +153,12 @@ export async function POST(req: Request) {
         insert into tenant_settings
           (id, tenant_id, industry_key, ai_mode, pricing_enabled,
            rendering_enabled, rendering_style, rendering_notes, rendering_max_per_day, rendering_customer_opt_in_required,
+           live_qa_enabled, live_qa_max_questions,
            created_at)
         values
           (gen_random_uuid(), ${gate.tenantId}::uuid, 'auto', ${data.ai_mode}, ${data.pricing_enabled},
            ${data.rendering_enabled}, ${data.rendering_style}, ${data.rendering_notes}, ${data.rendering_max_per_day}, ${data.rendering_customer_opt_in_required},
+           ${data.live_qa_enabled}, ${data.live_qa_max_questions},
            now())
       `);
     }
