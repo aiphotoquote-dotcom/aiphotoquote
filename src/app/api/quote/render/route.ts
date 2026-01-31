@@ -17,14 +17,16 @@ import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderC
 // ✅ PCC config (render prompt template + style presets live here)
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
+// ✅ NEW: debug + safe output writers
+import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
+import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
+
 export const runtime = "nodejs";
 
 const Req = z.object({
   tenantSlug: z.string().min(3),
   quoteLogId: z.string().uuid(),
 });
-
-const RENDER_DEBUG_ENABLED = process.env.PCC_RENDER_DEBUG?.trim() === "1";
 
 function safeErr(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
@@ -68,7 +70,7 @@ function loadRenderGuardrails(): RenderGuardrails {
       "No nudity, no explicit content, no weapons, no illegal activity.",
     ].join("\n"),
     denylist: ["weapon", "gun", "bomb", "explosive", "nude", "porn", "sex", "credit card", "ssn", "social security"],
-    maxDailyPerTenant: 250, // soft cap; later PCC will be per-tenant billing
+    maxDailyPerTenant: 250,
   };
 }
 
@@ -108,7 +110,6 @@ function fillTemplate(template: string, vars: Record<string, string>) {
   for (const [k, v] of Object.entries(vars)) {
     t = t.split(`{${k}}`).join(v ?? "");
   }
-  // remove repeated blank lines
   t = t
     .split("\n")
     .map((l) => l.trimEnd())
@@ -119,20 +120,9 @@ function fillTemplate(template: string, vars: Record<string, string>) {
   return t;
 }
 
-function safeImageInfo(inputAny: any, max = 3) {
-  const imgs = Array.isArray(inputAny?.images) ? inputAny.images : [];
-  const urls = imgs
-    .map((x: any) => String(x?.url ?? "").trim())
-    .filter(Boolean);
-
-  return {
-    count: urls.length,
-    sample_urls: urls.slice(0, max),
-  };
-}
-
 export async function POST(req: Request) {
   const debugId = `dbg_${Math.random().toString(36).slice(2, 10)}`;
+  const debugEnabled = isRenderDebugEnabled();
 
   try {
     const body = await req.json().catch(() => null);
@@ -192,7 +182,6 @@ export async function POST(req: Request) {
         status: "not_requested",
         imageUrl: q.renderImageUrl ?? null,
         debugId,
-        ...(RENDER_DEBUG_ENABLED ? { render_debug: null } : {}),
       });
     }
 
@@ -204,7 +193,6 @@ export async function POST(req: Request) {
         status: "rendered",
         imageUrl: q.renderImageUrl,
         debugId,
-        ...(RENDER_DEBUG_ENABLED ? { render_debug: null } : {}),
       });
     }
 
@@ -332,13 +320,14 @@ export async function POST(req: Request) {
     const inputAny: any = q.input ?? {};
     const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
     const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
+    const images = Array.isArray(inputAny?.images) ? inputAny.images : [];
 
     // Tenant-controlled selector + notes
     const tenantStyleKey = safeTrim(settings?.renderingStyle) || "photoreal";
     const tenantRenderNotes = safeTrim(settings?.renderingNotes) || "";
 
     // PCC-controlled presets (text)
-    const presets = pcc?.prompts?.renderStylePresets ?? ({} as any);
+    const presets = (pcc?.prompts?.renderStylePresets ?? {}) as any;
     const presetText =
       tenantStyleKey === "clean_oem"
         ? safeTrim(presets.clean_oem)
@@ -346,16 +335,13 @@ export async function POST(req: Request) {
         ? safeTrim(presets.custom)
         : safeTrim(presets.photoreal);
 
-    // final style text fallback (should never be empty)
     const styleText =
       presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
     // Denylist = env/platform denylist + PCC blockedTopics (dedupe)
     const denylist = joinDedupeStrings(platform.denylist, pcc?.guardrails?.blockedTopics);
 
-    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes, styleText]
-      .filter(Boolean)
-      .join("\n");
+    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes, styleText].filter(Boolean).join("\n");
     if (denylist.length && containsDenylistedText(combinedTextForScan, denylist)) {
       await db
         .update(quoteLogs)
@@ -372,7 +358,8 @@ export async function POST(req: Request) {
     }
 
     // PCC-owned render preamble + template (fallback to env/platform defaults)
-    const renderPromptPreamble = safeTrim(pcc?.prompts?.renderPromptPreamble) || safeTrim(platform.extraPromptPreamble) || "";
+    const renderPromptPreamble =
+      safeTrim(pcc?.prompts?.renderPromptPreamble) || safeTrim(platform.extraPromptPreamble) || "";
 
     const renderPromptTemplate =
       safeTrim(pcc?.prompts?.renderPromptTemplate) ||
@@ -389,7 +376,6 @@ export async function POST(req: Request) {
 
     const prompt = fillTemplate(renderPromptTemplate, {
       renderPromptPreamble,
-
       style: styleText,
 
       serviceTypeLine: serviceType ? `Service type: ${serviceType}` : "",
@@ -403,45 +389,34 @@ export async function POST(req: Request) {
       .set({ renderPrompt: prompt })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    // ✅ DEBUG instrumentation: persist to quote_logs.output.render_debug (jsonb)
-    let renderDebug: any = null;
-    if (RENDER_DEBUG_ENABLED) {
-      const renderModelResolved = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
-      const imgInfo = safeImageInfo(inputAny, 3);
+    // 8) Generate image (model comes from PCC)
+    const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
 
-      renderDebug = {
+    // ✅ DEBUG: persist proof (gated)
+    let renderDebug: any = null;
+    if (debugEnabled) {
+      renderDebug = buildRenderDebugPayload({
         debugId,
-        capturedAt: new Date().toISOString(),
-        renderModel: renderModelResolved,
+        renderModel,
         tenantStyleKey,
         styleText,
         renderPromptPreamble,
         renderPromptTemplate,
-        prompt,
-        images: imgInfo,
-        inputs: {
-          serviceType,
-          summary,
-          customerNotes,
-          tenantRenderNotes,
-        },
-      };
+        finalPrompt: prompt,
+        serviceType,
+        summary,
+        customerNotes,
+        tenantRenderNotes,
+        images,
+      });
 
+      // Persist to quote_logs.output.render_debug (jsonb_set; no overwrite)
       try {
-        const existingOutput = outAny ?? {};
-        const nextOutput = { ...(existingOutput as any), render_debug: renderDebug };
-        await db.execute(sql`
-          update quote_logs
-          set output = ${JSON.stringify(nextOutput)}::jsonb
-          where id = ${quoteLogId}::uuid
-        `);
+        await setRenderDebug({ db: db as any, quoteLogId, tenantId: tenant.id, debug: renderDebug });
       } catch {
-        // best-effort only
+        // best effort
       }
     }
-
-    // 8) Generate image (model comes from PCC)
-    const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
 
     const imgResp: any = await openai.images.generate({
       model: renderModel,
@@ -572,14 +547,14 @@ export async function POST(req: Request) {
         }
       }
 
-      // Persist into output.render_email (best effort)
+      // ✅ Persist into output.render_email WITHOUT overwriting output (jsonb_set)
       try {
-        const nextOutput = { ...(outAny ?? {}), render_email: renderEmailResult };
-        await db.execute(sql`
-          update quote_logs
-          set output = ${JSON.stringify(nextOutput)}::jsonb
-          where id = ${quoteLogId}::uuid
-        `);
+        await setRenderEmailResult({
+          db: db as any,
+          quoteLogId,
+          tenantId: tenant.id,
+          email: renderEmailResult,
+        });
       } catch {
         // ignore
       }
@@ -593,7 +568,7 @@ export async function POST(req: Request) {
       status: "rendered",
       imageUrl,
       debugId,
-      ...(RENDER_DEBUG_ENABLED ? { render_debug: renderDebug } : {}),
+      ...(debugEnabled ? { render_debug: renderDebug } : {}),
     });
   } catch (e) {
     const msg = safeErr(e);
