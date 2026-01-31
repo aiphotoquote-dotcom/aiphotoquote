@@ -1,3 +1,4 @@
+// src/app/api/admin/tenant-settings/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -21,25 +22,6 @@ const BrandLogoUrl = z.preprocess((v) => {
   return v;
 }, z.string().trim().url().max(500).nullable());
 
-const LiveQaEnabled = z.preprocess((v) => {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "string") {
-    const s = v.trim().toLowerCase();
-    if (s === "true") return true;
-    if (s === "false") return false;
-  }
-  return v;
-}, z.boolean());
-
-const LiveQaMaxQuestions = z.preprocess((v) => {
-  // allow string numbers from forms
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
-  }
-  return v;
-}, z.number().int().min(1).max(10));
-
 const PostBody = z.object({
   business_name: z.string().trim().min(1).max(120),
   lead_to_email: z.string().trim().email().max(200),
@@ -51,10 +33,6 @@ const PostBody = z.object({
   // enterprise/oauth
   email_send_mode: z.enum(["standard", "enterprise"]).optional(),
   email_identity_id: z.string().uuid().nullable().optional(),
-
-  // ✅ NEW: Live Q&A
-  live_qa_enabled: LiveQaEnabled.optional(),
-  live_qa_max_questions: LiveQaMaxQuestions.optional(),
 });
 
 async function getTenantSettingsRow(tenantId: string) {
@@ -66,9 +44,7 @@ async function getTenantSettingsRow(tenantId: string) {
       resend_from_email,
       brand_logo_url,
       email_send_mode,
-      email_identity_id,
-      live_qa_enabled,
-      live_qa_max_questions
+      email_identity_id
     from tenant_settings
     where tenant_id = ${tenantId}::uuid
     limit 1
@@ -94,13 +70,6 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
   // Same semantics for logo
   const brandLogoUrl = "brand_logo_url" in data ? (data.brand_logo_url ?? null) : undefined;
 
-  // ✅ Live Q&A semantics (preserve unless explicitly included)
-  const liveQaEnabled = "live_qa_enabled" in data ? Boolean(data.live_qa_enabled) : undefined;
-  const liveQaMaxQuestions =
-    "live_qa_max_questions" in data
-      ? Math.max(1, Math.min(10, Number(data.live_qa_max_questions ?? 3)))
-      : undefined;
-
   // 1) Try update first
   const upd = await db.execute(sql`
     update tenant_settings
@@ -113,11 +82,6 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
 
       email_send_mode = ${emailSendMode},
       email_identity_id = ${emailIdentityId === undefined ? sql`email_identity_id` : emailIdentityId},
-
-      live_qa_enabled = ${liveQaEnabled === undefined ? sql`live_qa_enabled` : liveQaEnabled},
-      live_qa_max_questions = ${
-        liveQaMaxQuestions === undefined ? sql`live_qa_max_questions` : liveQaMaxQuestions
-      },
 
       updated_at = now()
     where tenant_id = ${tenantId}::uuid
@@ -139,8 +103,6 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
         brand_logo_url,
         email_send_mode,
         email_identity_id,
-        live_qa_enabled,
-        live_qa_max_questions,
         updated_at
       )
     values
@@ -153,12 +115,6 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
         ${"brand_logo_url" in data ? (data.brand_logo_url ?? null) : null},
         ${emailSendMode},
         ${emailSendMode === "enterprise" ? (data.email_identity_id ?? null) : null},
-        ${"live_qa_enabled" in data ? Boolean(data.live_qa_enabled) : false},
-        ${
-          "live_qa_max_questions" in data
-            ? Math.max(1, Math.min(10, Number(data.live_qa_max_questions ?? 3)))
-            : 3
-        },
         now()
       )
   `);
@@ -185,10 +141,6 @@ export async function GET() {
 
       email_send_mode: settings?.email_send_mode ?? "standard",
       email_identity_id: settings?.email_identity_id ?? null,
-
-      // ✅ Live Q&A
-      live_qa_enabled: Boolean(settings?.live_qa_enabled ?? false),
-      live_qa_max_questions: Number(settings?.live_qa_max_questions ?? 3),
     },
   });
 }
@@ -218,10 +170,6 @@ export async function POST(req: Request) {
 
         email_send_mode: saved?.email_send_mode ?? "standard",
         email_identity_id: saved?.email_identity_id ?? null,
-
-        // ✅ Live Q&A
-        live_qa_enabled: Boolean(saved?.live_qa_enabled ?? false),
-        live_qa_max_questions: Number(saved?.live_qa_max_questions ?? 3),
       },
     });
   } catch (e: any) {
