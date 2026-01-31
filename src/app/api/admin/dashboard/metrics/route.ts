@@ -23,6 +23,11 @@ function firstRow(r: any): any | null {
   return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 }
 
+function toInt(v: any) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
 /**
  * Dashboard metrics for active tenant.
  * Uses created_at (NOT submitted_at).
@@ -32,7 +37,6 @@ export async function GET() {
   if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
 
   try {
-    // quote_logs columns assumed: tenant_id, created_at, is_read, stage
     const r = await db.execute(sql`
       WITH base AS (
         SELECT
@@ -72,23 +76,29 @@ export async function GET() {
 
     return json({
       ok: true,
-      totalLeads: Number(row.totalLeads ?? 0),
-      unread: Number(row.unread ?? 0),
-      stageNew: Number(row.stageNew ?? 0),
-      inProgress: Number(row.inProgress ?? 0),
-      todayNew: Number(row.todayNew ?? 0),
-      yesterdayNew: Number(row.yesterdayNew ?? 0),
-      staleUnread: Number(row.staleUnread ?? 0),
+      totalLeads: toInt(row.totalLeads),
+      unread: toInt(row.unread),
+      stageNew: toInt(row.stageNew),
+      inProgress: toInt(row.inProgress),
+      todayNew: toInt(row.todayNew),
+      yesterdayNew: toInt(row.yesterdayNew),
+      staleUnread: toInt(row.staleUnread),
     });
   } catch (e: any) {
+    // Log real error server-side; don't leak SQL details to the client.
+    console.error("[admin.dashboard.metrics] failed", {
+      tenantId: gate.tenantId,
+      code: e?.code,
+      message: e?.message,
+      detail: e?.detail,
+      hint: e?.hint,
+    });
+
     return json(
       {
         ok: false,
         error: "METRICS_QUERY_FAILED",
-        message: e?.message ?? String(e),
-        code: e?.code,
-        detail: e?.detail,
-        hint: e?.hint,
+        message: "Failed to load dashboard metrics.",
       },
       500
     );
