@@ -4,11 +4,13 @@ import { z } from "zod";
 
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { buildEffectiveLlmConfig, getIndustryDefaults } from "@/lib/pcc/llm/effective";
+import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 
 export const runtime = "nodejs";
+// Ensure Next doesn't try to cache this route
+export const dynamic = "force-dynamic";
 
 const GetQuery = z.object({
   tenantId: z.string().uuid(),
@@ -23,7 +25,7 @@ const PostBody = z.object({
 
 export async function GET(req: Request) {
   try {
-    // Match PCC page gating: view allowed for support/admin/owner
+    // PCC-only endpoint: platform roles
     await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
     const url = new URL(req.url);
@@ -41,8 +43,10 @@ export async function GET(req: Request) {
 
     const { tenantId, industryKey } = parsed.data;
 
+    // IMPORTANT: fetch fresh platform config (avoid cached resolver helpers)
     const platform = await loadPlatformLlmConfig();
-    const industry = getIndustryDefaults(industryKey);
+
+    const industry = getIndustryDefaults(industryKey ?? null);
 
     const tenantRow = await getTenantLlmOverrides(tenantId);
     const tenant: TenantLlmOverrides | null = tenantRow
@@ -53,7 +57,7 @@ export async function GET(req: Request) {
         })
       : null;
 
-    const { effective } = buildEffectiveLlmConfig({
+    const built = buildEffectiveLlmConfig({
       platform,
       industry,
       tenant,
@@ -64,7 +68,7 @@ export async function GET(req: Request) {
       platform,
       industry,
       tenant,
-      effective,
+      effective: built.effective,
       permissions: { canEdit: true },
     });
   } catch (e: any) {
@@ -75,8 +79,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    // Writes restricted to platform admin/owner
-    await requirePlatformRole(["platform_owner", "platform_admin"]);
+    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
     const body = await req.json().catch(() => null);
     const parsed = PostBody.safeParse(body);
@@ -89,19 +92,17 @@ export async function POST(req: Request) {
 
     const { tenantId, industryKey, overrides } = parsed.data;
 
-    // Normalize tenant overrides (models/prompts only)
     const normalized = normalizeTenantOverrides(overrides ?? {});
 
-    // Persist only what the DB supports today: models + prompts (+ updated_at handled by store)
     await upsertTenantLlmOverrides({
       tenantId,
       models: normalized.models ?? {},
       prompts: normalized.prompts ?? {},
     });
 
-    // Return fresh effective view after save
+    // Recompute effective with fresh platform config
     const platform = await loadPlatformLlmConfig();
-    const industry = getIndustryDefaults(industryKey ?? undefined);
+    const industry = getIndustryDefaults(industryKey ? String(industryKey) : null);
 
     const tenantRow = await getTenantLlmOverrides(tenantId);
     const tenant: TenantLlmOverrides | null = tenantRow
@@ -112,13 +113,13 @@ export async function POST(req: Request) {
         })
       : null;
 
-    const { effective } = buildEffectiveLlmConfig({
+    const built = buildEffectiveLlmConfig({
       platform,
       industry,
       tenant,
     });
 
-    return NextResponse.json({ ok: true, tenant, effective });
+    return NextResponse.json({ ok: true, tenant, effective: built.effective });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
