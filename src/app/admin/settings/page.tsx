@@ -31,10 +31,6 @@ type SettingsResp =
 
         email_send_mode?: "standard" | "enterprise" | null;
         email_identity_id?: string | null;
-
-        /* 🔥 Live Q&A */
-        live_qa_enabled?: boolean;
-        live_qa_max_questions?: number;
       };
     }
   | { ok: false; error: string; message?: string; issues?: any };
@@ -131,9 +127,7 @@ function Field(props: {
 }) {
   return (
     <div>
-      <label className="block text-sm font-medium text-gray-800 dark:text-gray-200">
-        {props.label}
-      </label>
+      <label className="block text-sm font-medium text-gray-800 dark:text-gray-200">{props.label}</label>
       <input
         value={props.value}
         onChange={(e) => props.onChange(e.target.value)}
@@ -177,10 +171,6 @@ export default function AdminTenantSettingsPage() {
   const [emailIdentityId, setEmailIdentityId] = useState("");
   const [emailStatus, setEmailStatus] = useState<EmailStatusResp | null>(null);
 
-  /* ---------- 🔥 Live Q&A ---------- */
-  const [liveQaEnabled, setLiveQaEnabled] = useState(false);
-  const [liveQaMaxQuestions, setLiveQaMaxQuestions] = useState(3);
-
   /* ---------- ui ---------- */
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -193,10 +183,7 @@ export default function AdminTenantSettingsPage() {
   const SETTINGS_URL = "/api/admin/tenant-settings";
   const EMAIL_STATUS_URL = "/api/admin/email/status";
 
-  const tenants = useMemo(
-    () => (Array.isArray(context?.tenants) ? context.tenants : []),
-    [context]
-  );
+  const tenants = useMemo(() => (Array.isArray(context?.tenants) ? context.tenants : []), [context]);
 
   const activeTenantId = context?.activeTenantId ?? null;
 
@@ -234,17 +221,10 @@ export default function AdminTenantSettingsPage() {
 
     setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
 
-    const modeRaw = String(data.settings.email_send_mode ?? "")
-      .trim()
-      .toLowerCase();
+    const modeRaw = String(data.settings.email_send_mode ?? "").trim().toLowerCase();
     setEmailSendMode(modeRaw === "enterprise" ? "enterprise" : "standard");
 
     setEmailIdentityId((data.settings.email_identity_id ?? "").toString());
-
-    // 🔥 Live Q&A (defaults)
-    setLiveQaEnabled(Boolean(data.settings.live_qa_enabled));
-    const mq = Number(data.settings.live_qa_max_questions ?? 3);
-    setLiveQaMaxQuestions(Number.isFinite(mq) ? Math.max(1, Math.min(10, Math.round(mq))) : 3);
   }
 
   async function loadEmailStatus() {
@@ -340,9 +320,7 @@ export default function AdminTenantSettingsPage() {
     });
 
     const ct = res.headers.get("content-type") || "";
-    const data = ct.includes("application/json")
-      ? await res.json()
-      : { ok: false, error: await res.text() };
+    const data = ct.includes("application/json") ? await res.json() : { ok: false, error: await res.text() };
 
     if (!data?.ok) throw new Error(data?.message || data?.error || "Upload failed");
     return data.url as string;
@@ -386,10 +364,6 @@ export default function AdminTenantSettingsPage() {
 
         email_send_mode: emailSendMode,
         email_identity_id: emailIdentityId.trim() || null,
-
-        // 🔥 Live Q&A
-        live_qa_enabled: Boolean(liveQaEnabled),
-        live_qa_max_questions: Math.max(1, Math.min(10, Number(liveQaMaxQuestions) || 3)),
       };
 
       const res = await fetch(SETTINGS_URL, {
@@ -419,12 +393,11 @@ export default function AdminTenantSettingsPage() {
   const statusMode = emailStatus?.ok ? (emailStatus.tenant.email_send_mode ?? "standard") : "standard";
   const enterpriseIdentityPresent = emailStatus?.ok ? Boolean(emailStatus.tenant.email_identity_id_present) : false;
 
-  const testEmailDisabledReason =
-    !leadToEmail.trim()
-      ? "Set Lead To Email first."
-      : emailSendMode === "enterprise" && !emailIdentityId.trim()
-      ? "Connect Google first (no Email Identity linked yet)."
-      : null;
+  const testEmailDisabledReason = !leadToEmail.trim()
+    ? "Set Lead To Email first."
+    : emailSendMode === "enterprise" && !emailIdentityId.trim()
+    ? "Connect Google first (no Email Identity linked yet)."
+    : null;
 
   const canSendTestEmail =
     canEdit &&
@@ -440,7 +413,7 @@ export default function AdminTenantSettingsPage() {
           <div>
             <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Tenant Settings</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Branding, live Q&A, and email configuration for the active tenant.
+              Branding and email configuration for the active tenant.
             </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -470,10 +443,6 @@ export default function AdminTenantSettingsPage() {
               <Pill tone={hasBrandLogo ? "good" : "neutral"}>
                 Logo: <span className="ml-1 font-mono">{hasBrandLogo ? "set" : "not set"}</span>
               </Pill>
-
-              <Pill tone={liveQaEnabled ? "good" : "neutral"}>
-                Live Q&amp;A: <span className="ml-1 font-mono">{liveQaEnabled ? "on" : "off"}</span>
-              </Pill>
             </div>
 
             {msg ? <div className="mt-2 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
@@ -483,11 +452,7 @@ export default function AdminTenantSettingsPage() {
 
         <div className="grid gap-5">
           {/* Active tenant */}
-          <Card
-            title="Active Tenant"
-            subtitle="If you belong to multiple tenants, switch here."
-            right={<Pill tone="neutral">{tenants.length} tenants</Pill>}
-          >
+          <Card title="Active Tenant" subtitle="If you belong to multiple tenants, switch here." right={<Pill tone="neutral">{tenants.length} tenants</Pill>}>
             {tenants.length === 0 ? (
               <div className="text-sm text-gray-700 dark:text-gray-300">No tenants yet.</div>
             ) : (
@@ -530,9 +495,7 @@ export default function AdminTenantSettingsPage() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Upload logo</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.
-                  </div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.</div>
 
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <input
@@ -583,9 +546,7 @@ export default function AdminTenantSettingsPage() {
 
                 <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Logo URL</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    Paste a public https URL (or we’ll set this automatically after upload).
-                  </div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Paste a public https URL (or we’ll set this automatically after upload).</div>
 
                   <div className="mt-3">
                     <Field
@@ -605,9 +566,7 @@ export default function AdminTenantSettingsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-gray-900 dark:text-white">Preview</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      This is how the logo will render in the UI (emails may scale it differently).
-                    </div>
+                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This is how the logo will render in the UI (emails may scale it differently).</div>
                   </div>
                   {hasBrandLogo ? (
                     <a
@@ -642,116 +601,13 @@ export default function AdminTenantSettingsPage() {
             </div>
           </Card>
 
-          {/* Live Q&A */}
-          <Card
-            title="Live Q&A (follow-up questions)"
-            subtitle="When enabled, the quote flow asks a few quick questions before finalizing the estimate."
-            right={liveQaEnabled ? <Pill tone="good">Enabled</Pill> : <Pill tone="neutral">Disabled</Pill>}
-          >
-            <div className="grid gap-4">
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 dark:text-white">Enable Live Q&amp;A</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      Turn this on if you want the AI to ask clarifying questions (dimensions, materials, access, etc.)
-                      before producing a final range.
-                    </div>
-
-                    <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-gray-700 dark:text-gray-300">
-                      <li>Improves estimate accuracy for ambiguous photos</li>
-                      <li>Reduces back-and-forth emails</li>
-                      <li>Creates a cleaner “two-step” quote experience</li>
-                    </ul>
-                  </div>
-
-                  <div className="shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setLiveQaEnabled((v) => !v)}
-                      disabled={!canEdit}
-                      className={cx(
-                        "rounded-xl border px-4 py-2 text-sm font-semibold transition",
-                        liveQaEnabled
-                          ? "border-green-300 bg-green-50 text-green-900 hover:bg-green-100 dark:border-green-900/60 dark:bg-green-900/15 dark:text-green-200 dark:hover:bg-green-900/25"
-                          : "border-gray-300 bg-white text-gray-900 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10",
-                        !canEdit ? "opacity-50 cursor-not-allowed" : ""
-                      )}
-                    >
-                      {liveQaEnabled ? "Enabled" : "Disabled"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Max questions</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    Recommended: 3–5. Keep it short to avoid drop-off.
-                  </div>
-
-                  <div className="mt-3 flex items-center gap-3">
-                    <input
-                      type="range"
-                      min={1}
-                      max={10}
-                      value={liveQaMaxQuestions}
-                      onChange={(e) => setLiveQaMaxQuestions(Number(e.target.value))}
-                      disabled={!canEdit || !liveQaEnabled}
-                      className="w-full"
-                    />
-                    <div className="w-10 text-right text-sm font-mono text-gray-900 dark:text-gray-100">
-                      {liveQaMaxQuestions}
-                    </div>
-                  </div>
-
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    If disabled, the quote will return the estimate immediately (single-step flow).
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-white">What customers see</div>
-                  <div className="mt-2 rounded-xl border border-gray-200 bg-white p-3 text-sm text-gray-700 dark:border-white/10 dark:bg-neutral-950/40 dark:text-gray-200">
-                    <div className="font-semibold">Quick questions</div>
-                    <div className="mt-1 text-sm opacity-90">
-                      “One more step — answer these and we’ll finalize your estimate.”
-                    </div>
-                    <div className="mt-3 grid gap-2">
-                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
-                        What is the exact size (L×W) of the item?
-                      </div>
-                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
-                        Repair vs full replacement?
-                      </div>
-                      <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
-                        Any material preference?
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {!canEdit ? (
-                <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100">
-                  You are a <span className="font-mono">{role}</span>. Only{" "}
-                  <span className="font-mono">owner</span> or <span className="font-mono">admin</span> can edit
-                  tenant settings.
-                </div>
-              ) : null}
-            </div>
-          </Card>
-
           {/* Email status */}
           <Card
             title="Email Status"
             subtitle="Shows whether email is configured. Delivery can still be affected by DMARC / spam / quarantine."
             right={
               emailStatus?.ok ? (
-                <Pill tone={emailStatus.enabled ? "good" : "warn"}>
-                  {emailStatus.enabled ? "Configured" : "Needs setup"}
-                </Pill>
+                <Pill tone={emailStatus.enabled ? "good" : "warn"}>{emailStatus.enabled ? "Configured" : "Needs setup"}</Pill>
               ) : (
                 <Pill tone="neutral">Loading…</Pill>
               )
@@ -765,13 +621,10 @@ export default function AdminTenantSettingsPage() {
                   </Pill>
                   <Pill tone={emailStatus.platform.resend_key_present ? "good" : "bad"}>
                     RESEND_API_KEY:{" "}
-                    <span className="ml-1 font-mono">
-                      {emailStatus.platform.resend_key_present ? "present" : "missing"}
-                    </span>
+                    <span className="ml-1 font-mono">{emailStatus.platform.resend_key_present ? "present" : "missing"}</span>
                   </Pill>
                   <Pill tone={enterpriseIdentityPresent ? "good" : "warn"}>
-                    email_identity_id:{" "}
-                    <span className="ml-1 font-mono">{enterpriseIdentityPresent ? "set" : "missing"}</span>
+                    email_identity_id: <span className="ml-1 font-mono">{enterpriseIdentityPresent ? "set" : "missing"}</span>
                   </Pill>
                 </div>
 
@@ -802,8 +655,8 @@ export default function AdminTenantSettingsPage() {
                 {!canEdit ? (
                   <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100">
                     You are a <span className="font-mono">{role}</span>. Only{" "}
-                    <span className="font-mono">owner</span> or <span className="font-mono">admin</span> can edit
-                    tenant settings.
+                    <span className="font-mono">owner</span> or <span className="font-mono">admin</span> can edit tenant
+                    settings.
                   </div>
                 ) : null}
 
@@ -961,8 +814,7 @@ export default function AdminTenantSettingsPage() {
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-white">Send Test Email</div>
                       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                        Sends a test message to{" "}
-                        <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
+                        Sends a test message to <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
                       </div>
                       {emailSendMode === "enterprise" ? (
                         <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -995,7 +847,7 @@ export default function AdminTenantSettingsPage() {
                 {/* Save row */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="text-xs text-gray-500 dark:text-gray-400">
-                    Tip: upload a logo, enable Live Q&amp;A if desired, then click Save Settings.
+                    Tip: upload a logo, configure email routing, then click Save Settings.
                   </div>
 
                   <div className="flex items-center gap-3">
