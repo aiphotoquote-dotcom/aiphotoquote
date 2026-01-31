@@ -1,7 +1,8 @@
 // src/components/admin/AdminTenantSwitcher.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 
 type TenantRow = {
   tenantId: string;
@@ -18,7 +19,9 @@ async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ${text.slice(0, 80)}`);
+    throw new Error(
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ${text.slice(0, 120)}`
+    );
   }
   return (await res.json()) as T;
 }
@@ -28,6 +31,9 @@ function cn(...xs: Array<string | false | null | undefined>) {
 }
 
 export default function AdminTenantSwitcher() {
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+
   const [loading, setLoading] = useState(true);
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [activeTenantId, setActiveTenantId] = useState<string | null>(null);
@@ -66,6 +72,7 @@ export default function AdminTenantSwitcher() {
   );
 
   const show = tenants.length > 1;
+  if (!show) return null;
 
   async function switchTenant(tenantId: string) {
     if (!tenantId || tenantId === activeTenantId) {
@@ -75,30 +82,39 @@ export default function AdminTenantSwitcher() {
 
     setErr(null);
     setSwitchingTo(tenantId);
+
+    // Optimistic UI update (feels instant)
+    setActiveTenantId(tenantId);
+
     try {
       const res = await fetch(CONTEXT_URL, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tenantId }),
       });
-      const data = await safeJson<any>(res);
-      if (!data?.ok) throw new Error(data?.message || data?.error || "Failed to switch tenant");
 
-      // update local state so UI updates instantly
-      setActiveTenantId(tenantId);
+      const data = await safeJson<any>(res);
+      if (!data?.ok) {
+        throw new Error(data?.message || data?.error || "Failed to switch tenant");
+      }
+
       setOpen(false);
 
-      // optional: hard refresh to ensure any server components read the new cookie immediately
-      // (this is the most reliable behavior in Next app router)
-      window.location.reload();
+      // Re-sync switcher state from server (authoritative)
+      await load();
+
+      // Most important: force App Router server components/layouts to re-read cookies
+      startTransition(() => {
+        router.refresh();
+      });
     } catch (e: any) {
+      // Roll back optimistic selection on failure
+      await load();
       setErr(e?.message ?? String(e));
     } finally {
       setSwitchingTo(null);
     }
   }
-
-  if (!show) return null;
 
   return (
     <div className="relative">
@@ -127,6 +143,11 @@ export default function AdminTenantSwitcher() {
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
               Your active tenant controls what quotes/settings you’re viewing.
             </div>
+            {isPending ? (
+              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                Updating views…
+              </div>
+            ) : null}
           </div>
 
           <div className="max-h-80 overflow-auto p-2">
@@ -144,7 +165,7 @@ export default function AdminTenantSwitcher() {
                       ? "border-blue-400 bg-blue-50 text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-100"
                       : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
                   )}
-                  disabled={isBusy}
+                  disabled={isBusy || loading}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
