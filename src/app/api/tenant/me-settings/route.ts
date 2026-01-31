@@ -1,52 +1,38 @@
 // src/app/api/tenant/me-settings/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
 import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSettings } from "@/lib/db/schema";
+import { requireTenantRole } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-
-  return candidates[0] || null;
+function json(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    },
+  });
 }
 
+/**
+ * Tenant "me-settings" for the ACTIVE tenant.
+ * RBAC + active tenant resolution is handled by requireTenantRole (cookie + tenant_members).
+ *
+ * IMPORTANT:
+ * - No "fallback to first tenant" (causes tenant drift).
+ * - If no active tenant cookie, client must call /api/tenant/context and/or use tenant switcher.
+ */
 export async function GET() {
+  const gate = await requireTenantRole(["owner", "admin", "member"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
+
   try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
-
-    const jar = await cookies();
-    let tenantId = getCookieTenantId(jar);
-
-    // fallback: first tenant owned by user
-    if (!tenantId) {
-      const t = await db
-        .select({ id: tenants.id })
-        .from(tenants)
-        .where(eq(tenants.ownerClerkUserId, userId))
-        .limit(1)
-        .then((r) => r[0] ?? null);
-
-      tenantId = t?.id ?? null;
-    }
-
-    if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
-    }
-
     const tenant = await db
       .select({
         id: tenants.id,
@@ -54,12 +40,12 @@ export async function GET() {
         slug: tenants.slug,
       })
       .from(tenants)
-      .where(eq(tenants.id, tenantId))
+      .where(eq(tenants.id, gate.tenantId as any))
       .limit(1)
       .then((r) => r[0] ?? null);
 
     if (!tenant) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+      return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
     }
 
     // Only select columns that *exist* in prod
@@ -76,14 +62,18 @@ export async function GET() {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    return NextResponse.json(
-      { ok: true, tenant, settings },
-      { headers: { "cache-control": "no-store, max-age=0" } }
-    );
+    return json({ ok: true, tenant, settings });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
+    return json(
+      {
+        ok: false,
+        error: "INTERNAL",
+        message: e?.message ?? String(e),
+        code: e?.code,
+        detail: e?.detail,
+        hint: e?.hint,
+      },
+      500
     );
   }
 }
