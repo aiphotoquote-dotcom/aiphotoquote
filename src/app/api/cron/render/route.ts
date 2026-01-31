@@ -1,3 +1,4 @@
+// src/app/api/cron/render/route.ts
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
@@ -7,6 +8,16 @@ import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
 import { decryptSecret } from "@/lib/crypto";
+
+// ✅ PCC + tenant overrides (for model selection)
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
+import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
+import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+
+// ✅ Render debug wiring
+import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
+import { setRenderDebug } from "@/lib/pcc/render/output";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -173,11 +184,7 @@ function renderLeadRenderEmailHTML(args: {
   </div>`;
 }
 
-function renderCustomerRenderEmailHTML(args: {
-  businessName: string;
-  quoteLogId: string;
-  renderImageUrl: string;
-}) {
+function renderCustomerRenderEmailHTML(args: { businessName: string; quoteLogId: string; renderImageUrl: string }) {
   const { businessName, quoteLogId, renderImageUrl } = args;
 
   return `
@@ -240,14 +247,13 @@ async function mergeQuoteLogRendering(args: {
 
   await db.execute(sql`
     update quote_logs
-   set output = coalesce(output, '{}'::jsonb) || ${JSON.stringify(next)}::jsonb
+    set output = coalesce(output, '{}'::jsonb) || ${JSON.stringify(next)}::jsonb
     where id = ${quoteLogId}::uuid
   `);
 }
 
 /**
  * Claim exactly one queued job using SKIP LOCKED.
- * This prevents multiple cron invocations from rendering the same quote.
  */
 async function claimOneQueuedJob(): Promise<JobRow | null> {
   const r = await db.execute(sql`
@@ -302,13 +308,8 @@ async function loadQuoteInputForRender(quoteLogId: string) {
   if (!row) return null;
 
   const input = safeJsonParse(row.input) ?? {};
-  const images: string[] = Array.isArray(input?.images)
-    ? input.images.map((x: any) => x?.url).filter(Boolean)
-    : [];
+  const images: string[] = Array.isArray(input?.images) ? input.images.map((x: any) => x?.url).filter(Boolean) : [];
 
-  // Support BOTH shapes:
-  //  - input.customer_context.{name,email,phone}
-  //  - input.contact.{name,email,phone}  (your newer UI used this)
   const cc = input?.customer_context ?? {};
   const contact = input?.contact ?? {};
 
@@ -339,12 +340,11 @@ async function uploadRenderedPngToBlob(args: { pathname: string; bytes: Buffer }
   return res.url;
 }
 
-async function generateRenderPngBytes(args: { openaiKey: string; prompt: string }) {
+async function generateRenderPngBytes(args: { openaiKey: string; prompt: string; model: string }) {
   const openai = new OpenAI({ apiKey: args.openaiKey });
 
-  // Request a manageable size so we don’t create giant payloads.
   const img = await openai.images.generate({
-    model: "gpt-image-1",
+    model: args.model,
     prompt: args.prompt,
     size: "1024x1024",
   } as any);
@@ -353,11 +353,8 @@ async function generateRenderPngBytes(args: { openaiKey: string; prompt: string 
   const b64 = first?.b64_json ? String(first.b64_json) : null;
   const url = first?.url ? String(first.url) : null;
 
-  if (b64) {
-    return Buffer.from(b64, "base64");
-  }
+  if (b64) return Buffer.from(b64, "base64");
 
-  // Some configs return a URL. If so, fetch and return bytes.
   if (url) {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Failed to download OpenAI image url (HTTP ${r.status})`);
@@ -366,6 +363,28 @@ async function generateRenderPngBytes(args: { openaiKey: string; prompt: string 
   }
 
   throw new Error("OpenAI image response missing b64_json/url");
+}
+
+/**
+ * Determine effective render model:
+ * platform PCC + tenant overrides (industry omitted in cron path).
+ */
+async function getEffectiveRenderModelForTenant(tenantId: string): Promise<string> {
+  const platform = await loadPlatformLlmConfig();
+
+  const tenantRow = await getTenantLlmOverrides(tenantId);
+  const tenant: TenantLlmOverrides | null = tenantRow
+    ? normalizeTenantOverrides({ models: tenantRow.models ?? {}, prompts: tenantRow.prompts ?? {} })
+    : null;
+
+  const merged = buildEffectiveLlmConfig({
+    platform,
+    industry: {}, // cron path does not know industry reliably
+    tenant,
+  });
+
+  const m = String(merged?.effective?.models?.renderModel ?? "").trim();
+  return m || "gpt-image-1";
 }
 
 async function sendRenderEmails(args: {
@@ -377,9 +396,7 @@ async function sendRenderEmails(args: {
   customer: { name?: string; email?: string; phone?: string };
 }) {
   const resendKey = process.env.RESEND_API_KEY || "";
-  if (!resendKey) {
-    return { configured: false, skipped: true, reason: "RESEND_API_KEY missing" };
-  }
+  if (!resendKey) return { configured: false, skipped: true, reason: "RESEND_API_KEY missing" };
 
   const { businessName, leadToEmail, resendFromEmail } = await getTenantEmailSettings(args.tenantId);
 
@@ -405,7 +422,6 @@ async function sendRenderEmails(args: {
     customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
   };
 
-  // Lead render email
   const leadDeliveryId = await insertEmailDelivery({
     tenantId: args.tenantId,
     quoteLogId: args.quoteLogId,
@@ -445,7 +461,6 @@ async function sendRenderEmails(args: {
     result.lead.error = errMsg;
   }
 
-  // Customer render email (if email provided)
   if (args.customer.email) {
     const custDeliveryId = await insertEmailDelivery({
       tenantId: args.tenantId,
@@ -495,10 +510,7 @@ function assertCronAuth(req: Request) {
   if (!secret) return { ok: true as const, mode: "no_secret_configured" as const };
 
   const h = req.headers;
-  const token =
-    h.get("x-cron-secret") ||
-    h.get("authorization")?.replace(/^Bearer\s+/i, "") ||
-    "";
+  const token = h.get("x-cron-secret") || h.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
 
   if (token && token === secret) return { ok: true as const, mode: "header" as const };
 
@@ -513,13 +525,11 @@ export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
-  // Protect cron endpoint
   const auth = assertCronAuth(req);
-  if (!auth.ok) {
-    return json({ ok: false, error: "UNAUTHORIZED" }, 401, debugId);
-  }
+  if (!auth.ok) return json({ ok: false, error: "UNAUTHORIZED" }, 401, debugId);
 
-  // Optional: allow ?max=3 to process a few jobs per invocation
+  const debugEnabled = isRenderDebugEnabled();
+
   const u = new URL(req.url);
   const max = Math.max(1, Math.min(5, Number(u.searchParams.get("max") || "1")));
 
@@ -534,35 +544,55 @@ export async function POST(req: Request) {
     const jobStart = Date.now();
 
     let imageUrl: string | null = null;
-    let errMsg: string | null = null;
 
     try {
       const quote = await loadQuoteInputForRender(job.quote_log_id);
       if (!quote) throw new Error("QUOTE_LOG_NOT_FOUND");
 
-      // Ensure job tenant matches quote tenant (safety)
-      if (String(quote.tenantId) !== String(job.tenant_id)) {
-        throw new Error("TENANT_MISMATCH");
-      }
-
+      if (String(quote.tenantId) !== String(job.tenant_id)) throw new Error("TENANT_MISMATCH");
       if (!quote.images.length) throw new Error("NO_IMAGES_ON_QUOTE_INPUT");
 
       const openaiKey = await getTenantOpenAiKey(job.tenant_id);
       if (!openaiKey) throw new Error("OPENAI_KEY_MISSING");
 
       const prompt = job.prompt || "";
+      if (!prompt) throw new Error("JOB_PROMPT_EMPTY");
 
-      // Generate PNG bytes (b64 preferred; url fallback)
-      const pngBytes = await generateRenderPngBytes({ openaiKey, prompt });
+      // ✅ choose effective model (tenant override > platform)
+      const renderModel = await getEffectiveRenderModelForTenant(job.tenant_id);
 
-      // Upload to Vercel Blob (server-side put => no 413)
+      // ✅ debug write (proof) BEFORE generation
+      if (debugEnabled) {
+        const dbg = buildRenderDebugPayload({
+          debugId: `cron_${debugId}`,
+          renderModel,
+          tenantStyleKey: "", // cron path does not know style key reliably
+          styleText: "",
+          renderPromptPreamble: "",
+          renderPromptTemplate: "",
+          finalPrompt: prompt,
+          serviceType: "",
+          summary: "",
+          customerNotes: "",
+          tenantRenderNotes: "",
+          images: quote.images.map((u) => ({ url: u })),
+        });
+
+        await setRenderDebug({
+          db: db as any,
+          quoteLogId: job.quote_log_id,
+          tenantId: job.tenant_id,
+          debug: dbg,
+        });
+      }
+
+      const pngBytes = await generateRenderPngBytes({ openaiKey, prompt, model: renderModel });
+
       const pathname = `renders/${safeName(`render-${job.quote_log_id}`)}-${Date.now()}.png`;
       imageUrl = await uploadRenderedPngToBlob({ pathname, bytes: pngBytes });
 
-      // Update render_jobs
       await completeJob({ jobId: job.id, imageUrl, error: null });
 
-      // Merge into quote_logs.output.rendering (portable, no schema drift issues)
       await mergeQuoteLogRendering({
         quoteLogId: job.quote_log_id,
         status: "rendered",
@@ -571,13 +601,10 @@ export async function POST(req: Request) {
         prompt,
       });
 
-      // Send emails + write email_deliveries
       const tenantSlugRow = await db.execute(sql`
         select slug from tenants where id = ${job.tenant_id}::uuid limit 1
       `);
-      const t: any =
-        (tenantSlugRow as any)?.rows?.[0] ?? (Array.isArray(tenantSlugRow) ? (tenantSlugRow as any)[0] : null);
-
+      const t: any = (tenantSlugRow as any)?.rows?.[0] ?? (Array.isArray(tenantSlugRow) ? (tenantSlugRow as any)[0] : null);
       const tenantSlug = t?.slug ? String(t.slug) : "tenant";
 
       const emailRes = await sendRenderEmails({
@@ -598,7 +625,7 @@ export async function POST(req: Request) {
         durationMs: Date.now() - jobStart,
       });
     } catch (e: any) {
-      errMsg = e?.message ?? String(e);
+      const errMsg = e?.message ?? String(e);
 
       try {
         await completeJob({ jobId: job.id, imageUrl: null, error: errMsg });
