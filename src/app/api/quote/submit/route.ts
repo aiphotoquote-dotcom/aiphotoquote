@@ -101,6 +101,12 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function clampInt(v: unknown, fallback: number, min: number, max: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
 function getBaseUrl(req: Request) {
   const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
   if (envBase) return envBase.replace(/\/+$/, "");
@@ -168,8 +174,20 @@ async function sendReceivedEmails(args: {
   const result: any = {
     configured,
     mode: cfg.sendMode ?? "standard",
-    lead_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-    customer_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    lead_received: {
+      attempted: false,
+      ok: false,
+      provider: "resend",
+      id: null as string | null,
+      error: null as string | null,
+    },
+    customer_received: {
+      attempted: false,
+      ok: false,
+      provider: "resend",
+      id: null as string | null,
+      error: null as string | null,
+    },
   };
 
   if (!configured) return result;
@@ -450,13 +468,26 @@ async function sendFinalEstimateEmails(args: {
   businessNameFromSettings: string | null;
   renderOptIn: boolean;
 }) {
-  const { req, tenant, tenantSlug, quoteLogId, customer, notes, images, output, brandLogoUrl, businessNameFromSettings, renderOptIn } =
-    args;
+  const {
+    req,
+    tenant,
+    tenantSlug,
+    quoteLogId,
+    customer,
+    notes,
+    images,
+    output,
+    brandLogoUrl,
+    businessNameFromSettings,
+    renderOptIn,
+  } = args;
 
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
+  const configured = Boolean(
+    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
+  );
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -464,8 +495,20 @@ async function sendFinalEstimateEmails(args: {
   const emailResult: any = {
     configured,
     mode: cfg.sendMode ?? "standard",
-    lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-    customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    lead_new: {
+      attempted: false,
+      ok: false,
+      provider: "resend",
+      id: null as string | null,
+      error: null as string | null,
+    },
+    customer_receipt: {
+      attempted: false,
+      ok: false,
+      provider: "resend",
+      id: null as string | null,
+      error: null as string | null,
+    },
   };
 
   if (!configured) return emailResult;
@@ -609,12 +652,17 @@ export async function POST(req: Request) {
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
-    // Live Q&A: tenant setting but capped by PCC guardrails
+    // ------------------------------------------------------------
+    // Live Q&A: tenant can only LOWER the cap; PCC sets the MAX cap.
+    // ------------------------------------------------------------
     const tenantQaEnabled = settings?.liveQaEnabled === true;
-    const tenantQaMax = Math.max(1, Math.min(10, Number(settings?.liveQaMaxQuestions ?? 3)));
-    const platformQaMax = Math.max(1, Math.min(10, Number(platform.guardrails.maxOutputTokens ? 10 : 10))); // (keep simple)
+    const tenantQaMax = clampInt(settings?.liveQaMaxQuestions, 3, 1, 10);
+
+    // ✅ PCC maxQaQuestions is the platform cap
+    const platformQaMax = clampInt(platform?.guardrails?.maxQaQuestions, 3, 1, 10);
+
     const liveQaEnabled = tenantQaEnabled;
-    const liveQaMaxQuestions = Math.min(tenantQaMax, platformQaMax);
+    const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
 
     // -------------------------
     // Phase 2: finalize after QA
@@ -665,6 +713,11 @@ export async function POST(req: Request) {
           question: String(x?.question ?? "").trim(),
           answer: String(x?.answer ?? "").trim(),
         }));
+      }
+
+      // Keep answers aligned to what was asked (never store extra)
+      if (storedQuestions.length) {
+        normalizedAnswers = normalizedAnswers.slice(0, storedQuestions.length);
       }
 
       // Store answers into quote_logs.qa
@@ -772,11 +825,17 @@ export async function POST(req: Request) {
     };
 
     if (customer.phone.replace(/\D/g, "").length < 10) {
-      return NextResponse.json({ ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
+        { status: 400 }
+      );
     }
 
     if (!images.length) {
-      return NextResponse.json({ ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
+        { status: 400 }
+      );
     }
 
     const customer_context = parsed.data.customer_context ?? {};
@@ -787,7 +846,11 @@ export async function POST(req: Request) {
     // ✅ PCC denylist guardrail on notes
     if (platform.guardrails.blockedTopics?.length && containsDenylistedText(notes, platform.guardrails.blockedTopics)) {
       return NextResponse.json(
-        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again." },
+        {
+          ok: false,
+          error: "CONTENT_BLOCKED",
+          message: "Your request includes content we can’t process. Please revise and try again.",
+        },
         { status: 400 }
       );
     }
@@ -849,7 +912,8 @@ export async function POST(req: Request) {
     }
 
     // If live QA is enabled, ask clarifying questions first
-    if (liveQaEnabled) {
+    // (PCC sets the max cap; tenant may reduce it.)
+    if (liveQaEnabled && liveQaMaxQuestions > 0) {
       const questions = await generateQaQuestions({
         openai,
         model: platform.models.qaModel,
@@ -898,7 +962,9 @@ export async function POST(req: Request) {
       const cfg = await getTenantEmailConfig(tenant.id);
       const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-      const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
+      const configured = Boolean(
+        process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
+      );
 
       const baseUrl = getBaseUrl(req);
       const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -906,8 +972,20 @@ export async function POST(req: Request) {
       const emailResult: any = {
         configured,
         mode: cfg.sendMode ?? "standard",
-        lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-        customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+        lead_new: {
+          attempted: false,
+          ok: false,
+          provider: "resend",
+          id: null as string | null,
+          error: null as string | null,
+        },
+        customer_receipt: {
+          attempted: false,
+          ok: false,
+          provider: "resend",
+          id: null as string | null,
+          error: null as string | null,
+        },
       };
 
       if (configured) {
