@@ -1,49 +1,30 @@
+// src/app/api/tenant/metrics/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
 import { and, count, eq, gte, lt } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenants } from "@/lib/db/schema";
+import { quoteLogs } from "@/lib/db/schema";
+import { requireTenantRole } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-
-  return candidates[0] || null;
-}
-
-async function resolveTenantId(userId: string) {
-  const jar = await cookies();
-  let tenantId = getCookieTenantId(jar);
-
-  if (!tenantId) {
-    const t = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    tenantId = t?.id ?? null;
-  }
-
-  return tenantId;
+function json(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    },
+  });
 }
 
 async function countRange(tenantId: string, start: Date, end: Date) {
   const total = await db
     .select({ n: count() })
     .from(quoteLogs)
-    .where(
-      and(eq(quoteLogs.tenantId, tenantId), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end))
-    )
+    .where(and(eq(quoteLogs.tenantId, tenantId as any), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end)))
     .then((r) => Number(r[0]?.n ?? 0));
 
   const optIn = await db
@@ -51,7 +32,7 @@ async function countRange(tenantId: string, start: Date, end: Date) {
     .from(quoteLogs)
     .where(
       and(
-        eq(quoteLogs.tenantId, tenantId),
+        eq(quoteLogs.tenantId, tenantId as any),
         gte(quoteLogs.createdAt, start),
         lt(quoteLogs.createdAt, end),
         eq(quoteLogs.renderOptIn, true)
@@ -64,10 +45,10 @@ async function countRange(tenantId: string, start: Date, end: Date) {
     .from(quoteLogs)
     .where(
       and(
-        eq(quoteLogs.tenantId, tenantId),
+        eq(quoteLogs.tenantId, tenantId as any),
         gte(quoteLogs.createdAt, start),
         lt(quoteLogs.createdAt, end),
-        eq(quoteLogs.renderStatus, "rendered")
+        eq(quoteLogs.renderStatus, "rendered" as any)
       )
     )
     .then((r) => Number(r[0]?.n ?? 0));
@@ -77,10 +58,10 @@ async function countRange(tenantId: string, start: Date, end: Date) {
     .from(quoteLogs)
     .where(
       and(
-        eq(quoteLogs.tenantId, tenantId),
+        eq(quoteLogs.tenantId, tenantId as any),
         gte(quoteLogs.createdAt, start),
         lt(quoteLogs.createdAt, end),
-        eq(quoteLogs.renderStatus, "failed")
+        eq(quoteLogs.renderStatus, "failed" as any)
       )
     )
     .then((r) => Number(r[0]?.n ?? 0));
@@ -88,57 +69,57 @@ async function countRange(tenantId: string, start: Date, end: Date) {
   return { total, optIn, rendered, failed };
 }
 
-function pctChange(thisVal: number, lastVal: number) {
-  if (lastVal === 0 && thisVal === 0) return 0;
-  if (lastVal === 0) return 100;
-  return ((thisVal - lastVal) / lastVal) * 100;
-}
-
+/**
+ * Tenant metrics (RBAC + active tenant via requireTenantRole).
+ * NOTE: This endpoint is “rolling last 7 days vs previous 7 days”.
+ */
 export async function GET() {
+  const gate = await requireTenantRole(["owner", "admin", "member"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
+
   try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
-
-    const tenantId = await resolveTenantId(userId);
-    if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
-    }
-
-    // Rolling windows (stable every day of week)
     const now = new Date();
     const msDay = 24 * 60 * 60 * 1000;
 
-    const endThis = now;
-    const startThis = new Date(now.getTime() - 7 * msDay);
+    // rolling 7-day window
+    const thisEnd = now;
+    const thisStart = new Date(now.getTime() - 7 * msDay);
 
-    const endLast = startThis;
-    const startLast = new Date(startThis.getTime() - 7 * msDay);
+    const lastEnd = thisStart;
+    const lastStart = new Date(thisStart.getTime() - 7 * msDay);
 
-    const thisPeriod = await countRange(tenantId, startThis, endThis);
-    const lastPeriod = await countRange(tenantId, startLast, endLast);
+    const thisPeriod = await countRange(gate.tenantId, thisStart, thisEnd);
+    const lastPeriod = await countRange(gate.tenantId, lastStart, lastEnd);
 
-    return NextResponse.json({
+    const pct = (a: number, b: number) => {
+      if (b === 0 && a === 0) return 0;
+      if (b === 0) return 100;
+      return ((a - b) / b) * 100;
+    };
+
+    return json({
       ok: true,
+      tenantId: gate.tenantId,
+      role: gate.role,
       range: {
-        thisStart: startThis.toISOString(),
-        thisEnd: endThis.toISOString(),
-        lastStart: startLast.toISOString(),
-        lastEnd: endLast.toISOString(),
+        thisStart: thisStart.toISOString(),
+        thisEnd: thisEnd.toISOString(),
+        lastStart: lastStart.toISOString(),
+        lastEnd: lastEnd.toISOString(),
       },
       thisPeriod,
       lastPeriod,
       deltaPct: {
-        total: pctChange(thisPeriod.total, lastPeriod.total),
-        optIn: pctChange(thisPeriod.optIn, lastPeriod.optIn),
-        rendered: pctChange(thisPeriod.rendered, lastPeriod.rendered),
+        total: pct(thisPeriod.total, lastPeriod.total),
+        optIn: pct(thisPeriod.optIn, lastPeriod.optIn),
+        rendered: pct(thisPeriod.rendered, lastPeriod.rendered),
+        failed: pct(thisPeriod.failed, lastPeriod.failed),
       },
     });
   } catch (e: any) {
-    return NextResponse.json(
+    return json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e ?? "Unknown error") },
-      { status: 500 }
+      500
     );
   }
 }
