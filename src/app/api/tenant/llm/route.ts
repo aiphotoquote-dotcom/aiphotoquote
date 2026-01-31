@@ -4,13 +4,12 @@ import { z } from "zod";
 
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
-import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
+import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+import { upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 
 export const runtime = "nodejs";
-// Ensure Next doesn't try to cache this route
-export const dynamic = "force-dynamic";
 
 const GetQuery = z.object({
   tenantId: z.string().uuid(),
@@ -23,9 +22,20 @@ const PostBody = z.object({
   overrides: z.any(),
 });
 
+function noStoreJson(data: any, init?: { status?: number }) {
+  return NextResponse.json(data, {
+    status: init?.status ?? 200,
+    headers: {
+      "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    },
+  });
+}
+
 export async function GET(req: Request) {
   try {
-    // PCC-only endpoint: platform roles
+    // PCC UI is platform-only
     await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
     const url = new URL(req.url);
@@ -35,7 +45,7 @@ export async function GET(req: Request) {
     });
 
     if (!parsed.success) {
-      return NextResponse.json(
+      return noStoreJson(
         { ok: false, error: "BAD_REQUEST", message: "Invalid query params", issues: parsed.error.issues },
         { status: 400 }
       );
@@ -43,9 +53,7 @@ export async function GET(req: Request) {
 
     const { tenantId, industryKey } = parsed.data;
 
-    // IMPORTANT: fetch fresh platform config (avoid cached resolver helpers)
     const platform = await loadPlatformLlmConfig();
-
     const industry = getIndustryDefaults(industryKey ?? null);
 
     const tenantRow = await getTenantLlmOverrides(tenantId);
@@ -57,34 +65,34 @@ export async function GET(req: Request) {
         })
       : null;
 
-    const built = buildEffectiveLlmConfig({
+    const effectiveBundle = buildEffectiveLlmConfig({
       platform,
       industry,
       tenant,
     });
 
-    return NextResponse.json({
+    return noStoreJson({
       ok: true,
       platform,
       industry,
       tenant,
-      effective: built.effective,
+      effective: effectiveBundle.effective,
       permissions: { canEdit: true },
     });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
+    return noStoreJson({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
   }
 }
 
 export async function POST(req: Request) {
   try {
-    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+    await requirePlatformRole(["platform_owner", "platform_admin"]);
 
     const body = await req.json().catch(() => null);
     const parsed = PostBody.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json(
+      return noStoreJson(
         { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues },
         { status: 400 }
       );
@@ -100,9 +108,8 @@ export async function POST(req: Request) {
       prompts: normalized.prompts ?? {},
     });
 
-    // Recompute effective with fresh platform config
     const platform = await loadPlatformLlmConfig();
-    const industry = getIndustryDefaults(industryKey ? String(industryKey) : null);
+    const industry = getIndustryDefaults((industryKey ?? null) as any);
 
     const tenantRow = await getTenantLlmOverrides(tenantId);
     const tenant: TenantLlmOverrides | null = tenantRow
@@ -113,15 +120,15 @@ export async function POST(req: Request) {
         })
       : null;
 
-    const built = buildEffectiveLlmConfig({
+    const effectiveBundle = buildEffectiveLlmConfig({
       platform,
       industry,
       tenant,
     });
 
-    return NextResponse.json({ ok: true, tenant, effective: built.effective });
+    return noStoreJson({ ok: true, tenant, effective: effectiveBundle.effective });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
+    return noStoreJson({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: 500 });
   }
 }
