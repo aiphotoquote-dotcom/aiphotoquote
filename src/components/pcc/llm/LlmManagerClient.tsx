@@ -3,10 +3,17 @@
 
 import React, { useMemo, useState } from "react";
 
+import { safeStr, numClamp, normalizeBlockedTopics } from "@/components/pcc/llm/helpers/normalize";
+import { promptPreview } from "@/components/pcc/llm/helpers/preview";
+import {
+  defaultRenderPromptPreamble,
+  defaultRenderPromptTemplate,
+  defaultStylePreset,
+  type RenderStyleKey,
+} from "@/components/pcc/llm/helpers/defaults";
+
 type GuardrailsMode = "strict" | "balanced" | "permissive";
 type PiiHandling = "redact" | "allow" | "deny";
-
-type RenderStyleKey = "photoreal" | "clean_oem" | "custom";
 
 export type PlatformLlmConfig = {
   version?: number;
@@ -70,67 +77,6 @@ async function apiPost(config: PlatformLlmConfig): Promise<ApiPostResp> {
     body: JSON.stringify({ config }),
   });
   return res.json();
-}
-
-function safeStr(v: unknown, fallback = "") {
-  const s = String(v ?? "").trim();
-  return s || fallback;
-}
-
-function numClamp(v: unknown, min: number, max: number, fallback: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-function normalizeBlockedTopics(raw: string): string[] {
-  const parts = raw
-    .split(/\n|,/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of parts) {
-    const k = p.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(p);
-  }
-  return out;
-}
-
-function promptPreview(s: string, max = 220) {
-  const t = String(s ?? "");
-  if (t.length <= max) return t;
-  return t.slice(0, max) + "…";
-}
-
-function defaultRenderPromptPreamble() {
-  return [
-    "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
-    "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
-    "No nudity, no explicit content, no weapons, no illegal activity.",
-  ].join("\n");
-}
-
-function defaultRenderPromptTemplate() {
-  return [
-    "{renderPromptPreamble}",
-    "Generate a realistic 'after' concept rendering based on the customer's photos.",
-    "Do NOT add text or watermarks.",
-    "Style: {style}",
-    "{serviceTypeLine}",
-    "{summaryLine}",
-    "{customerNotesLine}",
-    "{tenantRenderNotesLine}",
-  ].join("\n");
-}
-
-function defaultStylePreset(key: RenderStyleKey) {
-  if (key === "clean_oem") return "clean OEM refresh, factory-correct look, neutral lighting, product photo feel";
-  if (key === "custom") return "custom show-style upgrade, premium materials, dramatic but tasteful lighting";
-  return "photorealistic, clean lighting, product photography feel";
 }
 
 export function LlmManagerClient({
@@ -623,7 +569,8 @@ export function LlmManagerClient({
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Style presets</div>
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              These map tenant style keys to a style string injected into the prompt as <span className="font-mono">{"{style}"}</span>.
+              These map tenant style keys to a style string injected into the prompt as{" "}
+              <span className="font-mono">{"{style}"}</span>.
             </div>
 
             <div className="mt-4 grid gap-6 lg:grid-cols-3">
@@ -632,7 +579,7 @@ export function LlmManagerClient({
                   <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">photoreal</label>
                   <button
                     type="button"
-                    onClick={() => setRenderStylePhotoreal(defaultStylePreset("photoreal"))}
+                    onClick={() => setRenderStylePhotoreal(defaultStylePreset("photoreal" as RenderStyleKey))}
                     className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                   >
                     Default
@@ -651,7 +598,7 @@ export function LlmManagerClient({
                   <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">clean_oem</label>
                   <button
                     type="button"
-                    onClick={() => setRenderStyleCleanOem(defaultStylePreset("clean_oem"))}
+                    onClick={() => setRenderStyleCleanOem(defaultStylePreset("clean_oem" as RenderStyleKey))}
                     className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                   >
                     Default
@@ -670,7 +617,7 @@ export function LlmManagerClient({
                   <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">custom</label>
                   <button
                     type="button"
-                    onClick={() => setRenderStyleCustom(defaultStylePreset("custom"))}
+                    onClick={() => setRenderStyleCustom(defaultStylePreset("custom" as RenderStyleKey))}
                     className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                   >
                     Default
