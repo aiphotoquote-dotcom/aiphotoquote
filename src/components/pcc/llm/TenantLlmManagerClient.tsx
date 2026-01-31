@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { IMAGE_MODEL_OPTIONS, TEXT_MODEL_OPTIONS } from "@/components/pcc/llm/helpers/modelOptions";
 
 type GuardrailsMode = "strict" | "balanced" | "permissive";
 type PiiHandling = "redact" | "allow" | "deny";
@@ -87,6 +88,12 @@ function numClamp(v: unknown, min: number, max: number, fallback: number) {
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+function isKnownOption(value: string, options: Array<{ value: string }>) {
+  const v = String(value || "").trim();
+  if (!v) return true; // blank => inherit
+  return options.some((o) => o.value === v);
+}
+
 export function TenantLlmManagerClient(props: { tenantId: string; industryKey: string | null }) {
   const { tenantId, industryKey } = props;
 
@@ -101,9 +108,13 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     return {};
   }, [data]);
 
+  // tenant override state (raw text)
   const [estimatorModel, setEstimatorModel] = useState("");
   const [qaModel, setQaModel] = useState("");
-  const [renderModel, setRenderModel] = useState("");
+
+  // render image model override (select + optional custom input)
+  const [renderImageModelSelect, setRenderImageModelSelect] = useState<string>(""); // "" => inherit
+  const [renderImageModelCustom, setRenderImageModelCustom] = useState<string>("");
 
   const [extraSystemPreamble, setExtraSystemPreamble] = useState("");
   const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState("");
@@ -112,11 +123,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
   async function ensureTenantCookie(): Promise<void> {
-    // This endpoint is the ONLY thing that should auto-select and/or refresh tenant cookie.
-    // credentials: "include" is critical for mobile Safari consistency.
-    await safeJson<any>(
-      await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" })
-    );
+    await safeJson<any>(await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" }));
   }
 
   async function apiGet(): Promise<ApiGetResp> {
@@ -146,7 +153,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     try {
       let r = await apiGet();
 
-      // If the API says NO_ACTIVE_TENANT, force a cookie refresh via context and retry once.
       if (!("ok" in r) || !r.ok) {
         if ((r as any).error === "NO_ACTIVE_TENANT") {
           await ensureTenantCookie();
@@ -163,7 +169,19 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       const t = (r as any).tenant ?? {};
       setEstimatorModel(safeStr(t.models?.estimatorModel, ""));
       setQaModel(safeStr(t.models?.qaModel, ""));
-      setRenderModel(safeStr(t.models?.renderModel, ""));
+
+      // render image model: if value matches known list, select it; else "custom" + custom text
+      const rawRender = safeStr(t.models?.renderModel, "");
+      if (!rawRender) {
+        setRenderImageModelSelect("");
+        setRenderImageModelCustom("");
+      } else if (isKnownOption(rawRender, IMAGE_MODEL_OPTIONS)) {
+        setRenderImageModelSelect(rawRender);
+        setRenderImageModelCustom("");
+      } else {
+        setRenderImageModelSelect("custom");
+        setRenderImageModelCustom(rawRender);
+      }
 
       setExtraSystemPreamble(safeStr(t.prompts?.extraSystemPreamble, ""));
       setQuoteEstimatorSystem(safeStr(t.prompts?.quoteEstimatorSystem, ""));
@@ -182,14 +200,20 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   async function save() {
     setMsg(null);
     setSaving(true);
+
     try {
+      const resolvedRenderModel =
+        renderImageModelSelect === "custom"
+          ? safeStr(renderImageModelCustom, "")
+          : safeStr(renderImageModelSelect, ""); // "" means inherit
+
       const overrides: TenantOverrides = {
         version: tenant?.version ?? 1,
         updatedAt: tenant?.updatedAt ?? null,
         models: {
           estimatorModel: safeStr(estimatorModel, "") || undefined,
           qaModel: safeStr(qaModel, "") || undefined,
-          renderModel: safeStr(renderModel, "") || undefined,
+          renderModel: resolvedRenderModel || undefined,
         },
         prompts: {
           extraSystemPreamble: String(extraSystemPreamble || "") || undefined,
@@ -289,6 +313,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                 placeholder="(inherit)"
               />
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Common options: {TEXT_MODEL_OPTIONS.filter((o) => o.value !== "custom").map((o) => o.value).join(", ")}
+              </div>
             </div>
 
             <div>
@@ -302,16 +329,45 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
 
             <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render prompt model override</label>
-              <input
-                value={renderModel}
-                onChange={(e) => setRenderModel(e.target.value)}
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render image model override</label>
+              <select
+                value={renderImageModelSelect}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setRenderImageModelSelect(v);
+                  if (v !== "custom") setRenderImageModelCustom("");
+                }}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="(inherit)"
-              />
+              >
+                <option value="">(inherit)</option>
+                {IMAGE_MODEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+
+              {renderImageModelSelect === "custom" ? (
+                <input
+                  value={renderImageModelCustom}
+                  onChange={(e) => setRenderImageModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="Enter custom image model id…"
+                />
+              ) : null}
+
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                This affects text prompt synthesis only (image generation uses the image model).
+                This controls what <span className="font-mono">/api/quote/render</span> uses for image generation.
               </div>
+
+              {effective ? (
+                <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+                  Effective render model:{" "}
+                  <span className="font-mono text-gray-900 dark:text-gray-100">
+                    {effective.models?.renderModel ?? ""}
+                  </span>
+                </div>
+              ) : null}
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -342,9 +398,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Mode</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">
-                {platform?.guardrails?.mode ?? "balanced"}
-              </span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">{platform?.guardrails?.mode ?? "balanced"}</span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">PII handling</span>
@@ -370,9 +424,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Extra system preamble override
-            </label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
             <textarea
               value={extraSystemPreamble}
               onChange={(e) => setExtraSystemPreamble(e.target.value)}
@@ -382,9 +434,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Quote estimator system override
-            </label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system override</label>
             <textarea
               value={quoteEstimatorSystem}
               onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
@@ -394,9 +444,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Q&A generator system override
-            </label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A generator system override</label>
             <textarea
               value={qaQuestionGeneratorSystem}
               onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
@@ -411,9 +459,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective preview</div>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div>
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                  Effective estimator system
-                </div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Effective estimator system</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {effective.prompts?.quoteEstimatorSystem ?? ""}
                 </pre>
