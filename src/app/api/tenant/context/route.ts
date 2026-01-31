@@ -2,10 +2,9 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants } from "@/lib/db/schema";
 import { requireAppUserId } from "@/lib/auth/requireAppUser";
 import { readActiveTenantIdFromCookies, ACTIVE_TENANT_COOKIE_KEYS } from "@/lib/tenant/activeTenant";
 
@@ -16,6 +15,8 @@ const Body = z.object({
   tenantId: z.string().uuid().optional(),
   tenantSlug: z.string().min(3).optional(),
 });
+
+type TenantRole = "owner" | "admin" | "member";
 
 function cookieOpts() {
   const isProd = process.env.NODE_ENV === "production";
@@ -30,7 +31,7 @@ function cookieOpts() {
 
 /**
  * For now we write ALL legacy keys for backwards compat.
- * Later when everything reads only activeTenantId, we can stop writing the others.
+ * Later when everything reads only one key, we can stop writing the others.
  */
 function setTenantCookies(res: NextResponse, tenantId: string) {
   const opts = cookieOpts();
@@ -42,38 +43,77 @@ function setTenantCookies(res: NextResponse, tenantId: string) {
 }
 
 function clearTenantCookies(res: NextResponse) {
-  // NextResponse.cookies.delete() expects:
-  // - delete("name") OR delete({ name: "name", path: "/" })
   for (const name of ACTIVE_TENANT_COOKIE_KEYS) {
     res.cookies.delete({ name, path: "/" });
   }
   return res;
 }
 
-async function listTenantsForUser(userId: string) {
-  // Owner-only model for now; later switch to tenant_members
-  const rows = await db
-    .select({
-      tenantId: tenants.id,
-      slug: tenants.slug,
-      name: tenants.name,
-      createdAt: tenants.createdAt,
-    })
-    .from(tenants)
-    .where(eq(tenants.ownerClerkUserId, userId))
-    .orderBy(tenants.createdAt);
+function firstRows(r: any): any[] {
+  return (r as any)?.rows ?? (Array.isArray(r) ? r : []);
+}
 
-  return rows.map((t) => ({
-    tenantId: t.tenantId,
-    slug: t.slug,
-    name: t.name,
-    role: "owner" as const,
+/**
+ * RBAC source of truth:
+ * tenant_members (clerk_user_id + status=active)
+ * joined to tenants for slug/name
+ */
+async function listTenantsForUser(userId: string) {
+  const r = await db.execute(sql`
+    SELECT
+      t.id  AS tenant_id,
+      t.slug AS slug,
+      t.name AS name,
+      m.role AS role,
+      t.created_at AS created_at
+    FROM tenant_members m
+    JOIN tenants t
+      ON t.id = m.tenant_id
+    WHERE m.clerk_user_id = ${userId}
+      AND (m.status IS NULL OR m.status = 'active')
+    ORDER BY t.created_at ASC
+  `);
+
+  const rows = firstRows(r);
+
+  return rows.map((x: any) => ({
+    tenantId: String(x.tenant_id),
+    slug: String(x.slug),
+    name: x.name ? String(x.name) : null,
+    role: (String(x.role || "member") as TenantRole) ?? "member",
   }));
+}
+
+async function hasTenantAccessById(userId: string, tenantId: string) {
+  const r = await db.execute(sql`
+    SELECT 1
+    FROM tenant_members
+    WHERE tenant_id = ${tenantId}::uuid
+      AND clerk_user_id = ${userId}
+      AND (status IS NULL OR status = 'active')
+    LIMIT 1
+  `);
+  return firstRows(r).length > 0;
+}
+
+async function resolveTenantIdBySlugForUser(userId: string, tenantSlug: string) {
+  const r = await db.execute(sql`
+    SELECT t.id AS tenant_id
+    FROM tenant_members m
+    JOIN tenants t
+      ON t.id = m.tenant_id
+    WHERE m.clerk_user_id = ${userId}
+      AND (m.status IS NULL OR m.status = 'active')
+      AND t.slug = ${tenantSlug}
+    LIMIT 1
+  `);
+  const row = firstRows(r)[0] ?? null;
+  return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
 /**
  * GET:
- * - returns tenant context for signed-in user
+ * - returns tenant context for signed-in user (RBAC)
  * - if exactly 1 tenant and no cookie, auto-select and set cookie
  * - if cookie exists but is stale (not in tenant list), clear cookie and proceed
  */
@@ -84,7 +124,6 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
     }
 
-    // Ensure app_user exists (mobility layer)
     await requireAppUserId();
 
     const tenantsForUser = await listTenantsForUser(userId);
@@ -98,7 +137,6 @@ export async function GET() {
         tenants: [],
         needsTenantSelection: true,
       });
-      // if they had an old cookie from a previous account, clear it
       return clearTenantCookies(res);
     }
 
@@ -125,9 +163,7 @@ export async function GET() {
       });
       clearTenantCookies(cleared);
 
-      // if only one tenant, immediately set it
       if (tenantsForUser.length === 1) {
-        cleared.headers.set("x-auto-selected-tenant", tenantsForUser[0].tenantId);
         return setTenantCookies(cleared, tenantsForUser[0].tenantId);
       }
 
@@ -163,7 +199,7 @@ export async function GET() {
 
 /**
  * POST:
- * - sets active tenant cookie (must belong to user for now)
+ * - sets active tenant cookie (must be accessible by user via tenant_members)
  */
 export async function POST(req: Request) {
   try {
@@ -174,8 +210,8 @@ export async function POST(req: Request) {
 
     await requireAppUserId();
 
-    const json = await req.json().catch(() => null);
-    const parsed = Body.safeParse(json);
+    const bodyJson = await req.json().catch(() => null);
+    const parsed = Body.safeParse(bodyJson);
     if (!parsed.success) {
       return NextResponse.json(
         { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
@@ -188,28 +224,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, { status: 400 });
     }
 
-    const where =
-      tenantId && tenantSlug
-        ? and(eq(tenants.id, tenantId), eq(tenants.slug, tenantSlug), eq(tenants.ownerClerkUserId, userId))
-        : tenantId
-        ? and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId))
-        : and(eq(tenants.slug, tenantSlug!), eq(tenants.ownerClerkUserId, userId));
+    // Resolve candidate tenant id
+    const candidateId =
+      tenantId ??
+      (tenantSlug ? await resolveTenantIdBySlugForUser(userId, tenantSlug) : null);
 
-    const t = await db
-      .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
-      .from(tenants)
-      .where(where)
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!t) {
-      // also clear cookies here because the user is trying to select something invalid/stale
-      const res = NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
+    if (!candidateId) {
+      const res = NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_ACCESSIBLE" }, { status: 404 });
       return clearTenantCookies(res);
     }
 
-    const res = NextResponse.json({ ok: true, activeTenantId: t.id, tenant: t });
-    return setTenantCookies(res, t.id);
+    // Validate access by membership
+    const ok = await hasTenantAccessById(userId, candidateId);
+    if (!ok) {
+      const res = NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_ACCESSIBLE" }, { status: 403 });
+      return clearTenantCookies(res);
+    }
+
+    const res = NextResponse.json({ ok: true, activeTenantId: candidateId });
+    return setTenantCookies(res, candidateId);
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
