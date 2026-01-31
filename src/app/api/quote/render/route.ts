@@ -14,7 +14,7 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteCustomer";
 import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
 
-// ✅ NEW: PCC config (render prompt template + style presets live here)
+// ✅ PCC config (render prompt template + style presets live here)
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
@@ -23,6 +23,8 @@ const Req = z.object({
   tenantSlug: z.string().min(3),
   quoteLogId: z.string().uuid(),
 });
+
+const RENDER_DEBUG_ENABLED = process.env.PCC_RENDER_DEBUG?.trim() === "1";
 
 function safeErr(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
@@ -117,6 +119,18 @@ function fillTemplate(template: string, vars: Record<string, string>) {
   return t;
 }
 
+function safeImageInfo(inputAny: any, max = 3) {
+  const imgs = Array.isArray(inputAny?.images) ? inputAny.images : [];
+  const urls = imgs
+    .map((x: any) => String(x?.url ?? "").trim())
+    .filter(Boolean);
+
+  return {
+    count: urls.length,
+    sample_urls: urls.slice(0, max),
+  };
+}
+
 export async function POST(req: Request) {
   const debugId = `dbg_${Math.random().toString(36).slice(2, 10)}`;
 
@@ -178,6 +192,7 @@ export async function POST(req: Request) {
         status: "not_requested",
         imageUrl: q.renderImageUrl ?? null,
         debugId,
+        ...(RENDER_DEBUG_ENABLED ? { render_debug: null } : {}),
       });
     }
 
@@ -189,6 +204,7 @@ export async function POST(req: Request) {
         status: "rendered",
         imageUrl: q.renderImageUrl,
         debugId,
+        ...(RENDER_DEBUG_ENABLED ? { render_debug: null } : {}),
       });
     }
 
@@ -259,7 +275,10 @@ export async function POST(req: Request) {
           .set({ renderStatus: "failed", renderError: `Render daily cap reached (${effectiveCap}).` })
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-        return NextResponse.json({ ok: false, error: "RENDER_LIMIT", message: "Daily render limit reached.", debugId }, { status: 429 });
+        return NextResponse.json(
+          { ok: false, error: "RENDER_LIMIT", message: "Daily render limit reached.", debugId },
+          { status: 429 }
+        );
       }
     }
 
@@ -329,13 +348,14 @@ export async function POST(req: Request) {
 
     // final style text fallback (should never be empty)
     const styleText =
-      presetText ||
-      "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
     // Denylist = env/platform denylist + PCC blockedTopics (dedupe)
     const denylist = joinDedupeStrings(platform.denylist, pcc?.guardrails?.blockedTopics);
 
-    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes, styleText].filter(Boolean).join("\n");
+    const combinedTextForScan = [serviceType, summary, customerNotes, tenantRenderNotes, styleText]
+      .filter(Boolean)
+      .join("\n");
     if (denylist.length && containsDenylistedText(combinedTextForScan, denylist)) {
       await db
         .update(quoteLogs)
@@ -352,10 +372,7 @@ export async function POST(req: Request) {
     }
 
     // PCC-owned render preamble + template (fallback to env/platform defaults)
-    const renderPromptPreamble =
-      safeTrim(pcc?.prompts?.renderPromptPreamble) ||
-      safeTrim(platform.extraPromptPreamble) ||
-      "";
+    const renderPromptPreamble = safeTrim(pcc?.prompts?.renderPromptPreamble) || safeTrim(platform.extraPromptPreamble) || "";
 
     const renderPromptTemplate =
       safeTrim(pcc?.prompts?.renderPromptTemplate) ||
@@ -385,6 +402,43 @@ export async function POST(req: Request) {
       .update(quoteLogs)
       .set({ renderPrompt: prompt })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+    // ✅ DEBUG instrumentation: persist to quote_logs.output.render_debug (jsonb)
+    let renderDebug: any = null;
+    if (RENDER_DEBUG_ENABLED) {
+      const renderModelResolved = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
+      const imgInfo = safeImageInfo(inputAny, 3);
+
+      renderDebug = {
+        debugId,
+        capturedAt: new Date().toISOString(),
+        renderModel: renderModelResolved,
+        tenantStyleKey,
+        styleText,
+        renderPromptPreamble,
+        renderPromptTemplate,
+        prompt,
+        images: imgInfo,
+        inputs: {
+          serviceType,
+          summary,
+          customerNotes,
+          tenantRenderNotes,
+        },
+      };
+
+      try {
+        const existingOutput = outAny ?? {};
+        const nextOutput = { ...(existingOutput as any), render_debug: renderDebug };
+        await db.execute(sql`
+          update quote_logs
+          set output = ${JSON.stringify(nextOutput)}::jsonb
+          where id = ${quoteLogId}::uuid
+        `);
+      } catch {
+        // best-effort only
+      }
+    }
 
     // 8) Generate image (model comes from PCC)
     const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
@@ -539,6 +593,7 @@ export async function POST(req: Request) {
       status: "rendered",
       imageUrl,
       debugId,
+      ...(RENDER_DEBUG_ENABLED ? { render_debug: renderDebug } : {}),
     });
   } catch (e) {
     const msg = safeErr(e);
