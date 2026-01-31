@@ -20,6 +20,10 @@ type PolicyResp =
         rendering_notes: string;
         rendering_max_per_day: number;
         rendering_customer_opt_in_required: boolean;
+
+        // 🔥 Live Q&A
+        live_qa_enabled?: boolean;
+        live_qa_max_questions?: number;
       };
     }
   | { ok: false; error: string; message?: string; issues?: any };
@@ -72,6 +76,12 @@ function Card({
   );
 }
 
+function clampInt(v: any, fallback: number, min: number, max: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
 export default function AiPolicySetupPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -88,6 +98,10 @@ export default function AiPolicySetupPage() {
   const [renderingNotes, setRenderingNotes] = useState("");
   const [renderingMaxPerDay, setRenderingMaxPerDay] = useState<number>(20);
   const [renderingOptInRequired, setRenderingOptInRequired] = useState(true);
+
+  // 🔥 Live Q&A
+  const [liveQaEnabled, setLiveQaEnabled] = useState(false);
+  const [liveQaMaxQuestions, setLiveQaMaxQuestions] = useState(3);
 
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -113,12 +127,16 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
-      setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
+      setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
       );
       setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
+
+      // 🔥 Live Q&A (defaults)
+      setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
+      setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -141,6 +159,10 @@ export default function AiPolicySetupPage() {
         rendering_notes: renderingNotes,
         rendering_max_per_day: Math.max(0, Math.min(1000, Number(renderingMaxPerDay) || 0)),
         rendering_customer_opt_in_required: renderingOptInRequired,
+
+        // 🔥 Live Q&A
+        live_qa_enabled: Boolean(liveQaEnabled),
+        live_qa_max_questions: Math.max(1, Math.min(10, Number(liveQaMaxQuestions) || 3)),
       };
 
       const res = await fetch("/api/admin/ai-policy", {
@@ -154,18 +176,23 @@ export default function AiPolicySetupPage() {
       if (!data.ok) throw new Error(data.message || data.error || "Failed to save AI policy");
 
       setMsg("Saved.");
+
       setRole(data.role);
 
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
-      setRenderingStyle(data.ai_policy.rendering_style ?? "photoreal");
+      setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
       );
       setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
+
+      // 🔥 Live Q&A
+      setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
+      setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -184,7 +211,7 @@ export default function AiPolicySetupPage() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Setup: AI & Pricing Policy</h1>
           <p className="mt-1 text-sm text-gray-600">
-            Decide what the AI returns to customers, and optionally enable concept renderings.
+            Decide what the AI returns to customers, optionally enable concept renderings, and configure Live Q&amp;A.
           </p>
           {role ? (
             <div className="mt-2 text-sm">
@@ -222,8 +249,6 @@ export default function AiPolicySetupPage() {
                 <span className="font-mono">admin</span> can change the policy.
               </div>
             ) : null}
-
-            
 
             {/* AI Mode */}
             <div className="grid gap-3">
@@ -274,6 +299,75 @@ export default function AiPolicySetupPage() {
                 >
                   {pricingEnabled ? "ON" : "OFF"}
                 </button>
+              </div>
+            </div>
+
+            {/* 🔥 Live Q&A */}
+            <div className="rounded-xl border border-gray-200 bg-white p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Live Q&amp;A</div>
+                  <div className="mt-1 text-xs text-gray-600">
+                    When enabled, the quote flow asks a few quick follow-up questions before finalizing the estimate.
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => canEdit && setLiveQaEnabled((v) => !v)}
+                  disabled={!canEdit}
+                  className={[
+                    "rounded-md border px-3 py-2 text-sm font-semibold",
+                    liveQaEnabled
+                      ? "border-green-300 bg-green-50 text-green-800"
+                      : "border-gray-300 bg-white text-gray-800",
+                    !canEdit ? "opacity-50" : "hover:bg-gray-50",
+                  ].join(" ")}
+                >
+                  {liveQaEnabled ? "Enabled" : "Disabled"}
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-4">
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                  <div className="text-sm font-semibold text-gray-900">Max questions</div>
+                  <div className="mt-1 text-xs text-gray-600">Recommended: 3–5. Keep it short to avoid drop-off.</div>
+
+                  <div className="mt-3 flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={1}
+                      max={10}
+                      value={liveQaMaxQuestions}
+                      onChange={(e) => setLiveQaMaxQuestions(Number(e.target.value))}
+                      disabled={!canEdit || !liveQaEnabled}
+                      className="w-full"
+                    />
+                    <div className="w-10 text-right text-sm font-mono text-gray-900">{liveQaMaxQuestions}</div>
+                  </div>
+
+                  <div className="mt-2 text-xs text-gray-500">
+                    If disabled, the quote returns an estimate immediately (single-step flow).
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                  <div className="text-sm font-semibold text-gray-900">What customers see</div>
+                  <div className="mt-2 rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700">
+                    <div className="font-semibold">Quick questions</div>
+                    <div className="mt-1 opacity-90">“One more step — answer these and we’ll finalize your estimate.”</div>
+                    <div className="mt-3 grid gap-2">
+                      <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+                        What is the exact size (L×W) of the item?
+                      </div>
+                      <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+                        Repair vs full replacement?
+                      </div>
+                      <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+                        Any material preference?
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
