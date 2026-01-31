@@ -1,12 +1,11 @@
 // src/app/api/tenant/save-settings/route.ts
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
-import { auth } from "@clerk/nextjs/server";
+import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSettings } from "@/lib/db/schema";
+import { requireTenantRole } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,9 +17,15 @@ export const dynamic = "force-dynamic";
  * - Allow PARTIAL updates (setup wizard pages shouldn't need to send every field).
  * - Require industryKey ONLY when creating tenant_settings for the first time.
  * - Preserve existing values when fields are omitted.
+ *
+ * IMPORTANT:
+ * - Tenant resolution is ONLY via requireTenantRole (RBAC + active tenant cookie).
+ * - No cookie hunting. No fallback to "first tenant owned".
+ * - This avoids tenant drift and keeps future multi-user tenants correct.
  */
 
 const Body = z.object({
+  // NOTE: We keep tenantSlug because clients send it today, but we validate + apply it to the ACTIVE tenant only.
   tenantSlug: z.string().min(3),
 
   // allow both keys from different clients
@@ -76,15 +81,15 @@ const Body = z.object({
   week_starts_on: z.number().int().min(1).max(7).optional().nullable(),
 });
 
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-
-  return candidates[0] || null;
+function json(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "cache-control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      pragma: "no-cache",
+      expires: "0",
+    },
+  });
 }
 
 function normalizeUrl(u: string | null | undefined) {
@@ -109,73 +114,56 @@ function normalizeEmail(v: string | null | undefined) {
 
 function looksLikeEmail(v: string | null) {
   if (!v) return true; // allow null/empty
-  // lightweight validation; real validation happens at send-time too
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
-export async function POST(req: Request) {
-  try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
+function isAdminRole(role: string) {
+  return role === "owner" || role === "admin";
+}
 
-    const json = await req.json().catch(() => null);
-    const parsed = Body.safeParse(json);
+export async function POST(req: Request) {
+  // RBAC gate (active tenant must exist, and membership must be active)
+  const gate = await requireTenantRole(["owner", "admin", "member"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
+
+  // Only owner/admin can mutate settings (member can read elsewhere)
+  if (!isAdminRole(gate.role)) {
+    return json({ ok: false, error: "FORBIDDEN", message: "Only owner/admin can update tenant settings." }, 403);
+  }
+
+  try {
+    const body = await req.json().catch(() => null);
+    const parsed = Body.safeParse(body);
 
     if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_BODY", issues: parsed.error.issues },
-        { status: 400 }
-      );
+      return json({ ok: false, error: "INVALID_BODY", issues: parsed.error.issues }, 400);
     }
 
     const data: any = parsed.data;
 
-    // "desired slug" is what the client wants. We'll update tenant.slug if it differs.
-    const desiredSlug = String(data.tenantSlug).trim();
+    const desiredSlug = String(data.tenantSlug || "").trim();
 
-    // Resolve tenant by cookie (active tenant) with fallback to first owned tenant
-    const jar = await cookies();
-    let tenantId = getCookieTenantId(jar);
-
-    if (!tenantId) {
-      const t = await db
-        .select({ id: tenants.id })
-        .from(tenants)
-        .where(eq(tenants.ownerClerkUserId, userId))
-        .limit(1)
-        .then((r) => r[0] ?? null);
-
-      tenantId = t?.id ?? null;
-    }
-
-    if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
-    }
-
-    // Resolve tenant by id + ownership
+    // Load tenant by ACTIVE tenant id (not owner model)
     const tenant = await db
       .select({
         id: tenants.id,
         slug: tenants.slug,
-        ownerClerkUserId: tenants.ownerClerkUserId,
       })
       .from(tenants)
-      .where(and(eq(tenants.id, tenantId), eq(tenants.ownerClerkUserId, userId)))
+      .where(eq(tenants.id, gate.tenantId as any))
       .limit(1)
       .then((r) => r[0] ?? null);
 
     if (!tenant) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND_OR_NOT_OWNED" }, { status: 404 });
+      return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
     }
 
-    // ✅ Update tenant slug if changed (NOW tenant is defined)
+    // Update slug if changed (still scoped to active tenant)
     if (desiredSlug && desiredSlug !== tenant.slug) {
       await db.update(tenants).set({ slug: desiredSlug }).where(eq(tenants.id, tenant.id));
     }
 
-    // Load existing settings (so we can merge partial updates safely)
+    // Load existing settings (merge partial updates safely)
     const existing = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -204,18 +192,18 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // Industry key: only required on FIRST insert (no existing row)
+    // Industry key: required ONLY on first insert
     const incomingIndustryKey = pick<string>(data, "industryKey", "industry_key")?.trim();
     const industryKey = incomingIndustryKey ?? existing?.industryKey ?? "";
 
     if (!industryKey) {
-      return NextResponse.json(
+      return json(
         {
           ok: false,
           error: "MISSING_INDUSTRY_KEY",
           message: "industryKey is required the first time settings are saved.",
         },
-        { status: 400 }
+        400
       );
     }
 
@@ -230,9 +218,7 @@ export async function POST(req: Request) {
 
     const businessNameRaw = pick<string | null>(data, "businessName", "business_name");
     const businessName =
-      businessNameRaw !== undefined
-        ? (String(businessNameRaw ?? "").trim() || null)
-        : existing?.businessName ?? null;
+      businessNameRaw !== undefined ? (String(businessNameRaw ?? "").trim() || null) : existing?.businessName ?? null;
 
     const leadToEmailRaw = pick<string | null>(data, "leadToEmail", "lead_to_email");
     const leadToEmail =
@@ -243,36 +229,26 @@ export async function POST(req: Request) {
       resendFromEmailRaw !== undefined ? normalizeEmail(resendFromEmailRaw) : existing?.resendFromEmail ?? null;
 
     if (!looksLikeEmail(leadToEmail)) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." },
-        { status: 400 }
-      );
+      return json({ ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." }, 400);
     }
     if (!looksLikeEmail(resendFromEmail)) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." },
-        { status: 400 }
-      );
+      return json({ ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." }, 400);
     }
 
     const aiModeRaw = pick<string | null>(data, "aiMode", "ai_mode");
     const aiMode = aiModeRaw !== undefined ? (aiModeRaw ?? null) : existing?.aiMode ?? null;
 
     const pricingEnabledRaw = pick<boolean | null>(data, "pricingEnabled", "pricing_enabled");
-    const pricingEnabled =
-      pricingEnabledRaw !== undefined ? pricingEnabledRaw : existing?.pricingEnabled ?? null;
+    const pricingEnabled = pricingEnabledRaw !== undefined ? pricingEnabledRaw : existing?.pricingEnabled ?? null;
 
     const renderingEnabledRaw = pick<boolean | null>(data, "renderingEnabled", "rendering_enabled");
-    const renderingEnabled =
-      renderingEnabledRaw !== undefined ? renderingEnabledRaw : existing?.renderingEnabled ?? null;
+    const renderingEnabled = renderingEnabledRaw !== undefined ? renderingEnabledRaw : existing?.renderingEnabled ?? null;
 
     const renderingStyleRaw = pick<string | null>(data, "renderingStyle", "rendering_style");
-    const renderingStyle =
-      renderingStyleRaw !== undefined ? (renderingStyleRaw ?? null) : existing?.renderingStyle ?? null;
+    const renderingStyle = renderingStyleRaw !== undefined ? (renderingStyleRaw ?? null) : existing?.renderingStyle ?? null;
 
     const renderingNotesRaw = pick<string | null>(data, "renderingNotes", "rendering_notes");
-    const renderingNotes =
-      renderingNotesRaw !== undefined ? (renderingNotesRaw ?? null) : existing?.renderingNotes ?? null;
+    const renderingNotes = renderingNotesRaw !== undefined ? (renderingNotesRaw ?? null) : existing?.renderingNotes ?? null;
 
     const renderingMaxPerDayRaw = pick<number | null>(data, "renderingMaxPerDay", "rendering_max_per_day");
     const renderingMaxPerDay =
@@ -299,8 +275,7 @@ export async function POST(req: Request) {
         : existing?.reportingTimezone ?? "America/New_York";
 
     const weekStartsOnRaw = pick<number | null>(data, "weekStartsOn", "week_starts_on");
-    const weekStartsOn =
-      weekStartsOnRaw !== undefined ? (weekStartsOnRaw ?? null) : existing?.weekStartsOn ?? 1;
+    const weekStartsOn = weekStartsOnRaw !== undefined ? (weekStartsOnRaw ?? null) : existing?.weekStartsOn ?? 1;
 
     // Upsert tenant_settings (tenant_id is PK)
     await db
@@ -355,7 +330,7 @@ export async function POST(req: Request) {
       });
 
     // Return saved settings (snake_case response)
-    const settingsRows = await db
+    const settings = await db
       .select({
         tenant_id: tenantSettings.tenantId,
         industry_key: tenantSettings.industryKey,
@@ -381,17 +356,15 @@ export async function POST(req: Request) {
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1);
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    return NextResponse.json({
+    return json({
       ok: true,
       tenant: { id: tenant.id, slug: desiredSlug || tenant.slug },
-      settings: settingsRows[0] ?? null,
+      settings,
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, 500);
   }
 }
