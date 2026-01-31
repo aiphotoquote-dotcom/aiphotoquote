@@ -240,7 +240,7 @@ async function mergeQuoteLogRendering(args: {
 
   await db.execute(sql`
     update quote_logs
-    set output = ${JSON.stringify(next)}::jsonb
+   set output = coalesce(output, '{}'::jsonb) || ${JSON.stringify(next)}::jsonb
     where id = ${quoteLogId}::uuid
   `);
 }

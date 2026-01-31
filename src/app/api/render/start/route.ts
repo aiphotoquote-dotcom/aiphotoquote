@@ -124,7 +124,7 @@ async function updateQuoteLogOutput(quoteLogId: string, output: any) {
   const outputStr = JSON.stringify(output ?? {});
   await db.execute(sql`
     update quote_logs
-    set output = ${outputStr}::jsonb
+    set output = coalesce(output, '{}'::jsonb) || ${outputStr}::jsonb
     where id = ${quoteLogId}::uuid
   `);
 }
