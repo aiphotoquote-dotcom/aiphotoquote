@@ -25,7 +25,6 @@ function safeParse(json: string | null): PlatformLlmConfig | null {
 
 type BlobPointer = {
   url: string;
-  // used only to bust CDN / fetch caches
   versionToken: string;
 };
 
@@ -36,7 +35,6 @@ async function getBlobPointerIfExists(): Promise<BlobPointer | null> {
     const url = String(meta?.url ?? "").trim();
     if (!url) return null;
 
-    // Prefer uploadedAt if available; fall back to size; last resort Date.now()
     const uploadedAt = meta?.uploadedAt ? String(meta.uploadedAt) : "";
     const size = Number.isFinite(meta?.size) ? String(meta.size) : "";
     const versionToken = uploadedAt || size || String(Date.now());
@@ -57,13 +55,10 @@ export async function loadPlatformLlmConfig(): Promise<PlatformLlmConfig> {
   const ptr = await getBlobPointerIfExists();
   if (ptr) {
     try {
-      // Cache-bust: ensures fresh bytes even if CDN holds onto the object briefly.
       const bustUrl = `${ptr.url}${ptr.url.includes("?") ? "&" : "?"}v=${encodeURIComponent(ptr.versionToken)}`;
 
       const res = await fetch(bustUrl, {
         cache: "no-store",
-        // Extra belt-and-suspenders for Next fetch caching:
-        // (works in App Router environments)
         next: { revalidate: 0 },
       });
 
@@ -81,7 +76,7 @@ export async function loadPlatformLlmConfig(): Promise<PlatformLlmConfig> {
   return defaultPlatformLlmConfig();
 }
 
-export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<void> {
+export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<PlatformLlmConfig> {
   // Always stamp updatedAt on save (single source of truth)
   const next: PlatformLlmConfig = {
     ...cfg,
@@ -91,13 +86,14 @@ export async function savePlatformLlmConfig(cfg: PlatformLlmConfig): Promise<voi
 
   const payload = JSON.stringify(next, null, 2);
 
-  // Overwrite by using same key
   await put(BLOB_KEY, payload, {
     access: "public",
     contentType: "application/json",
     addRandomSuffix: false,
     allowOverwrite: true,
   });
+
+  return next;
 }
 
 /**
