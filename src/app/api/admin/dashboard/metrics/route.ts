@@ -24,26 +24,24 @@ function firstRow(r: any): any | null {
 }
 
 /**
- * Metrics for active tenant (RBAC via requireTenantRole).
- * Always returns complete numeric fields (0 if none).
+ * Dashboard metrics for active tenant.
+ * Uses created_at (NOT submitted_at).
  */
 export async function GET() {
   const gate = await requireTenantRole(["owner", "admin", "member"]);
   if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
 
-  const tenantId = gate.tenantId;
-
   try {
-    // Assumes quote_logs has: tenant_id, submitted_at, is_read, stage
+    // quote_logs columns assumed: tenant_id, created_at, is_read, stage
     const r = await db.execute(sql`
       WITH base AS (
         SELECT
           tenant_id,
-          submitted_at,
+          created_at,
           COALESCE(is_read, false) AS is_read,
           COALESCE(stage, 'new') AS stage
         FROM quote_logs
-        WHERE tenant_id = ${tenantId}::uuid
+        WHERE tenant_id = ${gate.tenantId}::uuid
       )
       SELECT
         COALESCE((SELECT COUNT(*)::int FROM base), 0) AS "totalLeads",
@@ -53,20 +51,20 @@ export async function GET() {
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
-          WHERE submitted_at >= date_trunc('day', now())
-            AND submitted_at <  date_trunc('day', now()) + interval '1 day'
+          WHERE created_at >= date_trunc('day', now())
+            AND created_at <  date_trunc('day', now()) + interval '1 day'
         ), 0) AS "todayNew",
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
-          WHERE submitted_at >= date_trunc('day', now()) - interval '1 day'
-            AND submitted_at <  date_trunc('day', now())
+          WHERE created_at >= date_trunc('day', now()) - interval '1 day'
+            AND created_at <  date_trunc('day', now())
         ), 0) AS "yesterdayNew",
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
           WHERE is_read = false
-            AND submitted_at < now() - interval '24 hours'
+            AND created_at < now() - interval '24 hours'
         ), 0) AS "staleUnread"
     `);
 
