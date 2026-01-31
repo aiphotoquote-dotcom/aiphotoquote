@@ -1,27 +1,15 @@
 // src/app/api/tenant/metrics-week/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { auth } from "@clerk/nextjs/server";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, tenants } from "@/lib/db/schema";
+import { quoteLogs } from "@/lib/db/schema";
+import { requireTenantRole } from "@/lib/auth/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-
-  return candidates[0] || null;
-}
-
-// Monday 00:00 local time
+// Monday 00:00 local time (server time for now)
 function startOfWeekMonday(d: Date) {
   const x = new Date(d);
   const day = x.getDay(); // 0 Sun .. 6 Sat
@@ -31,30 +19,8 @@ function startOfWeekMonday(d: Date) {
   return x;
 }
 
-async function resolveTenantId(userId: string) {
-  const jar = await cookies();
-  let tenantId = getCookieTenantId(jar);
-
-  if (!tenantId) {
-    const t = await db
-      .select({ id: tenants.id })
-      .from(tenants)
-      .where(eq(tenants.ownerClerkUserId, userId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    tenantId = t?.id ?? null;
-  }
-
-  return tenantId;
-}
-
 async function countMetrics(tenantId: string, start: Date, end: Date) {
-  const base = and(
-    eq(quoteLogs.tenantId, tenantId),
-    gte(quoteLogs.createdAt, start),
-    lt(quoteLogs.createdAt, end)
-  );
+  const base = and(eq(quoteLogs.tenantId, tenantId as any), gte(quoteLogs.createdAt, start), lt(quoteLogs.createdAt, end));
 
   const quotes = await db
     .select({ n: sql<number>`count(*)::int` })
@@ -84,16 +50,20 @@ async function countMetrics(tenantId: string, start: Date, end: Date) {
 }
 
 export async function GET() {
-  try {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
+  // RBAC + active tenant resolution (cookie) is centralized here
+  const gate = await requireTenantRole(["owner", "admin", "member"]);
+  if (!gate.ok) {
+    return NextResponse.json(
+      { ok: false, error: gate.error, message: gate.message },
+      {
+        status: gate.status,
+        headers: { "cache-control": "no-store, max-age=0" },
+      }
+    );
+  }
 
-    const tenantId = await resolveTenantId(userId);
-    if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_ACTIVE_TENANT" }, { status: 400 });
-    }
+  try {
+    const tenantId = gate.tenantId;
 
     const now = new Date();
     const thisStart = startOfWeekMonday(now);
@@ -128,7 +98,7 @@ export async function GET() {
   } catch (e: any) {
     return NextResponse.json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
+      { status: 500, headers: { "cache-control": "no-store, max-age=0" } }
     );
   }
 }
