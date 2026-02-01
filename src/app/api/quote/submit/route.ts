@@ -146,6 +146,20 @@ async function getOpenAiForTenant(tenantId: string) {
   return new OpenAI({ apiKey: openaiKey });
 }
 
+/**
+ * IMPORTANT:
+ * - Do NOT gate on provider-specific env vars (like RESEND_API_KEY).
+ * - Gate only on “do we have tenant email config to attempt sending?”
+ * - Let sendEmail() report provider misconfig (and capture it in output).
+ */
+function isEmailAttemptConfigured(cfg: any, effectiveBusinessName: string, customerEmail?: string | null) {
+  const fromOk = Boolean(safeTrim(cfg?.fromEmail));
+  const leadOk = Boolean(safeTrim(cfg?.leadToEmail));
+  const bizOk = Boolean(safeTrim(effectiveBusinessName));
+  const custOk = customerEmail ? Boolean(safeTrim(customerEmail)) : true;
+  return fromOk && leadOk && bizOk && custOk;
+}
+
 // Send initial “received” emails right after creating the quote log.
 // Best-effort: never blocks the request.
 async function sendReceivedEmails(args: {
@@ -164,9 +178,7 @@ async function sendReceivedEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(
-    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-  );
+  const configured = isEmailAttemptConfigured(cfg, effectiveBusinessName, customer.email);
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -177,14 +189,14 @@ async function sendReceivedEmails(args: {
     lead_received: {
       attempted: false,
       ok: false,
-      provider: "resend",
+      provider: cfg.provider ?? "unknown",
       id: null as string | null,
       error: null as string | null,
     },
     customer_received: {
       attempted: false,
       ok: false,
-      provider: "resend",
+      provider: cfg.provider ?? "unknown",
       id: null as string | null,
       error: null as string | null,
     },
@@ -219,11 +231,11 @@ async function sendReceivedEmails(args: {
 
     const r1 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "lead_new", quoteLogId },
+      context: { type: "lead_new_received", quoteLogId },
       message: {
         from: cfg.fromEmail!,
         to: [cfg.leadToEmail!],
-        replyTo: [cfg.leadToEmail!],
+        replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
         subject: `New Photo Quote — ${customer.name}`,
         html: leadHtml,
       },
@@ -261,11 +273,11 @@ async function sendReceivedEmails(args: {
 
     const r2 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "customer_receipt", quoteLogId },
+      context: { type: "customer_receipt_received", quoteLogId },
       message: {
         from: cfg.fromEmail!,
         to: [customer.email],
-        replyTo: [cfg.leadToEmail!],
+        replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
         subject: `We got your request — ${effectiveBusinessName}`,
         html: custHtml,
       },
@@ -485,9 +497,7 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(
-    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-  );
+  const configured = isEmailAttemptConfigured(cfg, effectiveBusinessName, customer.email);
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -498,14 +508,14 @@ async function sendFinalEstimateEmails(args: {
     lead_new: {
       attempted: false,
       ok: false,
-      provider: "resend",
+      provider: cfg.provider ?? "unknown",
       id: null as string | null,
       error: null as string | null,
     },
     customer_receipt: {
       attempted: false,
       ok: false,
-      provider: "resend",
+      provider: cfg.provider ?? "unknown",
       id: null as string | null,
       error: null as string | null,
     },
@@ -545,7 +555,7 @@ async function sendFinalEstimateEmails(args: {
       message: {
         from: cfg.fromEmail!,
         to: [cfg.leadToEmail!],
-        replyTo: [cfg.leadToEmail!],
+        replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
         subject: `New Photo Quote — ${customer.name}`,
         html: leadHtml,
       },
@@ -587,7 +597,7 @@ async function sendFinalEstimateEmails(args: {
       message: {
         from: cfg.fromEmail!,
         to: [customer.email],
-        replyTo: [cfg.leadToEmail!],
+        replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
         subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
         html: custHtml,
       },
@@ -962,9 +972,7 @@ export async function POST(req: Request) {
       const cfg = await getTenantEmailConfig(tenant.id);
       const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-      const configured = Boolean(
-        process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-      );
+      const configured = isEmailAttemptConfigured(cfg, effectiveBusinessName, customer.email);
 
       const baseUrl = getBaseUrl(req);
       const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -975,14 +983,14 @@ export async function POST(req: Request) {
         lead_new: {
           attempted: false,
           ok: false,
-          provider: "resend",
+          provider: cfg.provider ?? "unknown",
           id: null as string | null,
           error: null as string | null,
         },
         customer_receipt: {
           attempted: false,
           ok: false,
-          provider: "resend",
+          provider: cfg.provider ?? "unknown",
           id: null as string | null,
           error: null as string | null,
         },
@@ -1021,7 +1029,7 @@ export async function POST(req: Request) {
             message: {
               from: cfg.fromEmail!,
               to: [cfg.leadToEmail!],
-              replyTo: [cfg.leadToEmail!],
+              replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
               subject: `New Photo Quote — ${customer.name}`,
               html: leadHtml,
             },
@@ -1063,7 +1071,7 @@ export async function POST(req: Request) {
             message: {
               from: cfg.fromEmail!,
               to: [customer.email],
-              replyTo: [cfg.leadToEmail!],
+              replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
               subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
               html: custHtml,
             },
