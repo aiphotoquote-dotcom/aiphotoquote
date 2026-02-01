@@ -1,3 +1,4 @@
+// src/app/api/quote/submit/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
@@ -129,6 +130,10 @@ function containsDenylistedText(s: string, denylist: string[]) {
   return denylist.some((w) => hay.includes(String(w).toLowerCase()));
 }
 
+function sleepMs(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
 async function getOpenAiForTenant(tenantId: string) {
   const secretRow = await db
     .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
@@ -173,20 +178,8 @@ async function sendReceivedEmails(args: {
   const result: any = {
     configured,
     mode: cfg.sendMode ?? "standard",
-    lead_received: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
-    customer_received: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
+    lead_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    customer_received: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
   };
 
   if (!configured) return result;
@@ -216,10 +209,9 @@ async function sendReceivedEmails(args: {
       renderOptIn: false,
     } as any);
 
-    // ✅ use an existing EmailContextType
     const r1 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "lead_new", quoteLogId },
+      context: { type: "lead_new", quoteLogId }, // keep context types stable
       message: {
         from: cfg.fromEmail!,
         to: [cfg.leadToEmail!],
@@ -235,6 +227,9 @@ async function sendReceivedEmails(args: {
   } catch (e: any) {
     result.lead_received.error = e?.message ?? String(e);
   }
+
+  // small spacing helps avoid “2 req/sec” edge cases during bursts
+  await sleepMs(650);
 
   // Customer “received”
   try {
@@ -259,10 +254,9 @@ async function sendReceivedEmails(args: {
       quoteLogId,
     } as any);
 
-    // ✅ use an existing EmailContextType
     const r2 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "customer_receipt", quoteLogId },
+      context: { type: "customer_receipt", quoteLogId }, // keep context types stable
       message: {
         from: cfg.fromEmail!,
         to: [customer.email],
@@ -354,6 +348,7 @@ async function generateEstimate(args: {
     `Category: ${category}`,
     `Service type: ${service_type}`,
     `Customer notes: ${notes || "(none)"}`,
+    normalizedAnswers?.length ? "" : "",
     normalizedAnswers?.length ? "Follow-up Q&A:" : "",
     normalizedAnswers?.length ? (qaText || "(none)") : "",
     "",
@@ -468,19 +463,8 @@ async function sendFinalEstimateEmails(args: {
   businessNameFromSettings: string | null;
   renderOptIn: boolean;
 }) {
-  const {
-    req,
-    tenant,
-    tenantSlug,
-    quoteLogId,
-    customer,
-    notes,
-    images,
-    output,
-    brandLogoUrl,
-    businessNameFromSettings,
-    renderOptIn,
-  } = args;
+  const { req, tenant, tenantSlug, quoteLogId, customer, notes, images, output, brandLogoUrl, businessNameFromSettings, renderOptIn } =
+    args;
 
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
@@ -495,20 +479,8 @@ async function sendFinalEstimateEmails(args: {
   const emailResult: any = {
     configured,
     mode: cfg.sendMode ?? "standard",
-    lead_new: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
-    customer_receipt: {
-      attempted: false,
-      ok: false,
-      provider: "resend",
-      id: null as string | null,
-      error: null as string | null,
-    },
+    lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
   };
 
   if (!configured) return emailResult;
@@ -557,6 +529,8 @@ async function sendFinalEstimateEmails(args: {
   } catch (e: any) {
     emailResult.lead_new.error = e?.message ?? String(e);
   }
+
+  await sleepMs(650);
 
   // Customer email
   try {
@@ -888,32 +862,32 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
     }
 
-    // Send “received” emails immediately (best-effort), and persist result
-    try {
-      const received = await sendReceivedEmails({
-        req,
-        tenant: { id: tenant.id, name: tenant.name ?? "Business", slug: tenant.slug },
-        tenantSlug,
-        quoteLogId,
-        customer,
-        notes,
-        images,
-        brandLogoUrl,
-        businessNameFromSettings,
-      });
-
-      await db.execute(sql`
-        update quote_logs
-        set output = ${JSON.stringify({ email_received: received })}::jsonb
-        where id = ${quoteLogId}::uuid
-      `);
-    } catch {
-      // ignore — best effort
-    }
-
-    // If live QA is enabled, ask clarifying questions first
-    // (PCC sets the max cap; tenant may reduce it.)
+    // If live QA is enabled, send “received” emails (estimate is intentionally delayed),
+    // then return questions. This avoids duplicate emails in non-QA mode.
     if (liveQaEnabled && liveQaMaxQuestions > 0) {
+      // Send “received” emails immediately (best-effort), and persist result
+      try {
+        const received = await sendReceivedEmails({
+          req,
+          tenant: { id: tenant.id, name: tenant.name ?? "Business", slug: tenant.slug },
+          tenantSlug,
+          quoteLogId,
+          customer,
+          notes,
+          images,
+          brandLogoUrl,
+          businessNameFromSettings,
+        });
+
+        await db.execute(sql`
+          update quote_logs
+          set output = ${JSON.stringify({ email_received: received })}::jsonb
+          where id = ${quoteLogId}::uuid
+        `);
+      } catch {
+        // ignore — best effort
+      }
+
       const questions = await generateQaQuestions({
         openai,
         model: platform.models.qaModel,
@@ -957,125 +931,21 @@ export async function POST(req: Request) {
       where id = ${quoteLogId}::uuid
     `);
 
-    // Send estimate emails (best-effort)
+    // Send estimate emails exactly once (best-effort)
     try {
-      const cfg = await getTenantEmailConfig(tenant.id);
-      const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
-
-      const configured = Boolean(
-        process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-      );
-
-      const baseUrl = getBaseUrl(req);
-      const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
-
-      const emailResult: any = {
-        configured,
-        mode: cfg.sendMode ?? "standard",
-        lead_new: {
-          attempted: false,
-          ok: false,
-          provider: "resend",
-          id: null as string | null,
-          error: null as string | null,
-        },
-        customer_receipt: {
-          attempted: false,
-          ok: false,
-          provider: "resend",
-          id: null as string | null,
-          error: null as string | null,
-        },
-      };
-
-      if (configured) {
-        // Lead email
-        try {
-          emailResult.lead_new.attempted = true;
-
-          const leadHtml = renderLeadNewEmailHTML({
-            businessName: effectiveBusinessName!,
-            tenantSlug,
-            quoteLogId,
-            customer,
-            notes,
-            imageUrls: images.map((x: any) => x.url).filter(Boolean),
-            brandLogoUrl,
-            adminQuoteUrl,
-
-            confidence: output.confidence ?? null,
-            inspectionRequired: output.inspection_required ?? null,
-            estimateLow: output.estimate_low ?? null,
-            estimateHigh: output.estimate_high ?? null,
-            summary: output.summary ?? null,
-            visibleScope: output.visible_scope ?? [],
-            assumptions: output.assumptions ?? [],
-            questions: output.questions ?? [],
-
-            renderOptIn: Boolean(renderOptIn),
-          } as any);
-
-          const r1 = await sendEmail({
-            tenantId: tenant.id,
-            context: { type: "lead_new", quoteLogId },
-            message: {
-              from: cfg.fromEmail!,
-              to: [cfg.leadToEmail!],
-              replyTo: [cfg.leadToEmail!],
-              subject: `New Photo Quote — ${customer.name}`,
-              html: leadHtml,
-            },
-          });
-
-          emailResult.lead_new.ok = r1.ok;
-          emailResult.lead_new.id = r1.providerMessageId ?? null;
-          emailResult.lead_new.error = r1.error ?? null;
-        } catch (e: any) {
-          emailResult.lead_new.error = e?.message ?? String(e);
-        }
-
-        // Customer receipt
-        try {
-          emailResult.customer_receipt.attempted = true;
-
-          const custHtml = renderCustomerReceiptEmailHTML({
-            businessName: effectiveBusinessName!,
-            customerName: customer.name,
-            summary: output.summary ?? "",
-            estimateLow: output.estimate_low ?? 0,
-            estimateHigh: output.estimate_high ?? 0,
-
-            confidence: output.confidence ?? null,
-            inspectionRequired: output.inspection_required ?? null,
-            visibleScope: output.visible_scope ?? [],
-            assumptions: output.assumptions ?? [],
-            questions: output.questions ?? [],
-
-            imageUrls: images.map((x: any) => x.url).filter(Boolean),
-            brandLogoUrl,
-            replyToEmail: cfg.leadToEmail ?? null,
-            quoteLogId,
-          } as any);
-
-          const r2 = await sendEmail({
-            tenantId: tenant.id,
-            context: { type: "customer_receipt", quoteLogId },
-            message: {
-              from: cfg.fromEmail!,
-              to: [customer.email],
-              replyTo: [cfg.leadToEmail!],
-              subject: `Your AI Photo Quote — ${effectiveBusinessName}`,
-              html: custHtml,
-            },
-          });
-
-          emailResult.customer_receipt.ok = r2.ok;
-          emailResult.customer_receipt.id = r2.providerMessageId ?? null;
-          emailResult.customer_receipt.error = r2.error ?? null;
-        } catch (e: any) {
-          emailResult.customer_receipt.error = e?.message ?? String(e);
-        }
-      }
+      const emailResult = await sendFinalEstimateEmails({
+        req,
+        tenant: { id: tenant.id, name: tenant.name ?? "Business", slug: tenant.slug },
+        tenantSlug,
+        quoteLogId,
+        customer,
+        notes,
+        images,
+        output,
+        brandLogoUrl,
+        businessNameFromSettings,
+        renderOptIn: Boolean(renderOptIn),
+      });
 
       const nextOutput = { ...(output ?? {}), email: emailResult };
       await db.execute(sql`
