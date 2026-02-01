@@ -1,4 +1,3 @@
-// src/app/api/admin/email/test/route.ts
 import { NextResponse } from "next/server";
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { sendEmail } from "@/lib/email";
@@ -29,6 +28,23 @@ async function getEnterpriseMailboxEmail(emailIdentityId: string): Promise<strin
   }
 }
 
+function pickMeta(res: any) {
+  const m = (res?.meta ?? null) as any;
+  if (!m || typeof m !== "object") return null;
+
+  // Keep this tight + safe (no tokens, no giant blobs)
+  return {
+    mode: m.mode ?? null,
+    status: typeof m.status === "number" ? m.status : null,
+    attempt: typeof m.attempt === "number" ? m.attempt : null,
+    fromRequested: m.fromRequested ?? null,
+    fromUsed: m.fromUsed ?? null,
+    fallbackReason: m.fallbackReason ?? null,
+    emailIdentityId: m.emailIdentityId ?? null,
+    fromActual: m.fromActual ?? null, // enterprise path in your email/index.ts
+  };
+}
+
 export async function POST(req: Request) {
   const gate = await requireTenantRole(["owner", "admin"]);
   if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
@@ -53,9 +69,7 @@ export async function POST(req: Request) {
       : "standard";
 
   const mailboxEmail =
-    mode === "enterprise" && cfg.emailIdentityId
-      ? await getEnterpriseMailboxEmail(cfg.emailIdentityId)
-      : null;
+    mode === "enterprise" && cfg.emailIdentityId ? await getEnterpriseMailboxEmail(cfg.emailIdentityId) : null;
 
   const html = `
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
@@ -67,6 +81,7 @@ export async function POST(req: Request) {
         <div><b>Tenant</b>: ${escapeHtml(business)}</div>
         <div><b>Mode (requested)</b>: ${escapeHtml(mode)}</div>
         <div><b>To</b>: ${escapeHtml(cfg.leadToEmail)}</div>
+        <div><b>From (resolved)</b>: ${escapeHtml(from)}</div>
         <div><b>Reply-To</b>: ${escapeHtml(replyToFirst || "(none)")}</div>
         ${
           mode === "enterprise"
@@ -79,7 +94,7 @@ export async function POST(req: Request) {
     </div>
   `;
 
-  const text = `Test email: tenant=${business} mode=${mode} to=${cfg.leadToEmail} replyTo=${replyToFirst}`;
+  const text = `Test email: tenant=${business} mode=${mode} to=${cfg.leadToEmail} from=${from} replyTo=${replyToFirst}`;
 
   const message: any = {
     from,
@@ -89,7 +104,7 @@ export async function POST(req: Request) {
     html,
     text,
 
-    // Helpful for tracing in headers if you want:
+    // NOTE: your provider currently may not forward headers to Resend/Gmail unless implemented there.
     headers: {
       "X-AIPQ-Tenant": gate.tenantId,
       "X-AIPQ-Mode": mode,
@@ -111,7 +126,10 @@ export async function POST(req: Request) {
     message,
   });
 
-  const fromActual = (res.meta as any)?.fromActual ?? null;
+  const meta = pickMeta(res);
+
+  // Prefer “fromUsed” if provider supplied it (Resend will do this after our provider update)
+  const fromUsed = meta?.fromUsed ?? meta?.fromActual ?? null;
 
   return json(
     {
@@ -119,18 +137,27 @@ export async function POST(req: Request) {
       mode,
       provider: res.provider,
       providerMessageId: res.providerMessageId ?? null,
-      fromRequested: from,
-      fromActual,
+
+      // What we asked for (resolved from config)
+      fromResolved: from,
       replyToUsed: replyToFirst || null,
+
+      // What provider actually used (fallback / enterprise actual)
+      fromUsed,
+
+      // Enterprise debug
       emailIdentityId: cfg.emailIdentityId ?? null,
       mailboxEmail,
       alsoToSelf,
       bccSelf,
+
+      // Helpful provider meta (safe subset)
+      meta,
+
       error: res.error ?? null,
-      note:
-        res.ok
-          ? "Provider accepted the message. If delivery is missing, check recipient spam/quarantine and DMARC alignment."
-          : null,
+      note: res.ok
+        ? "Provider accepted the message. If delivery is missing, check spam/quarantine and DMARC alignment."
+        : null,
     },
     res.ok ? 200 : 500
   );
