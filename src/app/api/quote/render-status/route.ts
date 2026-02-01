@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const Q = z.object({
-  tenantSlug: z.string().min(3),
+  tenantSlug: z.string().min(3), // may be slug OR tenant UUID (back-compat)
   quoteLogId: z.string().uuid(),
   debug: z.boolean().optional(),
 });
@@ -39,6 +39,11 @@ function normalizeStatus(raw: unknown): "idle" | "running" | "rendered" | "faile
   return "idle";
 }
 
+function isUuidLike(v: string) {
+  // lightweight check (Postgres will validate via ::uuid when used)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
@@ -58,6 +63,8 @@ export async function GET(req: Request) {
   const { tenantSlug, quoteLogId, debug } = parsed.data;
 
   try {
+    const tenantIsUuid = isUuidLike(tenantSlug);
+
     const r = await db.execute(sql`
       select
         t.id as tenant_id,
@@ -68,7 +75,11 @@ export async function GET(req: Request) {
         q.render_error
       from quote_logs q
       join tenants t on t.id = q.tenant_id
-      where t.slug = ${tenantSlug}
+      where (
+          (t.slug = ${tenantSlug} and ${tenantIsUuid} = false)
+          or
+          (t.id = ${tenantSlug}::uuid and ${tenantIsUuid} = true)
+        )
         and q.id = ${quoteLogId}::uuid
       limit 1
     `);
@@ -84,6 +95,7 @@ export async function GET(req: Request) {
           debug: debug
             ? {
                 received: { tenantSlug, quoteLogId },
+                note: "tenantSlug may be slug or tenant UUID; no matching tenant+quote row was found",
               }
             : undefined,
         },
