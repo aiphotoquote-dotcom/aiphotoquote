@@ -3,21 +3,26 @@ import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
 import OpenAI from "openai";
-import { Resend } from "resend";
 import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
 import { decryptSecret } from "@/lib/crypto";
 
-// ✅ PCC + tenant overrides (for model selection)
+// ✅ PCC + tenant overrides (model selection)
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
 
-// ✅ Render debug wiring
+// ✅ Render debug wiring (writes to output.render_debug fallback if columns don’t exist)
 import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
 import { setRenderDebug } from "@/lib/pcc/render/output";
+
+// ✅ Email abstraction (enterprise vs standard lives here — do NOT bypass)
+import { sendEmail } from "@/lib/email";
+import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
+import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteCustomer";
+import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,20 +52,25 @@ function safeJsonParse(v: any) {
   }
 }
 
-function esc(s: unknown) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
 function safeName(name: string) {
   return (name || "render")
     .replace(/\s+/g, "-")
     .replace(/[^a-zA-Z0-9._-]/g, "_")
     .slice(0, 180);
+}
+
+function getBaseUrl(req: Request) {
+  const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
+  if (envBase) return envBase.replace(/\/+$/, "");
+
+  const vercel = process.env.VERCEL_URL?.trim();
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
+
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  return "";
 }
 
 async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
@@ -71,185 +81,6 @@ async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
   const enc = row?.openai_key_enc ?? null;
   if (!enc) return null;
   return decryptSecret(enc);
-}
-
-async function getTenantEmailSettings(tenantId: string) {
-  const r = await db.execute(sql`
-    select business_name, lead_to_email, resend_from_email
-    from tenant_settings
-    where tenant_id = ${tenantId}::uuid
-    limit 1
-  `);
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-
-  return {
-    businessName: row?.business_name ?? null,
-    leadToEmail: row?.lead_to_email ?? null,
-    resendFromEmail: row?.resend_from_email ?? null,
-  };
-}
-
-async function insertEmailDelivery(args: {
-  tenantId: string;
-  quoteLogId: string;
-  type: string;
-  to: any;
-  from: string;
-  provider?: string | null;
-}) {
-  const id = crypto.randomUUID();
-  await db.execute(sql`
-    insert into email_deliveries (id, tenant_id, quote_log_id, type, "to", "from", provider, status, created_at)
-    values (
-      ${id}::uuid,
-      ${args.tenantId}::uuid,
-      ${args.quoteLogId}::uuid,
-      ${args.type},
-      ${JSON.stringify(args.to)}::jsonb,
-      ${args.from},
-      ${args.provider ?? null},
-      'queued',
-      now()
-    )
-  `);
-  return id;
-}
-
-async function markEmailDeliverySent(args: { id: string; providerMessageId?: string | null }) {
-  await db.execute(sql`
-    update email_deliveries
-    set
-      status = 'sent',
-      provider_message_id = ${args.providerMessageId ?? null},
-      sent_at = now(),
-      error = null
-    where id = ${args.id}::uuid
-  `);
-}
-
-async function markEmailDeliveryFailed(args: { id: string; error: string }) {
-  await db.execute(sql`
-    update email_deliveries
-    set
-      status = 'failed',
-      error = ${args.error},
-      sent_at = null
-    where id = ${args.id}::uuid
-  `);
-}
-
-function renderLeadRenderEmailHTML(args: {
-  tenantSlug: string;
-  quoteLogId: string;
-  customer: { name?: string; email?: string; phone?: string };
-  images: string[];
-  renderImageUrl: string;
-}) {
-  const { tenantSlug, quoteLogId, customer, images, renderImageUrl } = args;
-
-  const imgs = images
-    .map(
-      (u) =>
-        `<div style="margin:10px 0;"><a href="${esc(u)}">${esc(u)}</a><br/><img src="${esc(
-          u
-        )}" alt="uploaded photo" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/></div>`
-    )
-    .join("");
-
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
-    <h2 style="margin:0 0 8px;">AI Render Complete</h2>
-    <div style="margin:0 0 12px;color:#374151;">
-      <div><b>Tenant</b>: ${esc(tenantSlug)}</div>
-      <div><b>Quote Log ID</b>: ${esc(quoteLogId)}</div>
-    </div>
-
-    <h3 style="margin:18px 0 6px;">Customer</h3>
-    <div style="color:#374151;">
-      <div><b>Name</b>: ${esc(customer.name || "")}</div>
-      <div><b>Email</b>: ${esc(customer.email || "")}</div>
-      <div><b>Phone</b>: ${esc(customer.phone || "")}</div>
-    </div>
-
-    <h3 style="margin:18px 0 6px;">Rendered Preview</h3>
-    <div style="margin:10px 0;">
-      <a href="${esc(renderImageUrl)}">${esc(renderImageUrl)}</a><br/>
-      <img src="${esc(
-        renderImageUrl
-      )}" alt="rendered preview" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/>
-    </div>
-
-    <h3 style="margin:18px 0 6px;">Original Photos</h3>
-    ${imgs}
-  </div>`;
-}
-
-function renderCustomerRenderEmailHTML(args: { businessName: string; quoteLogId: string; renderImageUrl: string }) {
-  const { businessName, quoteLogId, renderImageUrl } = args;
-
-  return `
-  <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.4;color:#111;">
-    <h2 style="margin:0 0 8px;">Your AI Preview is Ready</h2>
-    <div style="margin:0 0 12px;color:#374151;">
-      <div><b>Quote ID</b>: ${esc(quoteLogId)}</div>
-    </div>
-
-    <p style="color:#374151;margin:0 0 10px;">
-      Here’s an optional concept preview based on your photos. This is a visual mockup — final results depend on materials, inspection, and scope.
-    </p>
-
-    <div style="margin:10px 0;">
-      <img src="${esc(
-        renderImageUrl
-      )}" alt="rendered preview" style="max-width:560px;width:100%;border-radius:10px;border:1px solid #e5e7eb"/>
-    </div>
-
-    <p style="color:#6b7280;margin-top:14px;">
-      — ${esc(businessName)}
-    </p>
-  </div>`;
-}
-
-/**
- * Safely merge rendering info into quote_logs.output as JSONB.
- * (We do not require render_* columns to exist.)
- */
-async function mergeQuoteLogRendering(args: {
-  quoteLogId: string;
-  status: "rendered" | "failed";
-  imageUrl: string | null;
-  error: string | null;
-  prompt: string;
-}) {
-  const { quoteLogId, status, imageUrl, error, prompt } = args;
-
-  const r = await db.execute(sql`
-    select output
-    from quote_logs
-    where id = ${quoteLogId}::uuid
-    limit 1
-  `);
-
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const out = safeJsonParse(row?.output) ?? {};
-
-  const next = {
-    ...out,
-    rendering: {
-      requested: true,
-      status,
-      imageUrl,
-      prompt,
-      error,
-      renderedAt: new Date().toISOString(),
-    },
-  };
-
-  await db.execute(sql`
-    update quote_logs
-    set output = coalesce(output, '{}'::jsonb) || ${JSON.stringify(next)}::jsonb
-    where id = ${quoteLogId}::uuid
-  `);
 }
 
 /**
@@ -296,9 +127,9 @@ async function completeJob(args: { jobId: string; imageUrl: string | null; error
   `);
 }
 
-async function loadQuoteInputForRender(quoteLogId: string) {
+async function loadQuoteForRender(quoteLogId: string) {
   const r = await db.execute(sql`
-    select input, tenant_id
+    select input, output, tenant_id
     from quote_logs
     where id = ${quoteLogId}::uuid
     limit 1
@@ -308,22 +139,37 @@ async function loadQuoteInputForRender(quoteLogId: string) {
   if (!row) return null;
 
   const input = safeJsonParse(row.input) ?? {};
-  const images: string[] = Array.isArray(input?.images) ? input.images.map((x: any) => x?.url).filter(Boolean) : [];
+  const output = safeJsonParse(row.output) ?? {};
 
+  const images: string[] = Array.isArray(input?.images)
+    ? input.images.map((x: any) => x?.url).filter(Boolean)
+    : [];
+
+  // support both shapes (customer_context vs contact)
   const cc = input?.customer_context ?? {};
   const contact = input?.contact ?? {};
+  const customer = input?.customer ?? null;
 
-  const customer = {
-    name: (cc?.name ?? contact?.name ?? "").toString() || undefined,
-    email: (cc?.email ?? contact?.email ?? "").toString() || undefined,
-    phone: (cc?.phone ?? contact?.phone ?? "").toString() || undefined,
-  };
+  const customerName =
+    String(customer?.name ?? cc?.name ?? contact?.name ?? "Customer").trim() || "Customer";
+  const customerEmail =
+    String(customer?.email ?? cc?.email ?? contact?.email ?? "").trim().toLowerCase() || "";
+  const customerPhone =
+    String(customer?.phone ?? cc?.phone ?? contact?.phone ?? "").trim() || "";
+
+  const estimateLow = typeof output?.estimate_low === "number" ? output.estimate_low : null;
+  const estimateHigh = typeof output?.estimate_high === "number" ? output.estimate_high : null;
+  const summary = typeof output?.summary === "string" ? output.summary : "";
 
   return {
     tenantId: String(row.tenant_id),
-    images,
     input,
-    customer,
+    output,
+    images,
+    customer: { name: customerName, email: customerEmail, phone: customerPhone },
+    estimateLow,
+    estimateHigh,
+    summary,
   };
 }
 
@@ -366,8 +212,50 @@ async function generateRenderPngBytes(args: { openaiKey: string; prompt: string;
 }
 
 /**
+ * Merge render info into quote_logs.output.rendering
+ * (portable: no render_* columns required)
+ */
+async function mergeQuoteLogRendering(args: {
+  quoteLogId: string;
+  status: "rendered" | "failed";
+  imageUrl: string | null;
+  error: string | null;
+  prompt: string;
+}) {
+  const { quoteLogId, status, imageUrl, error, prompt } = args;
+
+  const r = await db.execute(sql`
+    select output
+    from quote_logs
+    where id = ${quoteLogId}::uuid
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const out = safeJsonParse(row?.output) ?? {};
+
+  const next = {
+    ...out,
+    rendering: {
+      requested: true,
+      status,
+      imageUrl,
+      prompt,
+      error,
+      renderedAt: new Date().toISOString(),
+    },
+  };
+
+  await db.execute(sql`
+    update quote_logs
+    set output = coalesce(output, '{}'::jsonb) || ${JSON.stringify(next)}::jsonb
+    where id = ${quoteLogId}::uuid
+  `);
+}
+
+/**
  * Determine effective render model:
- * platform PCC + tenant overrides (industry omitted in cron path).
+ * tenant override > platform PCC > default
  */
 async function getEffectiveRenderModelForTenant(tenantId: string): Promise<string> {
   const platform = await loadPlatformLlmConfig();
@@ -379,7 +267,7 @@ async function getEffectiveRenderModelForTenant(tenantId: string): Promise<strin
 
   const merged = buildEffectiveLlmConfig({
     platform,
-    industry: {}, // cron path does not know industry reliably
+    industry: {},
     tenant,
   });
 
@@ -387,119 +275,136 @@ async function getEffectiveRenderModelForTenant(tenantId: string): Promise<strin
   return m || "gpt-image-1";
 }
 
-async function sendRenderEmails(args: {
-  tenantSlug: string;
+async function loadTenantBranding(tenantId: string) {
+  // Optional columns; safe if missing (won’t throw if column doesn’t exist? it WILL throw)
+  // So: read only the ones you KNOW exist, or wrap.
+  try {
+    const r = await db.execute(sql`
+      select business_name, brand_logo_url, lead_to_email
+      from tenant_settings
+      where tenant_id = ${tenantId}::uuid
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    return {
+      businessName: row?.business_name ?? null,
+      brandLogoUrl: row?.brand_logo_url ?? null,
+      leadToEmail: row?.lead_to_email ?? null,
+    };
+  } catch {
+    return { businessName: null, brandLogoUrl: null, leadToEmail: null };
+  }
+}
+
+/**
+ * Send “render complete” emails via sendEmail abstraction.
+ * This preserves enterprise vs standard routing.
+ */
+async function sendRenderCompleteEmailsViaAbstraction(args: {
+  req: Request;
   tenantId: string;
+  tenantSlug: string;
   quoteLogId: string;
   renderImageUrl: string;
-  originalImages: string[];
-  customer: { name?: string; email?: string; phone?: string };
+  customer: { name: string; email: string; phone: string };
+  estimateLow: number | null;
+  estimateHigh: number | null;
+  summary: string;
 }) {
-  const resendKey = process.env.RESEND_API_KEY || "";
-  if (!resendKey) return { configured: false, skipped: true, reason: "RESEND_API_KEY missing" };
+  const cfg = await getTenantEmailConfig(args.tenantId);
+  const branding = await loadTenantBranding(args.tenantId);
 
-  const { businessName, leadToEmail, resendFromEmail } = await getTenantEmailSettings(args.tenantId);
+  const businessName = String(branding.businessName || cfg.businessName || "Your Business").trim();
+  const brandLogoUrl = branding.brandLogoUrl ?? null;
 
-  const configured = Boolean(businessName && leadToEmail && resendFromEmail);
-  if (!configured) {
-    return {
-      configured: false,
-      skipped: true,
-      reason: "tenant_settings missing business_name/lead_to_email/resend_from_email",
-      missing: {
-        business_name: !businessName,
-        lead_to_email: !leadToEmail,
-        resend_from_email: !resendFromEmail,
-      },
-    };
-  }
-
-  const resend = new Resend(resendKey);
+  const baseUrl = getBaseUrl(args.req);
+  const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(args.tenantSlug)}` : null;
+  const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(args.quoteLogId)}` : null;
 
   const result: any = {
-    configured: true,
-    lead: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
+    configured: Boolean(cfg.fromEmail),
+    lead_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
+    customer_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
   };
 
-  const leadDeliveryId = await insertEmailDelivery({
-    tenantId: args.tenantId,
-    quoteLogId: args.quoteLogId,
-    type: "render.lead",
-    to: [leadToEmail],
-    from: resendFromEmail,
-    provider: "resend",
-  });
+  if (!cfg.fromEmail) return result;
 
-  try {
-    result.lead.attempted = true;
+  // Lead
+  if (cfg.leadToEmail) {
+    try {
+      result.lead_render.attempted = true;
 
-    const leadHtml = renderLeadRenderEmailHTML({
-      tenantSlug: args.tenantSlug,
-      quoteLogId: args.quoteLogId,
-      customer: args.customer,
-      images: args.originalImages,
-      renderImageUrl: args.renderImageUrl,
-    });
+      const htmlLead = renderLeadRenderCompleteEmailHTML({
+        businessName,
+        brandLogoUrl,
+        quoteLogId: args.quoteLogId,
+        tenantSlug: args.tenantSlug,
+        customerName: args.customer.name,
+        customerEmail: args.customer.email,
+        customerPhone: args.customer.phone,
+        renderImageUrl: args.renderImageUrl,
+        estimateLow: args.estimateLow,
+        estimateHigh: args.estimateHigh,
+        summary: args.summary,
+        adminQuoteUrl,
+      });
 
-    const leadRes = await resend.emails.send({
-      from: resendFromEmail!,
-      to: [leadToEmail!],
-      subject: `AI Render Ready — ${args.quoteLogId}`,
-      html: leadHtml,
-    });
+      const r1 = await sendEmail({
+        tenantId: args.tenantId,
+        context: { type: "lead_render_complete", quoteLogId: args.quoteLogId },
+        message: {
+          from: cfg.fromEmail,
+          to: [cfg.leadToEmail],
+          replyTo: [cfg.leadToEmail],
+          subject: `Render complete — ${args.customer.name}`,
+          html: htmlLead,
+        },
+      });
 
-    const msgId = (leadRes as any)?.data?.id ?? null;
-    if ((leadRes as any)?.error) throw new Error((leadRes as any).error?.message ?? "Resend error");
-
-    await markEmailDeliverySent({ id: leadDeliveryId, providerMessageId: msgId });
-    result.lead.sent = true;
-    result.lead.id = msgId;
-  } catch (e: any) {
-    const errMsg = e?.message ?? String(e);
-    await markEmailDeliveryFailed({ id: leadDeliveryId, error: errMsg });
-    result.lead.error = errMsg;
+      result.lead_render.ok = r1.ok;
+      result.lead_render.id = r1.providerMessageId ?? null;
+      result.lead_render.error = r1.error ?? null;
+    } catch (e: any) {
+      result.lead_render.error = e?.message ?? String(e);
+    }
   }
 
+  // Customer
   if (args.customer.email) {
-    const custDeliveryId = await insertEmailDelivery({
-      tenantId: args.tenantId,
-      quoteLogId: args.quoteLogId,
-      type: "render.customer",
-      to: [args.customer.email],
-      from: resendFromEmail!,
-      provider: "resend",
-    });
-
     try {
-      result.customer.attempted = true;
+      result.customer_render.attempted = true;
 
-      const custHtml = renderCustomerRenderEmailHTML({
-        businessName: businessName!,
+      const htmlCust = renderCustomerRenderCompleteEmailHTML({
+        businessName,
+        brandLogoUrl,
+        customerName: args.customer.name,
         quoteLogId: args.quoteLogId,
         renderImageUrl: args.renderImageUrl,
+        estimateLow: args.estimateLow,
+        estimateHigh: args.estimateHigh,
+        summary: args.summary,
+        publicQuoteUrl,
+        replyToEmail: cfg.leadToEmail ?? null,
       });
 
-      const custRes = await resend.emails.send({
-        from: resendFromEmail!,
-        to: [args.customer.email],
-        subject: `Your AI preview is ready — Quote ${args.quoteLogId}`,
-        html: custHtml,
+      const r2 = await sendEmail({
+        tenantId: args.tenantId,
+        context: { type: "customer_render_complete", quoteLogId: args.quoteLogId },
+        message: {
+          from: cfg.fromEmail,
+          to: [args.customer.email],
+          replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
+          subject: `Your concept render is ready — ${businessName}`,
+          html: htmlCust,
+        },
       });
 
-      const msgId = (custRes as any)?.data?.id ?? null;
-      if ((custRes as any)?.error) throw new Error((custRes as any).error?.message ?? "Resend error");
-
-      await markEmailDeliverySent({ id: custDeliveryId, providerMessageId: msgId });
-      result.customer.sent = true;
-      result.customer.id = msgId;
+      result.customer_render.ok = r2.ok;
+      result.customer_render.id = r2.providerMessageId ?? null;
+      result.customer_render.error = r2.error ?? null;
     } catch (e: any) {
-      const errMsg = e?.message ?? String(e);
-      await markEmailDeliveryFailed({ id: custDeliveryId, error: errMsg });
-      result.customer.error = errMsg;
+      result.customer_render.error = e?.message ?? String(e);
     }
-  } else {
-    result.customer.error = "No customer email present; skipping customer render email.";
   }
 
   return result;
@@ -546,7 +451,7 @@ export async function POST(req: Request) {
     let imageUrl: string | null = null;
 
     try {
-      const quote = await loadQuoteInputForRender(job.quote_log_id);
+      const quote = await loadQuoteForRender(job.quote_log_id);
       if (!quote) throw new Error("QUOTE_LOG_NOT_FOUND");
 
       if (String(quote.tenantId) !== String(job.tenant_id)) throw new Error("TENANT_MISMATCH");
@@ -558,32 +463,35 @@ export async function POST(req: Request) {
       const prompt = job.prompt || "";
       if (!prompt) throw new Error("JOB_PROMPT_EMPTY");
 
-      // ✅ choose effective model (tenant override > platform)
       const renderModel = await getEffectiveRenderModelForTenant(job.tenant_id);
 
-      // ✅ debug write (proof) BEFORE generation
+      // ✅ Write debug proof (portable: output.render_debug fallback)
       if (debugEnabled) {
         const dbg = buildRenderDebugPayload({
           debugId: `cron_${debugId}`,
           renderModel,
-          tenantStyleKey: "", // cron path does not know style key reliably
+          tenantStyleKey: "",
           styleText: "",
           renderPromptPreamble: "",
           renderPromptTemplate: "",
           finalPrompt: prompt,
           serviceType: "",
-          summary: "",
+          summary: quote.summary || "",
           customerNotes: "",
           tenantRenderNotes: "",
           images: quote.images.map((u) => ({ url: u })),
         });
 
-        await setRenderDebug({
-          db: db as any,
-          quoteLogId: job.quote_log_id,
-          tenantId: job.tenant_id,
-          debug: dbg,
-        });
+        try {
+          await setRenderDebug({
+            db: db as any,
+            quoteLogId: job.quote_log_id,
+            tenantId: job.tenant_id,
+            debug: dbg,
+          });
+        } catch {
+          // best-effort only
+        }
       }
 
       const pngBytes = await generateRenderPngBytes({ openaiKey, prompt, model: renderModel });
@@ -601,19 +509,25 @@ export async function POST(req: Request) {
         prompt,
       });
 
+      // tenant slug
       const tenantSlugRow = await db.execute(sql`
         select slug from tenants where id = ${job.tenant_id}::uuid limit 1
       `);
-      const t: any = (tenantSlugRow as any)?.rows?.[0] ?? (Array.isArray(tenantSlugRow) ? (tenantSlugRow as any)[0] : null);
+      const t: any =
+        (tenantSlugRow as any)?.rows?.[0] ?? (Array.isArray(tenantSlugRow) ? (tenantSlugRow as any)[0] : null);
       const tenantSlug = t?.slug ? String(t.slug) : "tenant";
 
-      const emailRes = await sendRenderEmails({
-        tenantSlug,
+      // ✅ Emails via abstraction (preserves enterprise/standard)
+      const emailRes = await sendRenderCompleteEmailsViaAbstraction({
+        req,
         tenantId: job.tenant_id,
+        tenantSlug,
         quoteLogId: job.quote_log_id,
         renderImageUrl: imageUrl,
-        originalImages: quote.images,
         customer: quote.customer,
+        estimateLow: quote.estimateLow,
+        estimateHigh: quote.estimateHigh,
+        summary: quote.summary,
       });
 
       processed.push({
