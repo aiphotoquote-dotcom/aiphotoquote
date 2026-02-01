@@ -46,9 +46,23 @@ function isRateLimitError(e: any): boolean {
   return msg.includes("too many requests") || msg.includes("rate limit") || msg.includes("429");
 }
 
-function isDomainNotVerifiedError(e: any): boolean {
+/**
+ * Resend may phrase this a few ways depending on API shape/version.
+ * We treat all of these as "sender domain not allowed" -> try fallbackFrom.
+ */
+function isSenderDomainBlockedError(e: any): boolean {
   const msg = String(e?.message ?? "").toLowerCase();
-  return msg.includes("domain is not verified") || msg.includes("not verified");
+
+  // classic
+  if (msg.includes("domain is not verified") || msg.includes("not verified")) return true;
+
+  // other common variations
+  if (msg.includes("verify your domain")) return true;
+  if (msg.includes("add and verify your domain")) return true;
+  if (msg.includes("sender") && msg.includes("not verified")) return true;
+  if (msg.includes("from") && msg.includes("not verified")) return true;
+
+  return false;
 }
 
 function getFallbackFrom(): string | null {
@@ -103,13 +117,17 @@ export function makeResendProvider(): EmailProvider {
         };
       }
 
+      // Small "burst guard" — helps when you send lead + customer receipt back-to-back.
+      // This is intentionally tiny so it won't feel slow, but reduces accidental 2/sec spikes.
+      await sleep(40 + Math.floor(Math.random() * 70));
+
       const replyTo = Array.isArray(message.replyTo) ? message.replyTo[0] : undefined;
 
       const fallbackFrom = getFallbackFrom();
       const backoffs = [350, 900, 1800]; // for 429 only
 
       async function rawSend(fromOverride?: string) {
-        const fromUsed = fromOverride ?? message.from;
+        const fromUsed = (fromOverride ?? message.from).trim();
 
         const payload: any = {
           from: fromUsed,
@@ -127,7 +145,6 @@ export function makeResendProvider(): EmailProvider {
 
         // ✅ IMPORTANT: Resend success MUST include an id
         if (!id) {
-          // Log for Vercel Function Logs
           console.error("[email][resend] Missing id from Resend response", {
             tenantId,
             context,
@@ -141,10 +158,10 @@ export function makeResendProvider(): EmailProvider {
           throw new Error(`RESEND_NO_MESSAGE_ID: ${safeStr(out) || "(empty response)"}`);
         }
 
-        return { id: String(id), out };
+        return { id: String(id), out, fromUsed };
       }
 
-      async function sendWith429Retries(fn: () => Promise<{ id: string; out: any }>) {
+      async function sendWith429Retries(fn: () => Promise<{ id: string; out: any; fromUsed: string }>) {
         for (let attempt = 0; attempt <= backoffs.length; attempt++) {
           try {
             const res = await fn();
@@ -156,6 +173,7 @@ export function makeResendProvider(): EmailProvider {
               const retryAfter = getRetryAfterMs(e);
               const waitMs = retryAfter ?? backoffs[attempt];
               const jitter = Math.floor(Math.random() * 150);
+
               console.warn("[email][resend] 429 rate limit, retrying", {
                 tenantId,
                 context,
@@ -164,6 +182,7 @@ export function makeResendProvider(): EmailProvider {
                 status: getStatusCode(e),
                 message: String(e?.message ?? ""),
               });
+
               await sleep(waitMs + jitter);
               continue;
             }
@@ -176,27 +195,34 @@ export function makeResendProvider(): EmailProvider {
 
       // Attempt 1: requested sender
       try {
-        const { id, attempt } = await sendWith429Retries(() => rawSend());
+        const { id, attempt, fromUsed } = await sendWith429Retries(() => rawSend());
         return {
           ok: true,
           provider: "resend",
           providerMessageId: id,
           error: null,
-          meta: { tenantId, context, attempt, fromUsed: message.from },
+          meta: {
+            tenantId,
+            context,
+            attempt,
+            fromRequested: message.from,
+            fromUsed,
+          },
         };
       } catch (e1: any) {
-        // Fallback if tenant domain not verified
-        if (isDomainNotVerifiedError(e1) && fallbackFrom) {
+        // Fallback if tenant sender domain is blocked/unverified
+        if (isSenderDomainBlockedError(e1) && fallbackFrom) {
           try {
-            console.warn("[email][resend] Domain not verified, falling back to platform sender", {
+            console.warn("[email][resend] Sender domain blocked, falling back to platform sender", {
               tenantId,
               context,
               fromRequested: message.from,
               fallbackFrom,
+              status: getStatusCode(e1),
               message: String(e1?.message ?? ""),
             });
 
-            const { id, attempt } = await sendWith429Retries(() => rawSend(fallbackFrom));
+            const { id, attempt, fromUsed } = await sendWith429Retries(() => rawSend(fallbackFrom));
             return {
               ok: true,
               provider: "resend",
@@ -207,8 +233,8 @@ export function makeResendProvider(): EmailProvider {
                 context,
                 attempt,
                 fromRequested: message.from,
-                fromUsed: fallbackFrom,
-                fallbackReason: "domain_not_verified",
+                fromUsed,
+                fallbackReason: "sender_domain_blocked",
               },
             };
           } catch (e2: any) {
@@ -226,7 +252,13 @@ export function makeResendProvider(): EmailProvider {
               provider: "resend",
               providerMessageId: null,
               error: e2?.message ?? String(e2),
-              meta: { tenantId, context, status: getStatusCode(e2), fromRequested: message.from, fromUsed: fallbackFrom },
+              meta: {
+                tenantId,
+                context,
+                status: getStatusCode(e2),
+                fromRequested: message.from,
+                fromUsed: fallbackFrom,
+              },
             };
           }
         }
@@ -237,8 +269,9 @@ export function makeResendProvider(): EmailProvider {
           context,
           status: getStatusCode(e1),
           message: String(e1?.message ?? ""),
-          fromUsed: message.from,
+          fromRequested: message.from,
           to: message.to,
+          subject: message.subject,
         });
 
         return {
@@ -246,7 +279,12 @@ export function makeResendProvider(): EmailProvider {
           provider: "resend",
           providerMessageId: null,
           error: e1?.message ?? String(e1),
-          meta: { tenantId, context, status: getStatusCode(e1), fromUsed: message.from },
+          meta: {
+            tenantId,
+            context,
+            status: getStatusCode(e1),
+            fromRequested: message.from,
+          },
         };
       }
     },
