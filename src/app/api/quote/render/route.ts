@@ -26,6 +26,25 @@ function safeErr(e: unknown) {
   return msg.slice(0, 2000);
 }
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function getBaseUrl(req: Request) {
+  const envBase = safeTrim(process.env.NEXT_PUBLIC_APP_URL) || safeTrim(process.env.APP_URL);
+  if (envBase) return envBase.replace(/\/+$/, "");
+
+  const vercel = safeTrim(process.env.VERCEL_URL);
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
+
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  return "";
+}
+
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db
     .select({ id: tenants.id, slug: tenants.slug })
@@ -65,6 +84,42 @@ async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; pr
     )
   `);
   return jobId;
+}
+
+/**
+ * ✅ Immediate “kick” of the cron worker:
+ * - Keeps cron architecture (DB queue + cron worker)
+ * - But attempts to process right away so the user doesn't stare at "Queued"
+ * - Hard-timeouts quickly so the API response remains fast
+ */
+async function tryKickCronNow(req: Request) {
+  const secret = safeTrim(process.env.CRON_SECRET);
+  if (!secret) return { attempted: false as const, ok: false as const, reason: "missing_cron_secret" as const };
+
+  const baseUrl = getBaseUrl(req);
+  if (!baseUrl) return { attempted: false as const, ok: false as const, reason: "missing_base_url" as const };
+
+  const url = `${baseUrl}/api/cron/render?max=1`;
+
+  // Don't let this request hang the customer flow
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 1750);
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}` },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    // We don't care about parsing the body here; cron will still run later if needed
+    return { attempted: true as const, ok: r.ok as const };
+  } catch {
+    return { attempted: true as const, ok: false as const };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 export async function POST(req: Request) {
@@ -116,26 +171,31 @@ export async function POST(req: Request) {
 
     // If already rendered, do not enqueue
     if (q.renderStatus === "rendered" && q.renderImageUrl) {
-      return json(
-        { ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl },
-        200,
-        debugId
-      );
+      return json({ ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl }, 200, debugId);
     }
 
     // 3) Idempotency: if queued/running exists, return it
     const existing = await findExistingQueuedJob(quoteLogId);
     if (existing) {
-      // keep quote log status aligned (optional but helps UI/admin)
-      if (q.renderStatus !== "running") {
+      // keep quote log status aligned (helps UI/admin)
+      if (q.renderStatus !== "running" && q.renderStatus !== "queued") {
         await db
           .update(quoteLogs)
           .set({ renderStatus: existing.status === "running" ? "running" : "queued" })
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
       }
 
+      // ✅ try kick anyway (cheap) so "queued" turns into "rendered" quickly
+      void tryKickCronNow(req);
+
       return json(
-        { ok: true, quoteLogId, status: existing.status === "running" ? "running" : "queued", jobId: existing.id, skipped: true },
+        {
+          ok: true,
+          quoteLogId,
+          status: existing.status === "running" ? "running" : "queued",
+          jobId: existing.id,
+          skipped: true,
+        },
         200,
         debugId
       );
@@ -150,6 +210,10 @@ export async function POST(req: Request) {
       .update(quoteLogs)
       .set({ renderStatus: "queued", renderError: null })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+    // ✅ 6) Kick worker immediately (fast-timeout). Cron schedule remains fallback.
+    // This is the key fix for “Queued forever” from the customer's perspective.
+    void tryKickCronNow(req);
 
     return json({ ok: true, quoteLogId, status: "queued", jobId }, 200, debugId);
   } catch (e) {
