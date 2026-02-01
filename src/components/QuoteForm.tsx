@@ -216,7 +216,12 @@ export default function QuoteForm({
   const resultsHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const renderPreviewRef = useRef<HTMLDivElement | null>(null);
 
+  // Tracks “we already enqueued render for this quote id”
   const renderAttemptedForQuoteRef = useRef<string | null>(null);
+
+  // Poll timer + cancellation
+  const renderPollTimerRef = useRef<number | null>(null);
+  const renderPollAbortRef = useRef<AbortController | null>(null);
 
   // --- derived state ---
   const photoCount = photos.length;
@@ -259,6 +264,100 @@ export default function QuoteForm({
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
   const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
+
+  function stopRenderPolling() {
+    if (renderPollTimerRef.current) window.clearInterval(renderPollTimerRef.current);
+    renderPollTimerRef.current = null;
+
+    if (renderPollAbortRef.current) {
+      try {
+        renderPollAbortRef.current.abort();
+      } catch {
+        // ignore
+      }
+    }
+    renderPollAbortRef.current = null;
+  }
+
+  async function pollRenderStatusOnce(qid: string) {
+    if (!tenantSlug || !qid) return;
+
+    // cancel any in-flight request before starting a new one
+    if (renderPollAbortRef.current) {
+      try {
+        renderPollAbortRef.current.abort();
+      } catch {
+        // ignore
+      }
+    }
+    const ac = new AbortController();
+    renderPollAbortRef.current = ac;
+
+    const url = `/api/quote/render-status?tenantSlug=${encodeURIComponent(tenantSlug)}&quoteLogId=${encodeURIComponent(qid)}`;
+
+    const res = await fetch(url, { method: "GET", cache: "no-store", signal: ac.signal as any });
+    const txt = await res.text();
+
+    let j: any = null;
+    try {
+      j = txt ? JSON.parse(txt) : null;
+    } catch {
+      throw new Error(`Render status returned non-JSON (HTTP ${res.status}).`);
+    }
+
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Render status failed (HTTP ${res.status})`);
+    }
+
+    const statusRaw = String(j?.renderStatus ?? j?.render_status ?? "").toLowerCase().trim();
+    const imageUrl = (j?.imageUrl ?? j?.renderImageUrl ?? j?.render_image_url ?? null) as string | null;
+    const err = (j?.error ?? j?.renderError ?? j?.render_error ?? null) as string | null;
+
+    if (statusRaw === "rendered") {
+      if (!imageUrl) throw new Error("Render status is 'rendered' but no image url was returned.");
+      setRenderImageUrl(imageUrl);
+      setRenderError(null);
+      setRenderStatus("rendered");
+      setRenderProgressPct(100);
+      stopRenderPolling();
+      return;
+    }
+
+    if (statusRaw === "failed") {
+      setRenderStatus("failed");
+      setRenderError(err || "Render failed");
+      setRenderImageUrl(null);
+      setRenderProgressPct(100);
+      stopRenderPolling();
+      return;
+    }
+
+    // queued/running/etc
+    if (statusRaw === "running") setRenderStatus("running");
+    else setRenderStatus("idle"); // treat queued/not_requested as queued in UI
+  }
+
+  function startRenderPolling(qid: string) {
+    stopRenderPolling();
+
+    // kick one immediately, then poll
+    pollRenderStatusOnce(qid).catch((e: any) => {
+      // if polling fails hard, surface error but don’t spam
+      setRenderStatus("failed");
+      setRenderError(e?.message ?? "Render status polling failed");
+      setRenderImageUrl(null);
+      setRenderProgressPct(100);
+      stopRenderPolling();
+    });
+
+    renderPollTimerRef.current = window.setInterval(() => {
+      pollRenderStatusOnce(qid).catch((e: any) => {
+        // keep polling through transient issues, but show latest message
+        // (don’t flip to failed unless we really want to stop; here we keep going)
+        setRenderError(e?.message ?? "Temporary render status error");
+      });
+    }, 3000);
+  }
 
   // Status card copy + single action (no clutter)
   const statusModel = useMemo(() => {
@@ -401,7 +500,7 @@ export default function QuoteForm({
   // Render progress animation while running
   useEffect(() => {
     if (renderStatus !== "running") {
-      setRenderProgressPct(renderStatus === "rendered" ? 100 : 0);
+      setRenderProgressPct(renderStatus === "rendered" ? 100 : renderStatus === "failed" ? 100 : 0);
       return;
     }
 
@@ -426,6 +525,7 @@ export default function QuoteForm({
 
   useEffect(() => {
     return () => {
+      stopRenderPolling();
       photos.forEach((p) => {
         if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
       });
@@ -521,6 +621,7 @@ export default function QuoteForm({
     setWorking(false);
     setPhase("idle");
 
+    stopRenderPolling();
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
@@ -565,6 +666,7 @@ export default function QuoteForm({
     setQaQuestions([]);
     setQaAnswers([]);
 
+    stopRenderPolling();
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
@@ -771,13 +873,16 @@ export default function QuoteForm({
     }
   }
 
+  // ✅ enqueue render job, then poll status endpoint until done
   async function startRenderOnce(qid: string) {
     if (renderAttemptedForQuoteRef.current === qid) return;
     renderAttemptedForQuoteRef.current = qid;
 
-    setRenderStatus("running");
+    // queued UI state
+    setRenderStatus("idle");
     setRenderError(null);
     setRenderImageUrl(null);
+    setRenderProgressPct(10);
 
     try {
       const res = await fetch("/api/quote/render", {
@@ -791,31 +896,35 @@ export default function QuoteForm({
       try {
         j = txt ? JSON.parse(txt) : null;
       } catch {
-        throw new Error(`Render returned non-JSON (HTTP ${res.status}).`);
+        throw new Error(`Render enqueue returned non-JSON (HTTP ${res.status}).`);
       }
 
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Render failed (HTTP ${res.status})`);
+      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
 
-      const url = (j?.imageUrl ?? j?.render_image_url ?? j?.url ?? null) as string | null;
-      if (!url) throw new Error("Render completed but no imageUrl returned.");
-
-      setRenderImageUrl(url);
-      setRenderStatus("rendered");
-      setRenderProgressPct(100);
+      // begin polling for completion
+      setRenderStatus("running");
+      startRenderPolling(qid);
     } catch (e: any) {
       setRenderStatus("failed");
-      setRenderError(e?.message ?? "Render failed");
+      setRenderError(e?.message ?? "Render enqueue failed");
+      setRenderImageUrl(null);
+      setRenderProgressPct(100);
+      stopRenderPolling();
     }
   }
 
+  // Start render ONLY when we are on results (final), opted-in, and have a quote id
   useEffect(() => {
     if (!aiRenderingEnabled) return;
     if (!renderOptIn) return;
     if (!quoteLogId) return;
+    if (mode !== "results") return; // ✅ do not render while QA is pending
     if (renderAttemptedForQuoteRef.current === quoteLogId) return;
+
     startRenderOnce(quoteLogId);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug]);
+  }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug, mode]);
 
   return (
     <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6">
