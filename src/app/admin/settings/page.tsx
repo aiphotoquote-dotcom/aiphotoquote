@@ -54,6 +54,9 @@ type EmailStatusResp =
     }
   | { ok: false; error: string; message?: string };
 
+/** ✅ Branded Email readiness states (UI-first) */
+type BrandedState = "neutral" | "warn" | "good" | "bad";
+
 /* =======================
    Helpers
 ======================= */
@@ -63,7 +66,8 @@ async function safeJson<T>(res: Response): Promise<T> {
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
     throw new Error(
-      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ` + `First 80 chars: ${text.slice(0, 80)}`
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ` +
+        `First 80 chars: ${text.slice(0, 80)}`
     );
   }
   return (await res.json()) as T;
@@ -120,7 +124,11 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
       ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-900/20 dark:text-red-200"
       : "border-gray-200 bg-white text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200";
 
-  return <span className={cx("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium", cls)}>{props.children}</span>;
+  return (
+    <span className={cx("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium", cls)}>
+      {props.children}
+    </span>
+  );
 }
 
 function Card(props: { title: string; subtitle?: string; right?: React.ReactNode; children: React.ReactNode }) {
@@ -430,10 +438,10 @@ export default function AdminTenantSettingsPage() {
   /* ---------- Branded Email (UI-first/read-only) ---------- */
   const brandedDomain = useMemo(() => extractDomainFromEmail(fromEmail), [fromEmail]);
 
-  const brandedReadiness = useMemo(() => {
+  const brandedReadiness = useMemo<{ state: BrandedState; title: string; detail: string }>(() => {
     if (emailSendMode !== "standard") {
       return {
-        state: "neutral" as const,
+        state: "neutral",
         title: "Enterprise mode selected",
         detail: "Branded sending is handled by your connected mailbox in Enterprise mode.",
       };
@@ -441,7 +449,7 @@ export default function AdminTenantSettingsPage() {
 
     if (!fromEmail.trim()) {
       return {
-        state: "warn" as const,
+        state: "warn",
         title: "No From address set",
         detail: "Set “Resend From Email” to enable branded sending (after domain verification).",
       };
@@ -449,7 +457,7 @@ export default function AdminTenantSettingsPage() {
 
     if (!brandedDomain) {
       return {
-        state: "warn" as const,
+        state: "warn",
         title: "Invalid From address format",
         detail: "Use: Name <no-reply@yourdomain.com> or no-reply@yourdomain.com",
       };
@@ -457,7 +465,7 @@ export default function AdminTenantSettingsPage() {
 
     // UI-only for now (we’ll plug in Resend domain status next)
     return {
-      state: "warn" as const,
+      state: "warn",
       title: "Verification required",
       detail: `To send as @${brandedDomain}, the domain must be verified in Resend. Until then, the platform may fall back to a verified sender.`,
     };
@@ -470,7 +478,9 @@ export default function AdminTenantSettingsPage() {
         <div className="mb-6 flex items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Tenant Settings</h1>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Branding and email configuration for the active tenant.</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Branding and email configuration for the active tenant.
+            </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {activeTenant ? (
@@ -532,7 +542,8 @@ export default function AdminTenantSettingsPage() {
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="text-sm font-medium text-gray-900 dark:text-white">
-                          {t.name || t.slug} <span className="text-gray-500 dark:text-gray-400 font-normal">({t.slug})</span>
+                          {t.name || t.slug}{" "}
+                          <span className="text-gray-500 dark:text-gray-400 font-normal">({t.slug})</span>
                         </div>
                         <span className="text-xs font-mono text-gray-600 dark:text-gray-300">{t.role}</span>
                       </div>
@@ -554,12 +565,17 @@ export default function AdminTenantSettingsPage() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Upload logo</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.
-                  </div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.</div>
 
                   <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <input ref={fileInputRef} type="file" accept="image/*" onChange={onPickLogoFile} disabled={!canEdit || uploadingLogo} className="hidden" />
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={onPickLogoFile}
+                      disabled={!canEdit || uploadingLogo}
+                      className="hidden"
+                    />
 
                     <button
                       type="button"
@@ -600,9 +616,7 @@ export default function AdminTenantSettingsPage() {
 
                 <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Logo URL</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                    Paste a public https URL (or we’ll set this automatically after upload).
-                  </div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Paste a public https URL (or we’ll set this automatically after upload).</div>
 
                   <div className="mt-3">
                     <Field
@@ -622,9 +636,7 @@ export default function AdminTenantSettingsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-gray-900 dark:text-white">Preview</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      This is how the logo will render in the UI (emails may scale it differently).
-                    </div>
+                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This is how the logo will render in the UI (emails may scale it differently).</div>
                   </div>
                   {hasBrandLogo ? (
                     <a
@@ -696,7 +708,9 @@ export default function AdminTenantSettingsPage() {
                 </div>
               </div>
             ) : emailStatus ? (
-              <div className="text-sm text-red-700 dark:text-red-300">{emailStatus.message || emailStatus.error || "Failed to load email status."}</div>
+              <div className="text-sm text-red-700 dark:text-red-300">
+                {emailStatus.message || emailStatus.error || "Failed to load email status."}
+              </div>
             ) : (
               <div className="text-sm text-gray-700 dark:text-gray-300">Loading status…</div>
             )}
@@ -739,9 +753,14 @@ export default function AdminTenantSettingsPage() {
               <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm dark:border-white/10 dark:bg-neutral-950/40">
                 <div className="text-sm font-semibold text-gray-900 dark:text-white">How this works</div>
                 <ol className="mt-2 list-decimal space-y-1 pl-5 text-gray-700 dark:text-gray-300">
-                  <li>Set your desired sender in <span className="font-mono">Resend From Email</span> (below).</li>
+                  <li>
+                    Set your desired sender in <span className="font-mono">Resend From Email</span> (below).
+                  </li>
                   <li>Verify the domain with DNS records (we’ll show exact records in this card next).</li>
-                  <li>Once verified, emails send from your domain. If not verified, the platform can fall back to a verified sender to prevent failures.</li>
+                  <li>
+                    Once verified, emails send from your domain. If not verified, the platform can fall back to a verified
+                    sender to prevent failures.
+                  </li>
                 </ol>
 
                 <div className="mt-3 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3 text-xs text-gray-700 dark:border-white/10 dark:bg-black/30 dark:text-gray-300">
@@ -872,7 +891,9 @@ export default function AdminTenantSettingsPage() {
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-white">Enterprise connection</div>
-                      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Connect a mailbox to enable Enterprise sending.</div>
+                      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                        Connect a mailbox to enable Enterprise sending.
+                      </div>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
@@ -924,7 +945,9 @@ export default function AdminTenantSettingsPage() {
                         Sends a test message to <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
                       </div>
                       {emailSendMode === "enterprise" ? (
-                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Enterprise mode selected — sends via your connected mailbox.</div>
+                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          Enterprise mode selected — sends via your connected mailbox.
+                        </div>
                       ) : null}
                     </div>
 
@@ -951,7 +974,9 @@ export default function AdminTenantSettingsPage() {
 
                 {/* Save row */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-xs text-gray-500 dark:text-gray-400">Tip: upload a logo, configure email routing, then click Save Settings.</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">
+                    Tip: upload a logo, configure email routing, then click Save Settings.
+                  </div>
 
                   <div className="flex items-center gap-3">
                     <button
