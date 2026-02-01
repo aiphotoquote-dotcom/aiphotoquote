@@ -52,6 +52,21 @@ type EmailStatusResp =
     }
   | { ok: false; error: string; message?: string };
 
+// NEW: Branded Email status (server-derived; safe to be "not implemented yet")
+type BrandedEmailStatusResp =
+  | {
+      ok: true;
+      mode: "standard" | "enterprise";
+      fromRequested: string | null; // tenant resend_from_email (raw)
+      fromUsed: string | null; // what standard mode would actually use (after fallback decision)
+      replyTo: string | null; // lead_to_email
+      status: "verified" | "not_verified" | "missing_from" | "missing_reply_to" | "unknown";
+      usingFallback: boolean;
+      fallbackFrom: string | null; // platform sender (e.g., aiphotoquote.com)
+      notes: string[];
+    }
+  | { ok: false; error: string; message?: string };
+
 /* =======================
    Helpers
 ======================= */
@@ -70,6 +85,25 @@ async function safeJson<T>(res: Response): Promise<T> {
 
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
+}
+
+function extractDomainFromFromLine(fromLine: string): string | null {
+  const s = String(fromLine || "").trim();
+  if (!s) return null;
+
+  // Handles: "Name <email@domain.com>" or "email@domain.com"
+  const mAngle = s.match(/<([^>]+)>/);
+  const email = (mAngle?.[1] || s).trim();
+
+  const at = email.lastIndexOf("@");
+  if (at === -1) return null;
+
+  const domain = email.slice(at + 1).trim().toLowerCase();
+  return domain || null;
+}
+
+function prettyDomain(fromLine: string): string {
+  return extractDomainFromFromLine(fromLine) || "unknown";
 }
 
 /* =======================
@@ -94,20 +128,13 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
   );
 }
 
-function Card(props: {
-  title: string;
-  subtitle?: string;
-  right?: React.ReactNode;
-  children: React.ReactNode;
-}) {
+function Card(props: { title: string; subtitle?: string; right?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-white/10 dark:bg-neutral-950/40">
       <div className="flex items-start justify-between gap-4 border-b border-gray-100 p-5 dark:border-white/10">
         <div>
           <div className="text-sm font-semibold text-gray-900 dark:text-white">{props.title}</div>
-          {props.subtitle ? (
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{props.subtitle}</div>
-          ) : null}
+          {props.subtitle ? <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{props.subtitle}</div> : null}
         </div>
         {props.right ? <div className="shrink-0">{props.right}</div> : null}
       </div>
@@ -147,8 +174,36 @@ function Field(props: {
   );
 }
 
+function SmallButton(props: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  title?: string;
+  tone?: "primary" | "neutral";
+}) {
+  const tone = props.tone ?? "neutral";
+  const cls =
+    tone === "primary"
+      ? cx(
+          "rounded-lg px-3 py-2 text-sm font-semibold transition",
+          "bg-black text-white hover:opacity-90 disabled:opacity-50",
+          "dark:bg-white dark:text-black dark:hover:opacity-90"
+        )
+      : cx(
+          "rounded-lg border px-3 py-2 text-sm font-semibold transition",
+          "border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50",
+          "dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+        );
+
+  return (
+    <button type="button" onClick={props.onClick} disabled={props.disabled} title={props.title} className={cls}>
+      {props.children}
+    </button>
+  );
+}
+
 /* =======================
-   Page Component (Shell)
+   Page Component
 ======================= */
 
 export default function AdminTenantSettingsPage() {
@@ -171,6 +226,10 @@ export default function AdminTenantSettingsPage() {
   const [emailIdentityId, setEmailIdentityId] = useState("");
   const [emailStatus, setEmailStatus] = useState<EmailStatusResp | null>(null);
 
+  // NEW: branded email status (safe to be null / unknown)
+  const [brandedStatus, setBrandedStatus] = useState<BrandedEmailStatusResp | null>(null);
+  const [loadingBranded, setLoadingBranded] = useState(false);
+
   /* ---------- ui ---------- */
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -182,6 +241,9 @@ export default function AdminTenantSettingsPage() {
   const CONTEXT_URL = "/api/tenant/context";
   const SETTINGS_URL = "/api/admin/tenant-settings";
   const EMAIL_STATUS_URL = "/api/admin/email/status";
+
+  // NEW endpoint to be implemented next commit
+  const BRANDED_STATUS_URL = "/api/admin/email/branded-status";
 
   const tenants = useMemo(() => (Array.isArray(context?.tenants) ? context.tenants : []), [context]);
 
@@ -233,6 +295,46 @@ export default function AdminTenantSettingsPage() {
     setEmailStatus(data);
   }
 
+  async function loadBrandedEmailStatus() {
+    setLoadingBranded(true);
+    try {
+      const res = await fetch(BRANDED_STATUS_URL, { cache: "no-store" });
+
+      // If endpoint isn't built yet, don't throw — show "unknown" gracefully
+      if (res.status === 404) {
+        setBrandedStatus({
+          ok: true,
+          mode: emailSendMode,
+          fromRequested: fromEmail.trim() || null,
+          fromUsed: null,
+          replyTo: leadToEmail.trim() || null,
+          status: "unknown",
+          usingFallback: false,
+          fallbackFrom: null,
+          notes: ["Branded Email status endpoint not wired yet (next commit)."],
+        });
+        return;
+      }
+
+      const data = await safeJson<BrandedEmailStatusResp>(res);
+      setBrandedStatus(data);
+    } catch (e: any) {
+      setBrandedStatus({
+        ok: true,
+        mode: emailSendMode,
+        fromRequested: fromEmail.trim() || null,
+        fromUsed: null,
+        replyTo: leadToEmail.trim() || null,
+        status: "unknown",
+        usingFallback: false,
+        fallbackFrom: null,
+        notes: [`Unable to load Branded Email status: ${e?.message ?? String(e)}`],
+      });
+    } finally {
+      setLoadingBranded(false);
+    }
+  }
+
   async function bootstrap() {
     setErr(null);
     setMsg(null);
@@ -243,6 +345,7 @@ export default function AdminTenantSettingsPage() {
       if (!id) {
         setRole(null);
         setEmailStatus(null);
+        setBrandedStatus(null);
         setMsg(null);
         setErr("No tenants found for this user yet.");
         return;
@@ -250,10 +353,13 @@ export default function AdminTenantSettingsPage() {
 
       await loadSettings();
       await loadEmailStatus();
+      await loadBrandedEmailStatus();
+
       setMsg("Loaded.");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
       setEmailStatus(null);
+      setBrandedStatus(null);
     } finally {
       setLoading(false);
     }
@@ -377,6 +483,7 @@ export default function AdminTenantSettingsPage() {
 
       setRole(data.role);
       await loadEmailStatus();
+      await loadBrandedEmailStatus();
       setMsg("Saved.");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -404,6 +511,60 @@ export default function AdminTenantSettingsPage() {
     !testingEmail &&
     !!leadToEmail.trim() &&
     (emailSendMode === "standard" || (emailSendMode === "enterprise" && !!emailIdentityId.trim()));
+
+  // Branded Email UI derived bits (client-safe)
+  const fromDomain = useMemo(() => prettyDomain(fromEmail), [fromEmail]);
+
+  const brandedTone = useMemo(() => {
+    if (!brandedStatus || !brandedStatus.ok) return "neutral" as const;
+    if (emailSendMode !== "standard") return "neutral" as const;
+
+    const s = brandedStatus.status;
+    if (s === "verified") return "good" as const;
+    if (s === "not_verified" || s === "missing_from" || s === "missing_reply_to") return "warn" as const;
+    return "neutral" as const;
+  }, [brandedStatus, emailSendMode]);
+
+  const brandedRight = useMemo(() => {
+    if (emailSendMode !== "standard") return <Pill tone="neutral">Enterprise mode</Pill>;
+    if (!brandedStatus) return <Pill tone="neutral">Loading…</Pill>;
+    if (!brandedStatus.ok) return <Pill tone="bad">Error</Pill>;
+
+    const label =
+      brandedStatus.status === "verified"
+        ? "Verified"
+        : brandedStatus.status === "not_verified"
+        ? "Not verified"
+        : brandedStatus.status === "missing_from"
+        ? "From missing"
+        : brandedStatus.status === "missing_reply_to"
+        ? "Reply-To missing"
+        : "Unknown";
+
+    if (brandedStatus.usingFallback) {
+      return <Pill tone="warn">Fallback active</Pill>;
+    }
+    return <Pill tone={brandedTone}>{label}</Pill>;
+  }, [brandedStatus, brandedTone, emailSendMode]);
+
+  function copyToClipboard(text: string) {
+    try {
+      navigator.clipboard?.writeText(text);
+      setMsg("Copied.");
+    } catch {
+      // ignore
+    }
+  }
+
+  // Simple “recommended DNS instructions” placeholder (server will supply real records later)
+  const dnsPlaceholder = useMemo(() => {
+    const domain = extractDomainFromFromLine(fromEmail) || "yourdomain.com";
+    return [
+      `1) Add Resend domain: ${domain}`,
+      `2) Add SPF/DKIM records in DNS (Resend will provide exact values)`,
+      `3) Wait for verification, then retry Test Email`,
+    ].join("\n");
+  }, [fromEmail]);
 
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-neutral-950">
@@ -452,7 +613,11 @@ export default function AdminTenantSettingsPage() {
 
         <div className="grid gap-5">
           {/* Active tenant */}
-          <Card title="Active Tenant" subtitle="If you belong to multiple tenants, switch here." right={<Pill tone="neutral">{tenants.length} tenants</Pill>}>
+          <Card
+            title="Active Tenant"
+            subtitle="If you belong to multiple tenants, switch here."
+            right={<Pill tone="neutral">{tenants.length} tenants</Pill>}
+          >
             {tenants.length === 0 ? (
               <div className="text-sm text-gray-700 dark:text-gray-300">No tenants yet.</div>
             ) : (
@@ -495,7 +660,9 @@ export default function AdminTenantSettingsPage() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Upload logo</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.</div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    PNG/JPG/SVG/WebP up to 2MB. Stored in Vercel Blob.
+                  </div>
 
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <input
@@ -546,7 +713,9 @@ export default function AdminTenantSettingsPage() {
 
                 <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
                   <div className="text-sm font-semibold text-gray-900 dark:text-white">Logo URL</div>
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Paste a public https URL (or we’ll set this automatically after upload).</div>
+                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                    Paste a public https URL (or we’ll set this automatically after upload).
+                  </div>
 
                   <div className="mt-3">
                     <Field
@@ -566,7 +735,9 @@ export default function AdminTenantSettingsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-gray-900 dark:text-white">Preview</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This is how the logo will render in the UI (emails may scale it differently).</div>
+                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                      This is how the logo will render in the UI (emails may scale it differently).
+                    </div>
                   </div>
                   {hasBrandLogo ? (
                     <a
@@ -646,6 +817,124 @@ export default function AdminTenantSettingsPage() {
             )}
           </Card>
 
+          {/* NEW: Branded Email */}
+          <Card
+            title="Branded Email"
+            subtitle="Standard mode can send from your domain once it’s verified. If not verified, we’ll fall back to the platform sender so emails still deliver."
+            right={brandedRight}
+          >
+            <div className="grid gap-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Pill tone="neutral">
+                  Selected mode: <span className="ml-1 font-mono">{emailSendMode}</span>
+                </Pill>
+                <Pill tone={fromEmail.trim() ? "good" : "warn"}>
+                  From domain: <span className="ml-1 font-mono">{fromDomain}</span>
+                </Pill>
+                <Pill tone={leadToEmail.trim() ? "good" : "warn"}>
+                  Reply-To: <span className="ml-1 font-mono">{leadToEmail.trim() || "(missing)"}</span>
+                </Pill>
+              </div>
+
+              {emailSendMode !== "standard" ? (
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
+                  You’re in <span className="font-mono">enterprise</span> mode. Branded sender verification applies to{" "}
+                  <span className="font-mono">standard</span> mode only. Enterprise sends from the connected mailbox for
+                  DMARC alignment.
+                </div>
+              ) : (
+                <div className="grid gap-3">
+                  <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm dark:border-white/10 dark:bg-neutral-950/40">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900 dark:text-white">Status</div>
+                        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                          {loadingBranded ? "Checking…" : "Branded sender verification and fallback behavior."}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <SmallButton
+                          onClick={() => loadBrandedEmailStatus()}
+                          disabled={loadingBranded}
+                          tone="neutral"
+                        >
+                          {loadingBranded ? "Refreshing…" : "Refresh"}
+                        </SmallButton>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs dark:border-white/10 dark:bg-white/5">
+                        <div className="text-gray-600 dark:text-gray-300">From requested</div>
+                        <div className="mt-1 font-mono text-gray-900 dark:text-white">
+                          {fromEmail.trim() || "(not set)"}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs dark:border-white/10 dark:bg-white/5">
+                        <div className="text-gray-600 dark:text-gray-300">From used (after fallback)</div>
+                        <div className="mt-1 font-mono text-gray-900 dark:text-white">
+                          {brandedStatus?.ok ? brandedStatus.fromUsed || "(unknown until endpoint is wired)" : "(unknown)"}
+                        </div>
+                      </div>
+                    </div>
+
+                    {brandedStatus?.ok ? (
+                      <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-white/10 dark:bg-white/5">
+                        <div className="mb-2 text-sm font-semibold text-gray-900 dark:text-white">Notes</div>
+                        <ul className="list-disc space-y-1 pl-5 text-gray-700 dark:text-gray-300">
+                          {(brandedStatus.notes || []).map((n, i) => (
+                            <li key={i}>{n}</li>
+                          ))}
+                        </ul>
+
+                        {brandedStatus.usingFallback ? (
+                          <div className="mt-3 text-sm text-yellow-900 dark:text-yellow-100">
+                            Fallback is active — emails will send using the platform sender{" "}
+                            <span className="font-mono">{brandedStatus.fallbackFrom || "(platform sender)"}</span>, and replies still go to{" "}
+                            <span className="font-mono">{leadToEmail.trim() || "(Lead To Email missing)"}</span>.
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-white/10 dark:bg-white/5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900 dark:text-white">Enable Branded Email</div>
+                        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+                          Add and verify your sending domain in Resend. Once verified, we’ll automatically use it as the
+                          sender.
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        <SmallButton
+                          onClick={() => copyToClipboard(dnsPlaceholder)}
+                          disabled={!fromEmail.trim()}
+                          title={!fromEmail.trim() ? "Set Resend From Email first." : undefined}
+                          tone="neutral"
+                        >
+                          Copy instructions
+                        </SmallButton>
+                      </div>
+                    </div>
+
+                    <pre className="mt-3 whitespace-pre-wrap rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-white/10 dark:bg-neutral-950/40 dark:text-gray-100">
+{dnsPlaceholder}
+                    </pre>
+
+                    <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                      Next commit: we’ll show the exact DNS records for your domain and validate verification automatically.
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Card>
+
           {/* Configuration */}
           <Card title="Configuration" subtitle="Update settings for the active tenant.">
             {loading ? (
@@ -654,9 +943,8 @@ export default function AdminTenantSettingsPage() {
               <div className="grid gap-6">
                 {!canEdit ? (
                   <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100">
-                    You are a <span className="font-mono">{role}</span>. Only{" "}
-                    <span className="font-mono">owner</span> or <span className="font-mono">admin</span> can edit tenant
-                    settings.
+                    You are a <span className="font-mono">{role}</span>. Only <span className="font-mono">owner</span> or{" "}
+                    <span className="font-mono">admin</span> can edit tenant settings.
                   </div>
                 ) : null}
 
@@ -681,6 +969,8 @@ export default function AdminTenantSettingsPage() {
                           onChange={() => {
                             setEmailSendMode("standard");
                             setTestEmailRes(null);
+                            // refresh branded UI when mode changes
+                            queueMicrotask(() => loadBrandedEmailStatus());
                           }}
                           disabled={!canEdit}
                           className="mt-1"
@@ -710,6 +1000,7 @@ export default function AdminTenantSettingsPage() {
                           onChange={() => {
                             setEmailSendMode("enterprise");
                             setTestEmailRes(null);
+                            queueMicrotask(() => loadBrandedEmailStatus());
                           }}
                           disabled={!canEdit}
                           className="mt-1"
@@ -751,7 +1042,11 @@ export default function AdminTenantSettingsPage() {
                   <Field
                     label="Resend From Email"
                     value={fromEmail}
-                    onChange={setFromEmail}
+                    onChange={(v) => {
+                      setFromEmail(v);
+                      // lightweight UI refresh only
+                      queueMicrotask(() => loadBrandedEmailStatus());
+                    }}
                     disabled={!canEdit}
                     placeholder="AI Photo Quote <no-reply@yourdomain.com>"
                     hint="Must be a verified sending domain in Resend. Format: Name <email@domain.com>"
