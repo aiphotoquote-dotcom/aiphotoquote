@@ -88,8 +88,21 @@ export function ResultsSection({
         </div>
 
         {quoteLogId ? (
-          <div className="shrink-0 text-[11px] font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">
-            Ref: {quoteLogId.slice(0, 8)}
+          <div className="shrink-0 text-[11px] font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap text-right">
+            <div>Ref: {quoteLogId.slice(0, 8)}</div>
+
+            {/* ✅ Make full UUID accessible + copyable without clutter */}
+            <details className="mt-1">
+              <summary className="cursor-pointer select-none text-[11px] font-medium text-gray-500 dark:text-gray-400">
+                Show full ID
+              </summary>
+              <div className="mt-2 rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-[10px] text-gray-500 dark:text-gray-400">quoteLogId</div>
+                <div className="mt-1 font-mono text-[11px] text-gray-800 dark:text-gray-200 break-all">
+                  {quoteLogId}
+                </div>
+              </div>
+            </details>
           </div>
         ) : null}
       </div>
@@ -186,10 +199,7 @@ export function ResultsSection({
           {/* Progress bar while running */}
           {renderStatus === "running" ? (
             <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-              <div
-                className="h-full bg-emerald-600 transition-[width] duration-300"
-                style={{ width: `${pct}%` }}
-              />
+              <div className="h-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${pct}%` }} />
             </div>
           ) : null}
 
