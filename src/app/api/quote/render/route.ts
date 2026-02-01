@@ -91,13 +91,19 @@ async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; pr
  * - Keeps cron architecture (DB queue + cron worker)
  * - But attempts to process right away so the user doesn't stare at "Queued"
  * - Hard-timeouts quickly so the API response remains fast
+ *
+ * NOTE: This returns diagnostics for debugging why jobs stay queued.
  */
 async function tryKickCronNow(req: Request) {
   const secret = safeTrim(process.env.CRON_SECRET);
-  if (!secret) return { attempted: false as const, ok: false, reason: "missing_cron_secret" as const };
+  if (!secret) {
+    return { attempted: false as const, ok: false as const, reason: "missing_cron_secret" as const, url: null as string | null, status: null as number | null };
+  }
 
   const baseUrl = getBaseUrl(req);
-  if (!baseUrl) return { attempted: false as const, ok: false, reason: "missing_base_url" as const };
+  if (!baseUrl) {
+    return { attempted: false as const, ok: false as const, reason: "missing_base_url" as const, url: null as string | null, status: null as number | null };
+  }
 
   const url = `${baseUrl}/api/cron/render?max=1`;
 
@@ -113,9 +119,15 @@ async function tryKickCronNow(req: Request) {
       signal: controller.signal,
     });
 
-    return { attempted: true as const, ok: Boolean(r.ok) };
+    return {
+      attempted: true as const,
+      ok: Boolean(r.ok),
+      reason: r.ok ? null : ("cron_http_error" as const),
+      url,
+      status: r.status,
+    };
   } catch {
-    return { attempted: true as const, ok: false };
+    return { attempted: true as const, ok: false as const, reason: "cron_fetch_failed" as const, url, status: null as number | null };
   } finally {
     clearTimeout(t);
   }
@@ -162,16 +174,19 @@ export async function POST(req: Request) {
     // If not opted-in, do not enqueue
     if (!q.renderOptIn) {
       return json(
-        { ok: true, quoteLogId, status: "not_requested", jobId: null, imageUrl: q.renderImageUrl ?? null },
+        { ok: true, quoteLogId, status: "not_requested", jobId: null, imageUrl: q.renderImageUrl ?? null, kick: null },
         200,
         debugId
       );
     }
 
     // ✅ If an image URL exists, treat as rendered and never enqueue/stomp.
-    // This matches the hardened render-status contract.
     if (q.renderImageUrl) {
-      return json({ ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl }, 200, debugId);
+      return json(
+        { ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl, kick: null },
+        200,
+        debugId
+      );
     }
 
     // 3) Idempotency: if queued/running exists, return it
@@ -185,7 +200,7 @@ export async function POST(req: Request) {
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
       }
 
-      void tryKickCronNow(req);
+      const kick = await tryKickCronNow(req);
 
       return json(
         {
@@ -194,6 +209,7 @@ export async function POST(req: Request) {
           status: existing.status === "running" ? "running" : "queued",
           jobId: existing.id,
           skipped: true,
+          kick,
         },
         200,
         debugId
@@ -210,9 +226,9 @@ export async function POST(req: Request) {
       .set({ renderStatus: "queued", renderError: null })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    void tryKickCronNow(req);
+    const kick = await tryKickCronNow(req);
 
-    return json({ ok: true, quoteLogId, status: "queued", jobId }, 200, debugId);
+    return json({ ok: true, quoteLogId, status: "queued", jobId, kick }, 200, debugId);
   } catch (e) {
     return json({ ok: false, error: "REQUEST_FAILED", message: safeErr(e) }, 500, debugId);
   }
