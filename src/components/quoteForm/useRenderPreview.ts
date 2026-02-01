@@ -1,10 +1,63 @@
-// src/components/quoteForm/useRenderPreview.ts
 "use client";
 
 import { useEffect, useRef, useState } from "react";
 import { isAbortError } from "./helpers";
 
 export type RenderStatus = "idle" | "running" | "rendered" | "failed";
+
+// ---- Fake progress tuning ----
+// Goal: look believable for real-world render times (~50s observed).
+// - Ramp to 92% over ~50 seconds
+// - Hold at 92% until the server returns an image URL (rendered)
+// - Jump to 100% on rendered/failed
+const FAKE_PROGRESS = {
+  cap: 92,
+  // segment boundaries (ms)
+  t1: 5_000, // early ramp
+  t2: 30_000, // mid ramp
+  t3: 50_000, // final ramp to cap
+  // segment targets
+  p0: 8,
+  p1: 25,
+  p2: 70,
+  p3: 92,
+  tickMs: 250,
+};
+
+function clamp(n: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
+}
+
+function easeOutCubic(t: number) {
+  const x = clamp(t, 0, 1);
+  return 1 - Math.pow(1 - x, 3);
+}
+
+function fakeProgressAt(elapsedMs: number) {
+  const { t1, t2, t3, p0, p1, p2, p3, cap } = FAKE_PROGRESS;
+  const t = Math.max(0, elapsedMs);
+
+  if (t <= t1) {
+    const u = easeOutCubic(t / t1);
+    return clamp(lerp(p0, p1, u), 0, cap);
+  }
+
+  if (t <= t2) {
+    const u = easeOutCubic((t - t1) / (t2 - t1));
+    return clamp(lerp(p1, p2, u), 0, cap);
+  }
+
+  if (t <= t3) {
+    const u = easeOutCubic((t - t2) / (t3 - t2));
+    return clamp(lerp(p2, p3, u), 0, cap);
+  }
+
+  return cap;
+}
 
 export function useRenderPreview(params: {
   tenantSlug: string;
@@ -26,6 +79,16 @@ export function useRenderPreview(params: {
 
   // ✅ prevents “abort loop” where we never receive a successful response
   const pollInFlightRef = useRef(false);
+
+  // Fake progress timers/anchors
+  const progressStartMsRef = useRef<number | null>(null);
+  const progressTimerRef = useRef<number | null>(null);
+
+  function stopProgress() {
+    if (progressTimerRef.current) window.clearInterval(progressTimerRef.current);
+    progressTimerRef.current = null;
+    progressStartMsRef.current = null;
+  }
 
   function stopPolling() {
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
@@ -50,6 +113,7 @@ export function useRenderPreview(params: {
     setRenderStatus("rendered");
     setRenderProgressPct(100);
     stopPolling();
+    stopProgress();
   }
 
   function setFailedNow(message: string) {
@@ -58,6 +122,7 @@ export function useRenderPreview(params: {
     setRenderImageUrl(null);
     setRenderProgressPct(100);
     stopPolling();
+    stopProgress();
   }
 
   async function pollOnce(qid: string) {
@@ -190,31 +255,43 @@ export function useRenderPreview(params: {
     startPolling(qid);
   }
 
-  // smooth progress while "running"
+  // Fake progress while "running" (time-based, tuned to ~50s to reach 92%)
   useEffect(() => {
+    // stop any existing progress timer when status changes
+    stopProgress();
+
     if (renderStatus !== "running") {
       setRenderProgressPct(renderStatus === "rendered" || renderStatus === "failed" ? 100 : 0);
       return;
     }
 
-    setRenderProgressPct(12);
+    // anchor start time for this run
+    progressStartMsRef.current = Date.now();
 
-    const t = window.setInterval(() => {
+    // set an immediate starting value (prevents "0%" flash)
+    setRenderProgressPct((prev) => Math.max(prev, FAKE_PROGRESS.p0));
+
+    progressTimerRef.current = window.setInterval(() => {
+      const start = progressStartMsRef.current ?? Date.now();
+      const elapsed = Date.now() - start;
+
+      const next = fakeProgressAt(elapsed);
+
       setRenderProgressPct((prev) => {
-        const cap = 92;
-        if (prev >= cap) return cap;
-        const bump = prev < 50 ? 6 : prev < 75 ? 3 : 1;
-        return Math.min(cap, prev + bump);
+        // never go backwards; never exceed cap while running
+        const cap = FAKE_PROGRESS.cap;
+        return clamp(Math.max(prev, next), 0, cap);
       });
-    }, 650);
+    }, FAKE_PROGRESS.tickMs);
 
-    return () => window.clearInterval(t);
+    return () => stopProgress();
   }, [renderStatus]);
 
   // lifecycle / cleanup
   useEffect(() => {
     return () => {
       stopPolling();
+      stopProgress();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -236,6 +313,7 @@ export function useRenderPreview(params: {
 
   function resetRenderState() {
     stopPolling();
+    stopProgress();
     attemptedForQuoteRef.current = null;
     setRenderStatus("idle");
     setRenderImageUrl(null);
