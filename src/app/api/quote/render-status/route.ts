@@ -40,7 +40,6 @@ function normalizeStatus(raw: unknown): "idle" | "running" | "rendered" | "faile
 }
 
 function isUuidLike(v: string) {
-  // lightweight check (Postgres will validate via ::uuid when used)
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
@@ -65,24 +64,38 @@ export async function GET(req: Request) {
   try {
     const tenantIsUuid = isUuidLike(tenantSlug);
 
-    const r = await db.execute(sql`
-      select
-        t.id as tenant_id,
-        t.slug as tenant_slug,
-        q.id as quote_log_id,
-        q.render_status,
-        q.render_image_url,
-        q.render_error
-      from quote_logs q
-      join tenants t on t.id = q.tenant_id
-      where (
-          (t.slug = ${tenantSlug} and ${tenantIsUuid} = false)
-          or
-          (t.id = ${tenantSlug}::uuid and ${tenantIsUuid} = true)
-        )
-        and q.id = ${quoteLogId}::uuid
-      limit 1
-    `);
+    // ✅ IMPORTANT: do NOT use OR branches that include ${tenantSlug}::uuid
+    // when tenantSlug might be a non-uuid string (e.g. "maggio-upholstery").
+    // Postgres may attempt the cast even if the branch would evaluate false.
+    const r = tenantIsUuid
+      ? await db.execute(sql`
+          select
+            t.id as tenant_id,
+            t.slug as tenant_slug,
+            q.id as quote_log_id,
+            q.render_status,
+            q.render_image_url,
+            q.render_error
+          from quote_logs q
+          join tenants t on t.id = q.tenant_id
+          where t.id = ${tenantSlug}::uuid
+            and q.id = ${quoteLogId}::uuid
+          limit 1
+        `)
+      : await db.execute(sql`
+          select
+            t.id as tenant_id,
+            t.slug as tenant_slug,
+            q.id as quote_log_id,
+            q.render_status,
+            q.render_image_url,
+            q.render_error
+          from quote_logs q
+          join tenants t on t.id = q.tenant_id
+          where t.slug = ${tenantSlug}
+            and q.id = ${quoteLogId}::uuid
+          limit 1
+        `);
 
     const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
@@ -95,7 +108,7 @@ export async function GET(req: Request) {
           debug: debug
             ? {
                 received: { tenantSlug, quoteLogId },
-                note: "tenantSlug may be slug or tenant UUID; no matching tenant+quote row was found",
+                tenantSlugInterpretation: tenantIsUuid ? "tenant_id_uuid" : "tenant_slug",
               }
             : undefined,
         },
@@ -133,6 +146,7 @@ export async function GET(req: Request) {
           ? {
               debug: {
                 received: { tenantSlug, quoteLogId },
+                tenantSlugInterpretation: tenantIsUuid ? "tenant_id_uuid" : "tenant_slug",
                 matched: {
                   tenantId: String(row.tenant_id ?? ""),
                   tenantSlug: String(row.tenant_slug ?? ""),
