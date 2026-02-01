@@ -75,7 +75,7 @@ function buildAuthDebug(req: Request) {
   const hasAuthHeader = Boolean(authRaw);
 
   const expected = hasConfigured ? `Bearer ${configuredRaw}` : "";
-  const matches = hasConfigured ? authRaw === expected : true; // if not configured, auth is effectively "allowed"
+  const matches = hasConfigured ? authRaw === expected : true;
 
   const tokenFromHeader = authRaw.toLowerCase().startsWith("bearer ") ? authRaw.slice(7).trim() : authRaw;
 
@@ -84,11 +84,8 @@ function buildAuthDebug(req: Request) {
     authHeaderPresent: hasAuthHeader,
     authHeaderLooksBearer: authRaw.toLowerCase().startsWith("bearer "),
     matches,
-    // safe fingerprints (no raw secret)
     configuredSha10: hasConfigured ? shaPrefix(configuredRaw) : null,
     receivedTokenSha10: hasAuthHeader ? shaPrefix(tokenFromHeader) : null,
-
-    // env / routing context
     env: {
       VERCEL_ENV: safeTrim(process.env.VERCEL_ENV) || null,
       VERCEL_URL: safeTrim(process.env.VERCEL_URL) || null,
@@ -104,17 +101,32 @@ function buildAuthDebug(req: Request) {
   };
 }
 
-// ✅ CRON protection (new secret). If CRON_SECRET is unset, allow (dev convenience).
+/**
+ * ✅ CRON protection
+ * Accepts:
+ * - Authorization: Bearer <CRON_SECRET>
+ * - OR query param: ?cron_secret=<CRON_SECRET> (or ?secret= / ?token=)
+ *
+ * If CRON_SECRET is unset, allow (dev convenience).
+ */
 async function requireCronSecret(req: Request) {
-  const configured = String(process.env.CRON_SECRET ?? "").trim();
-  const auth = String(req.headers.get("authorization") ?? "").trim();
-
+  const configured = safeTrim(process.env.CRON_SECRET);
   if (!configured) return { ok: true as const, mode: "no_secret_configured" as const };
 
-  const expected = `Bearer ${configured}`;
-  if (auth !== expected) return { ok: false as const, error: "UNAUTHORIZED" as const };
+  const auth = safeTrim(req.headers.get("authorization"));
+  const url = new URL(req.url);
 
-  return { ok: true as const, mode: "header" as const };
+  const qp =
+    safeTrim(url.searchParams.get("cron_secret")) ||
+    safeTrim(url.searchParams.get("secret")) ||
+    safeTrim(url.searchParams.get("token"));
+
+  const expectedHeader = `Bearer ${configured}`;
+
+  if (auth && auth === expectedHeader) return { ok: true as const, mode: "header" as const };
+  if (qp && qp === configured) return { ok: true as const, mode: "query" as const };
+
+  return { ok: false as const, error: "UNAUTHORIZED" as const };
 }
 
 // Claim jobs safely (SKIP LOCKED prevents double-run across concurrent cron executions)
@@ -212,7 +224,8 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
   `);
 }
 
-export async function POST(req: Request) {
+// Shared handler so GET + POST behave identically
+async function handle(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
@@ -222,11 +235,7 @@ export async function POST(req: Request) {
   const auth = await requireCronSecret(req);
   if (!auth.ok) {
     return json(
-      {
-        ok: false,
-        error: "UNAUTHORIZED",
-        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
-      },
+      { ok: false, error: "UNAUTHORIZED", ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}) },
       401,
       debugId
     );
@@ -234,7 +243,6 @@ export async function POST(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  // Claim jobs
   const claimed = await claimJob(max);
   if (!claimed.length) {
     return json(
@@ -258,7 +266,6 @@ export async function POST(req: Request) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
-      // Load tenant + quote context
       const ctx = await loadRenderContext(job.tenantId, job.quoteLogId);
       if (!ctx) throw new Error("Missing tenant/quote context for job.");
 
@@ -305,13 +312,11 @@ export async function POST(req: Request) {
         continue;
       }
 
-      // OpenAI key
       const enc = ctx.openai_key_enc;
       if (!enc) throw new Error("Missing tenant OpenAI key (tenant_secrets.openai_key_enc).");
       const apiKey = decryptSecret(String(enc));
       if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
 
-      // Build prompt/model from PCC (single source of truth)
       const pcc = await loadPlatformLlmConfig();
       const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
 
@@ -367,7 +372,6 @@ export async function POST(req: Request) {
         .join("\n")
         .trim();
 
-      // Debug payload (stored ONLY in output.render_debug)
       if (debugEnabled) {
         const renderDebug: any = {
           ...buildRenderDebugPayload({
@@ -398,7 +402,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // Generate image
       const openai = new OpenAI({ apiKey });
       const imgResp: any = await openai.images.generate({
         model: renderModel,
@@ -411,16 +414,13 @@ export async function POST(req: Request) {
 
       const bytes = Buffer.from(b64, "base64");
 
-      // Upload to blob
       const key = `renders/${tenantSlug}/${job.quoteLogId}-${Date.now()}.png`;
       const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
 
-      // Update quote log
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
 
-      // Emails
       try {
         const cfg = await getTenantEmailConfig(job.tenantId);
 
@@ -531,7 +531,7 @@ export async function POST(req: Request) {
           // ignore
         }
       } catch {
-        // ignore email failures (render is still a success)
+        // ignore email failures
       }
 
       await markJobDone(job.id, "done", null);
@@ -567,4 +567,13 @@ export async function POST(req: Request) {
     200,
     debugId
   );
+}
+
+// ✅ Vercel Cron uses GET requests to trigger cron jobs.  [oai_citation:1‡Vercel](https://vercel.com/docs/cron-jobs)
+export async function GET(req: Request) {
+  return handle(req);
+}
+
+export async function POST(req: Request) {
+  return handle(req);
 }
