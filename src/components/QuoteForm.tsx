@@ -30,9 +30,31 @@ function defaultShotTypeForIndex(idx: number): ShotType {
   return "extra";
 }
 
+type ServerAi = {
+  liveQaEnabled?: boolean;
+  liveQaMaxQuestions?: number;
+  tenantRenderEnabled?: boolean;
+  renderOptIn?: boolean;
+  tenantStyleKey?: string;
+  tenantRenderNotes?: string;
+};
+
+function extractServerAi(json: any): ServerAi | null {
+  const ai = json?.ai;
+  if (!ai || typeof ai !== "object") return null;
+  return {
+    liveQaEnabled: typeof ai.liveQaEnabled === "boolean" ? ai.liveQaEnabled : undefined,
+    liveQaMaxQuestions: typeof ai.liveQaMaxQuestions === "number" ? ai.liveQaMaxQuestions : undefined,
+    tenantRenderEnabled: typeof ai.tenantRenderEnabled === "boolean" ? ai.tenantRenderEnabled : undefined,
+    renderOptIn: typeof ai.renderOptIn === "boolean" ? ai.renderOptIn : undefined,
+    tenantStyleKey: typeof ai.tenantStyleKey === "string" ? ai.tenantStyleKey : undefined,
+    tenantRenderNotes: typeof ai.tenantRenderNotes === "string" ? ai.tenantRenderNotes : undefined,
+  };
+}
+
 export default function QuoteForm({
   tenantSlug,
-  aiRenderingEnabled = false,
+  aiRenderingEnabled = false, // legacy/initial hint (server becomes authoritative after submit)
 }: {
   tenantSlug: string;
   aiRenderingEnabled?: boolean;
@@ -59,6 +81,9 @@ export default function QuoteForm({
   const [needsQa, setNeedsQa] = useState(false);
   const [qaQuestions, setQaQuestions] = useState<string[]>([]);
   const [qaAnswers, setQaAnswers] = useState<string[]>([]);
+
+  // ✅ Server-authoritative AI flags (captured from /api/quote/submit responses)
+  const [serverAi, setServerAi] = useState<ServerAi | null>(null);
 
   // Errors
   const [error, setError] = useState<string | null>(null);
@@ -105,19 +130,32 @@ export default function QuoteForm({
 
   const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
 
-  const showRendering = useMemo(() => aiRenderingEnabled && renderOptIn, [aiRenderingEnabled, renderOptIn]);
+  /**
+   * ✅ Effective rendering flag:
+   * - before first response: use prop
+   * - after first response: serverAi.tenantRenderEnabled is authoritative
+   */
+  const effectiveAiRenderingEnabled = useMemo(() => {
+    if (serverAi && typeof serverAi.tenantRenderEnabled === "boolean") return serverAi.tenantRenderEnabled;
+    return aiRenderingEnabled;
+  }, [serverAi, aiRenderingEnabled]);
+
+  const showRendering = useMemo(
+    () => effectiveAiRenderingEnabled && renderOptIn,
+    [effectiveAiRenderingEnabled, renderOptIn]
+  );
 
   // --- Rendering (moved to hook) ---
   const { renderStatus, renderImageUrl, renderError, renderProgressPct, resetRenderState } = useRenderPreview({
     tenantSlug,
-    enabled: aiRenderingEnabled,
+    enabled: effectiveAiRenderingEnabled,
     optIn: renderOptIn,
     quoteLogId,
     mode,
   });
 
   const renderingLabel = useMemo(() => {
-    if (!aiRenderingEnabled) return "Disabled";
+    if (!effectiveAiRenderingEnabled) return "Disabled";
     if (!renderOptIn) return "Off";
     if (!quoteLogId) return "Waiting";
     if (renderStatus === "idle") return "Queued";
@@ -125,7 +163,7 @@ export default function QuoteForm({
     if (renderStatus === "rendered") return "Ready";
     if (renderStatus === "failed") return "Failed";
     return "Waiting";
-  }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
+  }, [effectiveAiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
 
   // Status card copy + single action (no clutter)
   const statusModel = useMemo(() => {
@@ -265,9 +303,17 @@ export default function QuoteForm({
     })();
   }, [needsQa]);
 
+  // ✅ If server says rendering is disabled, force opt-in off
   useEffect(() => {
-    if (!aiRenderingEnabled) setRenderOptIn(false);
-  }, [aiRenderingEnabled]);
+    if (serverAi && serverAi.tenantRenderEnabled === false) {
+      setRenderOptIn(false);
+    }
+  }, [serverAi]);
+
+  // ✅ Legacy behavior: if prop flips off before any server response, keep UI consistent
+  useEffect(() => {
+    if (!aiRenderingEnabled && !serverAi) setRenderOptIn(false);
+  }, [aiRenderingEnabled, serverAi]);
 
   useEffect(() => {
     return () => {
@@ -351,6 +397,8 @@ export default function QuoteForm({
     setQaQuestions([]);
     setQaAnswers([]);
 
+    setServerAi(null);
+
     setNotes("");
     setCustomerName("");
     setEmail("");
@@ -405,7 +453,6 @@ export default function QuoteForm({
     setQaQuestions([]);
     setQaAnswers([]);
 
-    // reset render state for the new quote attempt
     resetRenderState();
 
     queueMicrotask(() => {
@@ -487,10 +534,8 @@ export default function QuoteForm({
           },
           customer_context: {
             notes: notes?.trim() || undefined,
-            category: "service",
-            service_type: "upholstery",
           },
-          render_opt_in: aiRenderingEnabled ? Boolean(renderOptIn) : false,
+          render_opt_in: Boolean(renderOptIn),
         }),
       });
 
@@ -509,6 +554,12 @@ export default function QuoteForm({
           ? `\nissues:\n${json.issues.map((i: any) => `- ${i.path?.join(".")}: ${i.message}`).join("\n")}`
           : "";
         throw new Error(`Quote failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
+      }
+
+      const ai = extractServerAi(json);
+      if (ai) {
+        setServerAi(ai);
+        if (ai.tenantRenderEnabled === false || ai.renderOptIn === false) setRenderOptIn(false);
       }
 
       const qid = (json?.quoteLogId ?? json?.quoteId ?? json?.id ?? null) as string | null;
@@ -590,6 +641,12 @@ export default function QuoteForm({
         throw new Error(`Finalize failed\nHTTP ${res.status}${code}${msg}${issues}`.trim());
       }
 
+      const ai = extractServerAi(json);
+      if (ai) {
+        setServerAi(ai);
+        if (ai.tenantRenderEnabled === false || ai.renderOptIn === false) setRenderOptIn(false);
+      }
+
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
@@ -656,7 +713,7 @@ export default function QuoteForm({
             notes={notes}
             disabledReason={disabledReason}
             canSubmit={canSubmit}
-            aiRenderingEnabled={aiRenderingEnabled}
+            aiRenderingEnabled={effectiveAiRenderingEnabled}
             renderOptIn={renderOptIn}
             onCustomerName={setCustomerName}
             onEmail={setEmail}
@@ -698,7 +755,7 @@ export default function QuoteForm({
           hasEstimate={hasEstimate}
           result={result}
           quoteLogId={quoteLogId}
-          aiRenderingEnabled={aiRenderingEnabled}
+          aiRenderingEnabled={effectiveAiRenderingEnabled}
           renderOptIn={renderOptIn}
           renderStatus={renderStatus}
           renderImageUrl={renderImageUrl}

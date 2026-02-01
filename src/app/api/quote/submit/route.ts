@@ -150,6 +150,35 @@ async function getOpenAiForTenant(tenantId: string) {
   return new OpenAI({ apiKey: openaiKey });
 }
 
+/**
+ * ✅ API contract for QuoteForm: server-authoritative AI flags
+ * These are returned on *success* responses for Phase 1 + Phase 2.
+ */
+function buildAiResponse(args: {
+  liveQaEnabled: boolean;
+  liveQaMaxQuestions: number;
+  tenantRenderEnabled: boolean;
+  renderOptIn: boolean;
+  platform?: any;
+}) {
+  const { liveQaEnabled, liveQaMaxQuestions, tenantRenderEnabled, renderOptIn, platform } = args;
+
+  return {
+    liveQaEnabled: Boolean(liveQaEnabled),
+    liveQaMaxQuestions: Number.isFinite(liveQaMaxQuestions) ? liveQaMaxQuestions : 0,
+
+    // server/tenant authoritative
+    tenantRenderEnabled: Boolean(tenantRenderEnabled),
+
+    // server-clamped opt-in (never true if tenant disabled)
+    renderOptIn: Boolean(tenantRenderEnabled && renderOptIn),
+
+    // optional for UI polish (safe: may be undefined)
+    tenantStyleKey: typeof platform?.styleKey === "string" ? platform.styleKey : undefined,
+    tenantRenderNotes: typeof platform?.renderNotes === "string" ? platform.renderNotes : undefined,
+  };
+}
+
 // Send initial “received” emails right after creating the quote log.
 // Best-effort: never blocks the request.
 async function sendReceivedEmails(args: {
@@ -776,7 +805,16 @@ export async function POST(req: Request) {
         output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
       }
 
-      return NextResponse.json({ ok: true, quoteLogId, output });
+      // ✅ return server-authoritative ai flags (phase 2)
+      const ai = buildAiResponse({
+        liveQaEnabled,
+        liveQaMaxQuestions,
+        tenantRenderEnabled: aiRenderingEnabled,
+        renderOptIn: Boolean(inputAny.render_opt_in),
+        platform,
+      });
+
+      return NextResponse.json({ ok: true, quoteLogId, output, ai });
     }
 
     // -------------------------
@@ -862,6 +900,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
     }
 
+    // ✅ return server-authoritative ai flags (phase 1)
+    const ai = buildAiResponse({
+      liveQaEnabled,
+      liveQaMaxQuestions,
+      tenantRenderEnabled: aiRenderingEnabled,
+      renderOptIn,
+      platform,
+    });
+
     // If live QA is enabled, send “received” emails (estimate is intentionally delayed),
     // then return questions. This avoids duplicate emails in non-QA mode.
     if (liveQaEnabled && liveQaMaxQuestions > 0) {
@@ -910,7 +957,7 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa });
+      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai });
     }
 
     // Otherwise, do estimate immediately
@@ -958,7 +1005,7 @@ export async function POST(req: Request) {
       output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
     }
 
-    return NextResponse.json({ ok: true, quoteLogId, output });
+    return NextResponse.json({ ok: true, quoteLogId, output, ai });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     if (msg === "MISSING_OPENAI_KEY") {
