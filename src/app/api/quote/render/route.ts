@@ -1,6 +1,11 @@
 // src/app/api/quote/render/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { eq, and, sql } from "drizzle-orm";
+import crypto from "crypto";
+
+import { db } from "@/lib/db/client";
+import { tenants, quoteLogs } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,59 +15,144 @@ const Req = z.object({
   quoteLogId: z.string().uuid(),
 });
 
+function json(data: any, status = 200, debugId?: string) {
+  const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
+  if (debugId) res.headers.set("x-debug-id", debugId);
+  return res;
+}
+
+function safeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
+  return msg.slice(0, 2000);
+}
+
+async function getTenantBySlug(tenantSlug: string) {
+  const rows = await db
+    .select({ id: tenants.id, slug: tenants.slug })
+    .from(tenants)
+    .where(eq(tenants.slug, tenantSlug))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+// If there is already a queued/running job, return it instead of inserting a new one
+async function findExistingQueuedJob(quoteLogId: string): Promise<{ id: string; status: string } | null> {
+  const r = await db.execute(sql`
+    select id, status
+    from render_jobs
+    where quote_log_id = ${quoteLogId}::uuid
+      and status in ('queued','running')
+    order by created_at desc
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  if (!row) return null;
+  return { id: String(row.id), status: String(row.status) };
+}
+
+async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; prompt: string }) {
+  const jobId = crypto.randomUUID();
+  await db.execute(sql`
+    insert into render_jobs (id, tenant_id, quote_log_id, status, prompt, created_at)
+    values (
+      ${jobId}::uuid,
+      ${args.tenantId}::uuid,
+      ${args.quoteLogId}::uuid,
+      'queued',
+      ${args.prompt},
+      now()
+    )
+  `);
+  return jobId;
+}
+
 export async function POST(req: Request) {
   const debugId = `dbg_${Math.random().toString(36).slice(2, 10)}`;
 
-  const body = await req.json().catch(() => null);
-  const parsed = Req.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues, debugId },
-      { status: 400 }
-    );
-  }
-
-  const { tenantSlug, quoteLogId } = parsed.data;
-
-  // Canonical behavior: enqueue job via internal endpoint
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-    process.env.APP_URL?.trim() ||
-    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
-
-  const url = `${String(baseUrl).replace(/\/+$/, "")}/api/render/start`;
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ tenantSlug, quoteLogId }),
-    cache: "no-store",
-  });
-
-  const txt = await r.text();
-  let j: any = null;
   try {
-    j = txt ? JSON.parse(txt) : null;
-  } catch {
-    return NextResponse.json(
-      { ok: false, error: "ENQUEUE_FAILED", message: `render/start returned non-JSON (HTTP ${r.status})`, debugId },
-      { status: 500 }
-    );
-  }
+    const body = await req.json().catch(() => null);
+    const parsed = Req.safeParse(body);
+    if (!parsed.success) {
+      return json(
+        { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues },
+        400,
+        debugId
+      );
+    }
 
-  if (!r.ok || !j?.ok) {
-    return NextResponse.json(
-      { ok: false, error: "ENQUEUE_FAILED", message: j?.message || j?.error || `HTTP ${r.status}`, debugId },
-      { status: 500 }
-    );
-  }
+    const { tenantSlug, quoteLogId } = parsed.data;
 
-  // What the UI needs: show as running/queued, cron will finish even if user leaves
-  return NextResponse.json({
-    ok: true,
-    quoteLogId,
-    status: "queued",
-    jobId: j.jobId ?? null,
-    debugId,
-  });
+    // 1) Resolve tenant
+    const tenant = await getTenantBySlug(tenantSlug);
+    if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link." }, 404, debugId);
+
+    // 2) Verify quote belongs to tenant (and read opt-in / current status)
+    const q = await db
+      .select({
+        id: quoteLogs.id,
+        tenantId: quoteLogs.tenantId,
+        renderOptIn: quoteLogs.renderOptIn,
+        renderStatus: quoteLogs.renderStatus,
+        renderImageUrl: quoteLogs.renderImageUrl,
+      })
+      .from(quoteLogs)
+      .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!q) {
+      return json({ ok: false, error: "QUOTE_NOT_FOUND", message: "Quote not found for this tenant." }, 404, debugId);
+    }
+
+    // If not opted-in, do not enqueue
+    if (!q.renderOptIn) {
+      return json(
+        { ok: true, quoteLogId, status: "not_requested", jobId: null, imageUrl: q.renderImageUrl ?? null },
+        200,
+        debugId
+      );
+    }
+
+    // If already rendered, do not enqueue
+    if (q.renderStatus === "rendered" && q.renderImageUrl) {
+      return json(
+        { ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl },
+        200,
+        debugId
+      );
+    }
+
+    // 3) Idempotency: if queued/running exists, return it
+    const existing = await findExistingQueuedJob(quoteLogId);
+    if (existing) {
+      // keep quote log status aligned (optional but helps UI/admin)
+      if (q.renderStatus !== "running") {
+        await db
+          .update(quoteLogs)
+          .set({ renderStatus: existing.status === "running" ? "running" : "queued" })
+          .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+      }
+
+      return json(
+        { ok: true, quoteLogId, status: existing.status === "running" ? "running" : "queued", jobId: existing.id, skipped: true },
+        200,
+        debugId
+      );
+    }
+
+    // 4) Enqueue job (prompt is a seed; cron builds canonical prompt from PCC)
+    const prompt = "queued_by_api_quote_render";
+    const jobId = await enqueueRenderJob({ tenantId: tenant.id, quoteLogId, prompt });
+
+    // 5) Reflect queued status on quote log for UI/admin visibility
+    await db
+      .update(quoteLogs)
+      .set({ renderStatus: "queued", renderError: null })
+      .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+    return json({ ok: true, quoteLogId, status: "queued", jobId }, 200, debugId);
+  } catch (e) {
+    return json({ ok: false, error: "REQUEST_FAILED", message: safeErr(e) }, 500, debugId);
+  }
 }
