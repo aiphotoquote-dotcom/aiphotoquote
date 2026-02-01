@@ -37,7 +37,7 @@ export function PhotoSection({
   recommendedPhotos: number;
   maxPhotos: number;
   onAddCameraFiles: (files: File[]) => void;
-  onUploadPhotosNow: (files: FileList) => Promise<void>;
+  onUploadPhotosNow: (files: File[]) => Promise<void>; // ✅ File[] (not FileList)
   onRemovePhoto: (id: string) => void;
   onSetShotType: (id: string, shotType: ShotType) => void;
 }) {
@@ -67,10 +67,9 @@ export function PhotoSection({
             multiple
             disabled={working}
             onChange={(e) => {
-              // Capture synchronously (before any await), then reset value safely.
               const input = e.currentTarget;
               const filesArr = Array.from(input.files ?? []);
-              input.value = ""; // ✅ reset immediately to allow re-selecting same photo
+              input.value = ""; // safe because we already copied to File[]
               if (!filesArr.length) return;
               onAddCameraFiles(filesArr);
             }}
@@ -93,13 +92,11 @@ export function PhotoSection({
             multiple
             disabled={working}
             onChange={async (e) => {
-              // Capture synchronously, reset immediately, then await upload.
               const input = e.currentTarget;
-              const files = input.files; // FileList | null
-              input.value = ""; // ✅ reset immediately to allow re-selecting same files
-
-              if (!files || files.length === 0) return;
-              await onUploadPhotosNow(files);
+              const filesArr = Array.from(input.files ?? []);
+              input.value = ""; // ✅ reset after copying to File[]
+              if (!filesArr.length) return;
+              await onUploadPhotosNow(filesArr);
             }}
           />
           <div
@@ -113,7 +110,6 @@ export function PhotoSection({
         </label>
       </div>
 
-      {/* Reserve space so switching between empty/grid is less jarring (helps mobile focus stability). */}
       <div className="min-h-[10rem]">
         {photos.length > 0 ? (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -174,7 +170,6 @@ export function PhotoSection({
         )}
       </div>
 
-      {/* Reserve a consistent line height so this doesn't reflow while interacting. */}
       <div className="text-xs text-gray-600 dark:text-gray-300 min-h-[1.25rem]">
         {photoCount >= minPhotos ? (
           <>
