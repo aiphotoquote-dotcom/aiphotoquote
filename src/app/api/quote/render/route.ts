@@ -94,10 +94,10 @@ async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; pr
  */
 async function tryKickCronNow(req: Request) {
   const secret = safeTrim(process.env.CRON_SECRET);
-  if (!secret) return { attempted: false as const, ok: false as const, reason: "missing_cron_secret" as const };
+  if (!secret) return { attempted: false as const, ok: false, reason: "missing_cron_secret" as const };
 
   const baseUrl = getBaseUrl(req);
-  if (!baseUrl) return { attempted: false as const, ok: false as const, reason: "missing_base_url" as const };
+  if (!baseUrl) return { attempted: false as const, ok: false, reason: "missing_base_url" as const };
 
   const url = `${baseUrl}/api/cron/render?max=1`;
 
@@ -113,10 +113,10 @@ async function tryKickCronNow(req: Request) {
       signal: controller.signal,
     });
 
-    // We don't care about parsing the body here; cron will still run later if needed
-    return { attempted: true as const, ok: r.ok as const };
+    // ✅ r.ok is a runtime boolean; don't const-assert it
+    return { attempted: true as const, ok: Boolean(r.ok) };
   } catch {
-    return { attempted: true as const, ok: false as const };
+    return { attempted: true as const, ok: false };
   } finally {
     clearTimeout(t);
   }
@@ -212,7 +212,6 @@ export async function POST(req: Request) {
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
     // ✅ 6) Kick worker immediately (fast-timeout). Cron schedule remains fallback.
-    // This is the key fix for “Queued forever” from the customer's perspective.
     void tryKickCronNow(req);
 
     return json({ ok: true, quoteLogId, status: "queued", jobId }, 200, debugId);
