@@ -333,8 +333,12 @@ export default function QuoteForm({
     }
 
     // queued/running/etc
-    if (statusRaw === "running") setRenderStatus("running");
-    else setRenderStatus("idle"); // treat queued/not_requested as queued in UI
+    if (statusRaw === "running") {
+      setRenderStatus("running");
+    } else {
+      // treat queued/not_requested as queued in UI
+      setRenderStatus("idle");
+    }
   }
 
   function startRenderPolling(qid: string) {
@@ -342,18 +346,14 @@ export default function QuoteForm({
 
     // kick one immediately, then poll
     pollRenderStatusOnce(qid).catch((e: any) => {
-      // if polling fails hard, surface error but don’t spam
-      setRenderStatus("failed");
-      setRenderError(e?.message ?? "Render status polling failed");
-      setRenderImageUrl(null);
-      setRenderProgressPct(100);
-      stopRenderPolling();
+      // DO NOT flip to failed on transient polling issues.
+      // Keep the user in "Queued/Rendering" state and show a soft message.
+      setRenderError(e?.message ?? "Temporary render status error");
     });
 
     renderPollTimerRef.current = window.setInterval(() => {
       pollRenderStatusOnce(qid).catch((e: any) => {
         // keep polling through transient issues, but show latest message
-        // (don’t flip to failed unless we really want to stop; here we keep going)
         setRenderError(e?.message ?? "Temporary render status error");
       });
     }, 3000);
@@ -873,86 +873,59 @@ export default function QuoteForm({
     }
   }
 
-  // ✅ enqueue render job, then poll status endpoint until done
+  // ✅ enqueue render job, then poll status endpoint until done (NON-BLOCKING)
   async function startRenderOnce(qid: string) {
-  if (renderAttemptedForQuoteRef.current === qid) return;
-  renderAttemptedForQuoteRef.current = qid;
+    if (renderAttemptedForQuoteRef.current === qid) return;
+    renderAttemptedForQuoteRef.current = qid;
 
-  setRenderStatus("running");
-  setRenderError(null);
-  setRenderImageUrl(null);
+    // show "Queued" immediately (idle == queued in UI)
+    setRenderStatus("idle");
+    setRenderError(null);
+    setRenderImageUrl(null);
+    setRenderProgressPct(0);
 
-  try {
-    // 1) enqueue (idempotent)
-    const res = await fetch("/api/quote/render", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantSlug, quoteLogId: qid }),
-    });
-
-    const txt = await res.text();
-    let j: any = null;
     try {
-      j = txt ? JSON.parse(txt) : null;
-    } catch {
-      throw new Error(`Render enqueue returned non-JSON (HTTP ${res.status}).`);
-    }
+      // 1) enqueue (idempotent)
+      const res = await fetch("/api/quote/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tenantSlug, quoteLogId: qid }),
+      });
 
-    if (!res.ok || !j?.ok) {
-      throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
-    }
-
-    // 2) poll status until rendered/failed (cron worker does the heavy lifting)
-    const started = Date.now();
-    const timeoutMs = 90_000; // 90s
-    const intervalMs = 2_000;
-
-    while (Date.now() - started < timeoutMs) {
-      const sres = await fetch(
-        `/api/quote/render-status?tenantSlug=${encodeURIComponent(tenantSlug)}&quoteLogId=${encodeURIComponent(qid)}`,
-        { cache: "no-store" }
-      );
-
-      const stxt = await sres.text();
-      let sj: any = null;
+      const txt = await res.text();
+      let j: any = null;
       try {
-        sj = stxt ? JSON.parse(stxt) : null;
+        j = txt ? JSON.parse(txt) : null;
       } catch {
-        throw new Error(`Render status returned non-JSON (HTTP ${sres.status}).`);
+        throw new Error(`Render enqueue returned non-JSON (HTTP ${res.status}).`);
       }
 
-      if (!sres.ok || !sj?.ok) {
-        throw new Error(sj?.message || sj?.error || `Render status failed (HTTP ${sres.status})`);
+      if (!res.ok || !j?.ok) {
+        throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
       }
 
-      const status = String(sj.renderStatus ?? "idle").toLowerCase();
-      if (status === "rendered") {
-        const url = (sj.imageUrl ?? null) as string | null;
-        if (!url) throw new Error("Render status is rendered but imageUrl is missing.");
-        setRenderImageUrl(url);
+      // If API ever returns immediate rendered state, honor it
+      const st = String(j?.status ?? "").toLowerCase();
+      const immediateUrl = (j?.imageUrl ?? j?.renderImageUrl ?? null) as string | null;
+      if (st === "rendered" && immediateUrl) {
+        setRenderImageUrl(immediateUrl);
         setRenderStatus("rendered");
+        setRenderError(null);
         setRenderProgressPct(100);
         return;
       }
 
-      if (status === "failed") {
-        setRenderStatus("failed");
-        setRenderError(String(sj.error ?? "Render failed."));
-        setRenderProgressPct(100);
-        return;
-      }
-
-      // queued/running/idle -> keep waiting
-      await sleep(intervalMs);
+      // 2) start polling in background until rendered/failed
+      startRenderPolling(qid);
+    } catch (e: any) {
+      // Hard failure only if enqueue truly failed.
+      setRenderStatus("failed");
+      setRenderError(e?.message ?? "Render failed");
+      setRenderProgressPct(100);
+      stopRenderPolling();
     }
-
-    throw new Error("Render is taking longer than expected. Please keep this tab open and check back shortly.");
-  } catch (e: any) {
-    setRenderStatus("failed");
-    setRenderError(e?.message ?? "Render failed");
-    setRenderProgressPct(100);
   }
-}
+
   // Start render ONLY when we are on results (final), opted-in, and have a quote id
   useEffect(() => {
     if (!aiRenderingEnabled) return;
