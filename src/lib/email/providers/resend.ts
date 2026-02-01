@@ -2,22 +2,9 @@
 import { Resend } from "resend";
 import type { EmailProvider } from "./base";
 
-type ResendSendResponse =
-  | { data?: { id?: string } | null; error?: { message?: string } | string | null }
-  | { id?: string | null; error?: { message?: string } | string | null };
-
-function extractErrorMessage(err: any): string | null {
-  if (!err) return null;
-  if (typeof err === "string") return err;
-  if (typeof err?.message === "string" && err.message.trim()) return err.message.trim();
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-}
-
 export function makeResendProvider(): EmailProvider {
+  const resend = new Resend(process.env.RESEND_API_KEY);
+
   return {
     key: "resend",
 
@@ -34,13 +21,10 @@ export function makeResendProvider(): EmailProvider {
           };
         }
 
-        const resend = new Resend(apiKey);
+        const replyTo = Array.isArray(message.replyTo) ? message.replyTo[0] : undefined;
 
-        const replyTo = Array.isArray(message.replyTo)
-          ? message.replyTo.filter(Boolean)[0]
-          : message.replyTo || undefined;
-
-        const out = (await resend.emails.send({
+        // Resend SDK commonly returns { data, error }
+        const out: any = await resend.emails.send({
           from: message.from,
           to: message.to,
           cc: message.cc,
@@ -49,40 +33,62 @@ export function makeResendProvider(): EmailProvider {
           subject: message.subject,
           html: message.html,
           text: message.text,
-        })) as ResendSendResponse;
+        });
 
-        // ✅ Resend SDK commonly returns { data, error }
-        const errMsg = extractErrorMessage((out as any)?.error);
-        if (errMsg) {
+        const errorObj = out?.error ?? null;
+        const id =
+          out?.data?.id ??
+          out?.id ??
+          null;
+
+        // If Resend returns an error, treat as failure (and surface it!)
+        if (errorObj) {
+          const errMsg =
+            typeof errorObj === "string"
+              ? errorObj
+              : errorObj?.message
+                ? String(errorObj.message)
+                : JSON.stringify(errorObj);
+
           return {
             ok: false,
             provider: "resend",
             providerMessageId: null,
-            error: errMsg,
-            meta: { tenantId, context },
+            error: `Resend error: ${errMsg}`.slice(0, 2000),
+            meta: {
+              tenantId,
+              context,
+              // safe debugging payload
+              resend: {
+                hasData: Boolean(out?.data),
+                hasId: Boolean(id),
+              },
+            },
           };
         }
 
-        const id =
-          (out as any)?.data?.id ??
-          (out as any)?.id ??
-          null;
-
-        // ✅ If we didn’t get an ID, treat as failure (prevents “ok:true id:null” lying)
+        // If no error but also no id, treat as failure (this is your current “ghost send”)
         if (!id) {
           return {
             ok: false,
             provider: "resend",
             providerMessageId: null,
-            error: "Resend returned no message id (data.id missing).",
-            meta: { tenantId, context },
+            error: "Resend returned no message id (unexpected response shape).",
+            meta: {
+              tenantId,
+              context,
+              resend: {
+                keys: out ? Object.keys(out) : null,
+                hasData: Boolean(out?.data),
+              },
+            },
           };
         }
 
         return {
           ok: true,
           provider: "resend",
-          providerMessageId: id,
+          providerMessageId: String(id),
           error: null,
           meta: { tenantId, context },
         };
