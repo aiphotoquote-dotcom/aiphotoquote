@@ -86,6 +86,7 @@ function buildAuthDebug(req: Request) {
     matches,
     configuredSha10: hasConfigured ? shaPrefix(configuredRaw) : null,
     receivedTokenSha10: hasAuthHeader ? shaPrefix(tokenFromHeader) : null,
+
     env: {
       VERCEL_ENV: safeTrim(process.env.VERCEL_ENV) || null,
       VERCEL_URL: safeTrim(process.env.VERCEL_URL) || null,
@@ -101,32 +102,17 @@ function buildAuthDebug(req: Request) {
   };
 }
 
-/**
- * ✅ CRON protection
- * Accepts:
- * - Authorization: Bearer <CRON_SECRET>
- * - OR query param: ?cron_secret=<CRON_SECRET> (or ?secret= / ?token=)
- *
- * If CRON_SECRET is unset, allow (dev convenience).
- */
+// ✅ CRON protection (new secret). If CRON_SECRET is unset, allow (dev convenience).
 async function requireCronSecret(req: Request) {
-  const configured = safeTrim(process.env.CRON_SECRET);
+  const configured = String(process.env.CRON_SECRET ?? "").trim();
+  const auth = String(req.headers.get("authorization") ?? "").trim();
+
   if (!configured) return { ok: true as const, mode: "no_secret_configured" as const };
 
-  const auth = safeTrim(req.headers.get("authorization"));
-  const url = new URL(req.url);
+  const expected = `Bearer ${configured}`;
+  if (auth !== expected) return { ok: false as const, error: "UNAUTHORIZED" as const };
 
-  const qp =
-    safeTrim(url.searchParams.get("cron_secret")) ||
-    safeTrim(url.searchParams.get("secret")) ||
-    safeTrim(url.searchParams.get("token"));
-
-  const expectedHeader = `Bearer ${configured}`;
-
-  if (auth && auth === expectedHeader) return { ok: true as const, mode: "header" as const };
-  if (qp && qp === configured) return { ok: true as const, mode: "query" as const };
-
-  return { ok: false as const, error: "UNAUTHORIZED" as const };
+  return { ok: true as const, mode: "header" as const };
 }
 
 // Claim jobs safely (SKIP LOCKED prevents double-run across concurrent cron executions)
@@ -224,7 +210,10 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
   `);
 }
 
-// Shared handler so GET + POST behave identically
+/**
+ * Core worker handler shared by GET + POST.
+ * Vercel Cron uses GET, so we support both.
+ */
 async function handle(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -235,7 +224,11 @@ async function handle(req: Request) {
   const auth = await requireCronSecret(req);
   if (!auth.ok) {
     return json(
-      { ok: false, error: "UNAUTHORIZED", ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}) },
+      {
+        ok: false,
+        error: "UNAUTHORIZED",
+        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
+      },
       401,
       debugId
     );
@@ -328,8 +321,8 @@ async function handle(req: Request) {
         tenantStyleKey === "clean_oem"
           ? safeTrim(presets.clean_oem)
           : tenantStyleKey === "custom"
-            ? safeTrim(presets.custom)
-            : safeTrim(presets.photoreal);
+          ? safeTrim(presets.custom)
+          : safeTrim(presets.photoreal);
 
       const styleText =
         presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
@@ -569,11 +562,12 @@ async function handle(req: Request) {
   );
 }
 
-// ✅ Vercel Cron uses GET requests to trigger cron jobs.  [oai_citation:1‡Vercel](https://vercel.com/docs/cron-jobs)
+// ✅ Vercel Cron = GET
 export async function GET(req: Request) {
   return handle(req);
 }
 
+// ✅ Manual / internal kick = POST
 export async function POST(req: Request) {
   return handle(req);
 }
