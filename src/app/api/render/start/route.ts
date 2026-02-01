@@ -1,16 +1,11 @@
+// src/app/api/render/start/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
-import OpenAI from "openai";
 import crypto from "crypto";
-import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
-import { decryptSecret } from "@/lib/crypto";
-
-import { sendEmail } from "@/lib/email";
-import { buildRenderReadyEmail } from "@/lib/email/templates/renderReady";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,16 +25,13 @@ function normalizeDbErr(err: any) {
   return {
     name: err?.name,
     message: err?.message ?? String(err),
-    code: err?.code,
-    detail: err?.detail,
-    hint: err?.hint,
-    constraint: err?.constraint,
+    code: err?.code ?? err?.cause?.code,
+    detail: err?.detail ?? err?.cause?.detail,
+    hint: err?.hint ?? err?.cause?.hint,
     table: err?.table,
     column: err?.column,
-    where: err?.where,
+    constraint: err?.constraint,
     causeMessage: err?.cause?.message,
-    causeCode: err?.cause?.code,
-    causeDetail: err?.cause?.detail,
   };
 }
 
@@ -61,15 +53,6 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
-// tenant_secrets: tenant_id, openai_key_enc
-async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
-  const r = await db.execute(sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId} limit 1`);
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const enc = row?.openai_key_enc ?? null;
-  if (!enc) return null;
-  return decryptSecret(enc);
-}
-
 // best-effort: tenant_settings.ai_rendering_enabled
 async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | null> {
   try {
@@ -85,23 +68,6 @@ async function isTenantRenderingEnabled(tenantId: string): Promise<boolean | nul
   } catch {
     return null;
   }
-}
-
-// tenant_settings: business_name, lead_to_email, resend_from_email
-async function getTenantEmailSettings(tenantId: string) {
-  const r = await db.execute(sql`
-    select business_name, lead_to_email, resend_from_email
-    from tenant_settings
-    where tenant_id = ${tenantId}::uuid
-    limit 1
-  `);
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-
-  return {
-    businessName: row?.business_name ?? null,
-    leadToEmail: row?.lead_to_email ?? null,
-    resendFromEmail: row?.resend_from_email ?? null,
-  };
 }
 
 function pickRenderOptInFromRecord(args: { row: any; renderingCols: boolean }) {
@@ -120,15 +86,19 @@ function pickRenderOptInFromRecord(args: { row: any; renderingCols: boolean }) {
   return false;
 }
 
-async function updateQuoteLogOutput(quoteLogId: string, output: any) {
-  const outputStr = JSON.stringify(output ?? {});
+async function updateQuoteLogOutputMerge(quoteLogId: string, patch: any) {
+  const patchStr = JSON.stringify(patch ?? {});
   await db.execute(sql`
     update quote_logs
-    set output = coalesce(output, '{}'::jsonb) || ${outputStr}::jsonb
+    set output = coalesce(output, '{}'::jsonb) || ${patchStr}::jsonb
     where id = ${quoteLogId}::uuid
   `);
 }
 
+/**
+ * Best-effort: set render_status='queued' + render_prompt if render columns exist.
+ * If those columns don't exist, we just return columns:false and rely on render_jobs as source of truth.
+ */
 async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: string }) {
   const { quoteLogId, prompt } = args;
   try {
@@ -150,145 +120,41 @@ async function markRenderQueuedBestEffort(args: { quoteLogId: string; prompt: st
   }
 }
 
-async function storeRenderResultBestEffort(args: {
-  quoteLogId: string;
-  imageUrl: string | null;
-  error: string | null;
-  prompt: string;
-}) {
-  const { quoteLogId, imageUrl, error, prompt } = args;
-  const renderedAtIso = new Date().toISOString();
+async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; prompt: string }) {
+  const jobId = crypto.randomUUID();
+  await db.execute(sql`
+    insert into render_jobs (id, tenant_id, quote_log_id, status, prompt, created_at)
+    values (
+      ${jobId}::uuid,
+      ${args.tenantId}::uuid,
+      ${args.quoteLogId}::uuid,
+      'queued',
+      ${args.prompt},
+      now()
+    )
+  `);
+  return jobId;
+}
 
-  try {
-    await db.execute(sql`
-      update quote_logs
-      set
-        render_status = ${error ? "failed" : "rendered"},
-        render_image_url = ${imageUrl},
-        render_prompt = ${prompt},
-        render_error = ${error},
-        rendered_at = now()
-      where id = ${quoteLogId}::uuid
-    `);
-    return { ok: true as const, columns: true as const };
-  } catch (e: any) {
-    const msg = e?.message ?? e?.cause?.message ?? "";
-    const code = e?.code ?? e?.cause?.code;
-    const isUndefinedColumn = code === "42703" || /column .*render_/i.test(msg);
-    if (!isUndefinedColumn) return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
-  }
-
+async function findExistingQueuedJob(quoteLogId: string): Promise<{ id: string; status: string } | null> {
   try {
     const r = await db.execute(sql`
-      select output
-      from quote_logs
-      where id = ${quoteLogId}::uuid
+      select id, status
+      from render_jobs
+      where quote_log_id = ${quoteLogId}::uuid
+        and status in ('queued','running')
+      order by created_at desc
       limit 1
     `);
     const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    const out = safeJsonParse(row?.output) ?? {};
-
-    const next = {
-      ...out,
-      rendering: {
-        requested: true,
-        status: error ? "failed" : "rendered",
-        imageUrl,
-        prompt,
-        error,
-        renderedAt: renderedAtIso,
-      },
-    };
-
-    await updateQuoteLogOutput(quoteLogId, next);
-    return { ok: true as const, columns: false as const, merged: true as const };
-  } catch (e: any) {
-    return { ok: false as const, columns: false as const, dbErr: normalizeDbErr(e) };
+    if (!row) return null;
+    return { id: String(row.id), status: String(row.status) };
+  } catch {
+    return null;
   }
 }
 
-// NEW: provider-agnostic email send (Standard mode via Resend adapter)
-async function sendRenderEmailsViaAbstraction(args: {
-  tenantId: string;
-  tenantSlug: string;
-  quoteLogId: string;
-  customerEmail: string | null;
-  renderImageUrl: string;
-}) {
-  const { businessName, leadToEmail, resendFromEmail } = await getTenantEmailSettings(args.tenantId);
-  const resendKeyPresent = !!process.env.RESEND_API_KEY?.trim();
-
-  const configured = Boolean(resendKeyPresent && businessName && leadToEmail && resendFromEmail);
-
-  const result = {
-    configured,
-    lead: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    customer: { attempted: false, sent: false, id: null as string | null, error: null as string | null },
-    missingEnv: { RESEND_API_KEY: !resendKeyPresent },
-    missingTenant: {
-      business_name: !businessName,
-      lead_to_email: !leadToEmail,
-      resend_from_email: !resendFromEmail,
-    },
-  };
-
-  if (!configured) return result;
-
-  const tpl = buildRenderReadyEmail({
-    businessName: businessName!,
-    tenantSlug: args.tenantSlug,
-    quoteLogId: args.quoteLogId,
-    renderImageUrl: args.renderImageUrl,
-  });
-
-  // Lead
-  try {
-    result.lead.attempted = true;
-    const r = await sendEmail({
-      tenantId: args.tenantId,
-      context: { type: "lead_render", quoteLogId: args.quoteLogId },
-      message: {
-        from: resendFromEmail!,
-        to: [leadToEmail!],
-        subject: tpl.subjectLead,
-        html: tpl.html,
-      },
-    });
-
-    if (!r.ok) throw new Error(r.error || "Send failed");
-    result.lead.sent = true;
-    result.lead.id = r.providerMessageId ?? null;
-  } catch (e: any) {
-    result.lead.error = e?.message ?? String(e);
-  }
-
-  // Customer
-  if (args.customerEmail) {
-    try {
-      result.customer.attempted = true;
-      const r = await sendEmail({
-        tenantId: args.tenantId,
-        context: { type: "customer_render", quoteLogId: args.quoteLogId },
-        message: {
-          from: resendFromEmail!,
-          to: [args.customerEmail],
-          subject: tpl.subjectCustomer,
-          html: tpl.html,
-        },
-      });
-
-      if (!r.ok) throw new Error(r.error || "Send failed");
-      result.customer.sent = true;
-      result.customer.id = r.providerMessageId ?? null;
-    } catch (e: any) {
-      result.customer.error = e?.message ?? String(e);
-    }
-  } else {
-    result.customer.error = "No customer email provided; skipping customer render email.";
-  }
-
-  return result;
-}
+// ---- Route ----
 
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
@@ -311,6 +177,7 @@ export async function POST(req: Request) {
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
     const tenantId = (tenant as any).id as string;
 
+    // Tenant must allow rendering
     const enabled = await isTenantRenderingEnabled(tenantId);
     if (enabled !== true) {
       return json(
@@ -358,24 +225,15 @@ export async function POST(req: Request) {
     }
 
     if (!quoteRow) return json({ ok: false, error: "QUOTE_NOT_FOUND" }, 404, debugId);
-    if (String(quoteRow.tenant_id) !== String(tenantId)) {
-      return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
-    }
+    if (String(quoteRow.tenant_id) !== String(tenantId)) return json({ ok: false, error: "TENANT_MISMATCH" }, 403, debugId);
 
-    // Idempotency
+    // Idempotency: if already rendered, no enqueue
     if (renderingCols) {
       const status = String(quoteRow.render_status ?? "");
       const url = quoteRow.render_image_url ? String(quoteRow.render_image_url) : null;
       if (status === "rendered" && url) {
         return json(
-          { ok: true, quoteLogId, skipped: true, reason: "already_rendered", imageUrl: url, durationMs: Date.now() - startedAt },
-          200,
-          debugId
-        );
-      }
-      if (status === "queued" && !url) {
-        return json(
-          { ok: true, quoteLogId, skipped: true, reason: "already_queued", durationMs: Date.now() - startedAt },
+          { ok: true, quoteLogId, status: "rendered", imageUrl: url, durationMs: Date.now() - startedAt },
           200,
           debugId
         );
@@ -385,26 +243,38 @@ export async function POST(req: Request) {
       const r = out?.rendering ?? null;
       if (r?.status === "rendered" && r?.imageUrl) {
         return json(
-          { ok: true, quoteLogId, skipped: true, reason: "already_rendered", imageUrl: String(r.imageUrl), durationMs: Date.now() - startedAt },
-          200,
-          debugId
-        );
-      }
-      if (r?.status === "queued") {
-        return json(
-          { ok: true, quoteLogId, skipped: true, reason: "already_queued", durationMs: Date.now() - startedAt },
+          { ok: true, quoteLogId, status: "rendered", imageUrl: String(r.imageUrl), durationMs: Date.now() - startedAt },
           200,
           debugId
         );
       }
     }
 
+    // If cron job already queued/running, no enqueue
+    const existing = await findExistingQueuedJob(quoteLogId);
+    if (existing) {
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          status: existing.status,
+          jobId: existing.id,
+          skipped: true,
+          reason: "already_queued_or_running",
+          durationMs: Date.now() - startedAt,
+        },
+        200,
+        debugId
+      );
+    }
+
+    // Must be opted-in
     const optIn = pickRenderOptInFromRecord({ row: quoteRow, renderingCols });
     if (!optIn) {
       return json({ ok: false, error: "NOT_OPTED_IN", message: "Customer did not opt in to AI rendering." }, 400, debugId);
     }
 
-    // Pull images + context
+    // Pull images + context (prompt seed)
     const input = safeJsonParse(quoteRow.input) ?? {};
     const images: string[] = Array.isArray(input?.images) ? input.images.map((x: any) => x?.url).filter(Boolean) : [];
     if (!images.length) {
@@ -415,11 +285,8 @@ export async function POST(req: Request) {
     const notes = (customerCtx?.notes ?? "").toString().trim();
     const category = (customerCtx?.category ?? "").toString().trim();
     const serviceType = (customerCtx?.service_type ?? "").toString().trim();
-    const customerEmail = customerCtx?.email ? String(customerCtx.email).trim() : null;
 
-    const openAiKey = await getTenantOpenAiKey(tenantId);
-    if (!openAiKey) return json({ ok: false, error: "OPENAI_KEY_MISSING" }, 500, debugId);
-
+    // This prompt is what cron will use (and what debug will prove)
     const prompt = [
       "Create a realistic concept 'after' rendering of the finished upholstery/service outcome.",
       "This is a second-step visual preview. Do NOT provide pricing. Do NOT provide text overlays.",
@@ -428,96 +295,39 @@ export async function POST(req: Request) {
       category ? `Category: ${category}` : "",
       serviceType ? `Service type: ${serviceType}` : "",
       notes ? `Customer notes: ${notes}` : "",
-    ].filter(Boolean).join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
+    // Best-effort: reflect queued in quote_logs if columns exist
     const queuedMark = await markRenderQueuedBestEffort({ quoteLogId, prompt });
 
-    const openai = new OpenAI({ apiKey: openAiKey });
-
-    const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
-    if (!blobToken) {
-      return json({ ok: false, error: "BLOB_TOKEN_MISSING", message: "Missing BLOB_READ_WRITE_TOKEN env var." }, 500, debugId);
-    }
-
-    let finalImageUrl: string | null = null;
-    let renderError: string | null = null;
-
+    // Also best-effort: reflect queued state in output JSON (helps when render cols don't exist)
     try {
-      const img = await openai.images.generate({
-        model: "gpt-image-1",
-        prompt,
-        size: "1024x1024",
-      } as any);
-
-      const first: any = (img as any)?.data?.[0] ?? null;
-      const url = first?.url ? String(first.url) : null;
-      const b64 = first?.b64_json ? String(first.b64_json) : null;
-
-      let bytes: Buffer | null = null;
-      let contentType = "image/png";
-
-      if (b64) {
-        bytes = Buffer.from(b64, "base64");
-        contentType = "image/png";
-      } else if (url) {
-        const dl = await fetch(url);
-        if (!dl.ok) throw new Error(`Failed to download render (HTTP ${dl.status})`);
-        const ab = await dl.arrayBuffer();
-        bytes = Buffer.from(ab);
-        contentType = dl.headers.get("content-type") || "image/png";
-      } else {
-        throw new Error("OpenAI image response missing url/b64_json");
-      }
-
-      const pathname = `renders/render-${quoteLogId}.png`;
-      const putRes = await put(pathname, bytes, { access: "public", contentType, token: blobToken });
-      finalImageUrl = putRes.url;
-    } catch (e: any) {
-      renderError = e?.message ?? "Render generation failed.";
+      await updateQuoteLogOutputMerge(quoteLogId, {
+        rendering: {
+          requested: true,
+          status: "queued",
+          prompt,
+          queuedAt: new Date().toISOString(),
+        },
+      });
+    } catch {
+      // ignore
     }
 
-    const stored = await storeRenderResultBestEffort({
-      quoteLogId,
-      imageUrl: finalImageUrl,
-      error: renderError,
-      prompt,
-    });
-
-    // NEW: emails via abstraction
-    let renderEmail: any = null;
-    if (!renderError && finalImageUrl) {
-      try {
-        renderEmail = await sendRenderEmailsViaAbstraction({
-          tenantId,
-          tenantSlug,
-          quoteLogId,
-          customerEmail,
-          renderImageUrl: finalImageUrl,
-        });
-
-        // Persist into output JSON (best effort)
-        try {
-          const cur = safeJsonParse(quoteRow.output) ?? {};
-          const next = { ...cur, email: { ...(cur?.email ?? {}), render: renderEmail } };
-          await updateQuoteLogOutput(quoteLogId, next);
-        } catch {
-          // ignore
-        }
-      } catch (e: any) {
-        renderEmail = { configured: false, error: e?.message ?? String(e) };
-      }
-    }
-
-    if (renderError) {
-      return json(
-        { ok: false, error: "RENDER_FAILED", message: renderError, quoteLogId, stored, queuedMark, durationMs: Date.now() - startedAt },
-        500,
-        debugId
-      );
-    }
+    // ✅ REAL queue action: insert render_jobs row
+    const jobId = await enqueueRenderJob({ tenantId, quoteLogId, prompt });
 
     return json(
-      { ok: true, quoteLogId, imageUrl: finalImageUrl, stored, queuedMark, renderEmail, durationMs: Date.now() - startedAt },
+      {
+        ok: true,
+        quoteLogId,
+        status: "queued",
+        jobId,
+        queuedMark,
+        durationMs: Date.now() - startedAt,
+      },
       200,
       debugId
     );
