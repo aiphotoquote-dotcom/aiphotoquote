@@ -875,44 +875,84 @@ export default function QuoteForm({
 
   // ✅ enqueue render job, then poll status endpoint until done
   async function startRenderOnce(qid: string) {
-    if (renderAttemptedForQuoteRef.current === qid) return;
-    renderAttemptedForQuoteRef.current = qid;
+  if (renderAttemptedForQuoteRef.current === qid) return;
+  renderAttemptedForQuoteRef.current = qid;
 
-    // queued UI state
-    setRenderStatus("idle");
-    setRenderError(null);
-    setRenderImageUrl(null);
-    setRenderProgressPct(10);
+  setRenderStatus("running");
+  setRenderError(null);
+  setRenderImageUrl(null);
 
+  try {
+    // 1) enqueue (idempotent)
+    const res = await fetch("/api/quote/render", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantSlug, quoteLogId: qid }),
+    });
+
+    const txt = await res.text();
+    let j: any = null;
     try {
-      const res = await fetch("/api/quote/render", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tenantSlug, quoteLogId: qid }),
-      });
+      j = txt ? JSON.parse(txt) : null;
+    } catch {
+      throw new Error(`Render enqueue returned non-JSON (HTTP ${res.status}).`);
+    }
 
-      const txt = await res.text();
-      let j: any = null;
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
+    }
+
+    // 2) poll status until rendered/failed (cron worker does the heavy lifting)
+    const started = Date.now();
+    const timeoutMs = 90_000; // 90s
+    const intervalMs = 2_000;
+
+    while (Date.now() - started < timeoutMs) {
+      const sres = await fetch(
+        `/api/quote/render-status?tenantSlug=${encodeURIComponent(tenantSlug)}&quoteLogId=${encodeURIComponent(qid)}`,
+        { cache: "no-store" }
+      );
+
+      const stxt = await sres.text();
+      let sj: any = null;
       try {
-        j = txt ? JSON.parse(txt) : null;
+        sj = stxt ? JSON.parse(stxt) : null;
       } catch {
-        throw new Error(`Render enqueue returned non-JSON (HTTP ${res.status}).`);
+        throw new Error(`Render status returned non-JSON (HTTP ${sres.status}).`);
       }
 
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
+      if (!sres.ok || !sj?.ok) {
+        throw new Error(sj?.message || sj?.error || `Render status failed (HTTP ${sres.status})`);
+      }
 
-      // begin polling for completion
-      setRenderStatus("running");
-      startRenderPolling(qid);
-    } catch (e: any) {
-      setRenderStatus("failed");
-      setRenderError(e?.message ?? "Render enqueue failed");
-      setRenderImageUrl(null);
-      setRenderProgressPct(100);
-      stopRenderPolling();
+      const status = String(sj.renderStatus ?? "idle").toLowerCase();
+      if (status === "rendered") {
+        const url = (sj.imageUrl ?? null) as string | null;
+        if (!url) throw new Error("Render status is rendered but imageUrl is missing.");
+        setRenderImageUrl(url);
+        setRenderStatus("rendered");
+        setRenderProgressPct(100);
+        return;
+      }
+
+      if (status === "failed") {
+        setRenderStatus("failed");
+        setRenderError(String(sj.error ?? "Render failed."));
+        setRenderProgressPct(100);
+        return;
+      }
+
+      // queued/running/idle -> keep waiting
+      await sleep(intervalMs);
     }
-  }
 
+    throw new Error("Render is taking longer than expected. Please keep this tab open and check back shortly.");
+  } catch (e: any) {
+    setRenderStatus("failed");
+    setRenderError(e?.message ?? "Render failed");
+    setRenderProgressPct(100);
+  }
+}
   // Start render ONLY when we are on results (final), opted-in, and have a quote id
   useEffect(() => {
     if (!aiRenderingEnabled) return;
