@@ -38,6 +38,22 @@ export function useRenderPreview(params: {
     pollAbortRef.current = null;
   }
 
+  function setRenderedNow(imageUrl: string) {
+    setRenderImageUrl(imageUrl);
+    setRenderError(null);
+    setRenderStatus("rendered");
+    setRenderProgressPct(100);
+    stopPolling();
+  }
+
+  function setFailedNow(message: string) {
+    setRenderStatus("failed");
+    setRenderError(message || "Render failed");
+    setRenderImageUrl(null);
+    setRenderProgressPct(100);
+    stopPolling();
+  }
+
   async function pollOnce(qid: string) {
     if (!tenantSlug || !qid) return;
 
@@ -52,7 +68,6 @@ export function useRenderPreview(params: {
     const ac = new AbortController();
     pollAbortRef.current = ac;
 
-    // Cache-bust param to avoid any unexpected CDN/proxy staleness
     const url = `/api/quote/render-status?tenantSlug=${encodeURIComponent(
       tenantSlug
     )}&quoteLogId=${encodeURIComponent(qid)}&ts=${Date.now()}`;
@@ -85,22 +100,18 @@ export function useRenderPreview(params: {
     // valid response -> clear transient error
     if (renderError) setRenderError(null);
 
-    if (statusRaw === "rendered") {
-      if (!imageUrl) throw new Error("Render status is 'rendered' but no image url was returned.");
-      setRenderImageUrl(imageUrl);
-      setRenderError(null);
-      setRenderStatus("rendered");
-      setRenderProgressPct(100);
-      stopPolling();
+    // ✅ Hard-converge if an image URL exists (even if status is stale)
+    if (imageUrl && statusRaw !== "failed") {
+      setRenderedNow(imageUrl);
       return;
     }
 
+    if (statusRaw === "rendered") {
+      throw new Error("Render status is 'rendered' but no image url was returned.");
+    }
+
     if (statusRaw === "failed") {
-      setRenderStatus("failed");
-      setRenderError(err || "Render failed");
-      setRenderImageUrl(null);
-      setRenderProgressPct(100);
-      stopPolling();
+      setFailedNow(err || "Render failed");
       return;
     }
 
@@ -161,6 +172,20 @@ export function useRenderPreview(params: {
       throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
     }
 
+    // ✅ If enqueue endpoint already knows it's rendered, converge immediately.
+    const enqueueStatus = String(j?.status ?? "").toLowerCase().trim();
+    const enqueueImageUrl = (j?.imageUrl ?? null) as string | null;
+
+    if (enqueueStatus === "rendered" && enqueueImageUrl) {
+      setRenderedNow(enqueueImageUrl);
+      return;
+    }
+
+    if (enqueueStatus === "failed") {
+      setFailedNow(String(j?.error ?? j?.message ?? "Render failed"));
+      return;
+    }
+
     startPolling(qid);
   }
 
@@ -202,10 +227,7 @@ export function useRenderPreview(params: {
 
     enqueueOnce(quoteLogId).catch((e: any) => {
       if (isAbortError(e)) return;
-      setRenderStatus("failed");
-      setRenderError(e?.message ?? "Render failed");
-      setRenderProgressPct(100);
-      stopPolling();
+      setFailedNow(e?.message ?? "Render failed");
     });
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
