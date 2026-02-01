@@ -61,6 +61,49 @@ function getBaseUrl(req: Request) {
   return "";
 }
 
+// ---- AUTH DIAGNOSTICS (safe) ----
+function shaPrefix(v: string) {
+  if (!v) return null;
+  return crypto.createHash("sha256").update(v).digest("hex").slice(0, 10);
+}
+
+function buildAuthDebug(req: Request) {
+  const configuredRaw = safeTrim(process.env.CRON_SECRET);
+  const authRaw = safeTrim(req.headers.get("authorization"));
+
+  const hasConfigured = Boolean(configuredRaw);
+  const hasAuthHeader = Boolean(authRaw);
+
+  const expected = hasConfigured ? `Bearer ${configuredRaw}` : "";
+  const matches = hasConfigured ? authRaw === expected : true; // if not configured, auth is effectively "allowed"
+
+  const tokenFromHeader = authRaw.toLowerCase().startsWith("bearer ") ? authRaw.slice(7).trim() : authRaw;
+
+  return {
+    configured: hasConfigured,
+    authHeaderPresent: hasAuthHeader,
+    authHeaderLooksBearer: authRaw.toLowerCase().startsWith("bearer "),
+    matches,
+    // safe fingerprints (no raw secret)
+    configuredSha10: hasConfigured ? shaPrefix(configuredRaw) : null,
+    receivedTokenSha10: hasAuthHeader ? shaPrefix(tokenFromHeader) : null,
+
+    // env / routing context
+    env: {
+      VERCEL_ENV: safeTrim(process.env.VERCEL_ENV) || null,
+      VERCEL_URL: safeTrim(process.env.VERCEL_URL) || null,
+      NEXT_PUBLIC_APP_URL: safeTrim(process.env.NEXT_PUBLIC_APP_URL) || null,
+      APP_URL: safeTrim(process.env.APP_URL) || null,
+    },
+    request: {
+      url: req.url,
+      host: safeTrim(req.headers.get("host")) || null,
+      xForwardedHost: safeTrim(req.headers.get("x-forwarded-host")) || null,
+      xForwardedProto: safeTrim(req.headers.get("x-forwarded-proto")) || null,
+    },
+  };
+}
+
 // ✅ CRON protection (new secret). If CRON_SECRET is unset, allow (dev convenience).
 async function requireCronSecret(req: Request) {
   const configured = String(process.env.CRON_SECRET ?? "").trim();
@@ -173,17 +216,36 @@ export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
-  const auth = await requireCronSecret(req);
-  if (!auth.ok) return json({ ok: false, error: "UNAUTHORIZED" }, 401, debugId);
-
   const url = new URL(req.url);
+  const wantDebug = url.searchParams.get("debug") === "1";
+
+  const auth = await requireCronSecret(req);
+  if (!auth.ok) {
+    return json(
+      {
+        ok: false,
+        error: "UNAUTHORIZED",
+        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
+      },
+      401,
+      debugId
+    );
+  }
+
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
   // Claim jobs
   const claimed = await claimJob(max);
   if (!claimed.length) {
     return json(
-      { ok: true, authMode: auth.mode, claimed: 0, processed: [], durationMs: Date.now() - startedAt },
+      {
+        ok: true,
+        authMode: auth.mode,
+        claimed: 0,
+        processed: [],
+        durationMs: Date.now() - startedAt,
+        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
+      },
       200,
       debugId
     );
@@ -305,7 +367,7 @@ export async function POST(req: Request) {
         .join("\n")
         .trim();
 
-      // ✅ Debug payload (stored ONLY in output.render_debug) — fixed: single variable + env included safely
+      // Debug payload (stored ONLY in output.render_debug)
       if (debugEnabled) {
         const renderDebug: any = {
           ...buildRenderDebugPayload({
@@ -332,7 +394,7 @@ export async function POST(req: Request) {
         try {
           await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
         } catch {
-          // debug should never break rendering
+          // ignore
         }
       }
 
@@ -358,7 +420,7 @@ export async function POST(req: Request) {
       // Update quote log
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
 
-      // Emails (enterprise/standard stays intact via sendEmail + getTenantEmailConfig)
+      // Emails
       try {
         const cfg = await getTenantEmailConfig(job.tenantId);
 
@@ -500,6 +562,7 @@ export async function POST(req: Request) {
       claimed: claimed.length,
       processed,
       durationMs: Date.now() - startedAt,
+      ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
     },
     200,
     debugId
