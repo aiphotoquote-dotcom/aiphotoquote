@@ -14,7 +14,6 @@ const Q = z.object({
 });
 
 function json(data: any, status = 200) {
-  // Explicitly prevent caching at every layer (browser/CDN/proxy)
   return NextResponse.json(data, {
     status,
     headers: {
@@ -74,9 +73,17 @@ export async function GET(req: Request) {
       return json({ ok: false, error: "NOT_FOUND", message: "Quote not found" }, 404);
     }
 
-    const renderStatus = normalizeStatus(row.render_status);
     const imageUrl = row.render_image_url ? String(row.render_image_url) : null;
     const error = row.render_error ? String(row.render_error) : null;
+
+    let renderStatus = normalizeStatus(row.render_status);
+
+    // ✅ Contract hardening:
+    // If an image URL exists and we are not explicitly failed, treat it as rendered.
+    // This guarantees UI convergence even if render_status is stale/mismatched.
+    if (imageUrl && renderStatus !== "failed") {
+      renderStatus = "rendered";
+    }
 
     return json({
       ok: true,

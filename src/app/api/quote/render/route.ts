@@ -113,7 +113,6 @@ async function tryKickCronNow(req: Request) {
       signal: controller.signal,
     });
 
-    // ✅ r.ok is a runtime boolean; don't const-assert it
     return { attempted: true as const, ok: Boolean(r.ok) };
   } catch {
     return { attempted: true as const, ok: false };
@@ -169,8 +168,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // If already rendered, do not enqueue
-    if (q.renderStatus === "rendered" && q.renderImageUrl) {
+    // ✅ If an image URL exists, treat as rendered and never enqueue/stomp.
+    // This matches the hardened render-status contract.
+    if (q.renderImageUrl) {
       return json({ ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl }, 200, debugId);
     }
 
@@ -185,7 +185,6 @@ export async function POST(req: Request) {
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
       }
 
-      // ✅ try kick anyway (cheap) so "queued" turns into "rendered" quickly
       void tryKickCronNow(req);
 
       return json(
@@ -211,7 +210,6 @@ export async function POST(req: Request) {
       .set({ renderStatus: "queued", renderError: null })
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
-    // ✅ 6) Kick worker immediately (fast-timeout). Cron schedule remains fallback.
     void tryKickCronNow(req);
 
     return json({ ok: true, quoteLogId, status: "queued", jobId }, 200, debugId);
