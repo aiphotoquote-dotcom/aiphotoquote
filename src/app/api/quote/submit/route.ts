@@ -152,7 +152,11 @@ async function getOpenAiForTenant(tenantId: string) {
  * - Gate only on “do we have tenant email config to attempt sending?”
  * - Let sendEmail() report provider misconfig (and capture it in output).
  */
-function isEmailAttemptConfigured(cfg: any, effectiveBusinessName: string, customerEmail?: string | null) {
+function isEmailAttemptConfigured(
+  cfg: { fromEmail: string | null; leadToEmail: string | null },
+  effectiveBusinessName: string,
+  customerEmail?: string | null
+) {
   const fromOk = Boolean(safeTrim(cfg?.fromEmail));
   const leadOk = Boolean(safeTrim(cfg?.leadToEmail));
   const bizOk = Boolean(safeTrim(effectiveBusinessName));
@@ -178,7 +182,11 @@ async function sendReceivedEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = isEmailAttemptConfigured(cfg, effectiveBusinessName, customer.email);
+  const configured = isEmailAttemptConfigured(
+    { fromEmail: cfg.fromEmail ?? null, leadToEmail: cfg.leadToEmail ?? null },
+    effectiveBusinessName,
+    customer.email
+  );
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -189,14 +197,14 @@ async function sendReceivedEmails(args: {
     lead_received: {
       attempted: false,
       ok: false,
-      provider: cfg.provider ?? "unknown",
+      provider: "resend",
       id: null as string | null,
       error: null as string | null,
     },
     customer_received: {
       attempted: false,
       ok: false,
-      provider: cfg.provider ?? "unknown",
+      provider: "resend",
       id: null as string | null,
       error: null as string | null,
     },
@@ -497,7 +505,11 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = isEmailAttemptConfigured(cfg, effectiveBusinessName, customer.email);
+  const configured = isEmailAttemptConfigured(
+    { fromEmail: cfg.fromEmail ?? null, leadToEmail: cfg.leadToEmail ?? null },
+    effectiveBusinessName,
+    customer.email
+  );
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -508,14 +520,14 @@ async function sendFinalEstimateEmails(args: {
     lead_new: {
       attempted: false,
       ok: false,
-      provider: cfg.provider ?? "unknown",
+      provider: "resend",
       id: null as string | null,
       error: null as string | null,
     },
     customer_receipt: {
       attempted: false,
       ok: false,
-      provider: cfg.provider ?? "unknown",
+      provider: "resend",
       id: null as string | null,
       error: null as string | null,
     },
@@ -972,7 +984,11 @@ export async function POST(req: Request) {
       const cfg = await getTenantEmailConfig(tenant.id);
       const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-      const configured = isEmailAttemptConfigured(cfg, effectiveBusinessName, customer.email);
+      const configured = isEmailAttemptConfigured(
+        { fromEmail: cfg.fromEmail ?? null, leadToEmail: cfg.leadToEmail ?? null },
+        effectiveBusinessName,
+        customer.email
+      );
 
       const baseUrl = getBaseUrl(req);
       const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -983,14 +999,14 @@ export async function POST(req: Request) {
         lead_new: {
           attempted: false,
           ok: false,
-          provider: cfg.provider ?? "unknown",
+          provider: "resend",
           id: null as string | null,
           error: null as string | null,
         },
         customer_receipt: {
           attempted: false,
           ok: false,
-          provider: cfg.provider ?? "unknown",
+          provider: "resend",
           id: null as string | null,
           error: null as string | null,
         },
