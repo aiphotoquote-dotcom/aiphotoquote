@@ -9,163 +9,25 @@ import { InfoSection } from "./quote/InfoSection";
 import { QaSection } from "./quote/QaSection";
 import { ResultsSection } from "./quote/ResultsSection";
 
-type RenderStatus = "idle" | "running" | "rendered" | "failed";
+import {
+  computeWorkingStep,
+  focusAndScroll,
+  formatUSPhone,
+  isValidEmail,
+  normalizeUSPhoneDigits,
+  prettyCount,
+  safeFocus,
+  sleep,
+  type WorkingPhase,
+} from "./quoteForm/helpers";
 
-function digitsOnlyRaw(s: string) {
-  return (s || "").replace(/\D/g, "");
-}
-function normalizeUSPhoneDigits(input: string) {
-  const d = digitsOnlyRaw(input);
-  if (d.length === 11 && d.startsWith("1")) return d.slice(1);
-  return d.slice(0, 10);
-}
-function formatUSPhone(input: string) {
-  const d = normalizeUSPhoneDigits(input);
-  const a = d.slice(0, 3);
-  const b = d.slice(3, 6);
-  const c = d.slice(6, 10);
-  if (d.length <= 3) return a ? `(${a}` : "";
-  if (d.length <= 6) return `(${a}) ${b}`;
-  return `(${a}) ${b}-${c}`;
-}
-function isValidEmail(email: string) {
-  const s = (email || "").trim();
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
-}
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function safeFocus(el: HTMLElement | null | undefined) {
-  if (!el) return;
-  try {
-    el.focus({ preventScroll: true } as any);
-  } catch {
-    try {
-      (el as any).focus();
-    } catch {
-      // ignore
-    }
-  }
-}
-async function focusAndScroll(
-  el: HTMLElement | null | undefined,
-  opts?: { block?: ScrollLogicalPosition; behavior?: ScrollBehavior }
-) {
-  if (!el) return;
-  const block = opts?.block ?? "start";
-  const behavior = opts?.behavior ?? "smooth";
-  try {
-    el.scrollIntoView({ behavior, block });
-  } catch {
-    try {
-      el.scrollIntoView();
-    } catch {
-      // ignore
-    }
-  }
-  await sleep(25);
-  safeFocus(el);
-}
-
-async function compressImage(file: File, opts?: { maxDim?: number; quality?: number }): Promise<File> {
-  const maxDim = opts?.maxDim ?? 1600;
-  const quality = opts?.quality ?? 0.78;
-
-  if (!file.type.startsWith("image/")) return file;
-
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Failed to read image"));
-    reader.readAsDataURL(file);
-  });
-
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = () => reject(new Error("Failed to load image"));
-    i.src = dataUrl;
-  });
-
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-
-  const scale = Math.min(1, maxDim / Math.max(w, h));
-  const outW = Math.max(1, Math.round(w * scale));
-  const outH = Math.max(1, Math.round(h * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = outW;
-  canvas.height = outH;
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return file;
-
-  ctx.drawImage(img, 0, 0, outW, outH);
-
-  const blob: Blob = await new Promise((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Compression failed"))), "image/jpeg", quality);
-  });
-
-  const baseName = file.name.replace(/\.[^/.]+$/, "");
-  const outName = `${baseName}.jpg`;
-  return new File([blob], outName, { type: "image/jpeg" });
-}
+import { compressImage, uploadToBlob } from "./quoteForm/imagePipeline";
+import { useRenderPreview } from "./quoteForm/useRenderPreview";
 
 function defaultShotTypeForIndex(idx: number): ShotType {
   if (idx === 0) return "wide";
   if (idx === 1) return "closeup";
   return "extra";
-}
-
-async function uploadToBlob(files: File[]): Promise<string[]> {
-  if (!files.length) return [];
-
-  const form = new FormData();
-  files.forEach((f) => form.append("files", f));
-
-  const res = await fetch("/api/blob/upload", { method: "POST", body: form });
-  const text = await res.text();
-
-  let j: any = null;
-  try {
-    j = text ? JSON.parse(text) : null;
-  } catch {
-    throw new Error(`Upload returned non-JSON (HTTP ${res.status}).`);
-  }
-
-  if (!res.ok || !j?.ok) {
-    throw new Error(j?.error?.message || j?.message || `Blob upload failed (HTTP ${res.status})`);
-  }
-
-  const urls: string[] = Array.isArray(j?.urls)
-    ? j.urls.map((x: any) => String(x)).filter(Boolean)
-    : Array.isArray(j?.files)
-      ? j.files.map((x: any) => String(x?.url)).filter(Boolean)
-      : [];
-
-  if (!urls.length) throw new Error("Blob upload returned no file urls.");
-  return urls;
-}
-
-function computeWorkingStep(phase: "idle" | "compressing" | "uploading" | "analyzing") {
-  if (phase === "compressing") return { idx: 1, total: 3, label: "Optimizing photos…" };
-  if (phase === "uploading") return { idx: 2, total: 3, label: "Uploading…" };
-  if (phase === "analyzing") return { idx: 3, total: 3, label: "Inspecting…" };
-  return { idx: 0, total: 3, label: "Ready" };
-}
-
-function prettyCount(n: number) {
-  if (!Number.isFinite(n)) return "0";
-  if (n <= 999) return String(n);
-  if (n <= 9_999) return `${Math.round(n / 100) / 10}k`;
-  return `${Math.round(n / 1000)}k`;
-}
-
-function isAbortError(e: any) {
-  const name = String(e?.name ?? "");
-  const msg = String(e?.message ?? "");
-  return name === "AbortError" || /aborted/i.test(msg);
 }
 
 export default function QuoteForm({
@@ -188,7 +50,7 @@ export default function QuoteForm({
   const [renderOptIn, setRenderOptIn] = useState(false);
 
   const [working, setWorking] = useState(false);
-  const [phase, setPhase] = useState<"idle" | "compressing" | "uploading" | "analyzing">("idle");
+  const [phase, setPhase] = useState<WorkingPhase>("idle");
 
   const [result, setResult] = useState<any>(null);
   const [quoteLogId, setQuoteLogId] = useState<string | null>(null);
@@ -200,14 +62,6 @@ export default function QuoteForm({
 
   // Errors
   const [error, setError] = useState<string | null>(null);
-
-  // Rendering
-  const [renderStatus, setRenderStatus] = useState<RenderStatus>("idle");
-  const [renderImageUrl, setRenderImageUrl] = useState<string | null>(null);
-  const [renderError, setRenderError] = useState<string | null>(null);
-
-  // Fake-but-smooth render progress
-  const [renderProgressPct, setRenderProgressPct] = useState(0);
 
   // --- refs ---
   const statusRegionRef = useRef<HTMLDivElement | null>(null);
@@ -221,13 +75,6 @@ export default function QuoteForm({
   const qaFirstInputRef = useRef<HTMLInputElement | null>(null);
   const resultsHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const renderPreviewRef = useRef<HTMLDivElement | null>(null);
-
-  // Tracks “we already enqueued render for this quote id”
-  const renderAttemptedForQuoteRef = useRef<string | null>(null);
-
-  // Poll timer + cancellation
-  const renderPollTimerRef = useRef<number | null>(null);
-  const renderPollAbortRef = useRef<AbortController | null>(null);
 
   // --- derived state ---
   const photoCount = photos.length;
@@ -254,9 +101,20 @@ export default function QuoteForm({
 
   const hasEstimate = Boolean(result) && !needsQa;
 
+  const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
+
   const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
 
   const showRendering = useMemo(() => aiRenderingEnabled && renderOptIn, [aiRenderingEnabled, renderOptIn]);
+
+  // --- Rendering (moved to hook) ---
+  const { renderStatus, renderImageUrl, renderError, renderProgressPct, resetRenderState } = useRenderPreview({
+    tenantSlug,
+    enabled: aiRenderingEnabled,
+    optIn: renderOptIn,
+    quoteLogId,
+    mode,
+  });
 
   const renderingLabel = useMemo(() => {
     if (!aiRenderingEnabled) return "Disabled";
@@ -268,124 +126,6 @@ export default function QuoteForm({
     if (renderStatus === "failed") return "Failed";
     return "Waiting";
   }, [aiRenderingEnabled, renderOptIn, quoteLogId, renderStatus]);
-
-  const mode: "entry" | "qa" | "results" = needsQa ? "qa" : hasEstimate ? "results" : "entry";
-
-  function stopRenderPolling() {
-    if (renderPollTimerRef.current) window.clearInterval(renderPollTimerRef.current);
-    renderPollTimerRef.current = null;
-
-    if (renderPollAbortRef.current) {
-      try {
-        renderPollAbortRef.current.abort();
-      } catch {
-        // ignore
-      }
-    }
-    renderPollAbortRef.current = null;
-  }
-
-  async function pollRenderStatusOnce(qid: string) {
-    if (!tenantSlug || !qid) return;
-
-    // cancel any in-flight request before starting a new one
-    if (renderPollAbortRef.current) {
-      try {
-        renderPollAbortRef.current.abort();
-      } catch {
-        // ignore
-      }
-    }
-    const ac = new AbortController();
-    renderPollAbortRef.current = ac;
-
-    const url = `/api/quote/render-status?tenantSlug=${encodeURIComponent(tenantSlug)}&quoteLogId=${encodeURIComponent(qid)}`;
-
-    let res: Response;
-    let txt = "";
-    try {
-      res = await fetch(url, { method: "GET", cache: "no-store", signal: ac.signal as any });
-      txt = await res.text();
-    } catch (e: any) {
-      // ✅ Abort is expected due to overlapping polls — do not surface to UI
-      if (isAbortError(e)) return;
-      throw e;
-    }
-
-    let j: any = null;
-    try {
-      j = txt ? JSON.parse(txt) : null;
-    } catch {
-      throw new Error(`Render status returned non-JSON (HTTP ${res.status}).`);
-    }
-
-    if (!res.ok || !j?.ok) {
-      throw new Error(j?.message || j?.error || `Render status failed (HTTP ${res.status})`);
-    }
-
-    const statusRaw = String(j?.renderStatus ?? j?.render_status ?? "").toLowerCase().trim();
-    const imageUrl = (j?.imageUrl ?? j?.renderImageUrl ?? j?.render_image_url ?? null) as string | null;
-    const err = (j?.error ?? j?.renderError ?? j?.render_error ?? null) as string | null;
-
-    // ✅ clear transient poll error if we got a valid response
-    if (renderError) setRenderError(null);
-
-    if (statusRaw === "rendered") {
-      if (!imageUrl) throw new Error("Render status is 'rendered' but no image url was returned.");
-      setRenderImageUrl(imageUrl);
-      setRenderError(null);
-      setRenderStatus("rendered");
-      setRenderProgressPct(100);
-      stopRenderPolling();
-      return;
-    }
-
-    if (statusRaw === "failed") {
-      setRenderStatus("failed");
-      setRenderError(err || "Render failed");
-      setRenderImageUrl(null);
-      setRenderProgressPct(100);
-      stopRenderPolling();
-      return;
-    }
-
-    if (statusRaw === "running") {
-      setRenderStatus("running");
-      return;
-    }
-
-    // ✅ IMPORTANT:
-    // The server normalizes queued -> idle.
-    // If we already requested a render for this quote, keep UI in "running"
-    // so the progress bar continues while the cron worker catches up.
-    const weRequestedThis = renderAttemptedForQuoteRef.current === qid;
-    if (weRequestedThis) {
-      setRenderStatus("running");
-      return;
-    }
-
-    // default fallback (no render requested / not opted-in etc)
-    setRenderStatus("idle");
-  }
-
-  function startRenderPolling(qid: string) {
-    stopRenderPolling();
-
-    // kick one immediately, then poll
-    pollRenderStatusOnce(qid).catch((e: any) => {
-      if (isAbortError(e)) return;
-      // don't hard-fail the render for transient polling issues
-      setRenderError(e?.message ?? "Temporary render status error");
-    });
-
-    renderPollTimerRef.current = window.setInterval(() => {
-      pollRenderStatusOnce(qid).catch((e: any) => {
-        if (isAbortError(e)) return;
-        // keep polling through transient issues, but don't spam / don't flip state
-        setRenderError(e?.message ?? "Temporary render status error");
-      });
-    }, 3000);
-  }
 
   // Status card copy + single action (no clutter)
   const statusModel = useMemo(() => {
@@ -525,35 +265,12 @@ export default function QuoteForm({
     })();
   }, [needsQa]);
 
-  // Render progress animation while running
-  useEffect(() => {
-    if (renderStatus !== "running") {
-      setRenderProgressPct(renderStatus === "rendered" ? 100 : renderStatus === "failed" ? 100 : 0);
-      return;
-    }
-
-    setRenderProgressPct(12);
-
-    const t = window.setInterval(() => {
-      setRenderProgressPct((prev) => {
-        // ease toward 92, then hold until server returns
-        const cap = 92;
-        if (prev >= cap) return cap;
-        const bump = prev < 50 ? 6 : prev < 75 ? 3 : 1;
-        return Math.min(cap, prev + bump);
-      });
-    }, 650);
-
-    return () => window.clearInterval(t);
-  }, [renderStatus]);
-
   useEffect(() => {
     if (!aiRenderingEnabled) setRenderOptIn(false);
   }, [aiRenderingEnabled]);
 
   useEffect(() => {
     return () => {
-      stopRenderPolling();
       photos.forEach((p) => {
         if (p.previewSrc.startsWith("blob:")) URL.revokeObjectURL(p.previewSrc);
       });
@@ -649,13 +366,7 @@ export default function QuoteForm({
     setWorking(false);
     setPhase("idle");
 
-    stopRenderPolling();
-    setRenderStatus("idle");
-    setRenderImageUrl(null);
-    setRenderError(null);
-    setRenderProgressPct(0);
-    renderAttemptedForQuoteRef.current = null;
-
+    resetRenderState();
     if (!aiRenderingEnabled) setRenderOptIn(false);
 
     queueMicrotask(() => {
@@ -694,12 +405,8 @@ export default function QuoteForm({
     setQaQuestions([]);
     setQaAnswers([]);
 
-    stopRenderPolling();
-    setRenderStatus("idle");
-    setRenderImageUrl(null);
-    setRenderError(null);
-    setRenderProgressPct(0);
-    renderAttemptedForQuoteRef.current = null;
+    // reset render state for the new quote attempt
+    resetRenderState();
 
     queueMicrotask(() => {
       focusAndScroll(statusRegionRef.current, { block: "start" });
@@ -817,7 +524,6 @@ export default function QuoteForm({
         setQaQuestions(qsMerged);
         setQaAnswers(qsMerged.map(() => ""));
         setResult(json?.output ?? json);
-        renderAttemptedForQuoteRef.current = null;
         return;
       }
 
@@ -825,8 +531,6 @@ export default function QuoteForm({
       setQaQuestions([]);
       setQaAnswers([]);
       setResult(json?.output ?? json);
-
-      renderAttemptedForQuoteRef.current = null;
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
     } finally {
@@ -900,58 +604,6 @@ export default function QuoteForm({
       });
     }
   }
-
-  // ✅ enqueue render job once, then poll status endpoint until done
-  async function startRenderOnce(qid: string) {
-    if (renderAttemptedForQuoteRef.current === qid) return;
-    renderAttemptedForQuoteRef.current = qid;
-
-    // start progress immediately (queued/running are indistinguishable from the server because queued->idle)
-    setRenderStatus("running");
-    setRenderError(null);
-    setRenderImageUrl(null);
-
-    try {
-      const res = await fetch("/api/quote/render", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tenantSlug, quoteLogId: qid }),
-      });
-
-      const txt = await res.text();
-      let j: any = null;
-      try {
-        j = txt ? JSON.parse(txt) : null;
-      } catch {
-        throw new Error(`Render enqueue returned non-JSON (HTTP ${res.status}).`);
-      }
-
-      if (!res.ok || !j?.ok) {
-        throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
-      }
-
-      // ✅ start polling and let cron finish whenever it finishes
-      startRenderPolling(qid);
-    } catch (e: any) {
-      if (isAbortError(e)) return;
-      setRenderStatus("failed");
-      setRenderError(e?.message ?? "Render failed");
-      setRenderProgressPct(100);
-      stopRenderPolling();
-    }
-  }
-
-  // Start render ONLY when we are on results (final), opted-in, and have a quote id
-  useEffect(() => {
-    if (!aiRenderingEnabled) return;
-    if (!renderOptIn) return;
-    if (!quoteLogId) return;
-    if (mode !== "results") return; // ✅ do not render while QA is pending
-
-    startRenderOnce(quoteLogId);
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiRenderingEnabled, renderOptIn, quoteLogId, tenantSlug, mode]);
 
   return (
     <div className="w-full max-w-full min-w-0 overflow-x-hidden space-y-6">
