@@ -24,10 +24,14 @@ export function useRenderPreview(params: {
   const pollTimerRef = useRef<number | null>(null);
   const pollAbortRef = useRef<AbortController | null>(null);
 
+  // ✅ prevents “abort loop” where we never receive a successful response
+  const pollInFlightRef = useRef(false);
+
   function stopPolling() {
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     pollTimerRef.current = null;
 
+    // Only abort when we intentionally stop (unmount / rendered / failed / reset)
     if (pollAbortRef.current) {
       try {
         pollAbortRef.current.abort();
@@ -36,6 +40,8 @@ export function useRenderPreview(params: {
       }
     }
     pollAbortRef.current = null;
+
+    pollInFlightRef.current = false;
   }
 
   function setRenderedNow(imageUrl: string) {
@@ -57,13 +63,10 @@ export function useRenderPreview(params: {
   async function pollOnce(qid: string) {
     if (!tenantSlug || !qid) return;
 
-    if (pollAbortRef.current) {
-      try {
-        pollAbortRef.current.abort();
-      } catch {
-        // ignore
-      }
-    }
+    // ✅ If a poll is already in-flight, do not start another one.
+    // This avoids aborting the very response that would transition us to "rendered".
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
 
     const ac = new AbortController();
     pollAbortRef.current = ac;
@@ -74,12 +77,15 @@ export function useRenderPreview(params: {
 
     let res: Response;
     let txt = "";
+
     try {
       res = await fetch(url, { method: "GET", cache: "no-store", signal: ac.signal as any });
       txt = await res.text();
     } catch (e: any) {
       if (isAbortError(e)) return;
       throw e;
+    } finally {
+      pollInFlightRef.current = false;
     }
 
     let j: any = null;
@@ -104,10 +110,6 @@ export function useRenderPreview(params: {
     if (imageUrl && statusRaw !== "failed") {
       setRenderedNow(imageUrl);
       return;
-    }
-
-    if (statusRaw === "rendered") {
-      throw new Error("Render status is 'rendered' but no image url was returned.");
     }
 
     if (statusRaw === "failed") {
@@ -172,7 +174,6 @@ export function useRenderPreview(params: {
       throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
     }
 
-    // ✅ If enqueue endpoint already knows it's rendered, converge immediately.
     const enqueueStatus = String(j?.status ?? "").toLowerCase().trim();
     const enqueueImageUrl = (j?.imageUrl ?? null) as string | null;
 
