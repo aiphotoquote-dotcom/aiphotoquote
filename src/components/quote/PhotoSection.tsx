@@ -1,7 +1,7 @@
 // src/components/quote/PhotoSection.tsx
 "use client";
 
-import React, { useRef, useState } from "react";
+import React from "react";
 import { cn } from "./ui";
 
 export type ShotType = "wide" | "closeup" | "extra";
@@ -44,14 +44,6 @@ export function PhotoSection({
   const photoCount = photos.length;
   const recommendedOk = photoCount >= recommendedPhotos;
 
-  // Prevent overlapping "Upload Photos" calls (double taps / slow networks)
-  const [uploadingNow, setUploadingNow] = useState(false);
-  const isBusy = working || uploadingNow;
-
-  // Keep last FileList alive across awaits by copying to an array of Files
-  // (FileList can be ephemeral in some browsers).
-  const lastUploadFilesRef = useRef<File[] | null>(null);
-
   return (
     <section
       ref={sectionRef as any}
@@ -73,19 +65,20 @@ export function PhotoSection({
             accept="image/*"
             capture="environment"
             multiple
+            disabled={working}
             onChange={(e) => {
-              // Always snapshot files synchronously; never touch e.target after an await.
-              const files = Array.from(e.currentTarget.files ?? []);
-              // Clear immediately to allow re-selecting same file.
-              e.currentTarget.value = "";
-              if (files.length) onAddCameraFiles(files);
+              // Capture synchronously (before any await), then reset value safely.
+              const input = e.currentTarget;
+              const filesArr = Array.from(input.files ?? []);
+              input.value = ""; // ✅ reset immediately to allow re-selecting same photo
+              if (!filesArr.length) return;
+              onAddCameraFiles(filesArr);
             }}
-            disabled={isBusy}
           />
           <div
             className={cn(
               "w-full rounded-xl bg-black text-white py-4 text-center font-semibold cursor-pointer select-none dark:bg-white dark:text-black",
-              isBusy ? "opacity-50 cursor-not-allowed" : ""
+              working ? "opacity-50 cursor-not-allowed" : ""
             )}
           >
             Take Photo
@@ -98,53 +91,24 @@ export function PhotoSection({
             type="file"
             accept="image/*"
             multiple
+            disabled={working}
             onChange={async (e) => {
-              if (isBusy) {
-                // still clear to avoid stale selection
-                e.currentTarget.value = "";
-                return;
-              }
+              // Capture synchronously, reset immediately, then await upload.
+              const input = e.currentTarget;
+              const files = input.files; // FileList | null
+              input.value = ""; // ✅ reset immediately to allow re-selecting same files
 
-              // Snapshot files immediately.
-              const filesArr = Array.from(e.currentTarget.files ?? []);
-              // Clear immediately (don’t rely on ref existing later).
-              e.currentTarget.value = "";
-
-              if (!filesArr.length) return;
-
-              // Keep a copy so we can recreate a FileList-like structure if needed
-              lastUploadFilesRef.current = filesArr;
-
-              setUploadingNow(true);
-              try {
-                /**
-                 * Your existing onUploadPhotosNow expects a FileList.
-                 * We can't reliably construct a real FileList cross-browser, so we pass the
-                 * original FileList when possible by re-reading from the event before clearing.
-                 *
-                 * Since we already cleared the input, we instead create a minimal "FileList-like"
-                 * object that behaves for Array.from(...) usage.
-                 */
-                const pseudoFileList: FileList = {
-                  length: filesArr.length,
-                  item: (idx: number) => filesArr[idx] ?? null,
-                  ...filesArr,
-                } as any;
-
-                await onUploadPhotosNow(pseudoFileList);
-              } finally {
-                setUploadingNow(false);
-              }
+              if (!files || files.length === 0) return;
+              await onUploadPhotosNow(files);
             }}
-            disabled={isBusy}
           />
           <div
             className={cn(
               "w-full rounded-xl border border-gray-200 py-4 text-center font-semibold cursor-pointer select-none dark:border-gray-800",
-              isBusy ? "opacity-50 cursor-not-allowed" : ""
+              working ? "opacity-50 cursor-not-allowed" : ""
             )}
           >
-            {uploadingNow ? "Uploading…" : "Upload Photos"}
+            Upload Photos
           </div>
         </label>
       </div>
@@ -167,7 +131,7 @@ export function PhotoSection({
                       type="button"
                       className="absolute top-2 right-2 rounded-md bg-white/90 border border-gray-200 px-2 py-1 text-xs disabled:opacity-50 dark:bg-gray-900/90 dark:border-gray-800"
                       onClick={() => onRemovePhoto(p.id)}
-                      disabled={isBusy}
+                      disabled={working}
                     >
                       Remove
                     </button>
@@ -187,7 +151,7 @@ export function PhotoSection({
                             : "bg-white text-gray-900 border-gray-200 dark:bg-gray-950 dark:text-gray-100 dark:border-gray-800"
                         )}
                         onClick={() => onSetShotType(p.id, t)}
-                        disabled={isBusy}
+                        disabled={working}
                       >
                         {t === "wide" ? "Wide" : t === "closeup" ? "Close-up" : "Extra"}
                       </button>
