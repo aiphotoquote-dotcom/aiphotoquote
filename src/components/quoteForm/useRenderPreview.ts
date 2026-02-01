@@ -8,14 +8,14 @@ export type RenderStatus = "idle" | "running" | "rendered" | "failed";
 // ---- Fake progress tuning ----
 // Goal: look believable for real-world render times (~50s observed).
 // - Ramp to 92% over ~50 seconds
-// - Hold at 92% until the server returns an image URL (rendered)
+// - Hold at 92% until the image is actually loaded
 // - Jump to 100% on rendered/failed
 const FAKE_PROGRESS = {
   cap: 92,
   // segment boundaries (ms)
-  t1: 5_000, // early ramp
-  t2: 30_000, // mid ramp
-  t3: 50_000, // final ramp to cap
+  t1: 5_000,
+  t2: 30_000,
+  t3: 50_000,
   // segment targets
   p0: 8,
   p1: 25,
@@ -59,6 +59,40 @@ function fakeProgressAt(elapsedMs: number) {
   return cap;
 }
 
+// Prefetch image so we don't show "Ready" before the user can actually see it.
+function prefetchImage(url: string, timeoutMs = 6000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!url) return resolve();
+
+    const img = new Image();
+    let done = false;
+
+    const t = window.setTimeout(() => {
+      if (done) return;
+      done = true;
+      // timeout: resolve (don't block UI forever)
+      resolve();
+    }, timeoutMs);
+
+    img.onload = () => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(t);
+      resolve();
+    };
+
+    img.onerror = () => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(t);
+      // error: resolve (we'll still try to show it; browser may load later)
+      resolve();
+    };
+
+    img.src = url;
+  });
+}
+
 export function useRenderPreview(params: {
   tenantSlug: string;
   enabled: boolean; // aiRenderingEnabled
@@ -84,6 +118,10 @@ export function useRenderPreview(params: {
   const progressStartMsRef = useRef<number | null>(null);
   const progressTimerRef = useRef<number | null>(null);
 
+  // Prevent double-finalize (poll + enqueue can both learn about imageUrl)
+  const finalizeInFlightRef = useRef(false);
+  const finalizedUrlRef = useRef<string | null>(null);
+
   function stopProgress() {
     if (progressTimerRef.current) window.clearInterval(progressTimerRef.current);
     progressTimerRef.current = null;
@@ -107,20 +145,49 @@ export function useRenderPreview(params: {
     pollInFlightRef.current = false;
   }
 
-  function setRenderedNow(imageUrl: string) {
-    setRenderImageUrl(imageUrl);
-    setRenderError(null);
-    setRenderStatus("rendered");
-    setRenderProgressPct(100);
-    stopPolling();
-    stopProgress();
+  async function setRenderedWhenLoaded(imageUrl: string) {
+    if (!imageUrl) return;
+
+    // If we already finalized to this URL, do nothing
+    if (finalizedUrlRef.current === imageUrl) return;
+
+    // If another finalize is in-flight for some URL, ignore duplicates
+    if (finalizeInFlightRef.current) return;
+
+    finalizeInFlightRef.current = true;
+
+    try {
+      // Keep UI in "running" while the image is actually downloading
+      setRenderStatus("running");
+      setRenderError(null);
+      setRenderImageUrl(null);
+
+      // Prefetch (best-effort, resolves on timeout too)
+      await prefetchImage(imageUrl, 6000);
+
+      finalizedUrlRef.current = imageUrl;
+
+      setRenderImageUrl(imageUrl);
+      setRenderError(null);
+      setRenderStatus("rendered");
+      setRenderProgressPct(100);
+
+      stopPolling();
+      stopProgress();
+    } finally {
+      finalizeInFlightRef.current = false;
+    }
   }
 
   function setFailedNow(message: string) {
+    finalizedUrlRef.current = null;
+    finalizeInFlightRef.current = false;
+
     setRenderStatus("failed");
     setRenderError(message || "Render failed");
     setRenderImageUrl(null);
     setRenderProgressPct(100);
+
     stopPolling();
     stopProgress();
   }
@@ -129,7 +196,6 @@ export function useRenderPreview(params: {
     if (!tenantSlug || !qid) return;
 
     // ✅ If a poll is already in-flight, do not start another one.
-    // This avoids aborting the very response that would transition us to "rendered".
     if (pollInFlightRef.current) return;
     pollInFlightRef.current = true;
 
@@ -173,7 +239,7 @@ export function useRenderPreview(params: {
 
     // ✅ Hard-converge if an image URL exists (even if status is stale)
     if (imageUrl && statusRaw !== "failed") {
-      setRenderedNow(imageUrl);
+      await setRenderedWhenLoaded(imageUrl);
       return;
     }
 
@@ -217,6 +283,10 @@ export function useRenderPreview(params: {
     if (attemptedForQuoteRef.current === qid) return;
     attemptedForQuoteRef.current = qid;
 
+    // clear any previous finalize state
+    finalizedUrlRef.current = null;
+    finalizeInFlightRef.current = false;
+
     setRenderStatus("running");
     setRenderError(null);
     setRenderImageUrl(null);
@@ -243,7 +313,7 @@ export function useRenderPreview(params: {
     const enqueueImageUrl = (j?.imageUrl ?? null) as string | null;
 
     if (enqueueStatus === "rendered" && enqueueImageUrl) {
-      setRenderedNow(enqueueImageUrl);
+      await setRenderedWhenLoaded(enqueueImageUrl);
       return;
     }
 
@@ -255,7 +325,7 @@ export function useRenderPreview(params: {
     startPolling(qid);
   }
 
-  // Fake progress while "running" (time-based, tuned to ~50s to reach 92%)
+  // Fake progress while "running" (time-based, rounded to whole percent)
   useEffect(() => {
     // stop any existing progress timer when status changes
     stopProgress();
@@ -275,12 +345,13 @@ export function useRenderPreview(params: {
       const start = progressStartMsRef.current ?? Date.now();
       const elapsed = Date.now() - start;
 
-      const next = fakeProgressAt(elapsed);
+      const nextFloat = fakeProgressAt(elapsed);
+      const nextInt = Math.round(nextFloat);
 
       setRenderProgressPct((prev) => {
-        // never go backwards; never exceed cap while running
         const cap = FAKE_PROGRESS.cap;
-        return clamp(Math.max(prev, next), 0, cap);
+        // never go backwards; never exceed cap while running
+        return clamp(Math.max(prev, nextInt), 0, cap);
       });
     }, FAKE_PROGRESS.tickMs);
 
@@ -314,7 +385,11 @@ export function useRenderPreview(params: {
   function resetRenderState() {
     stopPolling();
     stopProgress();
+
     attemptedForQuoteRef.current = null;
+    finalizedUrlRef.current = null;
+    finalizeInFlightRef.current = false;
+
     setRenderStatus("idle");
     setRenderImageUrl(null);
     setRenderError(null);
