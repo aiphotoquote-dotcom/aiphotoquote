@@ -2,14 +2,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { isAbortError, sleep } from "./helpers";
+import { isAbortError } from "./helpers";
 
 export type RenderStatus = "idle" | "running" | "rendered" | "failed";
 
 export function useRenderPreview(params: {
   tenantSlug: string;
   enabled: boolean; // aiRenderingEnabled
-  optIn: boolean;   // renderOptIn
+  optIn: boolean; // renderOptIn
   quoteLogId: string | null;
   mode: "entry" | "qa" | "results";
 }) {
@@ -52,7 +52,10 @@ export function useRenderPreview(params: {
     const ac = new AbortController();
     pollAbortRef.current = ac;
 
-    const url = `/api/quote/render-status?tenantSlug=${encodeURIComponent(tenantSlug)}&quoteLogId=${encodeURIComponent(qid)}`;
+    // Cache-bust param to avoid any unexpected CDN/proxy staleness
+    const url = `/api/quote/render-status?tenantSlug=${encodeURIComponent(
+      tenantSlug
+    )}&quoteLogId=${encodeURIComponent(qid)}&ts=${Date.now()}`;
 
     let res: Response;
     let txt = "";

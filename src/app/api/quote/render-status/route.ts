@@ -14,7 +14,15 @@ const Q = z.object({
 });
 
 function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+  // Explicitly prevent caching at every layer (browser/CDN/proxy)
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+    },
+  });
 }
 
 function normalizeStatus(raw: unknown): "idle" | "running" | "rendered" | "failed" {
