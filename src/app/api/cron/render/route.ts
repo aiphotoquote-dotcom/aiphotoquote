@@ -321,11 +321,27 @@ export async function POST(req: Request) {
           images,
         });
 
-        renderDebug.env = {
-          PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
-          VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
-          VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
-        };
+        const renderDebug = {
+  ...buildRenderDebugPayload({
+    debugId,
+    renderModel,
+    tenantStyleKey,
+    styleText,
+    renderPromptPreamble,
+    renderPromptTemplate,
+    finalPrompt: prompt,
+    serviceType,
+    summary,
+    customerNotes,
+    tenantRenderNotes,
+    images,
+  }),
+  env: {
+    PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
+    VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
+    VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
+  },
+};
 
         try {
           await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
