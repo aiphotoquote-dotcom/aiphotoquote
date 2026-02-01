@@ -67,25 +67,54 @@ function shaPrefix(v: string) {
   return crypto.createHash("sha256").update(v).digest("hex").slice(0, 10);
 }
 
+function getCronSecretFromQuery(req: Request) {
+  try {
+    const url = new URL(req.url);
+    const v = safeTrim(url.searchParams.get("cron_secret"));
+    return v || "";
+  } catch {
+    return "";
+  }
+}
+
+function getTokenFromAuthHeader(req: Request) {
+  const authRaw = safeTrim(req.headers.get("authorization"));
+  if (!authRaw) return "";
+  const lower = authRaw.toLowerCase();
+  if (lower.startsWith("bearer ")) return authRaw.slice(7).trim();
+  return authRaw.trim();
+}
+
 function buildAuthDebug(req: Request) {
   const configuredRaw = safeTrim(process.env.CRON_SECRET);
-  const authRaw = safeTrim(req.headers.get("authorization"));
+  const headerToken = getTokenFromAuthHeader(req);
+  const queryToken = getCronSecretFromQuery(req);
 
   const hasConfigured = Boolean(configuredRaw);
-  const hasAuthHeader = Boolean(authRaw);
+  const hasHeader = Boolean(headerToken);
+  const hasQuery = Boolean(queryToken);
 
-  const expected = hasConfigured ? `Bearer ${configuredRaw}` : "";
-  const matches = hasConfigured ? authRaw === expected : true;
-
-  const tokenFromHeader = authRaw.toLowerCase().startsWith("bearer ") ? authRaw.slice(7).trim() : authRaw;
+  const matchesHeader = hasConfigured ? headerToken === configuredRaw : true;
+  const matchesQuery = hasConfigured ? queryToken === configuredRaw : true;
 
   return {
     configured: hasConfigured,
-    authHeaderPresent: hasAuthHeader,
-    authHeaderLooksBearer: authRaw.toLowerCase().startsWith("bearer "),
-    matches,
+
+    header: {
+      present: hasHeader,
+      looksBearer: safeTrim(req.headers.get("authorization")).toLowerCase().startsWith("bearer "),
+      receivedTokenSha10: hasHeader ? shaPrefix(headerToken) : null,
+      matches: matchesHeader,
+    },
+
+    query: {
+      present: hasQuery,
+      receivedTokenSha10: hasQuery ? shaPrefix(queryToken) : null,
+      matches: matchesQuery,
+      paramName: "cron_secret",
+    },
+
     configuredSha10: hasConfigured ? shaPrefix(configuredRaw) : null,
-    receivedTokenSha10: hasAuthHeader ? shaPrefix(tokenFromHeader) : null,
 
     env: {
       VERCEL_ENV: safeTrim(process.env.VERCEL_ENV) || null,
@@ -93,8 +122,10 @@ function buildAuthDebug(req: Request) {
       NEXT_PUBLIC_APP_URL: safeTrim(process.env.NEXT_PUBLIC_APP_URL) || null,
       APP_URL: safeTrim(process.env.APP_URL) || null,
     },
+
     request: {
       url: req.url,
+      method: (req as any)?.method ?? null,
       host: safeTrim(req.headers.get("host")) || null,
       xForwardedHost: safeTrim(req.headers.get("x-forwarded-host")) || null,
       xForwardedProto: safeTrim(req.headers.get("x-forwarded-proto")) || null,
@@ -102,17 +133,25 @@ function buildAuthDebug(req: Request) {
   };
 }
 
-// ✅ CRON protection (new secret). If CRON_SECRET is unset, allow (dev convenience).
+/**
+ * ✅ CRON protection
+ * Accepts either:
+ *  - Authorization: Bearer <CRON_SECRET>   (preferred)
+ *  - ?cron_secret=<CRON_SECRET>            (fallback for cron systems without headers)
+ *
+ * If CRON_SECRET is unset -> allow (dev convenience).
+ */
 async function requireCronSecret(req: Request) {
-  const configured = String(process.env.CRON_SECRET ?? "").trim();
-  const auth = String(req.headers.get("authorization") ?? "").trim();
-
+  const configured = safeTrim(process.env.CRON_SECRET);
   if (!configured) return { ok: true as const, mode: "no_secret_configured" as const };
 
-  const expected = `Bearer ${configured}`;
-  if (auth !== expected) return { ok: false as const, error: "UNAUTHORIZED" as const };
+  const headerToken = getTokenFromAuthHeader(req);
+  const queryToken = getCronSecretFromQuery(req);
 
-  return { ok: true as const, mode: "header" as const };
+  if (headerToken && headerToken === configured) return { ok: true as const, mode: "header" as const };
+  if (queryToken && queryToken === configured) return { ok: true as const, mode: "query" as const };
+
+  return { ok: false as const, error: "UNAUTHORIZED" as const };
 }
 
 // Claim jobs safely (SKIP LOCKED prevents double-run across concurrent cron executions)
@@ -210,11 +249,7 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
   `);
 }
 
-/**
- * Core worker handler shared by GET + POST.
- * Vercel Cron uses GET, so we support both.
- */
-async function handle(req: Request) {
+async function handleCron(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
@@ -236,6 +271,7 @@ async function handle(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
+  // Claim jobs
   const claimed = await claimJob(max);
   if (!claimed.length) {
     return json(
@@ -259,6 +295,7 @@ async function handle(req: Request) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
+      // Load tenant + quote context
       const ctx = await loadRenderContext(job.tenantId, job.quoteLogId);
       if (!ctx) throw new Error("Missing tenant/quote context for job.");
 
@@ -305,11 +342,13 @@ async function handle(req: Request) {
         continue;
       }
 
+      // OpenAI key
       const enc = ctx.openai_key_enc;
       if (!enc) throw new Error("Missing tenant OpenAI key (tenant_secrets.openai_key_enc).");
       const apiKey = decryptSecret(String(enc));
       if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
 
+      // Build prompt/model from PCC (single source of truth)
       const pcc = await loadPlatformLlmConfig();
       const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
 
@@ -321,8 +360,8 @@ async function handle(req: Request) {
         tenantStyleKey === "clean_oem"
           ? safeTrim(presets.clean_oem)
           : tenantStyleKey === "custom"
-          ? safeTrim(presets.custom)
-          : safeTrim(presets.photoreal);
+            ? safeTrim(presets.custom)
+            : safeTrim(presets.photoreal);
 
       const styleText =
         presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
@@ -365,6 +404,7 @@ async function handle(req: Request) {
         .join("\n")
         .trim();
 
+      // Debug payload (stored ONLY in output.render_debug)
       if (debugEnabled) {
         const renderDebug: any = {
           ...buildRenderDebugPayload({
@@ -389,12 +429,18 @@ async function handle(req: Request) {
         };
 
         try {
-          await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
+          await setRenderDebug({
+            db: db as any,
+            quoteLogId: job.quoteLogId,
+            tenantId: job.tenantId,
+            debug: renderDebug,
+          });
         } catch {
           // ignore
         }
       }
 
+      // Generate image
       const openai = new OpenAI({ apiKey });
       const imgResp: any = await openai.images.generate({
         model: renderModel,
@@ -407,13 +453,16 @@ async function handle(req: Request) {
 
       const bytes = Buffer.from(b64, "base64");
 
+      // Upload to blob
       const key = `renders/${tenantSlug}/${job.quoteLogId}-${Date.now()}.png`;
       const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
 
+      // Update quote log
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
 
+      // Emails
       try {
         const cfg = await getTenantEmailConfig(job.tenantId);
 
@@ -524,7 +573,7 @@ async function handle(req: Request) {
           // ignore
         }
       } catch {
-        // ignore email failures
+        // ignore email failures (render is still a success)
       }
 
       await markJobDone(job.id, "done", null);
@@ -562,12 +611,11 @@ async function handle(req: Request) {
   );
 }
 
-// ✅ Vercel Cron = GET
+// ✅ Vercel Cron typically uses GET. Support both.
 export async function GET(req: Request) {
-  return handle(req);
+  return handleCron(req);
 }
 
-// ✅ Manual / internal kick = POST
 export async function POST(req: Request) {
-  return handle(req);
+  return handleCron(req);
 }
