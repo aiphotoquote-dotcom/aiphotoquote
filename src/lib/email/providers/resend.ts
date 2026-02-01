@@ -2,20 +2,28 @@
 import { Resend } from "resend";
 import type { EmailProvider } from "./base";
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
+type ResendSendResponse =
+  | { data?: { id?: string } | null; error?: { message?: string } | string | null }
+  | { id?: string | null; error?: { message?: string } | string | null };
+
+function extractErrorMessage(err: any): string | null {
+  if (!err) return null;
+  if (typeof err === "string") return err;
+  if (typeof err?.message === "string" && err.message.trim()) return err.message.trim();
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
 }
 
 export function makeResendProvider(): EmailProvider {
-  const resend = new Resend(process.env.RESEND_API_KEY);
-
   return {
     key: "resend",
 
     async send({ tenantId, context, message }) {
       try {
-        const apiKey = safeTrim(process.env.RESEND_API_KEY);
+        const apiKey = process.env.RESEND_API_KEY?.trim();
         if (!apiKey) {
           return {
             ok: false,
@@ -26,113 +34,48 @@ export function makeResendProvider(): EmailProvider {
           };
         }
 
-        const from = safeTrim(message.from);
-        const subject = safeTrim(message.subject);
+        const resend = new Resend(apiKey);
 
-        const to = Array.isArray(message.to) ? message.to.map((x) => safeTrim(x)).filter(Boolean) : [];
-        const cc = Array.isArray(message.cc) ? message.cc.map((x) => safeTrim(x)).filter(Boolean) : undefined;
-        const bcc = Array.isArray(message.bcc) ? message.bcc.map((x) => safeTrim(x)).filter(Boolean) : undefined;
+        const replyTo = Array.isArray(message.replyTo)
+          ? message.replyTo.filter(Boolean)[0]
+          : message.replyTo || undefined;
 
-        const replyTo = Array.isArray(message.replyTo) ? safeTrim(message.replyTo[0]) || undefined : undefined;
-
-        if (!from) {
-          return {
-            ok: false,
-            provider: "resend",
-            providerMessageId: null,
-            error: "Missing from address",
-            meta: { tenantId, context },
-          };
-        }
-        if (!to.length) {
-          return {
-            ok: false,
-            provider: "resend",
-            providerMessageId: null,
-            error: "Missing to address",
-            meta: { tenantId, context },
-          };
-        }
-        if (!subject) {
-          return {
-            ok: false,
-            provider: "resend",
-            providerMessageId: null,
-            error: "Missing subject",
-            meta: { tenantId, context },
-          };
-        }
-        if (!safeTrim(message.html) && !safeTrim(message.text)) {
-          return {
-            ok: false,
-            provider: "resend",
-            providerMessageId: null,
-            error: "Missing email body (html or text)",
-            meta: { tenantId, context },
-          };
-        }
-
-        // Resend SDK responses can vary by version:
-        // - { id: "..." }
-        // - { data: { id: "..." }, error: null }
-        // - { data: null, error: { message: "...", ... } }
-        const out: any = await resend.emails.send({
-          from,
-          to,
-          cc,
-          bcc,
+        const out = (await resend.emails.send({
+          from: message.from,
+          to: message.to,
+          cc: message.cc,
+          bcc: message.bcc,
           replyTo,
-          subject,
+          subject: message.subject,
           html: message.html,
           text: message.text,
-        });
+        })) as ResendSendResponse;
 
-        const id =
-          safeTrim(out?.id) ||
-          safeTrim(out?.data?.id) ||
-          safeTrim(out?.data?.messageId) ||
-          safeTrim(out?.messageId);
-
-        const errMsg =
-          safeTrim(out?.error?.message) ||
-          safeTrim(out?.error) ||
-          safeTrim(out?.message) ||
-          "";
-
-        // If we have an explicit error, fail.
-        if (errMsg && !id) {
+        // ✅ Resend SDK commonly returns { data, error }
+        const errMsg = extractErrorMessage((out as any)?.error);
+        if (errMsg) {
           return {
             ok: false,
             provider: "resend",
             providerMessageId: null,
             error: errMsg,
-            meta: {
-              tenantId,
-              context,
-              resend: {
-                hasData: Boolean(out?.data),
-                hasError: Boolean(out?.error),
-              },
-            },
+            meta: { tenantId, context },
           };
         }
 
-        // If we have NO id, treat as failure (this is your current “ghost success” bug)
+        const id =
+          (out as any)?.data?.id ??
+          (out as any)?.id ??
+          null;
+
+        // ✅ If we didn’t get an ID, treat as failure (prevents “ok:true id:null” lying)
         if (!id) {
           return {
             ok: false,
             provider: "resend",
             providerMessageId: null,
-            error: "Resend returned no message id",
-            meta: {
-              tenantId,
-              context,
-              resend: {
-                keys: out && typeof out === "object" ? Object.keys(out).slice(0, 20) : [],
-                hasData: Boolean(out?.data),
-                hasError: Boolean(out?.error),
-              },
-            },
+            error: "Resend returned no message id (data.id missing).",
+            meta: { tenantId, context },
           };
         }
 
@@ -141,11 +84,7 @@ export function makeResendProvider(): EmailProvider {
           provider: "resend",
           providerMessageId: id,
           error: null,
-          meta: {
-            tenantId,
-            context,
-            resend: { idPresent: true },
-          },
+          meta: { tenantId, context },
         };
       } catch (e: any) {
         return {
