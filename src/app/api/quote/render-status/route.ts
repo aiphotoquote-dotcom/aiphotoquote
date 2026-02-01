@@ -11,15 +11,17 @@ export const dynamic = "force-dynamic";
 const Q = z.object({
   tenantSlug: z.string().min(3),
   quoteLogId: z.string().uuid(),
+  debug: z.boolean().optional(),
 });
 
-function json(data: any, status = 200) {
+function json(data: any, status = 200, headers?: Record<string, string>) {
   return NextResponse.json(data, {
     status,
     headers: {
       "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
       Pragma: "no-cache",
       Expires: "0",
+      ...(headers ?? {}),
     },
   });
 }
@@ -43,6 +45,7 @@ export async function GET(req: Request) {
   const parsed = Q.safeParse({
     tenantSlug: url.searchParams.get("tenantSlug"),
     quoteLogId: url.searchParams.get("quoteLogId"),
+    debug: url.searchParams.get("debug") === "1" || url.searchParams.get("debug") === "true",
   });
 
   if (!parsed.success) {
@@ -52,11 +55,14 @@ export async function GET(req: Request) {
     );
   }
 
-  const { tenantSlug, quoteLogId } = parsed.data;
+  const { tenantSlug, quoteLogId, debug } = parsed.data;
 
   try {
     const r = await db.execute(sql`
       select
+        t.id as tenant_id,
+        t.slug as tenant_slug,
+        q.id as quote_log_id,
         q.render_status,
         q.render_image_url,
         q.render_error
@@ -70,27 +76,69 @@ export async function GET(req: Request) {
     const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
     if (!row) {
-      return json({ ok: false, error: "NOT_FOUND", message: "Quote not found" }, 404);
+      return json(
+        {
+          ok: false,
+          error: "NOT_FOUND",
+          message: "Quote not found",
+          debug: debug
+            ? {
+                received: { tenantSlug, quoteLogId },
+              }
+            : undefined,
+        },
+        404
+      );
     }
 
+    const rawStatus = row.render_status;
     const imageUrl = row.render_image_url ? String(row.render_image_url) : null;
     const error = row.render_error ? String(row.render_error) : null;
 
-    let renderStatus = normalizeStatus(row.render_status);
+    let renderStatus = normalizeStatus(rawStatus);
 
     // ✅ Contract hardening:
     // If an image URL exists and we are not explicitly failed, treat it as rendered.
-    // This guarantees UI convergence even if render_status is stale/mismatched.
     if (imageUrl && renderStatus !== "failed") {
       renderStatus = "rendered";
     }
 
-    return json({
-      ok: true,
-      renderStatus,
-      imageUrl,
-      error,
-    });
+    const headers: Record<string, string> = {
+      "x-apq-tenant-slug": String(row.tenant_slug ?? ""),
+      "x-apq-tenant-id": String(row.tenant_id ?? ""),
+      "x-apq-quote-log-id": String(row.quote_log_id ?? ""),
+      "x-apq-render-status": String(renderStatus),
+      "x-apq-has-image-url": imageUrl ? "1" : "0",
+    };
+
+    return json(
+      {
+        ok: true,
+        renderStatus,
+        imageUrl,
+        error,
+        ...(debug
+          ? {
+              debug: {
+                received: { tenantSlug, quoteLogId },
+                matched: {
+                  tenantId: String(row.tenant_id ?? ""),
+                  tenantSlug: String(row.tenant_slug ?? ""),
+                  quoteLogId: String(row.quote_log_id ?? ""),
+                },
+                db: {
+                  render_status: rawStatus == null ? null : String(rawStatus),
+                  render_image_url_present: Boolean(imageUrl),
+                  render_image_url: imageUrl,
+                  render_error: error,
+                },
+              },
+            }
+          : {}),
+      },
+      200,
+      headers
+    );
   } catch (e: any) {
     return json(
       { ok: false, error: "INTERNAL", message: e?.message ?? String(e ?? "Unknown error") },
