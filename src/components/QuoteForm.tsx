@@ -162,6 +162,12 @@ function prettyCount(n: number) {
   return `${Math.round(n / 1000)}k`;
 }
 
+function isAbortError(e: any) {
+  const name = String(e?.name ?? "");
+  const msg = String(e?.message ?? "");
+  return name === "AbortError" || /aborted/i.test(msg);
+}
+
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false,
@@ -295,8 +301,16 @@ export default function QuoteForm({
 
     const url = `/api/quote/render-status?tenantSlug=${encodeURIComponent(tenantSlug)}&quoteLogId=${encodeURIComponent(qid)}`;
 
-    const res = await fetch(url, { method: "GET", cache: "no-store", signal: ac.signal as any });
-    const txt = await res.text();
+    let res: Response;
+    let txt = "";
+    try {
+      res = await fetch(url, { method: "GET", cache: "no-store", signal: ac.signal as any });
+      txt = await res.text();
+    } catch (e: any) {
+      // ✅ Abort is expected due to overlapping polls — do not surface to UI
+      if (isAbortError(e)) return;
+      throw e;
+    }
 
     let j: any = null;
     try {
@@ -312,6 +326,9 @@ export default function QuoteForm({
     const statusRaw = String(j?.renderStatus ?? j?.render_status ?? "").toLowerCase().trim();
     const imageUrl = (j?.imageUrl ?? j?.renderImageUrl ?? j?.render_image_url ?? null) as string | null;
     const err = (j?.error ?? j?.renderError ?? j?.render_error ?? null) as string | null;
+
+    // ✅ clear transient poll error if we got a valid response
+    if (renderError) setRenderError(null);
 
     if (statusRaw === "rendered") {
       if (!imageUrl) throw new Error("Render status is 'rendered' but no image url was returned.");
@@ -332,13 +349,23 @@ export default function QuoteForm({
       return;
     }
 
-    // queued/running/etc
     if (statusRaw === "running") {
       setRenderStatus("running");
-    } else {
-      // treat queued/not_requested as queued in UI
-      setRenderStatus("idle");
+      return;
     }
+
+    // ✅ IMPORTANT:
+    // The server normalizes queued -> idle.
+    // If we already requested a render for this quote, keep UI in "running"
+    // so the progress bar continues while the cron worker catches up.
+    const weRequestedThis = renderAttemptedForQuoteRef.current === qid;
+    if (weRequestedThis) {
+      setRenderStatus("running");
+      return;
+    }
+
+    // default fallback (no render requested / not opted-in etc)
+    setRenderStatus("idle");
   }
 
   function startRenderPolling(qid: string) {
@@ -346,14 +373,15 @@ export default function QuoteForm({
 
     // kick one immediately, then poll
     pollRenderStatusOnce(qid).catch((e: any) => {
-      // DO NOT flip to failed on transient polling issues.
-      // Keep the user in "Queued/Rendering" state and show a soft message.
+      if (isAbortError(e)) return;
+      // don't hard-fail the render for transient polling issues
       setRenderError(e?.message ?? "Temporary render status error");
     });
 
     renderPollTimerRef.current = window.setInterval(() => {
       pollRenderStatusOnce(qid).catch((e: any) => {
-        // keep polling through transient issues, but show latest message
+        if (isAbortError(e)) return;
+        // keep polling through transient issues, but don't spam / don't flip state
         setRenderError(e?.message ?? "Temporary render status error");
       });
     }, 3000);
@@ -873,19 +901,17 @@ export default function QuoteForm({
     }
   }
 
-  // ✅ enqueue render job, then poll status endpoint until done (NON-BLOCKING)
+  // ✅ enqueue render job once, then poll status endpoint until done
   async function startRenderOnce(qid: string) {
     if (renderAttemptedForQuoteRef.current === qid) return;
     renderAttemptedForQuoteRef.current = qid;
 
-    // show "Queued" immediately (idle == queued in UI)
-    setRenderStatus("idle");
+    // start progress immediately (queued/running are indistinguishable from the server because queued->idle)
+    setRenderStatus("running");
     setRenderError(null);
     setRenderImageUrl(null);
-    setRenderProgressPct(0);
 
     try {
-      // 1) enqueue (idempotent)
       const res = await fetch("/api/quote/render", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -904,21 +930,10 @@ export default function QuoteForm({
         throw new Error(j?.message || j?.error || `Render enqueue failed (HTTP ${res.status})`);
       }
 
-      // If API ever returns immediate rendered state, honor it
-      const st = String(j?.status ?? "").toLowerCase();
-      const immediateUrl = (j?.imageUrl ?? j?.renderImageUrl ?? null) as string | null;
-      if (st === "rendered" && immediateUrl) {
-        setRenderImageUrl(immediateUrl);
-        setRenderStatus("rendered");
-        setRenderError(null);
-        setRenderProgressPct(100);
-        return;
-      }
-
-      // 2) start polling in background until rendered/failed
+      // ✅ start polling and let cron finish whenever it finishes
       startRenderPolling(qid);
     } catch (e: any) {
-      // Hard failure only if enqueue truly failed.
+      if (isAbortError(e)) return;
       setRenderStatus("failed");
       setRenderError(e?.message ?? "Render failed");
       setRenderProgressPct(100);
@@ -932,7 +947,6 @@ export default function QuoteForm({
     if (!renderOptIn) return;
     if (!quoteLogId) return;
     if (mode !== "results") return; // ✅ do not render while QA is pending
-    if (renderAttemptedForQuoteRef.current === quoteLogId) return;
 
     startRenderOnce(quoteLogId);
 
