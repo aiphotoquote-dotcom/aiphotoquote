@@ -31,16 +31,22 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Prefer the *actual* request host over VERCEL_URL.
+ * VERCEL_URL can be a deployment URL that is protected (401), which breaks the kick.
+ */
 function getBaseUrl(req: Request) {
   const envBase = safeTrim(process.env.NEXT_PUBLIC_APP_URL) || safeTrim(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
 
-  const vercel = safeTrim(process.env.VERCEL_URL);
-  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
-
+  // Prefer host headers (public domain) before VERCEL_URL
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  const vercel = safeTrim(process.env.VERCEL_URL);
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   return "";
 }
@@ -87,27 +93,19 @@ async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; pr
 }
 
 /**
- * ✅ Immediate “kick” of the cron worker:
- * - Keeps cron architecture (DB queue + cron worker)
- * - But attempts to process right away so the user doesn't stare at "Queued"
- * - Hard-timeouts quickly so the API response remains fast
- *
- * NOTE: This returns diagnostics for debugging why jobs stay queued.
+ * ✅ Immediate “kick” of the cron worker.
+ * Hard timeout so we never hang the customer flow.
+ * Returns debug info so we can see if it actually hit the right URL and auth worked.
  */
 async function tryKickCronNow(req: Request) {
   const secret = safeTrim(process.env.CRON_SECRET);
-  if (!secret) {
-    return { attempted: false as const, ok: false as const, reason: "missing_cron_secret" as const, url: null as string | null, status: null as number | null };
-  }
+  if (!secret) return { attempted: false as const, ok: false, reason: "missing_cron_secret" as const };
 
   const baseUrl = getBaseUrl(req);
-  if (!baseUrl) {
-    return { attempted: false as const, ok: false as const, reason: "missing_base_url" as const, url: null as string | null, status: null as number | null };
-  }
+  if (!baseUrl) return { attempted: false as const, ok: false, reason: "missing_base_url" as const };
 
   const url = `${baseUrl}/api/cron/render?max=1`;
 
-  // Don't let this request hang the customer flow
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), 1750);
 
@@ -119,15 +117,30 @@ async function tryKickCronNow(req: Request) {
       signal: controller.signal,
     });
 
+    // Read a tiny bit for debugging (don’t throw if it fails)
+    let bodySnippet: string | null = null;
+    try {
+      const txt = await r.text();
+      bodySnippet = txt ? txt.slice(0, 200) : "";
+    } catch {
+      bodySnippet = null;
+    }
+
     return {
       attempted: true as const,
       ok: Boolean(r.ok),
-      reason: r.ok ? null : ("cron_http_error" as const),
+      reason: r.ok ? "ok" : "cron_http_error",
       url,
       status: r.status,
+      bodySnippet,
     };
-  } catch {
-    return { attempted: true as const, ok: false as const, reason: "cron_fetch_failed" as const, url, status: null as number | null };
+  } catch (e: any) {
+    return {
+      attempted: true as const,
+      ok: false,
+      reason: e?.name === "AbortError" ? "timeout" : "fetch_error",
+      url,
+    };
   } finally {
     clearTimeout(t);
   }
@@ -174,19 +187,15 @@ export async function POST(req: Request) {
     // If not opted-in, do not enqueue
     if (!q.renderOptIn) {
       return json(
-        { ok: true, quoteLogId, status: "not_requested", jobId: null, imageUrl: q.renderImageUrl ?? null, kick: null },
+        { ok: true, quoteLogId, status: "not_requested", jobId: null, imageUrl: q.renderImageUrl ?? null },
         200,
         debugId
       );
     }
 
-    // ✅ If an image URL exists, treat as rendered and never enqueue/stomp.
+    // If an image URL exists, treat as rendered and never enqueue/stomp.
     if (q.renderImageUrl) {
-      return json(
-        { ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl, kick: null },
-        200,
-        debugId
-      );
+      return json({ ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl }, 200, debugId);
     }
 
     // 3) Idempotency: if queued/running exists, return it
@@ -216,7 +225,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4) Enqueue job (prompt is a seed; cron builds canonical prompt from PCC)
+    // 4) Enqueue job
     const prompt = "queued_by_api_quote_render";
     const jobId = await enqueueRenderJob({ tenantId: tenant.id, quoteLogId, prompt });
 
