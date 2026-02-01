@@ -2,40 +2,53 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 /**
- * Protect ONLY routes that must require an authenticated Clerk session.
- * Public quote flow APIs (submit, render/start, blob upload, etc.) MUST remain public.
- *
- * This fixes: public client calling /api/render/start receiving 401 HTML instead of JSON.
+ * Explicitly define which routes REQUIRE auth
  */
 const isProtectedRoute = createRouteMatcher([
-  // UI
   "/admin(.*)",
   "/dashboard(.*)",
   "/onboarding(.*)",
   "/pcc(.*)",
-
-  // Private APIs (admin / internal tools)
   "/api/admin(.*)",
   "/api/pcc(.*)",
   "/api/tenant(.*)",
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) {
-    await auth.protect();
+/**
+ * Explicitly define PUBLIC routes
+ * (critical for AIaaS + customer quote flow)
+ */
+const publicRoutes = [
+  "/",
+  "/q(.*)",
+
+  // Quote flow APIs
+  "/api/quote/submit",
+  "/api/quote/render",
+  "/api/render/start",
+
+  // Cron is protected by CRON_SECRET, NOT Clerk
+  "/api/cron/render",
+];
+
+export default clerkMiddleware(
+  async (auth, req) => {
+    if (isProtectedRoute(req)) {
+      await auth.protect();
+    }
+  },
+  {
+    publicRoutes,
   }
-});
+);
 
 export const config = {
   matcher: [
-    // ✅ ONLY run middleware on protected routes.
-    // (Running it on all /api was causing 401 HTML responses for public endpoints.)
+    // Only run middleware where Clerk is relevant
     "/admin(.*)",
     "/dashboard(.*)",
     "/onboarding(.*)",
     "/pcc(.*)",
-    "/api/admin(.*)",
-    "/api/pcc(.*)",
-    "/api/tenant(.*)",
+    "/api/(.*)",
   ],
 };
