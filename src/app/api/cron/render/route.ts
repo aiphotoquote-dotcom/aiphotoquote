@@ -8,37 +8,27 @@ import { put } from "@vercel/blob";
 import { db } from "@/lib/db/client";
 import { decryptSecret } from "@/lib/crypto";
 
-// ✅ PCC + tenant overrides (model selection)
-import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
-import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
-import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
-
-// ✅ Render debug wiring (writes to output.render_debug fallback if columns don’t exist)
-import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
-import { setRenderDebug } from "@/lib/pcc/render/output";
-
-// ✅ Email abstraction (enterprise vs standard lives here — do NOT bypass)
 import { sendEmail } from "@/lib/email";
 import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteCustomer";
 import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
 
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
+import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-type JobRow = {
-  id: string;
-  tenant_id: string;
-  quote_log_id: string;
-  status: string;
-  prompt: string | null;
-};
 
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
   if (debugId) res.headers.set("x-debug-id", debugId);
   return res;
+}
+
+function safeErr(e: unknown) {
+  const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
+  return msg.slice(0, 2000);
 }
 
 function safeJsonParse(v: any) {
@@ -52,11 +42,9 @@ function safeJsonParse(v: any) {
   }
 }
 
-function safeName(name: string) {
-  return (name || "render")
-    .replace(/\s+/g, "-")
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .slice(0, 180);
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
 }
 
 function getBaseUrl(req: Request) {
@@ -73,503 +61,441 @@ function getBaseUrl(req: Request) {
   return "";
 }
 
-async function getTenantOpenAiKey(tenantId: string): Promise<string | null> {
-  const r = await db.execute(
-    sql`select openai_key_enc from tenant_secrets where tenant_id = ${tenantId}::uuid limit 1`
-  );
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const enc = row?.openai_key_enc ?? null;
-  if (!enc) return null;
-  return decryptSecret(enc);
+async function requireCronSecret(req: Request) {
+  const configured = String(process.env.CRON_SECRET ?? "").trim();
+  const auth = String(req.headers.get("authorization") ?? "").trim();
+
+  if (!configured) return { ok: true as const, mode: "no_secret_configured" as const };
+
+  const expected = `Bearer ${configured}`;
+  if (auth !== expected) return { ok: false as const, error: "UNAUTHORIZED" as const };
+
+  return { ok: true as const, mode: "header" as const };
 }
 
-/**
- * Claim exactly one queued job using SKIP LOCKED.
- */
-async function claimOneQueuedJob(): Promise<JobRow | null> {
+// Claim one job safely (SKIP LOCKED so concurrent crons don’t double-run)
+async function claimJob(max: number) {
   const r = await db.execute(sql`
-    with c as (
+    with picked as (
       select id
       from render_jobs
       where status = 'queued'
       order by created_at asc
+      limit ${max}
       for update skip locked
-      limit 1
     )
-    update render_jobs
-    set status = 'running',
-        started_at = coalesce(started_at, now())
-    where id in (select id from c)
-    returning id, tenant_id, quote_log_id, status, prompt
+    update render_jobs j
+    set status = 'running', started_at = now()
+    from picked
+    where j.id = picked.id
+    returning j.id, j.tenant_id, j.quote_log_id, j.prompt, j.created_at
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  if (!row) return null;
-
-  return {
-    id: String(row.id),
-    tenant_id: String(row.tenant_id),
-    quote_log_id: String(row.quote_log_id),
-    status: String(row.status),
-    prompt: row.prompt != null ? String(row.prompt) : null,
-  };
+  const rows: any[] = (r as any)?.rows ?? (Array.isArray(r) ? (r as any) : []);
+  return rows.map((x) => ({
+    id: String(x.id),
+    tenantId: String(x.tenant_id),
+    quoteLogId: String(x.quote_log_id),
+    prompt: String(x.prompt ?? ""),
+    createdAt: x.created_at,
+  }));
 }
 
-async function completeJob(args: { jobId: string; imageUrl: string | null; error: string | null }) {
+async function markJobDone(jobId: string, status: "done" | "failed", error?: string | null) {
   await db.execute(sql`
     update render_jobs
-    set
-      status = ${args.error ? "failed" : "rendered"},
-      image_url = ${args.imageUrl},
-      error = ${args.error},
-      completed_at = now()
-    where id = ${args.jobId}::uuid
+    set status = ${status}, finished_at = now(), error = ${error ?? null}
+    where id = ${jobId}::uuid
   `);
 }
 
-async function loadQuoteForRender(quoteLogId: string) {
+// Reads everything the worker needs in one shot
+async function loadRenderContext(tenantId: string, quoteLogId: string) {
   const r = await db.execute(sql`
-    select input, output, tenant_id
-    from quote_logs
-    where id = ${quoteLogId}::uuid
+    select
+      t.id as tenant_id,
+      t.slug as tenant_slug,
+      t.name as tenant_name,
+
+      ts.business_name,
+      ts.brand_logo_url,
+      ts.lead_to_email,
+      ts.rendering_enabled,
+      ts.rendering_style,
+      ts.rendering_notes,
+
+      sec.openai_key_enc,
+
+      q.id as quote_log_id,
+      q.input,
+      q.output,
+      q.render_opt_in
+    from tenants t
+    left join tenant_settings ts on ts.tenant_id = t.id
+    left join tenant_secrets sec on sec.tenant_id = t.id
+    left join quote_logs q on q.id = ${quoteLogId}::uuid
+    where t.id = ${tenantId}::uuid
     limit 1
   `);
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  if (!row) return null;
-
-  const input = safeJsonParse(row.input) ?? {};
-  const output = safeJsonParse(row.output) ?? {};
-
-  const images: string[] = Array.isArray(input?.images)
-    ? input.images.map((x: any) => x?.url).filter(Boolean)
-    : [];
-
-  // support both shapes (customer_context vs contact)
-  const cc = input?.customer_context ?? {};
-  const contact = input?.contact ?? {};
-  const customer = input?.customer ?? null;
-
-  const customerName =
-    String(customer?.name ?? cc?.name ?? contact?.name ?? "Customer").trim() || "Customer";
-  const customerEmail =
-    String(customer?.email ?? cc?.email ?? contact?.email ?? "").trim().toLowerCase() || "";
-  const customerPhone =
-    String(customer?.phone ?? cc?.phone ?? contact?.phone ?? "").trim() || "";
-
-  const estimateLow = typeof output?.estimate_low === "number" ? output.estimate_low : null;
-  const estimateHigh = typeof output?.estimate_high === "number" ? output.estimate_high : null;
-  const summary = typeof output?.summary === "string" ? output.summary : "";
-
-  return {
-    tenantId: String(row.tenant_id),
-    input,
-    output,
-    images,
-    customer: { name: customerName, email: customerEmail, phone: customerPhone },
-    estimateLow,
-    estimateHigh,
-    summary,
-  };
+  return row ?? null;
 }
 
-async function uploadRenderedPngToBlob(args: { pathname: string; bytes: Buffer }) {
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) throw new Error("Missing BLOB_READ_WRITE_TOKEN");
-
-  const res = await put(args.pathname, args.bytes, {
-    access: "public",
-    contentType: "image/png",
-    token,
-  });
-
-  return res.url;
-}
-
-async function generateRenderPngBytes(args: { openaiKey: string; prompt: string; model: string }) {
-  const openai = new OpenAI({ apiKey: args.openaiKey });
-
-  const img = await openai.images.generate({
-    model: args.model,
-    prompt: args.prompt,
-    size: "1024x1024",
-  } as any);
-
-  const first: any = (img as any)?.data?.[0] ?? null;
-  const b64 = first?.b64_json ? String(first.b64_json) : null;
-  const url = first?.url ? String(first.url) : null;
-
-  if (b64) return Buffer.from(b64, "base64");
-
-  if (url) {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`Failed to download OpenAI image url (HTTP ${r.status})`);
-    const ab = await r.arrayBuffer();
-    return Buffer.from(ab);
-  }
-
-  throw new Error("OpenAI image response missing b64_json/url");
-}
-
-/**
- * Merge render info into quote_logs.output.rendering
- * (portable: no render_* columns required)
- */
-async function mergeQuoteLogRendering(args: {
+async function updateQuoteRendered(args: {
+  tenantId: string;
   quoteLogId: string;
-  status: "rendered" | "failed";
-  imageUrl: string | null;
-  error: string | null;
+  imageUrl: string;
   prompt: string;
 }) {
-  const { quoteLogId, status, imageUrl, error, prompt } = args;
-
-  const r = await db.execute(sql`
-    select output
-    from quote_logs
-    where id = ${quoteLogId}::uuid
-    limit 1
-  `);
-
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const out = safeJsonParse(row?.output) ?? {};
-
-  const next = {
-    ...out,
-    rendering: {
-      requested: true,
-      status,
-      imageUrl,
-      prompt,
-      error,
-      renderedAt: new Date().toISOString(),
-    },
-  };
-
   await db.execute(sql`
     update quote_logs
-    set output = coalesce(output, '{}'::jsonb) || ${JSON.stringify(next)}::jsonb
-    where id = ${quoteLogId}::uuid
+    set
+      render_status = 'rendered',
+      render_image_url = ${args.imageUrl},
+      render_prompt = ${args.prompt},
+      render_error = null,
+      rendered_at = now()
+    where id = ${args.quoteLogId}::uuid
+      and tenant_id = ${args.tenantId}::uuid
   `);
 }
 
-/**
- * Determine effective render model:
- * tenant override > platform PCC > default
- */
-async function getEffectiveRenderModelForTenant(tenantId: string): Promise<string> {
-  const platform = await loadPlatformLlmConfig();
-
-  const tenantRow = await getTenantLlmOverrides(tenantId);
-  const tenant: TenantLlmOverrides | null = tenantRow
-    ? normalizeTenantOverrides({ models: tenantRow.models ?? {}, prompts: tenantRow.prompts ?? {} })
-    : null;
-
-  const merged = buildEffectiveLlmConfig({
-    platform,
-    industry: {},
-    tenant,
-  });
-
-  const m = String(merged?.effective?.models?.renderModel ?? "").trim();
-  return m || "gpt-image-1";
-}
-
-async function loadTenantBranding(tenantId: string) {
-  // Optional columns; safe if missing (won’t throw if column doesn’t exist? it WILL throw)
-  // So: read only the ones you KNOW exist, or wrap.
-  try {
-    const r = await db.execute(sql`
-      select business_name, brand_logo_url, lead_to_email
-      from tenant_settings
-      where tenant_id = ${tenantId}::uuid
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    return {
-      businessName: row?.business_name ?? null,
-      brandLogoUrl: row?.brand_logo_url ?? null,
-      leadToEmail: row?.lead_to_email ?? null,
-    };
-  } catch {
-    return { businessName: null, brandLogoUrl: null, leadToEmail: null };
-  }
-}
-
-/**
- * Send “render complete” emails via sendEmail abstraction.
- * This preserves enterprise vs standard routing.
- */
-async function sendRenderCompleteEmailsViaAbstraction(args: {
-  req: Request;
+async function updateQuoteFailed(args: {
   tenantId: string;
-  tenantSlug: string;
   quoteLogId: string;
-  renderImageUrl: string;
-  customer: { name: string; email: string; phone: string };
-  estimateLow: number | null;
-  estimateHigh: number | null;
-  summary: string;
+  prompt: string;
+  error: string;
 }) {
-  const cfg = await getTenantEmailConfig(args.tenantId);
-  const branding = await loadTenantBranding(args.tenantId);
-
-  const businessName = String(branding.businessName || cfg.businessName || "Your Business").trim();
-  const brandLogoUrl = branding.brandLogoUrl ?? null;
-
-  const baseUrl = getBaseUrl(args.req);
-  const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(args.tenantSlug)}` : null;
-  const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(args.quoteLogId)}` : null;
-
-  const result: any = {
-    configured: Boolean(cfg.fromEmail),
-    lead_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
-    customer_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
-  };
-
-  if (!cfg.fromEmail) return result;
-
-  // Lead
-  if (cfg.leadToEmail) {
-    try {
-      result.lead_render.attempted = true;
-
-      const htmlLead = renderLeadRenderCompleteEmailHTML({
-        businessName,
-        brandLogoUrl,
-        quoteLogId: args.quoteLogId,
-        tenantSlug: args.tenantSlug,
-        customerName: args.customer.name,
-        customerEmail: args.customer.email,
-        customerPhone: args.customer.phone,
-        renderImageUrl: args.renderImageUrl,
-        estimateLow: args.estimateLow,
-        estimateHigh: args.estimateHigh,
-        summary: args.summary,
-        adminQuoteUrl,
-      });
-
-      const r1 = await sendEmail({
-        tenantId: args.tenantId,
-        context: { type: "lead_render_complete", quoteLogId: args.quoteLogId },
-        message: {
-          from: cfg.fromEmail,
-          to: [cfg.leadToEmail],
-          replyTo: [cfg.leadToEmail],
-          subject: `Render complete — ${args.customer.name}`,
-          html: htmlLead,
-        },
-      });
-
-      result.lead_render.ok = r1.ok;
-      result.lead_render.id = r1.providerMessageId ?? null;
-      result.lead_render.error = r1.error ?? null;
-    } catch (e: any) {
-      result.lead_render.error = e?.message ?? String(e);
-    }
-  }
-
-  // Customer
-  if (args.customer.email) {
-    try {
-      result.customer_render.attempted = true;
-
-      const htmlCust = renderCustomerRenderCompleteEmailHTML({
-        businessName,
-        brandLogoUrl,
-        customerName: args.customer.name,
-        quoteLogId: args.quoteLogId,
-        renderImageUrl: args.renderImageUrl,
-        estimateLow: args.estimateLow,
-        estimateHigh: args.estimateHigh,
-        summary: args.summary,
-        publicQuoteUrl,
-        replyToEmail: cfg.leadToEmail ?? null,
-      });
-
-      const r2 = await sendEmail({
-        tenantId: args.tenantId,
-        context: { type: "customer_render_complete", quoteLogId: args.quoteLogId },
-        message: {
-          from: cfg.fromEmail,
-          to: [args.customer.email],
-          replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
-          subject: `Your concept render is ready — ${businessName}`,
-          html: htmlCust,
-        },
-      });
-
-      result.customer_render.ok = r2.ok;
-      result.customer_render.id = r2.providerMessageId ?? null;
-      result.customer_render.error = r2.error ?? null;
-    } catch (e: any) {
-      result.customer_render.error = e?.message ?? String(e);
-    }
-  }
-
-  return result;
-}
-
-function assertCronAuth(req: Request) {
-  const secret = process.env.CRON_SECRET || "";
-  if (!secret) return { ok: true as const, mode: "no_secret_configured" as const };
-
-  const h = req.headers;
-  const token = h.get("x-cron-secret") || h.get("authorization")?.replace(/^Bearer\s+/i, "") || "";
-
-  if (token && token === secret) return { ok: true as const, mode: "header" as const };
-
-  const url = new URL(req.url);
-  const qs = url.searchParams.get("secret") || "";
-  if (qs && qs === secret) return { ok: true as const, mode: "query" as const };
-
-  return { ok: false as const };
+  await db.execute(sql`
+    update quote_logs
+    set
+      render_status = 'failed',
+      render_prompt = ${args.prompt},
+      render_error = ${args.error}
+    where id = ${args.quoteLogId}::uuid
+      and tenant_id = ${args.tenantId}::uuid
+  `);
 }
 
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
 
-  const auth = assertCronAuth(req);
+  const auth = await requireCronSecret(req);
   if (!auth.ok) return json({ ok: false, error: "UNAUTHORIZED" }, 401, debugId);
 
-  const debugEnabled = isRenderDebugEnabled();
+  const url = new URL(req.url);
+  const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  const u = new URL(req.url);
-  const max = Math.max(1, Math.min(5, Number(u.searchParams.get("max") || "1")));
+  // Claim jobs
+  const claimed = await claimJob(max);
+  if (!claimed.length) {
+    return json(
+      { ok: true, authMode: auth.mode, claimed: 0, processed: [], durationMs: Date.now() - startedAt },
+      200,
+      debugId
+    );
+  }
 
   const processed: any[] = [];
-  let claimed = 0;
 
-  for (let i = 0; i < max; i++) {
-    const job = await claimOneQueuedJob();
-    if (!job) break;
-
-    claimed++;
-    const jobStart = Date.now();
-
-    let imageUrl: string | null = null;
+  for (const job of claimed) {
+    const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
-      const quote = await loadQuoteForRender(job.quote_log_id);
-      if (!quote) throw new Error("QUOTE_LOG_NOT_FOUND");
+      // Load tenant + quote context
+      const ctx = await loadRenderContext(job.tenantId, job.quoteLogId);
+      if (!ctx) throw new Error("Missing tenant/quote context for job.");
 
-      if (String(quote.tenantId) !== String(job.tenant_id)) throw new Error("TENANT_MISMATCH");
-      if (!quote.images.length) throw new Error("NO_IMAGES_ON_QUOTE_INPUT");
+      const tenantSlug = String(ctx.tenant_slug ?? "");
+      const tenantName = String(ctx.tenant_name ?? "Your Business");
 
-      const openaiKey = await getTenantOpenAiKey(job.tenant_id);
-      if (!openaiKey) throw new Error("OPENAI_KEY_MISSING");
+      const renderingEnabled = ctx.rendering_enabled;
+      if (renderingEnabled === false) {
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: "Rendering disabled by tenant settings.",
+        });
+        await markJobDone(job.id, "failed", "Tenant disabled rendering.");
+        processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
+        continue;
+      }
 
-      const prompt = job.prompt || "";
-      if (!prompt) throw new Error("JOB_PROMPT_EMPTY");
+      const inputAny: any = safeJsonParse(ctx.input) ?? {};
+      const outputAny: any = safeJsonParse(ctx.output) ?? {};
 
-      const renderModel = await getEffectiveRenderModelForTenant(job.tenant_id);
+      const optIn = Boolean(ctx.render_opt_in) || Boolean(inputAny?.render_opt_in) || Boolean(inputAny?.customer_context?.render_opt_in);
+      if (!optIn) {
+        await markJobDone(job.id, "done", null);
+        processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
+        continue;
+      }
 
-      // ✅ Write debug proof (portable: output.render_debug fallback)
+      const images = Array.isArray(inputAny?.images) ? inputAny.images : [];
+      if (!images.length) {
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: "No images stored on quote.",
+        });
+        await markJobDone(job.id, "failed", "No images.");
+        processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
+        continue;
+      }
+
+      // OpenAI key
+      const enc = ctx.openai_key_enc;
+      if (!enc) throw new Error("Missing tenant OpenAI key (tenant_secrets.openai_key_enc).");
+      const apiKey = decryptSecret(String(enc));
+      if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
+
+      // Build prompt/model from PCC (single source of truth)
+      const pcc = await loadPlatformLlmConfig();
+      const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
+
+      const tenantStyleKey = safeTrim(ctx.rendering_style) || "photoreal";
+      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || "";
+
+      const presets = (pcc?.prompts?.renderStylePresets ?? {}) as any;
+      const presetText =
+        tenantStyleKey === "clean_oem"
+          ? safeTrim(presets.clean_oem)
+          : tenantStyleKey === "custom"
+            ? safeTrim(presets.custom)
+            : safeTrim(presets.photoreal);
+
+      const styleText =
+        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+
+      const renderPromptPreamble = safeTrim(pcc?.prompts?.renderPromptPreamble) || "";
+
+      const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
+      const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
+      const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
+
+      const renderPromptTemplate =
+        safeTrim(pcc?.prompts?.renderPromptTemplate) ||
+        [
+          "{renderPromptPreamble}",
+          "Generate a realistic 'after' concept rendering based on the customer's photos.",
+          "Do NOT add text or watermarks.",
+          "Style: {style}",
+          "{serviceTypeLine}",
+          "{summaryLine}",
+          "{customerNotesLine}",
+          "{tenantRenderNotesLine}",
+        ].join("\n");
+
+      const prompt = renderPromptTemplate
+        .split("{renderPromptPreamble}").join(renderPromptPreamble)
+        .split("{style}").join(styleText)
+        .split("{serviceTypeLine}").join(serviceType ? `Service type: ${serviceType}` : "")
+        .split("{summaryLine}").join(summary ? `Estimate summary context: ${summary}` : "")
+        .split("{customerNotesLine}").join(customerNotes ? `Customer notes: ${customerNotes}` : "")
+        .split("{tenantRenderNotesLine}").join(tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "")
+        .split("\n")
+        .map((l) => l.trimEnd())
+        .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
+        .join("\n")
+        .trim();
+
+      // Debug payload (stored ONLY in output.render_debug)
+      const debugEnabled = isRenderDebugEnabled();
       if (debugEnabled) {
-        const dbg = buildRenderDebugPayload({
-          debugId: `cron_${debugId}`,
+        const renderDebug = buildRenderDebugPayload({
+          debugId: jobDebugId,
           renderModel,
-          tenantStyleKey: "",
-          styleText: "",
-          renderPromptPreamble: "",
-          renderPromptTemplate: "",
+          tenantStyleKey,
+          styleText,
+          renderPromptPreamble,
+          renderPromptTemplate,
           finalPrompt: prompt,
-          serviceType: "",
-          summary: quote.summary || "",
-          customerNotes: "",
-          tenantRenderNotes: "",
-          images: quote.images.map((u) => ({ url: u })),
+          serviceType,
+          summary,
+          customerNotes,
+          tenantRenderNotes,
+          images,
         });
 
+        renderDebug.env = {
+          PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
+          VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
+          VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
+        };
+
         try {
-          await setRenderDebug({
-            db: db as any,
-            quoteLogId: job.quote_log_id,
-            tenantId: job.tenant_id,
-            debug: dbg,
-          });
+          await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
         } catch {
-          // best-effort only
+          // debug should never break rendering
         }
       }
 
-      const pngBytes = await generateRenderPngBytes({ openaiKey, prompt, model: renderModel });
-
-      const pathname = `renders/${safeName(`render-${job.quote_log_id}`)}-${Date.now()}.png`;
-      imageUrl = await uploadRenderedPngToBlob({ pathname, bytes: pngBytes });
-
-      await completeJob({ jobId: job.id, imageUrl, error: null });
-
-      await mergeQuoteLogRendering({
-        quoteLogId: job.quote_log_id,
-        status: "rendered",
-        imageUrl,
-        error: null,
+      // Generate image
+      const openai = new OpenAI({ apiKey });
+      const imgResp: any = await openai.images.generate({
+        model: renderModel,
         prompt,
+        size: "1024x1024",
       });
 
-      // tenant slug
-      const tenantSlugRow = await db.execute(sql`
-        select slug from tenants where id = ${job.tenant_id}::uuid limit 1
-      `);
-      const t: any =
-        (tenantSlugRow as any)?.rows?.[0] ?? (Array.isArray(tenantSlugRow) ? (tenantSlugRow as any)[0] : null);
-      const tenantSlug = t?.slug ? String(t.slug) : "tenant";
+      const b64: string | undefined = imgResp?.data?.[0]?.b64_json;
+      if (!b64) throw new Error("Image generation returned no b64_json.");
 
-      // ✅ Emails via abstraction (preserves enterprise/standard)
-      const emailRes = await sendRenderCompleteEmailsViaAbstraction({
-        req,
-        tenantId: job.tenant_id,
-        tenantSlug,
-        quoteLogId: job.quote_log_id,
-        renderImageUrl: imageUrl,
-        customer: quote.customer,
-        estimateLow: quote.estimateLow,
-        estimateHigh: quote.estimateHigh,
-        summary: quote.summary,
-      });
+      const bytes = Buffer.from(b64, "base64");
 
-      processed.push({
-        jobId: job.id,
-        quoteLogId: job.quote_log_id,
-        status: "rendered",
-        imageUrl,
-        email: emailRes,
-        durationMs: Date.now() - jobStart,
-      });
+      // Upload to blob
+      const key = `renders/${tenantSlug}/${job.quoteLogId}-${Date.now()}.png`;
+      const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
+      const imageUrl = blob?.url;
+      if (!imageUrl) throw new Error("Blob upload returned no url.");
+
+      // Update quote log
+      await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
+
+      // Emails (enterprise/standard stays intact via sendEmail + getTenantEmailConfig)
+      try {
+        const cfg = await getTenantEmailConfig(job.tenantId);
+
+        const businessName = (cfg.businessName || ctx.business_name || tenantName || "Your Business").trim();
+        const brandLogoUrl = ctx.brand_logo_url ?? null;
+
+        const customer = inputAny?.customer ?? inputAny?.contact ?? null;
+        const customerName = String(customer?.name ?? "Customer").trim();
+        const customerEmail = String(customer?.email ?? "").trim().toLowerCase();
+        const customerPhone = String(customer?.phone ?? "").trim();
+
+        const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
+        const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
+
+        const baseUrl = getBaseUrl(req);
+        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
+        const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(job.quoteLogId)}` : null;
+
+        const renderEmailResult: any = {
+          lead_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
+          customer_render: { attempted: false, ok: false, id: null as string | null, error: null as string | null },
+        };
+
+        if (cfg.fromEmail && cfg.leadToEmail) {
+          try {
+            renderEmailResult.lead_render.attempted = true;
+
+            const htmlLead = renderLeadRenderCompleteEmailHTML({
+              businessName,
+              brandLogoUrl,
+              quoteLogId: job.quoteLogId,
+              tenantSlug,
+              customerName,
+              customerEmail,
+              customerPhone,
+              renderImageUrl: imageUrl,
+              estimateLow,
+              estimateHigh,
+              summary,
+              adminQuoteUrl,
+            });
+
+            const r1 = await sendEmail({
+              tenantId: job.tenantId,
+              context: { type: "lead_render_complete", quoteLogId: job.quoteLogId },
+              message: {
+                from: cfg.fromEmail,
+                to: [cfg.leadToEmail],
+                replyTo: [cfg.leadToEmail],
+                subject: `Render complete — ${customerName}`,
+                html: htmlLead,
+              },
+            });
+
+            renderEmailResult.lead_render.ok = r1.ok;
+            renderEmailResult.lead_render.id = r1.providerMessageId ?? null;
+            renderEmailResult.lead_render.error = r1.error ?? null;
+          } catch (e: any) {
+            renderEmailResult.lead_render.error = e?.message ?? String(e);
+          }
+        }
+
+        if (cfg.fromEmail && customerEmail) {
+          try {
+            renderEmailResult.customer_render.attempted = true;
+
+            const htmlCust = renderCustomerRenderCompleteEmailHTML({
+              businessName,
+              brandLogoUrl,
+              customerName,
+              quoteLogId: job.quoteLogId,
+              renderImageUrl: imageUrl,
+              estimateLow,
+              estimateHigh,
+              summary,
+              publicQuoteUrl,
+              replyToEmail: cfg.leadToEmail ?? null,
+            });
+
+            const r2 = await sendEmail({
+              tenantId: job.tenantId,
+              context: { type: "customer_render_complete", quoteLogId: job.quoteLogId },
+              message: {
+                from: cfg.fromEmail,
+                to: [customerEmail],
+                replyTo: cfg.leadToEmail ? [cfg.leadToEmail] : undefined,
+                subject: `Your concept render is ready — ${businessName}`,
+                html: htmlCust,
+              },
+            });
+
+            renderEmailResult.customer_render.ok = r2.ok;
+            renderEmailResult.customer_render.id = r2.providerMessageId ?? null;
+            renderEmailResult.customer_render.error = r2.error ?? null;
+          } catch (e: any) {
+            renderEmailResult.customer_render.error = e?.message ?? String(e);
+          }
+        }
+
+        try {
+          await setRenderEmailResult({
+            db: db as any,
+            quoteLogId: job.quoteLogId,
+            tenantId: job.tenantId,
+            emailResult: renderEmailResult,
+          });
+        } catch {
+          // ignore
+        }
+      } catch {
+        // ignore email failures (render is still a success)
+      }
+
+      await markJobDone(job.id, "done", null);
+      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl });
     } catch (e: any) {
-      const errMsg = e?.message ?? String(e);
+      const msg = safeErr(e);
 
       try {
-        await completeJob({ jobId: job.id, imageUrl: null, error: errMsg });
-      } catch {}
-
-      try {
-        await mergeQuoteLogRendering({
-          quoteLogId: job.quote_log_id,
-          status: "failed",
-          imageUrl: null,
-          error: errMsg,
-          prompt: job.prompt || "",
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: msg,
         });
-      } catch {}
+      } catch {
+        // ignore
+      }
 
-      processed.push({
-        jobId: job.id,
-        quoteLogId: job.quote_log_id,
-        status: "failed",
-        error: errMsg,
-        durationMs: Date.now() - jobStart,
-      });
+      await markJobDone(job.id, "failed", msg);
+      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: msg });
     }
   }
 
   return json(
     {
       ok: true,
-      authMode: (auth as any).mode ?? "unknown",
-      claimed,
+      authMode: auth.mode,
+      claimed: claimed.length,
       processed,
       durationMs: Date.now() - startedAt,
     },
