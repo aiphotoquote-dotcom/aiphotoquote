@@ -5,6 +5,15 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function safeStr(v: any, max = 4000) {
+  try {
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    return s.length > max ? s.slice(0, max) + "…(truncated)" : s;
+  } catch {
+    return String(v ?? "");
+  }
+}
+
 function getStatusCode(e: any): number | null {
   const s =
     e?.statusCode ??
@@ -43,13 +52,9 @@ function isDomainNotVerifiedError(e: any): boolean {
 }
 
 function getFallbackFrom(): string | null {
-  // Configure ONE of these in Vercel env (Production):
-  // - RESEND_FALLBACK_FROM="AI Photo Quote <notifications@aiphotoquote.com>"
-  // - PLATFORM_FROM_EMAIL="AI Photo Quote <notifications@aiphotoquote.com>"
   const raw =
     (process.env.RESEND_FALLBACK_FROM ?? "").trim() ||
     (process.env.PLATFORM_FROM_EMAIL ?? "").trim();
-
   return raw || null;
 }
 
@@ -60,6 +65,7 @@ export function makeResendProvider(): EmailProvider {
     key: "resend",
 
     async send({ tenantId, context, message }) {
+      // Hard preflight (prevents "fake ok")
       if (!process.env.RESEND_API_KEY?.trim()) {
         return {
           ok: false,
@@ -69,17 +75,44 @@ export function makeResendProvider(): EmailProvider {
           meta: { tenantId, context },
         };
       }
+      if (!message?.from?.trim()) {
+        return {
+          ok: false,
+          provider: "resend",
+          providerMessageId: null,
+          error: "Missing message.from",
+          meta: { tenantId, context },
+        };
+      }
+      if (!Array.isArray(message?.to) || message.to.length === 0) {
+        return {
+          ok: false,
+          provider: "resend",
+          providerMessageId: null,
+          error: "Missing message.to",
+          meta: { tenantId, context },
+        };
+      }
+      if (!message?.subject?.trim()) {
+        return {
+          ok: false,
+          provider: "resend",
+          providerMessageId: null,
+          error: "Missing message.subject",
+          meta: { tenantId, context },
+        };
+      }
 
       const replyTo = Array.isArray(message.replyTo) ? message.replyTo[0] : undefined;
 
-      const backoffs = [350, 900, 1800]; // only for 429
       const fallbackFrom = getFallbackFrom();
+      const backoffs = [350, 900, 1800]; // for 429 only
 
-      async function attemptSend(fromOverride?: string) {
-        const from = fromOverride ?? message.from;
+      async function rawSend(fromOverride?: string) {
+        const fromUsed = fromOverride ?? message.from;
 
-        const out = await resend.emails.send({
-          from,
+        const payload: any = {
+          from: fromUsed,
           to: message.to,
           cc: message.cc,
           bcc: message.bcc,
@@ -87,63 +120,87 @@ export function makeResendProvider(): EmailProvider {
           subject: message.subject,
           html: message.html,
           text: message.text,
-        });
+        };
 
-        return out;
+        const out = await resend.emails.send(payload);
+        const id = (out as any)?.id ?? null;
+
+        // ✅ IMPORTANT: Resend success MUST include an id
+        if (!id) {
+          // Log for Vercel Function Logs
+          console.error("[email][resend] Missing id from Resend response", {
+            tenantId,
+            context,
+            fromRequested: message.from,
+            fromUsed,
+            to: message.to,
+            subject: message.subject,
+            out: safeStr(out),
+          });
+
+          throw new Error(`RESEND_NO_MESSAGE_ID: ${safeStr(out) || "(empty response)"}`);
+        }
+
+        return { id: String(id), out };
       }
 
-      // 1) First attempt: requested sender
-      // 2) If domain not verified: retry once with fallback sender (if configured)
-      // 3) If rate limited: retry with backoff (still honoring requested sender unless we switched to fallback)
-
-      let lastErr: any = null;
-
-      // helper that performs 429 retries around a single send function
-      async function sendWith429Retries(sendFn: () => Promise<any>) {
+      async function sendWith429Retries(fn: () => Promise<{ id: string; out: any }>) {
         for (let attempt = 0; attempt <= backoffs.length; attempt++) {
           try {
-            const out = await sendFn();
-            return { out, attempt };
+            const res = await fn();
+            return { ...res, attempt };
           } catch (e: any) {
-            lastErr = e;
-
             if (!isRateLimitError(e)) throw e;
 
             if (attempt < backoffs.length) {
               const retryAfter = getRetryAfterMs(e);
               const waitMs = retryAfter ?? backoffs[attempt];
               const jitter = Math.floor(Math.random() * 150);
+              console.warn("[email][resend] 429 rate limit, retrying", {
+                tenantId,
+                context,
+                attempt,
+                waitMs,
+                status: getStatusCode(e),
+                message: String(e?.message ?? ""),
+              });
               await sleep(waitMs + jitter);
               continue;
             }
-
             throw e;
           }
         }
-
-        throw lastErr ?? new Error("Unknown Resend error");
+        // unreachable
+        throw new Error("RESEND_UNKNOWN_RETRY_STATE");
       }
 
+      // Attempt 1: requested sender
       try {
-        const { out, attempt } = await sendWith429Retries(() => attemptSend());
-
+        const { id, attempt } = await sendWith429Retries(() => rawSend());
         return {
           ok: true,
           provider: "resend",
-          providerMessageId: (out as any)?.id ?? null,
+          providerMessageId: id,
           error: null,
           meta: { tenantId, context, attempt, fromUsed: message.from },
         };
       } catch (e1: any) {
-        // If the tenant domain isn't verified, retry using platform sender (one time).
+        // Fallback if tenant domain not verified
         if (isDomainNotVerifiedError(e1) && fallbackFrom) {
           try {
-            const { out, attempt } = await sendWith429Retries(() => attemptSend(fallbackFrom));
+            console.warn("[email][resend] Domain not verified, falling back to platform sender", {
+              tenantId,
+              context,
+              fromRequested: message.from,
+              fallbackFrom,
+              message: String(e1?.message ?? ""),
+            });
 
+            const { id, attempt } = await sendWith429Retries(() => rawSend(fallbackFrom));
             return {
               ok: true,
               provider: "resend",
-              providerMessageId: (out as any)?.id ?? null,
+              providerMessageId: id,
               error: null,
               meta: {
                 tenantId,
@@ -155,23 +212,35 @@ export function makeResendProvider(): EmailProvider {
               },
             };
           } catch (e2: any) {
+            console.error("[email][resend] Fallback send failed", {
+              tenantId,
+              context,
+              fromRequested: message.from,
+              fallbackFrom,
+              status: getStatusCode(e2),
+              message: String(e2?.message ?? ""),
+            });
+
             return {
               ok: false,
               provider: "resend",
               providerMessageId: null,
               error: e2?.message ?? String(e2),
-              meta: {
-                tenantId,
-                context,
-                status: getStatusCode(e2),
-                fromRequested: message.from,
-                fromTriedFallback: fallbackFrom,
-              },
+              meta: { tenantId, context, status: getStatusCode(e2), fromRequested: message.from, fromUsed: fallbackFrom },
             };
           }
         }
 
-        // non-fallback path
+        // Normal failure
+        console.error("[email][resend] Send failed", {
+          tenantId,
+          context,
+          status: getStatusCode(e1),
+          message: String(e1?.message ?? ""),
+          fromUsed: message.from,
+          to: message.to,
+        });
+
         return {
           ok: false,
           provider: "resend",
