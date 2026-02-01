@@ -61,6 +61,7 @@ function getBaseUrl(req: Request) {
   return "";
 }
 
+// ✅ CRON protection (new secret). If CRON_SECRET is unset, allow (dev convenience).
 async function requireCronSecret(req: Request) {
   const configured = String(process.env.CRON_SECRET ?? "").trim();
   const auth = String(req.headers.get("authorization") ?? "").trim();
@@ -73,7 +74,7 @@ async function requireCronSecret(req: Request) {
   return { ok: true as const, mode: "header" as const };
 }
 
-// Claim one job safely (SKIP LOCKED so concurrent crons don’t double-run)
+// Claim jobs safely (SKIP LOCKED prevents double-run across concurrent cron executions)
 async function claimJob(max: number) {
   const r = await db.execute(sql`
     with picked as (
@@ -142,12 +143,7 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
   return row ?? null;
 }
 
-async function updateQuoteRendered(args: {
-  tenantId: string;
-  quoteLogId: string;
-  imageUrl: string;
-  prompt: string;
-}) {
+async function updateQuoteRendered(args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
   await db.execute(sql`
     update quote_logs
     set
@@ -161,12 +157,7 @@ async function updateQuoteRendered(args: {
   `);
 }
 
-async function updateQuoteFailed(args: {
-  tenantId: string;
-  quoteLogId: string;
-  prompt: string;
-  error: string;
-}) {
+async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; prompt: string; error: string }) {
   await db.execute(sql`
     update quote_logs
     set
@@ -199,6 +190,7 @@ export async function POST(req: Request) {
   }
 
   const processed: any[] = [];
+  const debugEnabled = isRenderDebugEnabled();
 
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
@@ -227,7 +219,11 @@ export async function POST(req: Request) {
       const inputAny: any = safeJsonParse(ctx.input) ?? {};
       const outputAny: any = safeJsonParse(ctx.output) ?? {};
 
-      const optIn = Boolean(ctx.render_opt_in) || Boolean(inputAny?.render_opt_in) || Boolean(inputAny?.customer_context?.render_opt_in);
+      const optIn =
+        Boolean(ctx.render_opt_in) ||
+        Boolean(inputAny?.render_opt_in) ||
+        Boolean(inputAny?.customer_context?.render_opt_in);
+
       if (!optIn) {
         await markJobDone(job.id, "done", null);
         processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
@@ -291,57 +287,47 @@ export async function POST(req: Request) {
         ].join("\n");
 
       const prompt = renderPromptTemplate
-        .split("{renderPromptPreamble}").join(renderPromptPreamble)
-        .split("{style}").join(styleText)
-        .split("{serviceTypeLine}").join(serviceType ? `Service type: ${serviceType}` : "")
-        .split("{summaryLine}").join(summary ? `Estimate summary context: ${summary}` : "")
-        .split("{customerNotesLine}").join(customerNotes ? `Customer notes: ${customerNotes}` : "")
-        .split("{tenantRenderNotesLine}").join(tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "")
+        .split("{renderPromptPreamble}")
+        .join(renderPromptPreamble)
+        .split("{style}")
+        .join(styleText)
+        .split("{serviceTypeLine}")
+        .join(serviceType ? `Service type: ${serviceType}` : "")
+        .split("{summaryLine}")
+        .join(summary ? `Estimate summary context: ${summary}` : "")
+        .split("{customerNotesLine}")
+        .join(customerNotes ? `Customer notes: ${customerNotes}` : "")
+        .split("{tenantRenderNotesLine}")
+        .join(tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "")
         .split("\n")
         .map((l) => l.trimEnd())
         .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
         .join("\n")
         .trim();
 
-      // Debug payload (stored ONLY in output.render_debug)
-      const debugEnabled = isRenderDebugEnabled();
+      // ✅ Debug payload (stored ONLY in output.render_debug) — fixed: single variable + env included safely
       if (debugEnabled) {
-        const renderDebug = buildRenderDebugPayload({
-          debugId: jobDebugId,
-          renderModel,
-          tenantStyleKey,
-          styleText,
-          renderPromptPreamble,
-          renderPromptTemplate,
-          finalPrompt: prompt,
-          serviceType,
-          summary,
-          customerNotes,
-          tenantRenderNotes,
-          images,
-        });
-
-        const renderDebug = {
-  ...buildRenderDebugPayload({
-    debugId,
-    renderModel,
-    tenantStyleKey,
-    styleText,
-    renderPromptPreamble,
-    renderPromptTemplate,
-    finalPrompt: prompt,
-    serviceType,
-    summary,
-    customerNotes,
-    tenantRenderNotes,
-    images,
-  }),
-  env: {
-    PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
-    VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
-    VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
-  },
-};
+        const renderDebug: any = {
+          ...buildRenderDebugPayload({
+            debugId: jobDebugId,
+            renderModel,
+            tenantStyleKey,
+            styleText,
+            renderPromptPreamble,
+            renderPromptTemplate,
+            finalPrompt: prompt,
+            serviceType,
+            summary,
+            customerNotes,
+            tenantRenderNotes,
+            images,
+          }),
+          env: {
+            PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
+            VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
+            VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
+          },
+        };
 
         try {
           await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
