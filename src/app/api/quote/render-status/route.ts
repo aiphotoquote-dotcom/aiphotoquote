@@ -29,18 +29,45 @@ function json(data: any, status = 200, headers?: Record<string, string>) {
 function normalizeStatus(raw: unknown): "idle" | "running" | "rendered" | "failed" {
   const s = String(raw ?? "").toLowerCase().trim();
 
-  // treat not_requested / queued / empty as “idle” (queued UI)
   if (!s || s === "not_requested" || s === "queued") return "idle";
   if (s === "running") return "running";
   if (s === "rendered") return "rendered";
   if (s === "failed") return "failed";
 
-  // anything else: be conservative
   return "idle";
 }
 
 function isUuidLike(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+async function loadLatestRenderJob(tenantId: string, quoteLogId: string) {
+  const r = await db.execute(sql`
+    select
+      id,
+      status,
+      created_at,
+      started_at,
+      finished_at,
+      error
+    from render_jobs
+    where tenant_id = ${tenantId}::uuid
+      and quote_log_id = ${quoteLogId}::uuid
+    order by created_at desc
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  if (!row) return null;
+
+  return {
+    id: String(row.id),
+    status: String(row.status ?? ""),
+    createdAt: row.created_at ?? null,
+    startedAt: row.started_at ?? null,
+    finishedAt: row.finished_at ?? null,
+    error: row.error ? String(row.error) : null,
+  };
 }
 
 export async function GET(req: Request) {
@@ -64,9 +91,6 @@ export async function GET(req: Request) {
   try {
     const tenantIsUuid = isUuidLike(tenantSlug);
 
-    // ✅ IMPORTANT: do NOT use OR branches that include ${tenantSlug}::uuid
-    // when tenantSlug might be a non-uuid string (e.g. "maggio-upholstery").
-    // Postgres may attempt the cast even if the branch would evaluate false.
     const r = tenantIsUuid
       ? await db.execute(sql`
           select
@@ -116,25 +140,34 @@ export async function GET(req: Request) {
       );
     }
 
+    const tenantId = String(row.tenant_id ?? "");
     const rawStatus = row.render_status;
     const imageUrl = row.render_image_url ? String(row.render_image_url) : null;
     const error = row.render_error ? String(row.render_error) : null;
 
     let renderStatus = normalizeStatus(rawStatus);
 
-    // ✅ Contract hardening:
-    // If an image URL exists and we are not explicitly failed, treat it as rendered.
+    // ✅ Contract hardening: if imageUrl exists and not failed, treat as rendered.
     if (imageUrl && renderStatus !== "failed") {
       renderStatus = "rendered";
     }
 
     const headers: Record<string, string> = {
       "x-apq-tenant-slug": String(row.tenant_slug ?? ""),
-      "x-apq-tenant-id": String(row.tenant_id ?? ""),
+      "x-apq-tenant-id": tenantId,
       "x-apq-quote-log-id": String(row.quote_log_id ?? ""),
       "x-apq-render-status": String(renderStatus),
       "x-apq-has-image-url": imageUrl ? "1" : "0",
     };
+
+    let latestJob: any = null;
+    if (debug && tenantId) {
+      try {
+        latestJob = await loadLatestRenderJob(tenantId, quoteLogId);
+      } catch {
+        latestJob = { error: "FAILED_TO_LOAD_RENDER_JOB" };
+      }
+    }
 
     return json(
       {
@@ -148,7 +181,7 @@ export async function GET(req: Request) {
                 received: { tenantSlug, quoteLogId },
                 tenantSlugInterpretation: tenantIsUuid ? "tenant_id_uuid" : "tenant_slug",
                 matched: {
-                  tenantId: String(row.tenant_id ?? ""),
+                  tenantId,
                   tenantSlug: String(row.tenant_slug ?? ""),
                   quoteLogId: String(row.quote_log_id ?? ""),
                 },
@@ -158,6 +191,7 @@ export async function GET(req: Request) {
                   render_image_url: imageUrl,
                   render_error: error,
                 },
+                latestRenderJob: latestJob,
               },
             }
           : {}),
