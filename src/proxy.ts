@@ -13,6 +13,7 @@ const isProtectedRoute = createRouteMatcher([
 
   // Protected API namespaces only (do NOT include all /api)
   "/api/admin(.*)",
+  "/api/onboarding(.*)",
   "/api/pcc(.*)",
   "/api/tenant(.*)",
 ]);
@@ -40,6 +41,7 @@ export const config = {
 
     // ✅ Only protected API namespaces (do NOT include all /api)
     "/api/admin(.*)",
+    "/api/onboarding(.*)",
     "/api/pcc(.*)",
     "/api/tenant(.*)",
   ],
