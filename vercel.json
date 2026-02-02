@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/cron/abandoned",
-      "schedule": "0 14 * * *"
+      "path": "/api/cron/render",
+      "schedule": "0 13 * * *"
     }
   ]
 }
