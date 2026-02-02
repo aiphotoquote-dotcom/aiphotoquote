@@ -15,21 +15,12 @@ function safeStr(v: any, max = 4000) {
 }
 
 function getStatusCode(e: any): number | null {
-  const s =
-    e?.statusCode ??
-    e?.status ??
-    e?.response?.status ??
-    e?.response?.statusCode ??
-    null;
+  const s = e?.statusCode ?? e?.status ?? e?.response?.status ?? e?.response?.statusCode ?? null;
   return typeof s === "number" ? s : null;
 }
 
 function getRetryAfterMs(e: any): number | null {
-  const ra =
-    e?.response?.headers?.["retry-after"] ??
-    e?.headers?.["retry-after"] ??
-    e?.retryAfter ??
-    null;
+  const ra = e?.response?.headers?.["retry-after"] ?? e?.headers?.["retry-after"] ?? e?.retryAfter ?? null;
 
   if (ra == null) return null;
 
@@ -66,13 +57,40 @@ function isSenderDomainBlockedError(e: any): boolean {
 }
 
 function getFallbackFrom(): string | null {
-  const raw =
-    (process.env.RESEND_FALLBACK_FROM ?? "").trim() ||
-    (process.env.PLATFORM_FROM_EMAIL ?? "").trim();
+  const raw = (process.env.RESEND_FALLBACK_FROM ?? "").trim() || (process.env.PLATFORM_FROM_EMAIL ?? "").trim();
   return raw || null;
 }
 
+/**
+ * ✅ Resend response shape varies by SDK/version:
+ * - { data: { id }, error: null, ... }
+ * - { id, ... }
+ * - sometimes: { data: { messageId }, ... }
+ */
+function extractMessageId(out: any): string | null {
+  const a = out?.data?.id;
+  if (typeof a === "string" && a.trim()) return a.trim();
+
+  const b = out?.id;
+  if (typeof b === "string" && b.trim()) return b.trim();
+
+  const c = out?.data?.messageId ?? out?.messageId ?? out?.data?.message_id ?? out?.message_id;
+  if (typeof c === "string" && c.trim()) return c.trim();
+
+  return null;
+}
+
+function extractProviderError(out: any): string | null {
+  // Typical: { error: null } or { error: { message: "..." } }
+  const e = out?.error;
+  if (!e) return null;
+  if (typeof e === "string") return e;
+  if (typeof e?.message === "string" && e.message.trim()) return e.message.trim();
+  return safeStr(e);
+}
+
 export function makeResendProvider(): EmailProvider {
+  // NOTE: keep construction here (as you have it). We still preflight below.
   const resend = new Resend(process.env.RESEND_API_KEY);
 
   return {
@@ -141,9 +159,18 @@ export function makeResendProvider(): EmailProvider {
         };
 
         const out = await resend.emails.send(payload);
-        const id = (out as any)?.id ?? null;
 
-        // ✅ IMPORTANT: Resend success MUST include an id
+        // ✅ If provider returns an explicit error field, treat as failure
+        const providerErr = extractProviderError(out);
+        if (providerErr) {
+          const err = new Error(providerErr);
+          (err as any).provider_out = out;
+          throw err;
+        }
+
+        const id = extractMessageId(out);
+
+        // ✅ IMPORTANT: Resend success MUST include an id (accept both out.data.id and out.id)
         if (!id) {
           console.error("[email][resend] Missing id from Resend response", {
             tenantId,
