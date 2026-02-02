@@ -32,13 +32,13 @@ async function ensureAppUser(): Promise<string> {
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
   const name = u?.fullName ?? u?.firstName ?? null;
 
-  // ✅ Single upsert query (no gen_random_uuid dependency)
+  // ✅ Upsert without depending on constraint NAME (prod may differ)
   const appUserId = crypto.randomUUID();
 
   const upserted = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (${appUserId}::uuid, 'clerk', ${userId}, ${email}, ${name}, now(), now())
-    on conflict on constraint app_users_provider_subject_uq
+    on conflict (auth_provider, auth_subject)
     do update set
       email = coalesce(excluded.email, app_users.email),
       name = coalesce(excluded.name, app_users.name),
@@ -129,7 +129,6 @@ export async function POST(req: Request) {
     const appUserId = await ensureAppUser();
     let tenantId = await findTenantForUser(appUserId);
 
-    // Create tenant if first time
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -153,7 +152,6 @@ export async function POST(req: Request) {
         on conflict do nothing
       `);
 
-      // seed minimal settings (industryKey required)
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
         values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -162,7 +160,6 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
-      // keep tenant name aligned
       await db.execute(sql`
         update tenants
         set name = ${businessName}
@@ -176,7 +173,6 @@ export async function POST(req: Request) {
       `);
     }
 
-    // upsert onboarding state
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
