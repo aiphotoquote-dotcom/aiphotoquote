@@ -8,10 +8,19 @@ import { db } from "@/lib/db/client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 export async function POST() {
   try {
-    const { userId } = await auth();
-    if (!userId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    const a = await auth();
+    const userId = (a as any)?.userId as string | null;
+
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    }
 
     const rTenant = await db.execute(sql`
       select tm.tenant_id
@@ -22,9 +31,12 @@ export async function POST() {
       limit 1
     `);
 
-    const rowT: any = (rTenant as any)?.rows?.[0] ?? null;
+    const rowT: any = (rTenant as any)?.rows?.[0] ?? (Array.isArray(rTenant) ? (rTenant as any)[0] : null);
     const tenantId = rowT?.tenant_id ? String(rowT.tenant_id) : null;
-    if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
+
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
+    }
 
     const r = await db.execute(sql`
       select website
@@ -33,8 +45,8 @@ export async function POST() {
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    const website = String(row?.website ?? "").trim();
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const website = safeTrim(row?.website ?? "");
 
     // Mock v1 (auditable); we’ll swap to OpenAI next.
     const mock = {
