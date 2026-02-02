@@ -59,6 +59,21 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function safeJsonParse(v: unknown): any | null {
+  try {
+    if (v == null) return null;
+    if (typeof v === "object") return v;
+    if (typeof v === "string") {
+      const s = v.trim();
+      if (!s) return null;
+      return JSON.parse(s);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function buildPlatformFrom(): string | null {
   const email = safeTrim(process.env.PLATFORM_FROM_EMAIL);
   if (!email) return null;
@@ -88,6 +103,63 @@ function shouldFallbackToPlatformFrom(res: EmailSendResult): boolean {
   return false;
 }
 
+/**
+ * ✅ Fix for the screenshot issue:
+ * Some Resend responses include { data: { id: "..." }, error: null } but our provider
+ * may return RESEND_NO_MESSAGE_ID anyway.
+ *
+ * This normalizes those cases so UI doesn't show a red "error" when the send succeeded.
+ */
+function normalizeResendNoMessageId(res: EmailSendResult): EmailSendResult {
+  if (res.provider !== "resend") return res;
+
+  // Already fine
+  if (res.ok && res.providerMessageId) return res;
+
+  // Only try to heal "no message id" style failures
+  const err = String(res.error ?? "");
+  if (!err) return res;
+
+  const looksLikeNoId =
+    err === "RESEND_NO_MESSAGE_ID" ||
+    err.toLowerCase().includes("no_message_id") ||
+    err.toLowerCase().includes("no message id");
+
+  if (!looksLikeNoId) return res;
+
+  // meta might be the raw Resend response OR a JSON string of it
+  const metaObj = safeJsonParse((res as any)?.meta) ?? (res as any)?.meta ?? null;
+
+  const id =
+    safeTrim(metaObj?.data?.id) ||
+    safeTrim(metaObj?.id) ||
+    safeTrim(metaObj?.data?.messageId) ||
+    safeTrim(metaObj?.messageId);
+
+  const metaError =
+    safeTrim(metaObj?.error?.message) ||
+    safeTrim(metaObj?.error) ||
+    null;
+
+  // If Resend said error: null and we have an id, treat as success.
+  if (id && !metaError) {
+    return {
+      ...res,
+      ok: true,
+      providerMessageId: id,
+      error: null,
+      meta: metaObj ?? res.meta,
+    };
+  }
+
+  // Otherwise, keep as-is but ensure meta is an object for debugging
+  if (metaObj && typeof metaObj === "object") {
+    return { ...res, meta: metaObj };
+  }
+
+  return res;
+}
+
 export async function sendEmail(args: {
   tenantId: string;
   context: { type: EmailContextType; quoteLogId?: string };
@@ -102,11 +174,14 @@ export async function sendEmail(args: {
     const provider = makeResendProvider();
 
     const requestedFrom = args.message.from;
-    const first = await provider.send({
+    const firstRaw = await provider.send({
       tenantId: args.tenantId,
       context: args.context,
       message: args.message,
     });
+
+    // ✅ normalize RESEND_NO_MESSAGE_ID false-negative
+    const first = normalizeResendNoMessageId(firstRaw);
 
     // Success: attach useful meta for debugging
     if (first.ok) {
@@ -141,7 +216,7 @@ export async function sendEmail(args: {
         };
       }
 
-      const second = await provider.send({
+      const secondRaw = await provider.send({
         tenantId: args.tenantId,
         context: args.context,
         message: {
@@ -149,6 +224,9 @@ export async function sendEmail(args: {
           from: platformFrom,
         },
       });
+
+      // ✅ normalize RESEND_NO_MESSAGE_ID false-negative on retry too
+      const second = normalizeResendNoMessageId(secondRaw);
 
       // Return the retry result but preserve the original failure for visibility
       return {
