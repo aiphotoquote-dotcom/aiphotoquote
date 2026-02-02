@@ -69,7 +69,6 @@ async function findTenantForUser(appUserId: string): Promise<string | null> {
     select tm.tenant_id
     from tenant_members tm
     where tm.user_id::text = ${appUserId}::text
-    order by tm.created_at asc
     limit 1
   `);
 
