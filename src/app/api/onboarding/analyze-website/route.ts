@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST() {
   try {
-    const { userId } = auth();
+    const { userId } = await auth();
     if (!userId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
 
     const rTenant = await db.execute(sql`
@@ -21,6 +21,7 @@ export async function POST() {
       order by tm.created_at asc
       limit 1
     `);
+
     const rowT: any = (rTenant as any)?.rows?.[0] ?? null;
     const tenantId = rowT?.tenant_id ? String(rowT.tenant_id) : null;
     if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
@@ -31,6 +32,7 @@ export async function POST() {
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
+
     const row: any = (r as any)?.rows?.[0] ?? null;
     const website = String(row?.website ?? "").trim();
 
@@ -59,6 +61,9 @@ export async function POST() {
 
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: mock }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
+    );
   }
 }

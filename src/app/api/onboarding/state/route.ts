@@ -24,7 +24,7 @@ function slugify(name: string) {
 }
 
 async function ensureAppUser(): Promise<string> {
-  const { userId } = auth();
+  const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
 
   const u = await currentUser();
