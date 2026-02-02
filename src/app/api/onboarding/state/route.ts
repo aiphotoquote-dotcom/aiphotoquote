@@ -70,7 +70,7 @@ async function findTenantForUser(appUserId: string): Promise<string | null> {
     from tenant_members tm
     join app_users au
       on au.id::text = tm.user_id::text
-    where au.id::text = ${appUserId}
+    where au.id::text = ${appUserId}::text
     order by tm.created_at asc
     limit 1
   `);
