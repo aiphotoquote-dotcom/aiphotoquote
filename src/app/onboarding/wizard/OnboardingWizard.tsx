@@ -11,6 +11,10 @@ type OnboardingState = {
   completed: boolean;
   website: string | null;
   aiAnalysis: any | null;
+
+  // ✅ API may return these on failures; wizard uses them in thrown errors.
+  message?: string;
+  error?: string;
 };
 
 function safeStep(v: any) {
