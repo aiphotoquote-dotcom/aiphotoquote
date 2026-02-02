@@ -24,6 +24,12 @@ function slugify(name: string) {
   return base || `tenant-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+function firstRow(r: any): any | null {
+  // drizzle execute can be { rows: [...] } or sometimes just [...]
+  const rows = r?.rows ?? (Array.isArray(r) ? r : null);
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
 async function ensureAppUser(): Promise<string> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -32,21 +38,28 @@ async function ensureAppUser(): Promise<string> {
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
   const name = u?.fullName ?? u?.firstName ?? null;
 
-  // ✅ Upsert without depending on constraint NAME (prod may differ)
-  const appUserId = crypto.randomUUID();
+  // ✅ UPSERT without referencing constraint name (prod-safe)
+  // ✅ Also do NOT depend on `RETURNING` shape — we will SELECT after.
+  const newId = crypto.randomUUID();
 
-  const upserted = await db.execute(sql`
+  await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
-    values (${appUserId}::uuid, 'clerk', ${userId}, ${email}, ${name}, now(), now())
+    values (${newId}::uuid, 'clerk', ${userId}, ${email}, ${name}, now(), now())
     on conflict (auth_provider, auth_subject)
     do update set
       email = coalesce(excluded.email, app_users.email),
       name = coalesce(excluded.name, app_users.name),
       updated_at = now()
-    returning id
   `);
 
-  const row: any = (upserted as any)?.rows?.[0] ?? null;
+  const sel = await db.execute(sql`
+    select id
+    from app_users
+    where auth_provider = 'clerk' and auth_subject = ${userId}
+    limit 1
+  `);
+
+  const row = firstRow(sel);
   if (!row?.id) throw new Error("FAILED_TO_UPSERT_APP_USER");
   return String(row.id);
 }
@@ -59,7 +72,7 @@ async function findTenantForUser(appUserId: string): Promise<string | null> {
     order by tm.created_at asc
     limit 1
   `);
-  const row: any = (r as any)?.rows?.[0] ?? null;
+  const row = firstRow(r);
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
@@ -88,7 +101,7 @@ export async function GET() {
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
+    const row = firstRow(r);
 
     return NextResponse.json(
       {
@@ -141,7 +154,7 @@ export async function POST(req: Request) {
         returning id
       `);
 
-      const trow: any = (tIns as any)?.rows?.[0] ?? null;
+      const trow = firstRow(tIns);
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
