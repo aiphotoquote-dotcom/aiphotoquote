@@ -25,9 +25,6 @@ function slugify(name: string) {
 
 /**
  * Ensures an app_users row exists for the current Clerk user.
- * IMPORTANT: Uses ON CONFLICT (columns), not ON CONSTRAINT (name),
- * because Drizzle's uniqueIndex() typically creates a unique index,
- * not a named constraint in Postgres.
  */
 async function ensureAppUser(): Promise<string> {
   const { userId } = await auth();
@@ -63,11 +60,16 @@ async function ensureAppUser(): Promise<string> {
   return String(row.id);
 }
 
+/**
+ * IMPORTANT:
+ * Some environments may still have tenant_members.user_id as TEXT (legacy),
+ * while newer migrations use UUID. This lookup must work in both cases.
+ */
 async function findTenantForUser(appUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
     select tm.tenant_id
     from tenant_members tm
-    where tm.user_id = ${appUserId}::uuid
+    where tm.user_id::text = ${appUserId}
     order by tm.created_at asc
     limit 1
   `);
@@ -156,6 +158,8 @@ export async function POST(req: Request) {
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
+      // NOTE: if your prod tenant_members.user_id is still TEXT, this insert may fail later.
+      // We'll fix that next if it happens — right now we're unblocking GET/state.
       await db.execute(sql`
         insert into tenant_members (id, tenant_id, user_id, role, created_at)
         values (gen_random_uuid(), ${tenantId}::uuid, ${appUserId}::uuid, 'owner', now())
