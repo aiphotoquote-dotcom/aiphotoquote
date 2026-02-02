@@ -8,6 +8,11 @@ import { db } from "@/lib/db/client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type OnboardingMode =
+  | "new_user_new_tenant"
+  | "existing_user_new_tenant"
+  | "existing_user_existing_tenant";
+
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -24,9 +29,10 @@ function slugify(name: string) {
 }
 
 /**
- * Ensures an app_users row exists for the current Clerk user.
+ * Ensures we have an internal app_user anchored to Clerk subject.
+ * Returns id + whether it was newly created in THIS call.
  */
-async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
+async function ensureAppUser(): Promise<{ appUserId: string; wasCreated: boolean; user: { name: string | null; email: string | null } }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
 
@@ -34,99 +40,83 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
   const name = u?.fullName ?? u?.firstName ?? null;
 
-  const upsert = await db.execute(sql`
-    insert into app_users (
-      id, auth_provider, auth_subject, email, name, created_at, updated_at
-    )
-    values (
-      gen_random_uuid(),
-      'clerk',
-      ${userId},
-      ${email},
-      ${name},
-      now(),
-      now()
-    )
-    on conflict (auth_provider, auth_subject)
-    do update set
-      email = coalesce(excluded.email, app_users.email),
-      name = coalesce(excluded.name, app_users.name),
-      updated_at = now()
+  // Check existence first so we can compute "wasCreated"
+  const existing = await db.execute(sql`
+    select id
+    from app_users
+    where auth_provider = 'clerk' and auth_subject = ${userId}
+    limit 1
+  `);
+
+  const row: any = (existing as any)?.rows?.[0] ?? null;
+
+  // If exists, update basic profile and return
+  if (row?.id) {
+    await db.execute(sql`
+      update app_users
+      set email = coalesce(${email}, email),
+          name = coalesce(${name}, name),
+          updated_at = now()
+      where id = ${String(row.id)}::uuid
+    `);
+
+    return {
+      appUserId: String(row.id),
+      wasCreated: false,
+      user: { name, email },
+    };
+  }
+
+  // Else insert
+  const inserted = await db.execute(sql`
+    insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
+    values (gen_random_uuid(), 'clerk', ${userId}, ${email}, ${name}, now(), now())
     returning id
   `);
 
-  const row: any = (upsert as any)?.rows?.[0] ?? (Array.isArray(upsert) ? (upsert as any)[0] : null);
-  if (!row?.id) throw new Error("FAILED_TO_CREATE_APP_USER");
+  const irow: any = (inserted as any)?.rows?.[0] ?? null;
+  if (!irow?.id) throw new Error("FAILED_TO_CREATE_APP_USER");
 
-  return { appUserId: String(row.id), clerkUserId: userId };
+  return {
+    appUserId: String(irow.id),
+    wasCreated: true,
+    user: { name, email },
+  };
 }
 
-/**
- * Find the first tenant for a user, handling legacy DBs where tenant_members.user_id
- * might be UUID or TEXT. We try multiple strategies and gracefully fall back.
- */
-async function findTenantForUser(args: { appUserId: string; clerkUserId: string }): Promise<string | null> {
-  const { appUserId, clerkUserId } = args;
-
-  // Strategy A: UUID compare (fast path when tenant_members.user_id is UUID)
-  try {
-    const r = await db.execute(sql`
-      select tm.tenant_id
-      from tenant_members tm
-      where tm.user_id = ${appUserId}::uuid
-      order by tm.created_at asc
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    if (row?.tenant_id) return String(row.tenant_id);
-  } catch {
-    // ignore -> try next strategy
-  }
-
-  // Strategy B: text compare (works when tenant_members.user_id is TEXT)
-  try {
-    const r = await db.execute(sql`
-      select tm.tenant_id
-      from tenant_members tm
-      where tm.user_id::text = ${appUserId}::text
-      order by tm.created_at asc
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    if (row?.tenant_id) return String(row.tenant_id);
-  } catch {
-    // ignore -> try next strategy
-  }
-
-  // Strategy C: join via app_users (covers odd cases + keeps logic aligned to clerk subject)
-  try {
-    const r = await db.execute(sql`
-      select tm.tenant_id
-      from tenant_members tm
-      join app_users au
-        on au.id::text = tm.user_id::text
-      where au.auth_provider = 'clerk'
-        and au.auth_subject = ${clerkUserId}
-      order by tm.created_at asc
-      limit 1
-    `);
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    if (row?.tenant_id) return String(row.tenant_id);
-  } catch {
-    // ignore
-  }
-
-  return null;
+async function findTenantForUser(appUserId: string): Promise<string | null> {
+  const r = await db.execute(sql`
+    select tm.tenant_id
+    from tenant_members tm
+    where tm.user_id = ${appUserId}::uuid
+    order by tm.created_at asc
+    limit 1
+  `);
+  const row: any = (r as any)?.rows?.[0] ?? null;
+  return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
 export async function GET() {
   try {
-    const { appUserId, clerkUserId } = await ensureAppUser();
-    const tenantId = await findTenantForUser({ appUserId, clerkUserId });
+    const { appUserId, wasCreated, user } = await ensureAppUser();
+    const tenantId = await findTenantForUser(appUserId);
 
+    // If no tenant yet, we can tell whether this is a brand-new user or an existing user creating a new tenant.
     if (!tenantId) {
+      const onboardingMode: OnboardingMode = wasCreated ? "new_user_new_tenant" : "existing_user_new_tenant";
+
       return NextResponse.json(
-        { ok: true, tenantId: null, tenantName: null, currentStep: 1, completed: false, website: null, aiAnalysis: null },
+        {
+          ok: true,
+          onboardingMode,
+          user,
+          tenantId: null,
+          tenantName: null,
+          currentStep: 1,
+          completed: false,
+          website: null,
+          aiAnalysis: null,
+        },
         { status: 200 }
       );
     }
@@ -149,6 +139,8 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: true,
+        onboardingMode: "existing_user_existing_tenant" as OnboardingMode,
+        user,
         tenantId,
         tenantName: row?.tenant_name ?? null,
         currentStep: row?.current_step ?? 1,
@@ -173,19 +165,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "UNSUPPORTED_STEP" }, { status: 400 });
     }
 
+    // ✅ Step 1 is TENANT-only now:
     const businessName = safeTrim(body?.businessName);
-    const ownerName = safeTrim(body?.ownerName);
-    const ownerEmail = safeTrim(body?.ownerEmail);
     const website = safeTrim(body?.website);
 
-    if (businessName.length < 2) return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
-    if (ownerName.length < 2) return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
-    if (!ownerEmail.includes("@")) return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+    if (businessName.length < 2) {
+      return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
+    }
 
-    const { appUserId, clerkUserId } = await ensureAppUser();
-    let tenantId = await findTenantForUser({ appUserId, clerkUserId });
+    // Ensure app user exists (identity comes from Clerk, not form fields)
+    const { appUserId } = await ensureAppUser();
 
-    // Create tenant if first time
+    let tenantId = await findTenantForUser(appUserId);
+
+    // Create tenant if first time for this user
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -215,7 +208,7 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
-      // keep tenant name aligned
+      // Existing tenant path: keep tenant name aligned
       await db.execute(sql`
         update tenants
         set name = ${businessName}
