@@ -68,10 +68,12 @@ async function findTenantForUser(appUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
     select tm.tenant_id
     from tenant_members tm
-    where tm.user_id = ${appUserId}::uuid
+    join app_users au on au.id = tm.user_id
+    where au.id = ${appUserId}::uuid
     order by tm.created_at asc
     limit 1
   `);
+
   const row = firstRow(r);
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
