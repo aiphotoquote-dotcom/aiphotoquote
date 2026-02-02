@@ -47,12 +47,11 @@ async function sendAbandonedFollowup(args: {
 
   const cfg = await getTenantEmailConfig(tenantId);
 
-  // platform prerequisites
   if (!process.env.RESEND_API_KEY?.trim()) return { ok: false, error: "MISSING_RESEND_API_KEY" };
   if (!cfg?.fromEmail?.trim()) return { ok: false, error: "MISSING_FROM_EMAIL" };
   if (!cfg?.leadToEmail?.trim()) return { ok: false, error: "MISSING_LEAD_TO_EMAIL" };
 
-  // Option A for now: simple “you started but didn’t finish”
+  // Option A: simple “you started but didn’t finish”
   const subjectCustomer = `Finish your quote anytime — ${businessName}`;
 
   const htmlCustomer = `
@@ -68,10 +67,19 @@ async function sendAbandonedFollowup(args: {
     </div>
   `;
 
-  // customer follow-up
+  // ✅ IMPORTANT:
+  // We REUSE an existing EmailContextType ("lead_new") to avoid touching union types right now.
+  // We still mark it as abandoned via headers so you can trace/filter.
+  const commonHeaders = {
+    "X-AIPQ-Context": "abandoned_followup",
+    "X-AIPQ-Tenant": tenantId,
+    "X-AIPQ-TenantSlug": tenantSlug,
+    "X-AIPQ-QuoteLogId": quoteLogId,
+  };
+
   const rCustomer = await sendEmail({
     tenantId,
-    context: { type: "abandoned_followup", quoteLogId },
+    context: { type: "lead_new", quoteLogId },
     message: {
       from: cfg.fromEmail,
       to: [customerEmail],
@@ -79,18 +87,18 @@ async function sendAbandonedFollowup(args: {
       subject: subjectCustomer,
       html: htmlCustomer,
       text: `Finish your quote. Business=${businessName} Quote=${quoteLogId}`,
+      headers: { ...commonHeaders, "X-AIPQ-Recipient": "customer" },
     },
   });
 
-  // shop notification (goes to shop inbox)
   const rShop = await sendEmail({
     tenantId,
-    context: { type: "abandoned_followup_shop", quoteLogId },
+    context: { type: "lead_new", quoteLogId },
     message: {
       from: cfg.fromEmail,
       to: [cfg.leadToEmail],
       replyTo: [cfg.leadToEmail],
-      subject: `Abandoned quote follow-up sent — ${customerName}`,
+      subject: `Abandoned follow-up sent — ${customerName}`,
       html: `
         <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.45;color:#111">
           <h3 style="margin:0 0 8px;">Abandoned follow-up sent</h3>
@@ -104,6 +112,7 @@ async function sendAbandonedFollowup(args: {
         </div>
       `,
       text: `Abandoned follow-up sent: ${customerName} ${customerEmail} ${customerPhone} quote=${quoteLogId} tenant=${tenantSlug}`,
+      headers: { ...commonHeaders, "X-AIPQ-Recipient": "shop" },
     },
   });
 
@@ -115,15 +124,11 @@ async function sendAbandonedFollowup(args: {
 }
 
 async function runScan() {
-  // Hobby = daily cron, so abandon threshold can be wider
+  // Hobby = daily cron; keep threshold reasonable
   const minutesRaw = Number(process.env.ABANDONED_MINUTES ?? 60);
   const minutes = Number.isFinite(minutesRaw) ? Math.max(10, Math.min(24 * 60, Math.floor(minutesRaw))) : 60;
   const threshold = minutesAgo(minutes);
 
-  // Abandoned criteria:
-  // - older than threshold
-  // - no estimate_low/high
-  // - no abandoned_followup_sent_at marker
   const rows = (await db.execute(sql`
     select
       q.id,
@@ -144,7 +149,8 @@ async function runScan() {
     limit 50
   `)) as any;
 
-  const list: any[] = Array.isArray((rows as any)?.rows) ? (rows as any).rows : (Array.isArray(rows) ? rows : []);
+  const list: any[] = Array.isArray((rows as any)?.rows) ? (rows as any).rows : Array.isArray(rows) ? rows : [];
+
   let emailed = 0;
   let skipped = 0;
   const details: any[] = [];
@@ -180,7 +186,7 @@ async function runScan() {
     if (sendRes.ok) {
       emailed++;
 
-      // mark sent in output jsonb (minimal DB change)
+      // mark sent in output jsonb (minimal DB/process change)
       await db.execute(sql`
         update quote_logs
         set output = jsonb_set(
@@ -211,8 +217,7 @@ async function runScan() {
 
 export async function GET(req: Request) {
   if (!authOk(req)) return json({ ok: false, error: "UNAUTHORIZED" }, 401);
-  const out = await runScan();
-  return json(out, 200);
+  return json(await runScan(), 200);
 }
 
 export async function POST(req: Request) {
