@@ -14,6 +14,8 @@ import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/ren
 import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
 
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
+
 import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
 import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
 
@@ -201,7 +203,11 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.business_name,
       ts.brand_logo_url,
       ts.lead_to_email,
+
+      -- legacy + new (we'll reconcile below)
       ts.rendering_enabled,
+      ts.ai_rendering_enabled,
+
       ts.rendering_style,
       ts.rendering_notes,
 
@@ -249,6 +255,19 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
   `);
 }
 
+function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: boolean) {
+  // Prefer server resolver (authoritative), but fall back to DB columns if needed.
+  if (typeof resolvedTenantRenderEnabled === "boolean") return resolvedTenantRenderEnabled;
+
+  const ai = ctx?.ai_rendering_enabled;
+  if (typeof ai === "boolean") return ai;
+
+  const legacy = ctx?.rendering_enabled;
+  if (typeof legacy === "boolean") return legacy;
+
+  return false;
+}
+
 async function handleCron(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -291,6 +310,9 @@ async function handleCron(req: Request) {
   const processed: any[] = [];
   const debugEnabled = isRenderDebugEnabled();
 
+  // PCC prompt assets (templates/presets) are platform-level
+  const pcc = await loadPlatformLlmConfig();
+
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
@@ -302,8 +324,14 @@ async function handleCron(req: Request) {
       const tenantSlug = String(ctx.tenant_slug ?? "");
       const tenantName = String(ctx.tenant_name ?? "Your Business");
 
-      const renderingEnabled = ctx.rendering_enabled;
-      if (renderingEnabled === false) {
+      // ✅ Resolve tenant + PCC AI settings (authoritative)
+      const resolved = await resolveTenantLlm(job.tenantId);
+      const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
+
+      const resolvedTenantRenderEnabled = resolved.tenant.tenantRenderEnabled;
+      const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolvedTenantRenderEnabled);
+
+      if (tenantRenderEnabled === false) {
         await updateQuoteFailed({
           tenantId: job.tenantId,
           quoteLogId: job.quoteLogId,
@@ -318,6 +346,7 @@ async function handleCron(req: Request) {
       const inputAny: any = safeJsonParse(ctx.input) ?? {};
       const outputAny: any = safeJsonParse(ctx.output) ?? {};
 
+      // Render opt-in should be explicit per quote (server stored)
       const optIn =
         Boolean(ctx.render_opt_in) ||
         Boolean(inputAny?.render_opt_in) ||
@@ -348,13 +377,11 @@ async function handleCron(req: Request) {
       const apiKey = decryptSecret(String(enc));
       if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
 
-      // Build prompt/model from PCC (single source of truth)
-      const pcc = await loadPlatformLlmConfig();
-      const renderModel = safeTrim(pcc?.models?.renderModel) || "gpt-image-1";
+      // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
+      const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
+      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved.tenant.tenantRenderNotes) || "";
 
-      const tenantStyleKey = safeTrim(ctx.rendering_style) || "photoreal";
-      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || "";
-
+      // Build prompt from PCC (platform-level prompt assets)
       const presets = (pcc?.prompts?.renderStylePresets ?? {}) as any;
       const presetText =
         tenantStyleKey === "clean_oem"
@@ -366,14 +393,14 @@ async function handleCron(req: Request) {
       const styleText =
         presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
-      const renderPromptPreamble = safeTrim(pcc?.prompts?.renderPromptPreamble) || "";
+      const renderPromptPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
 
       const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
       const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
       const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
 
       const renderPromptTemplate =
-        safeTrim(pcc?.prompts?.renderPromptTemplate) ||
+        safeTrim((pcc as any)?.prompts?.renderPromptTemplate) ||
         [
           "{renderPromptPreamble}",
           "Generate a realistic 'after' concept rendering based on the customer's photos.",
@@ -577,7 +604,7 @@ async function handleCron(req: Request) {
       }
 
       await markJobDone(job.id, "done", null);
-      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl });
+      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl, renderModel });
     } catch (e: any) {
       const msg = safeErr(e);
 
