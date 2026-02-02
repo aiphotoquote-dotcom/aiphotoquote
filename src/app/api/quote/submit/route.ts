@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
+import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
 import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
@@ -101,12 +102,6 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-function clampInt(v: unknown, fallback: number, min: number, max: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
 function getBaseUrl(req: Request) {
   const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
   if (envBase) return envBase.replace(/\/+$/, "");
@@ -134,6 +129,64 @@ function sleepMs(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+function sha256Hex(s: string) {
+  const v = String(s ?? "");
+  return crypto.createHash("sha256").update(v).digest("hex");
+}
+
+/**
+ * ✅ Auditable AI snapshot:
+ * - store prompt hashes (not full prompts) to avoid giant JSON + accidental leakage
+ * - persist models/guardrails/tenant flags/pricing
+ */
+function buildAiSnapshot(args: {
+  phase: "phase1_insert" | "phase1_qa_asking" | "phase1_estimated" | "phase2_finalized";
+  tenantId: string;
+  tenantSlug: string;
+  renderOptIn: boolean;
+  resolved: Awaited<ReturnType<typeof resolveTenantLlm>>;
+}) {
+  const { phase, tenantId, tenantSlug, renderOptIn, resolved } = args;
+
+  const quoteEstimatorSystem = resolved?.prompts?.quoteEstimatorSystem ?? "";
+  const qaQuestionGeneratorSystem = resolved?.prompts?.qaQuestionGeneratorSystem ?? "";
+
+  return {
+    version: 1,
+    capturedAt: nowIso(),
+    phase,
+
+    tenant: {
+      tenantId,
+      tenantSlug,
+    },
+
+    models: {
+      estimatorModel: resolved.models.estimatorModel,
+      qaModel: resolved.models.qaModel,
+      renderModel: resolved.models.renderModel,
+    },
+
+    prompts: {
+      quoteEstimatorSystemSha256: sha256Hex(quoteEstimatorSystem),
+      qaQuestionGeneratorSystemSha256: sha256Hex(qaQuestionGeneratorSystem),
+      // lightweight diagnostics (helps spot “wrong prompt loaded” quickly)
+      quoteEstimatorSystemLen: quoteEstimatorSystem.length,
+      qaQuestionGeneratorSystemLen: qaQuestionGeneratorSystem.length,
+    },
+
+    guardrails: resolved.guardrails,
+
+    tenantSettings: {
+      ...resolved.tenant,
+      // important “runtime truth”:
+      renderOptIn,
+    },
+
+    pricing: resolved.pricing ?? null,
+  };
+}
+
 async function getOpenAiForTenant(tenantId: string) {
   const secretRow = await db
     .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
@@ -151,7 +204,6 @@ async function getOpenAiForTenant(tenantId: string) {
 }
 
 // ---------------- email helpers ----------------
-
 async function sendFinalEstimateEmails(args: {
   req: Request;
   tenant: { id: string; name: string; slug: string };
@@ -165,8 +217,19 @@ async function sendFinalEstimateEmails(args: {
   businessNameFromSettings: string | null;
   renderOptIn: boolean;
 }) {
-  const { req, tenant, tenantSlug, quoteLogId, customer, notes, images, output, brandLogoUrl, businessNameFromSettings, renderOptIn } =
-    args;
+  const {
+    req,
+    tenant,
+    tenantSlug,
+    quoteLogId,
+    customer,
+    notes,
+    images,
+    output,
+    brandLogoUrl,
+    businessNameFromSettings,
+    renderOptIn,
+  } = args;
 
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
@@ -182,7 +245,13 @@ async function sendFinalEstimateEmails(args: {
     configured,
     mode: cfg.sendMode ?? "standard",
     lead_new: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
-    customer_receipt: { attempted: false, ok: false, provider: "resend", id: null as string | null, error: null as string | null },
+    customer_receipt: {
+      attempted: false,
+      ok: false,
+      provider: "resend",
+      id: null as string | null,
+      error: null as string | null,
+    },
   };
 
   if (!configured) return emailResult;
@@ -280,7 +349,6 @@ async function sendFinalEstimateEmails(args: {
 }
 
 // ---------------- AI generation helpers ----------------
-
 async function generateQaQuestions(args: {
   openai: OpenAI;
   model: string;
@@ -495,7 +563,7 @@ export async function POST(req: Request) {
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
-    // ✅ Resolve tenant + PCC AI settings ONCE
+    // ✅ Resolve tenant + PCC AI settings ONCE (request-scoped)
     const resolved = await resolveTenantLlm(tenant.id);
 
     // ✅ denylist guardrail (PCC)
@@ -509,7 +577,7 @@ export async function POST(req: Request) {
       liveQaEnabled: resolved.tenant.liveQaEnabled,
       liveQaMaxQuestions: resolved.tenant.liveQaMaxQuestions,
       tenantRenderEnabled: resolved.tenant.tenantRenderEnabled,
-      renderOptIn: undefined as boolean | undefined, // we’ll fill per-request
+      renderOptIn: undefined as boolean | undefined, // per-request
       tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
     };
@@ -521,7 +589,7 @@ export async function POST(req: Request) {
       const quoteLogId = parsed.data.quoteLogId;
 
       const existing = await db
-        .select({ id: quoteLogs.id, input: quoteLogs.input, qa: quoteLogs.qa })
+        .select({ id: quoteLogs.id, input: quoteLogs.input, qa: quoteLogs.qa, output: quoteLogs.output })
         .from(quoteLogs)
         .where(eq(quoteLogs.id, quoteLogId))
         .limit(1)
@@ -592,11 +660,28 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise." },
+            {
+              ok: false,
+              error: "CONTENT_BLOCKED",
+              message: "Your answers include content we can’t process. Please revise.",
+            },
             { status: 400 }
           );
         }
       }
+
+      // render opt-in was stored in inputToStore; return server-authoritative value
+      const renderOptIn = Boolean(inputAny?.render_opt_in);
+      aiEnvelope.renderOptIn = renderOptIn;
+
+      // ✅ persist AI snapshot (phase2)
+      const aiSnapshot = buildAiSnapshot({
+        phase: "phase2_finalized",
+        tenantId: tenant.id,
+        tenantSlug,
+        renderOptIn,
+        resolved,
+      });
 
       // ✅ system prompt + model from resolved tenant+PCC
       const systemEstimate = resolved.prompts.quoteEstimatorSystem;
@@ -612,14 +697,14 @@ export async function POST(req: Request) {
         normalizedAnswers,
       });
 
+      // Always persist snapshot in output (auditing)
+      let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshot };
+
       await db.execute(sql`
         update quote_logs
-        set output = ${JSON.stringify(output)}::jsonb
+        set output = ${JSON.stringify(outputToStore)}::jsonb
         where id = ${quoteLogId}::uuid
       `);
-
-      // render opt-in was stored in inputToStore; return server-authoritative value
-      aiEnvelope.renderOptIn = Boolean(inputAny?.render_opt_in);
 
       // Send estimate emails exactly once (best-effort)
       try {
@@ -634,21 +719,21 @@ export async function POST(req: Request) {
           output,
           brandLogoUrl,
           businessNameFromSettings,
-          renderOptIn: Boolean(inputAny?.render_opt_in),
+          renderOptIn,
         });
 
-        const nextOutput = { ...(output ?? {}), email: emailResult };
+        outputToStore = { ...(outputToStore ?? {}), email: emailResult };
+
         await db.execute(sql`
           update quote_logs
-          set output = ${JSON.stringify(nextOutput)}::jsonb
+          set output = ${JSON.stringify(outputToStore)}::jsonb
           where id = ${quoteLogId}::uuid
         `);
-        output = nextOutput;
       } catch (e: any) {
-        output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+        outputToStore = { ...(outputToStore ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
       }
 
-      return NextResponse.json({ ok: true, quoteLogId, output, ai: aiEnvelope });
+      return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope });
     }
 
     // -------------------------
@@ -678,10 +763,7 @@ export async function POST(req: Request) {
     }
 
     if (!images.length) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." }, { status: 400 });
     }
 
     const customer_context = parsed.data.customer_context ?? {};
@@ -715,13 +797,22 @@ export async function POST(req: Request) {
       createdAt: nowIso(),
     };
 
+    // ✅ Persist snapshot at insert-time (auditing even if later phases fail)
+    const aiSnapshotInsert = buildAiSnapshot({
+      phase: "phase1_insert",
+      tenantId: tenant.id,
+      tenantSlug,
+      renderOptIn,
+      resolved,
+    });
+
     // Create quote log now
     const inserted = await db
       .insert(quoteLogs)
       .values({
         tenantId: tenant.id,
         input: inputToStore,
-        output: {}, // will be filled later
+        output: { ai_snapshot: aiSnapshotInsert } as any,
         renderOptIn,
         qaStatus: "none",
       })
@@ -748,12 +839,22 @@ export async function POST(req: Request) {
 
       const qa = { questions, answers: [], askedAt: nowIso() };
 
+      // Update snapshot for “asking” phase (optional but useful)
+      const aiSnapshotAsking = buildAiSnapshot({
+        phase: "phase1_qa_asking",
+        tenantId: tenant.id,
+        tenantSlug,
+        renderOptIn,
+        resolved,
+      });
+
       await db
         .update(quoteLogs)
         .set({
           qa: qa as any,
           qaStatus: "asking",
           qaAskedAt: new Date(),
+          output: { ai_snapshot: aiSnapshotAsking } as any,
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
@@ -771,9 +872,19 @@ export async function POST(req: Request) {
       notes,
     });
 
+    const aiSnapshotEstimated = buildAiSnapshot({
+      phase: "phase1_estimated",
+      tenantId: tenant.id,
+      tenantSlug,
+      renderOptIn,
+      resolved,
+    });
+
+    let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshotEstimated };
+
     await db.execute(sql`
       update quote_logs
-      set output = ${JSON.stringify(output)}::jsonb
+      set output = ${JSON.stringify(outputToStore)}::jsonb
       where id = ${quoteLogId}::uuid
     `);
 
@@ -790,21 +901,21 @@ export async function POST(req: Request) {
         output,
         brandLogoUrl,
         businessNameFromSettings,
-        renderOptIn: Boolean(renderOptIn),
+        renderOptIn,
       });
 
-      const nextOutput = { ...(output ?? {}), email: emailResult };
+      outputToStore = { ...(outputToStore ?? {}), email: emailResult };
+
       await db.execute(sql`
         update quote_logs
-        set output = ${JSON.stringify(nextOutput)}::jsonb
+        set output = ${JSON.stringify(outputToStore)}::jsonb
         where id = ${quoteLogId}::uuid
       `);
-      output = nextOutput;
     } catch (e: any) {
-      output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+      outputToStore = { ...(outputToStore ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
     }
 
-    return NextResponse.json({ ok: true, quoteLogId, output, ai: aiEnvelope });
+    return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     if (msg === "MISSING_OPENAI_KEY") {
