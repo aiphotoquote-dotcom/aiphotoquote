@@ -13,8 +13,8 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
-// ✅ PCC LLM resolver (models/prompts/guardrails)
-import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+// ✅ Tenant-aware LLM resolver
+import { getTenantEffectiveLlm } from "@/lib/pcc/llm/tenant";
 
 export const runtime = "nodejs";
 
@@ -33,7 +33,6 @@ const QaAnswerSchema = z.object({
 const Req = z.object({
   tenantSlug: z.string().min(3),
 
-  // Phase 1 fields
   images: z
     .array(z.object({ url: z.string().url(), shotType: z.string().optional() }))
     .min(1)
@@ -53,12 +52,8 @@ const Req = z.object({
     })
     .optional(),
 
-  // Phase 2 fields
   quoteLogId: z.string().uuid().optional(),
 
-  // accept BOTH:
-  // - [{question, answer}] (clean)
-  // - ["answer1", "answer2"] (what your current QuoteForm sends)
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
 });
 
@@ -142,45 +137,54 @@ async function getOpenAiForTenant(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!secretRow?.openaiKeyEnc) {
-    throw new Error("MISSING_OPENAI_KEY");
-  }
+  if (!secretRow?.openaiKeyEnc) throw new Error("MISSING_OPENAI_KEY");
 
   const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
   return new OpenAI({ apiKey: openaiKey });
 }
 
-/**
- * ✅ API contract for QuoteForm: server-authoritative AI flags
- * These are returned on *success* responses for Phase 1 + Phase 2.
- */
-function buildAiResponse(args: {
+function buildAiEnvelope(args: {
+  llm: Awaited<ReturnType<typeof getTenantEffectiveLlm>>;
+  renderOptInAccepted: boolean;
   liveQaEnabled: boolean;
   liveQaMaxQuestions: number;
-  tenantRenderEnabled: boolean;
-  renderOptIn: boolean;
-  platform?: any;
 }) {
-  const { liveQaEnabled, liveQaMaxQuestions, tenantRenderEnabled, renderOptIn, platform } = args;
+  const { llm, renderOptInAccepted, liveQaEnabled, liveQaMaxQuestions } = args;
 
   return {
+    tenantRenderEnabled: Boolean(llm.tenant.tenantRenderEnabled),
+    renderOptIn: Boolean(renderOptInAccepted),
+
+    // Rendering config returned to client (for UI + debugging)
+    tenantStyleKey: llm.tenant.renderingStyle ?? undefined,
+    tenantRenderNotes: llm.tenant.renderingNotes ?? undefined,
+    renderingCustomerOptInRequired: Boolean(llm.tenant.renderingCustomerOptInRequired),
+
     liveQaEnabled: Boolean(liveQaEnabled),
-    liveQaMaxQuestions: Number.isFinite(liveQaMaxQuestions) ? liveQaMaxQuestions : 0,
+    liveQaMaxQuestions: Number(liveQaMaxQuestions) || 0,
 
-    // server/tenant authoritative
-    tenantRenderEnabled: Boolean(tenantRenderEnabled),
+    modelsUsed: {
+      estimatorModel: llm.models.estimatorModel,
+      qaModel: llm.models.qaModel,
+      renderModel: llm.models.renderModel,
+    },
 
-    // server-clamped opt-in (never true if tenant disabled)
-    renderOptIn: Boolean(tenantRenderEnabled && renderOptIn),
+    guardrails: {
+      mode: llm.guardrails.mode,
+      piiHandling: llm.guardrails.piiHandling,
+      maxQaQuestions: llm.guardrails.maxQaQuestions,
+      maxOutputTokens: llm.guardrails.maxOutputTokens,
+      blockedTopicsCount: Array.isArray(llm.guardrails.blockedTopics) ? llm.guardrails.blockedTopics.length : 0,
+    },
 
-    // optional for UI polish (safe: may be undefined)
-    tenantStyleKey: typeof platform?.styleKey === "string" ? platform.styleKey : undefined,
-    tenantRenderNotes: typeof platform?.renderNotes === "string" ? platform.renderNotes : undefined,
+    meta: {
+      modelSource: llm.meta.modelSource,
+      tenantAiMode: llm.tenant.aiMode ?? undefined,
+    },
   };
 }
 
-// Send initial “received” emails right after creating the quote log.
-// Best-effort: never blocks the request.
+// ----------------- emails -----------------
 async function sendReceivedEmails(args: {
   req: Request;
   tenant: { id: string; name: string; slug: string };
@@ -192,6 +196,14 @@ async function sendReceivedEmails(args: {
   brandLogoUrl: string | null;
   businessNameFromSettings: string | null;
 }) {
+  const ENABLED = String(process.env.SEND_RECEIVED_EMAILS ?? "").trim() === "1";
+  if (!ENABLED) {
+    return {
+      configured: false,
+      disabledBy: "SEND_RECEIVED_EMAILS!=1",
+    };
+  }
+
   const { req, tenant, tenantSlug, quoteLogId, customer, notes, images, brandLogoUrl, businessNameFromSettings } = args;
 
   const cfg = await getTenantEmailConfig(tenant.id);
@@ -213,7 +225,6 @@ async function sendReceivedEmails(args: {
 
   if (!configured) return result;
 
-  // Lead “received”
   try {
     result.lead_received.attempted = true;
 
@@ -240,7 +251,7 @@ async function sendReceivedEmails(args: {
 
     const r1 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "lead_new", quoteLogId }, // keep context types stable
+      context: { type: "lead_new", quoteLogId },
       message: {
         from: cfg.fromEmail!,
         to: [cfg.leadToEmail!],
@@ -257,10 +268,8 @@ async function sendReceivedEmails(args: {
     result.lead_received.error = e?.message ?? String(e);
   }
 
-  // small spacing helps avoid “2 req/sec” edge cases during bursts
   await sleepMs(650);
 
-  // Customer “received”
   try {
     result.customer_received.attempted = true;
 
@@ -285,7 +294,7 @@ async function sendReceivedEmails(args: {
 
     const r2 = await sendEmail({
       tenantId: tenant.id,
-      context: { type: "customer_receipt", quoteLogId }, // keep context types stable
+      context: { type: "customer_receipt", quoteLogId },
       message: {
         from: cfg.fromEmail!,
         to: [customer.email],
@@ -314,8 +323,9 @@ async function generateQaQuestions(args: {
   service_type: string;
   notes: string;
   maxQuestions: number;
+  maxOutputTokens: number;
 }) {
-  const { openai, model, system, images, category, service_type, notes, maxQuestions } = args;
+  const { openai, model, system, images, category, service_type, notes, maxQuestions, maxOutputTokens } = args;
 
   const userText = [
     `Category: ${category}`,
@@ -337,6 +347,7 @@ async function generateQaQuestions(args: {
       { role: "user", content },
     ],
     temperature: 0.2,
+    max_tokens: Math.max(200, Math.min(4000, Math.floor(maxOutputTokens || 1200))),
   });
 
   const raw = completion.choices?.[0]?.message?.content ?? "{}";
@@ -365,8 +376,9 @@ async function generateEstimate(args: {
   service_type: string;
   notes: string;
   normalizedAnswers?: Array<{ question: string; answer: string }>;
+  maxOutputTokens: number;
 }) {
-  const { openai, model, system, images, category, service_type, notes, normalizedAnswers } = args;
+  const { openai, model, system, images, category, service_type, notes, normalizedAnswers, maxOutputTokens } = args;
 
   const qaText =
     normalizedAnswers?.length
@@ -402,6 +414,7 @@ async function generateEstimate(args: {
       { role: "user", content },
     ],
     temperature: 0.2,
+    max_tokens: Math.max(200, Math.min(4000, Math.floor(maxOutputTokens || 1200))),
     response_format: {
       type: "json_schema",
       json_schema: {
@@ -514,7 +527,6 @@ async function sendFinalEstimateEmails(args: {
 
   if (!configured) return emailResult;
 
-  // Lead email
   try {
     emailResult.lead_new.attempted = true;
 
@@ -559,9 +571,8 @@ async function sendFinalEstimateEmails(args: {
     emailResult.lead_new.error = e?.message ?? String(e);
   }
 
-  await sleepMs(650);
+  await new Promise((r) => setTimeout(r, 650));
 
-  // Customer email
   try {
     emailResult.customer_receipt.attempted = true;
 
@@ -616,10 +627,6 @@ export async function POST(req: Request) {
 
     const { tenantSlug } = parsed.data;
 
-    // ✅ PCC config (models/prompts/guardrails)
-    const platform = await getPlatformLlm();
-
-    // Tenant lookup
     const tenant = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
       .from(tenants)
@@ -631,18 +638,21 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    // Settings (optional)
+    // Tenant settings (we still need these for industryKey + branding)
     const settings = await db
       .select({
-        tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
-        aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
         brandLogoUrl: tenantSettings.brandLogoUrl,
         businessName: tenantSettings.businessName,
 
         // Live Q&A
         liveQaEnabled: tenantSettings.liveQaEnabled,
         liveQaMaxQuestions: tenantSettings.liveQaMaxQuestions,
+
+        // Rendering config (for opt-in requirement)
+        renderingCustomerOptInRequired: tenantSettings.renderingCustomerOptInRequired,
+        aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
+        renderingEnabled: tenantSettings.renderingEnabled,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
@@ -650,22 +660,37 @@ export async function POST(req: Request) {
       .then((r) => r[0] ?? null);
 
     const industryKey = settings?.industryKey ?? "service";
-    const aiRenderingEnabled = settings?.aiRenderingEnabled === true;
-
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
-    // ------------------------------------------------------------
-    // Live Q&A: tenant can only LOWER the cap; PCC sets the MAX cap.
-    // ------------------------------------------------------------
+    // ✅ Resolve PCC + tenant aiMode into actual model names
+    const llm = await getTenantEffectiveLlm(tenant.id);
+
+    // Live Q&A: tenant can only LOWER the cap; platform guardrails sets MAX
     const tenantQaEnabled = settings?.liveQaEnabled === true;
     const tenantQaMax = clampInt(settings?.liveQaMaxQuestions, 3, 1, 10);
-
-    // ✅ PCC maxQaQuestions is the platform cap
-    const platformQaMax = clampInt(platform?.guardrails?.maxQaQuestions, 3, 1, 10);
+    const platformQaMax = clampInt(llm.guardrails.maxQaQuestions, 3, 1, 10);
 
     const liveQaEnabled = tenantQaEnabled;
     const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
+
+    // Rendering enablement + opt-in requirement
+    const tenantRenderEnabled = llm.tenant.tenantRenderEnabled === true;
+    const optInRequired =
+      llm.tenant.renderingCustomerOptInRequired === true ||
+      settings?.renderingCustomerOptInRequired === true;
+
+    // Only accept opt-in if tenant render enabled.
+    // If opt-in is required, renderOptIn must be true to request render.
+    const rawOptIn = Boolean(parsed.data.render_opt_in);
+    const renderOptInAccepted = tenantRenderEnabled ? (optInRequired ? rawOptIn === true : rawOptIn) : false;
+
+    const aiEnvelope = buildAiEnvelope({
+      llm,
+      renderOptInAccepted,
+      liveQaEnabled,
+      liveQaMaxQuestions,
+    });
 
     // -------------------------
     // Phase 2: finalize after QA
@@ -696,7 +721,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG" }, { status: 400 });
       }
 
-      // Normalize incoming QA answers:
       const qaStored: any = existing.qa ?? {};
       const storedQuestions: string[] = Array.isArray(qaStored?.questions)
         ? qaStored.questions.map((x: any) => String(x)).filter(Boolean)
@@ -704,7 +728,6 @@ export async function POST(req: Request) {
 
       let normalizedAnswers: Array<{ question: string; answer: string }> = [];
 
-      // If client sent ["a1","a2"], pair with stored questions
       if (Array.isArray(parsed.data.qaAnswers) && typeof (parsed.data.qaAnswers as any)[0] === "string") {
         const answersOnly = (parsed.data.qaAnswers as string[]).map((s) => String(s ?? "").trim());
         normalizedAnswers = answersOnly.map((ans, i) => ({
@@ -718,12 +741,8 @@ export async function POST(req: Request) {
         }));
       }
 
-      // Keep answers aligned to what was asked (never store extra)
-      if (storedQuestions.length) {
-        normalizedAnswers = normalizedAnswers.slice(0, storedQuestions.length);
-      }
+      if (storedQuestions.length) normalizedAnswers = normalizedAnswers.slice(0, storedQuestions.length);
 
-      // Store answers into quote_logs.qa
       const qaPayload = {
         ...(qaStored ?? {}),
         questions: storedQuestions,
@@ -740,12 +759,11 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      // PCC denylist check on phase-2 answers too (cheap safety)
       if (
-        platform.guardrails.blockedTopics?.length &&
+        llm.guardrails.blockedTopics?.length &&
         containsDenylistedText(
           normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n"),
-          platform.guardrails.blockedTopics
+          llm.guardrails.blockedTopics
         )
       ) {
         return NextResponse.json(
@@ -756,29 +774,26 @@ export async function POST(req: Request) {
 
       const openai = await getOpenAiForTenant(tenant.id);
 
-      // ✅ PCC system prompt
-      const systemEstimate = platform.prompts.quoteEstimatorSystem;
-
-      // Generate final estimate (with Q&A)
       let output = await generateEstimate({
         openai,
-        model: platform.models.estimatorModel,
-        system: systemEstimate,
+        model: llm.models.estimatorModel, // ✅ tenant-effective model
+        system: llm.prompts.quoteEstimatorSystem,
         images,
         category,
         service_type,
         notes,
         normalizedAnswers,
+        maxOutputTokens: llm.guardrails.maxOutputTokens,
       });
 
-      // Persist estimate output
+      const outputWithAi = { ...(output ?? {}), ai: aiEnvelope };
+
       await db.execute(sql`
         update quote_logs
-        set output = ${JSON.stringify(output)}::jsonb
+        set output = ${JSON.stringify(outputWithAi)}::jsonb
         where id = ${quoteLogId}::uuid
       `);
 
-      // Send final estimate emails (best-effort)
       try {
         const emailResult = await sendFinalEstimateEmails({
           req,
@@ -788,33 +803,24 @@ export async function POST(req: Request) {
           customer,
           notes,
           images,
-          output,
+          output: outputWithAi,
           brandLogoUrl,
           businessNameFromSettings,
           renderOptIn: Boolean(inputAny.render_opt_in),
         });
 
-        const nextOutput = { ...(output ?? {}), email: emailResult };
+        const nextOutput = { ...(outputWithAi ?? {}), email: emailResult };
         await db.execute(sql`
           update quote_logs
           set output = ${JSON.stringify(nextOutput)}::jsonb
           where id = ${quoteLogId}::uuid
         `);
-        output = nextOutput;
+
+        return NextResponse.json({ ok: true, quoteLogId, output: nextOutput, ai: aiEnvelope });
       } catch (e: any) {
-        output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+        const nextOutput = { ...(outputWithAi ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+        return NextResponse.json({ ok: true, quoteLogId, output: nextOutput, ai: aiEnvelope });
       }
-
-      // ✅ return server-authoritative ai flags (phase 2)
-      const ai = buildAiResponse({
-        liveQaEnabled,
-        liveQaMaxQuestions,
-        tenantRenderEnabled: aiRenderingEnabled,
-        renderOptIn: Boolean(inputAny.render_opt_in),
-        platform,
-      });
-
-      return NextResponse.json({ ok: true, quoteLogId, output, ai });
     }
 
     // -------------------------
@@ -837,17 +843,10 @@ export async function POST(req: Request) {
     };
 
     if (customer.phone.replace(/\D/g, "").length < 10) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." }, { status: 400 });
     }
-
     if (!images.length) {
-      return NextResponse.json(
-        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." }, { status: 400 });
     }
 
     const customer_context = parsed.data.customer_context ?? {};
@@ -855,64 +854,40 @@ export async function POST(req: Request) {
     const service_type = customer_context.service_type ?? "upholstery";
     const notes = customer_context.notes ?? "";
 
-    // ✅ PCC denylist guardrail on notes
-    if (platform.guardrails.blockedTopics?.length && containsDenylistedText(notes, platform.guardrails.blockedTopics)) {
+    if (llm.guardrails.blockedTopics?.length && containsDenylistedText(notes, llm.guardrails.blockedTopics)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "CONTENT_BLOCKED",
-          message: "Your request includes content we can’t process. Please revise and try again.",
-        },
+        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again." },
         { status: 400 }
       );
     }
 
     const openai = await getOpenAiForTenant(tenant.id);
 
-    // Only allow render opt-in if tenant enabled it
-    const renderOptIn = aiRenderingEnabled ? Boolean(parsed.data.render_opt_in) : false;
-
-    // Store input
     const inputToStore = {
       tenantSlug,
       images,
-      render_opt_in: renderOptIn,
+      render_opt_in: renderOptInAccepted,
       customer,
       customer_context: { category, service_type, notes },
       createdAt: nowIso(),
     };
 
-    // Create quote log now (so Q&A can reference it)
     const inserted = await db
       .insert(quoteLogs)
       .values({
         tenantId: tenant.id,
         input: inputToStore,
-        output: {}, // will be filled later
-        renderOptIn,
+        output: { ai: aiEnvelope },
+        renderOptIn: renderOptInAccepted,
         qaStatus: "none",
       })
       .returning({ id: quoteLogs.id })
       .then((r) => r[0] ?? null);
 
     const quoteLogId = inserted?.id ? String(inserted.id) : null;
-    if (!quoteLogId) {
-      return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
-    }
+    if (!quoteLogId) return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
 
-    // ✅ return server-authoritative ai flags (phase 1)
-    const ai = buildAiResponse({
-      liveQaEnabled,
-      liveQaMaxQuestions,
-      tenantRenderEnabled: aiRenderingEnabled,
-      renderOptIn,
-      platform,
-    });
-
-    // If live QA is enabled, send “received” emails (estimate is intentionally delayed),
-    // then return questions. This avoids duplicate emails in non-QA mode.
     if (liveQaEnabled && liveQaMaxQuestions > 0) {
-      // Send “received” emails immediately (best-effort), and persist result
       try {
         const received = await sendReceivedEmails({
           req,
@@ -928,22 +903,23 @@ export async function POST(req: Request) {
 
         await db.execute(sql`
           update quote_logs
-          set output = ${JSON.stringify({ email_received: received })}::jsonb
+          set output = ${JSON.stringify({ ai: aiEnvelope, email_received: received })}::jsonb
           where id = ${quoteLogId}::uuid
         `);
       } catch {
-        // ignore — best effort
+        // best effort
       }
 
       const questions = await generateQaQuestions({
         openai,
-        model: platform.models.qaModel,
-        system: platform.prompts.qaQuestionGeneratorSystem,
+        model: llm.models.qaModel, // ✅ tenant-effective model
+        system: llm.prompts.qaQuestionGeneratorSystem,
         images,
         category,
         service_type,
         notes,
         maxQuestions: liveQaMaxQuestions,
+        maxOutputTokens: llm.guardrails.maxOutputTokens,
       });
 
       const qa = { questions, answers: [], askedAt: nowIso() };
@@ -957,28 +933,28 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai });
+      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope });
     }
 
-    // Otherwise, do estimate immediately
     let output = await generateEstimate({
       openai,
-      model: platform.models.estimatorModel,
-      system: platform.prompts.quoteEstimatorSystem,
+      model: llm.models.estimatorModel, // ✅ tenant-effective model
+      system: llm.prompts.quoteEstimatorSystem,
       images,
       category,
       service_type,
       notes,
+      maxOutputTokens: llm.guardrails.maxOutputTokens,
     });
 
-    // Persist estimate output
+    const outputWithAi = { ...(output ?? {}), ai: aiEnvelope };
+
     await db.execute(sql`
       update quote_logs
-      set output = ${JSON.stringify(output)}::jsonb
+      set output = ${JSON.stringify(outputWithAi)}::jsonb
       where id = ${quoteLogId}::uuid
     `);
 
-    // Send estimate emails exactly once (best-effort)
     try {
       const emailResult = await sendFinalEstimateEmails({
         req,
@@ -988,29 +964,27 @@ export async function POST(req: Request) {
         customer,
         notes,
         images,
-        output,
+        output: outputWithAi,
         brandLogoUrl,
         businessNameFromSettings,
-        renderOptIn: Boolean(renderOptIn),
+        renderOptIn: Boolean(renderOptInAccepted),
       });
 
-      const nextOutput = { ...(output ?? {}), email: emailResult };
+      const nextOutput = { ...(outputWithAi ?? {}), email: emailResult };
       await db.execute(sql`
         update quote_logs
         set output = ${JSON.stringify(nextOutput)}::jsonb
         where id = ${quoteLogId}::uuid
       `);
-      output = nextOutput;
-    } catch (e: any) {
-      output = { ...(output ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
-    }
 
-    return NextResponse.json({ ok: true, quoteLogId, output, ai });
+      return NextResponse.json({ ok: true, quoteLogId, output: nextOutput, ai: aiEnvelope });
+    } catch (e: any) {
+      const nextOutput = { ...(outputWithAi ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
+      return NextResponse.json({ ok: true, quoteLogId, output: nextOutput, ai: aiEnvelope });
+    }
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    if (msg === "MISSING_OPENAI_KEY") {
-      return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
-    }
+    if (msg === "MISSING_OPENAI_KEY") return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status: 500 });
   }
 }
