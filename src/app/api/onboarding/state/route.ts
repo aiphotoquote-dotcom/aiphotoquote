@@ -29,10 +29,13 @@ function slugify(name: string) {
 }
 
 /**
- * Ensures we have an internal app_user anchored to Clerk subject.
- * Returns id + whether it was newly created in THIS call.
+ * Ensure the portable app_user exists for this Clerk user.
+ * IMPORTANT: Use ON CONFLICT to avoid "already exists" crashes in race conditions.
  */
-async function ensureAppUser(): Promise<{ appUserId: string; wasCreated: boolean; user: { name: string | null; email: string | null } }> {
+async function ensureAppUser(): Promise<{
+  appUserId: string;
+  user: { name: string | null; email: string | null };
+}> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
 
@@ -40,71 +43,79 @@ async function ensureAppUser(): Promise<{ appUserId: string; wasCreated: boolean
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
   const name = u?.fullName ?? u?.firstName ?? null;
 
-  // Check existence first so we can compute "wasCreated"
-  const existing = await db.execute(sql`
-    select id
-    from app_users
-    where auth_provider = 'clerk' and auth_subject = ${userId}
-    limit 1
-  `);
-
-  const row: any = (existing as any)?.rows?.[0] ?? null;
-
-  // If exists, update basic profile and return
-  if (row?.id) {
-    await db.execute(sql`
-      update app_users
-      set email = coalesce(${email}, email),
-          name = coalesce(${name}, name),
-          updated_at = now()
-      where id = ${String(row.id)}::uuid
-    `);
-
-    return {
-      appUserId: String(row.id),
-      wasCreated: false,
-      user: { name, email },
-    };
-  }
-
-  // Else insert
-  const inserted = await db.execute(sql`
+  const upsert = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (gen_random_uuid(), 'clerk', ${userId}, ${email}, ${name}, now(), now())
+    on conflict on constraint app_users_provider_subject_uq
+    do update set
+      email = coalesce(excluded.email, app_users.email),
+      name = coalesce(excluded.name, app_users.name),
+      updated_at = now()
     returning id
   `);
 
-  const irow: any = (inserted as any)?.rows?.[0] ?? null;
-  if (!irow?.id) throw new Error("FAILED_TO_CREATE_APP_USER");
+  const row: any = (upsert as any)?.rows?.[0] ?? null;
+  const appUserId = row?.id ? String(row.id) : null;
+  if (!appUserId) throw new Error("FAILED_TO_CREATE_APP_USER");
+
+  return { appUserId, user: { name, email } };
+}
+
+async function listTenantsForUser(appUserId: string): Promise<Array<{ tenantId: string; tenantName: string | null }>> {
+  const r = await db.execute(sql`
+    select tm.tenant_id, t.name as tenant_name
+    from tenant_members tm
+    join tenants t on t.id = tm.tenant_id
+    where tm.user_id = ${appUserId}::uuid
+    order by tm.created_at asc
+  `);
+
+  const rows: any[] = (r as any)?.rows ?? [];
+  return rows
+    .map((x) => ({
+      tenantId: x?.tenant_id ? String(x.tenant_id) : "",
+      tenantName: x?.tenant_name ?? null,
+    }))
+    .filter((x) => Boolean(x.tenantId));
+}
+
+async function getOnboardingRow(tenantId: string) {
+  const r = await db.execute(sql`
+    select
+      t.name as tenant_name,
+      o.current_step,
+      o.completed,
+      o.website,
+      o.ai_analysis
+    from tenants t
+    left join tenant_onboarding o on o.tenant_id = t.id
+    where t.id = ${tenantId}::uuid
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? null;
 
   return {
-    appUserId: String(irow.id),
-    wasCreated: true,
-    user: { name, email },
+    tenantName: row?.tenant_name ?? null,
+    currentStep: row?.current_step ?? 1,
+    completed: row?.completed ?? false,
+    website: row?.website ?? null,
+    aiAnalysis: row?.ai_analysis ?? null,
   };
 }
 
-async function findTenantForUser(appUserId: string): Promise<string | null> {
-  const r = await db.execute(sql`
-    select tm.tenant_id
-    from tenant_members tm
-    where tm.user_id = ${appUserId}::uuid
-    order by tm.created_at asc
-    limit 1
-  `);
-  const row: any = (r as any)?.rows?.[0] ?? null;
-  return row?.tenant_id ? String(row.tenant_id) : null;
-}
-
+/**
+ * Entry point rules:
+ * - existing user + existing tenant: continue onboarding for earliest tenant (v1 behavior)
+ * - existing user + no tenant: wizard will create tenant on POST step 1
+ */
 export async function GET() {
   try {
-    const { appUserId, wasCreated, user } = await ensureAppUser();
-    const tenantId = await findTenantForUser(appUserId);
+    const { appUserId, user } = await ensureAppUser();
+    const tenants = await listTenantsForUser(appUserId);
 
-    // If no tenant yet, we can tell whether this is a brand-new user or an existing user creating a new tenant.
-    if (!tenantId) {
-      const onboardingMode: OnboardingMode = wasCreated ? "new_user_new_tenant" : "existing_user_new_tenant";
-
+    if (!tenants.length) {
+      const onboardingMode: OnboardingMode = "new_user_new_tenant";
       return NextResponse.json(
         {
           ok: true,
@@ -121,32 +132,24 @@ export async function GET() {
       );
     }
 
-    const r = await db.execute(sql`
-      select
-        t.name as tenant_name,
-        o.current_step,
-        o.completed,
-        o.website,
-        o.ai_analysis
-      from tenants t
-      left join tenant_onboarding o on o.tenant_id = t.id
-      where t.id = ${tenantId}::uuid
-      limit 1
-    `);
+    // v1: pick earliest tenant membership as "active onboarding tenant"
+    const tenantId = tenants[0].tenantId;
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
+    const o = await getOnboardingRow(tenantId);
+
+    const onboardingMode: OnboardingMode = "existing_user_existing_tenant";
 
     return NextResponse.json(
       {
         ok: true,
-        onboardingMode: "existing_user_existing_tenant" as OnboardingMode,
+        onboardingMode,
         user,
         tenantId,
-        tenantName: row?.tenant_name ?? null,
-        currentStep: row?.current_step ?? 1,
-        completed: row?.completed ?? false,
-        website: row?.website ?? null,
-        aiAnalysis: row?.ai_analysis ?? null,
+        tenantName: o.tenantName,
+        currentStep: o.currentStep,
+        completed: o.completed,
+        website: o.website,
+        aiAnalysis: o.aiAnalysis,
       },
       { status: 200 }
     );
@@ -165,7 +168,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "UNSUPPORTED_STEP" }, { status: 400 });
     }
 
-    // ✅ Step 1 is TENANT-only now:
     const businessName = safeTrim(body?.businessName);
     const website = safeTrim(body?.website);
 
@@ -173,12 +175,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
     }
 
-    // Ensure app user exists (identity comes from Clerk, not form fields)
     const { appUserId } = await ensureAppUser();
 
-    let tenantId = await findTenantForUser(appUserId);
+    // If user already has a tenant, treat this POST as "update business identity" for that tenant (v1).
+    const tenants = await listTenantsForUser(appUserId);
+    let tenantId: string | null = tenants.length ? tenants[0].tenantId : null;
 
-    // Create tenant if first time for this user
+    // Create tenant if first time
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -208,7 +211,7 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
-      // Existing tenant path: keep tenant name aligned
+      // keep tenant name aligned
       await db.execute(sql`
         update tenants
         set name = ${businessName}
