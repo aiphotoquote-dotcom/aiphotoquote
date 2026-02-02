@@ -26,7 +26,7 @@ function slugify(name: string) {
 /**
  * Ensures an app_users row exists for the current Clerk user.
  */
-async function ensureAppUser(): Promise<string> {
+async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
 
@@ -57,33 +57,72 @@ async function ensureAppUser(): Promise<string> {
 
   const row: any = (upsert as any)?.rows?.[0] ?? (Array.isArray(upsert) ? (upsert as any)[0] : null);
   if (!row?.id) throw new Error("FAILED_TO_CREATE_APP_USER");
-  return String(row.id);
+
+  return { appUserId: String(row.id), clerkUserId: userId };
 }
 
 /**
- * IMPORTANT:
- * Some environments may still have tenant_members.user_id as TEXT (legacy),
- * while newer migrations use UUID. This lookup must work in both cases.
- *
- * Key detail: cast BOTH sides to text to avoid "text = uuid" operator mismatch
- * if the driver binds $1 as uuid.
+ * Find the first tenant for a user, handling legacy DBs where tenant_members.user_id
+ * might be UUID or TEXT. We try multiple strategies and gracefully fall back.
  */
-async function findTenantForUser(appUserId: string): Promise<string | null> {
-  const r = await db.execute(sql`
-    select tm.tenant_id
-    from tenant_members tm
-    where tm.user_id::text = ${appUserId}::text
-    order by tm.created_at asc
-    limit 1
-  `);
-  const row: any = (r as any)?.rows?.[0] ?? null;
-  return row?.tenant_id ? String(row.tenant_id) : null;
+async function findTenantForUser(args: { appUserId: string; clerkUserId: string }): Promise<string | null> {
+  const { appUserId, clerkUserId } = args;
+
+  // Strategy A: UUID compare (fast path when tenant_members.user_id is UUID)
+  try {
+    const r = await db.execute(sql`
+      select tm.tenant_id
+      from tenant_members tm
+      where tm.user_id = ${appUserId}::uuid
+      order by tm.created_at asc
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    if (row?.tenant_id) return String(row.tenant_id);
+  } catch {
+    // ignore -> try next strategy
+  }
+
+  // Strategy B: text compare (works when tenant_members.user_id is TEXT)
+  try {
+    const r = await db.execute(sql`
+      select tm.tenant_id
+      from tenant_members tm
+      where tm.user_id::text = ${appUserId}::text
+      order by tm.created_at asc
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    if (row?.tenant_id) return String(row.tenant_id);
+  } catch {
+    // ignore -> try next strategy
+  }
+
+  // Strategy C: join via app_users (covers odd cases + keeps logic aligned to clerk subject)
+  try {
+    const r = await db.execute(sql`
+      select tm.tenant_id
+      from tenant_members tm
+      join app_users au
+        on au.id::text = tm.user_id::text
+      where au.auth_provider = 'clerk'
+        and au.auth_subject = ${clerkUserId}
+      order by tm.created_at asc
+      limit 1
+    `);
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    if (row?.tenant_id) return String(row.tenant_id);
+  } catch {
+    // ignore
+  }
+
+  return null;
 }
 
 export async function GET() {
   try {
-    const appUserId = await ensureAppUser();
-    const tenantId = await findTenantForUser(appUserId);
+    const { appUserId, clerkUserId } = await ensureAppUser();
+    const tenantId = await findTenantForUser({ appUserId, clerkUserId });
 
     if (!tenantId) {
       return NextResponse.json(
@@ -143,8 +182,8 @@ export async function POST(req: Request) {
     if (ownerName.length < 2) return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
     if (!ownerEmail.includes("@")) return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
 
-    const appUserId = await ensureAppUser();
-    let tenantId = await findTenantForUser(appUserId);
+    const { appUserId, clerkUserId } = await ensureAppUser();
+    let tenantId = await findTenantForUser({ appUserId, clerkUserId });
 
     // Create tenant if first time
     if (!tenantId) {
