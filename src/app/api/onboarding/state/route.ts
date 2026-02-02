@@ -24,32 +24,42 @@ function slugify(name: string) {
 }
 
 /**
- * ✅ Robust app_user upsert
- * Fixes race conditions where multiple concurrent requests try to create the same app_user.
- * Uses ON CONFLICT ON CONSTRAINT to match your schema:
- *   uniqueIndex("app_users_provider_subject_uq").on(authProvider, authSubject)
+ * Ensures an app_users row exists for the current Clerk user.
+ * IMPORTANT: Uses ON CONFLICT (columns), not ON CONSTRAINT (name),
+ * because Drizzle's uniqueIndex() typically creates a unique index,
+ * not a named constraint in Postgres.
  */
 async function ensureAppUser(): Promise<string> {
-  const a = await auth();
-  const userId = (a as any)?.userId as string | null;
+  const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
 
   const u = await currentUser();
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
   const name = u?.fullName ?? u?.firstName ?? null;
 
-  const r = await db.execute(sql`
-    insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
-    values (gen_random_uuid(), 'clerk', ${userId}, ${email}, ${name}, now(), now())
-    on conflict on constraint app_users_provider_subject_uq do update
-      set email = coalesce(excluded.email, app_users.email),
-          name = coalesce(excluded.name, app_users.name),
-          updated_at = now()
+  const upsert = await db.execute(sql`
+    insert into app_users (
+      id, auth_provider, auth_subject, email, name, created_at, updated_at
+    )
+    values (
+      gen_random_uuid(),
+      'clerk',
+      ${userId},
+      ${email},
+      ${name},
+      now(),
+      now()
+    )
+    on conflict (auth_provider, auth_subject)
+    do update set
+      email = coalesce(excluded.email, app_users.email),
+      name = coalesce(excluded.name, app_users.name),
+      updated_at = now()
     returning id
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  if (!row?.id) throw new Error("FAILED_TO_UPSERT_APP_USER");
+  const row: any = (upsert as any)?.rows?.[0] ?? (Array.isArray(upsert) ? (upsert as any)[0] : null);
+  if (!row?.id) throw new Error("FAILED_TO_CREATE_APP_USER");
   return String(row.id);
 }
 
