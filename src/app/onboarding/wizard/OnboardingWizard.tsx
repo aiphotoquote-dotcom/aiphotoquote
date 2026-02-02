@@ -5,16 +5,19 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type OnboardingState = {
   ok: boolean;
+
+  // common error payload shape
+  error?: string;
+  message?: string;
+
   tenantId: string | null;
   tenantName: string | null;
+
   currentStep: number;
   completed: boolean;
+
   website: string | null;
   aiAnalysis: any | null;
-
-  // ✅ API may return these on failures; wizard uses them in thrown errors.
-  message?: string;
-  error?: string;
 };
 
 function safeStep(v: any) {
@@ -53,7 +56,6 @@ export default function OnboardingWizard() {
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
       setState(j);
-      // prefer URL step; fallback to server step
       const urlStep = getStepFromUrl();
       setStep(urlStep || safeStep(j.currentStep || 1));
     } catch (e: any) {
@@ -88,7 +90,7 @@ export default function OnboardingWizard() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
     });
-    const j = await res.json().catch(() => null);
+    const j = (await res.json().catch(() => null)) as OnboardingState | null;
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
     await refresh();
     go(2);
@@ -118,18 +120,14 @@ export default function OnboardingWizard() {
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
-            <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">
-              Let’s set up your business
-            </div>
+            <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               We’ll tailor your quoting experience in just a few steps.
             </div>
           </div>
           <div className="shrink-0 text-right">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">
-              {state?.tenantName ? state.tenantName : "New tenant"}
-            </div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">{state?.tenantName ? state.tenantName : "New tenant"}</div>
           </div>
         </div>
 
@@ -206,9 +204,7 @@ function Step1({
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Business identity</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        This helps us personalize your estimates, emails, and branding.
-      </div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This helps us personalize your estimates, emails, and branding.</div>
 
       <div className="mt-6 grid gap-4">
         <Field label="Business name" value={businessName} onChange={setBusinessName} placeholder="Maggio Upholstery" />
@@ -261,9 +257,7 @@ function Step2({
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">AI fit check</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        If you provided a website, we’ll scan it to tailor your setup.
-      </div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">If you provided a website, we’ll scan it to tailor your setup.</div>
 
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
