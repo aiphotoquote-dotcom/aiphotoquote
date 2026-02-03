@@ -22,9 +22,21 @@ function slugify(name: string) {
   return base || `tenant-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+/** Normalize Drizzle execute() return shape across drivers */
+function firstRow(r: any): any | null {
+  const rows =
+    (r as any)?.rows ??
+    (Array.isArray(r) ? r : null) ??
+    (Array.isArray((r as any)?.result) ? (r as any).result : null);
+
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
 /**
  * Ensures an app_users row exists for the currently logged-in Clerk user.
- * IMPORTANT: use column-based ON CONFLICT so we don't depend on a specific constraint name in prod.
+ * IMPORTANT:
+ * - Use column-based ON CONFLICT so we don't depend on a constraint name.
+ * - Normalize db.execute() result shape so returning id is read reliably.
  */
 async function ensureAppUser(): Promise<{
   appUserId: string;
@@ -51,9 +63,12 @@ async function ensureAppUser(): Promise<{
     returning id
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? null;
+  const row: any = firstRow(r);
   const appUserId = row?.id ? String(row.id) : "";
-  if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
+  if (!appUserId) {
+    // make the error more actionable next time
+    throw new Error("FAILED_TO_UPSERT_APP_USER");
+  }
 
   return { appUserId, clerkUserId, email, name };
 }
@@ -67,7 +82,7 @@ async function findTenantForClerkUser(_clerkUserId: string, appUserId: string): 
     limit 1
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? null;
+  const row: any = firstRow(r);
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
@@ -96,7 +111,7 @@ export async function GET() {
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
+    const row: any = firstRow(r);
 
     return NextResponse.json(
       {
@@ -161,7 +176,7 @@ export async function POST(req: Request) {
         returning id
       `);
 
-      const trow: any = (tIns as any)?.rows?.[0] ?? null;
+      const trow: any = firstRow(tIns);
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
