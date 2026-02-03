@@ -24,11 +24,14 @@ function slugify(name: string) {
 
 /**
  * Ensures an app_users row exists for the currently logged-in Clerk user.
- * Returns both IDs for downstream joins.
- *
- * Uses an UPSERT so existing users don't error on duplicates.
+ * IMPORTANT: use column-based ON CONFLICT so we don't depend on a specific constraint name in prod.
  */
-async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string; email: string | null; name: string | null }> {
+async function ensureAppUser(): Promise<{
+  appUserId: string;
+  clerkUserId: string;
+  email: string | null;
+  name: string | null;
+}> {
   const a = await auth();
   const clerkUserId = (a as any)?.userId ? String((a as any).userId) : "";
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
@@ -40,7 +43,7 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   const r = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (gen_random_uuid(), 'clerk', ${clerkUserId}, ${email}, ${name}, now(), now())
-    on conflict on constraint app_users_provider_subject_uq
+    on conflict (auth_provider, auth_subject)
     do update set
       email = coalesce(excluded.email, app_users.email),
       name = coalesce(excluded.name, app_users.name),
@@ -55,10 +58,6 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   return { appUserId, clerkUserId, email, name };
 }
 
-/**
- * Find the first tenant for a given app user (authoritative).
- * (We keep clerkUserId in signature for flexibility, but primary join is appUserId.)
- */
 async function findTenantForClerkUser(_clerkUserId: string, appUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
     select tm.tenant_id
@@ -133,12 +132,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
     }
 
-    // Identify user + existing tenant context (if any)
     const { appUserId, clerkUserId, email: clerkEmail, name: clerkName } = await ensureAppUser();
     let tenantId = await findTenantForClerkUser(clerkUserId, appUserId);
 
-    // Only require owner name/email if this is truly first-time AND Clerk didn't give us anything usable.
-    // UI may omit these for existing users, which is correct.
     const ownerNameInput = safeTrim(body?.ownerName);
     const ownerEmailInput = safeTrim(body?.ownerEmail);
 
@@ -155,7 +151,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // Create tenant if first time
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -176,7 +171,6 @@ export async function POST(req: Request) {
         on conflict do nothing
       `);
 
-      // seed minimal settings (industryKey required)
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
         values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -185,7 +179,6 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
-      // keep tenant name aligned
       await db.execute(sql`
         update tenants
         set name = ${businessName}
@@ -199,7 +192,6 @@ export async function POST(req: Request) {
       `);
     }
 
-    // upsert onboarding state
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
