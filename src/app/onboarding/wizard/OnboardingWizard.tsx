@@ -1,7 +1,8 @@
-// src/app/onboarding/wizard/OnboardingWizard.tsx
+//src/app/onboarding/wizard/OnboardingWizard.tsx
+
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type OnboardingState = {
   ok: boolean;
@@ -40,16 +41,10 @@ function safeStep(v: any) {
   return Math.max(1, Math.min(6, Math.floor(n)));
 }
 
-/**
- * ✅ IMPORTANT:
- * Return null if the URL does not contain ?step=
- * (so refresh() can fall back to server currentStep)
- */
-function getStepFromUrl(): number | null {
-  if (typeof window === "undefined") return null;
+function getStepFromUrl(): number {
+  if (typeof window === "undefined") return 1;
   const url = new URL(window.location.href);
-  if (!url.searchParams.has("step")) return null;
-  return safeStep(url.searchParams.get("step"));
+  return safeStep(url.searchParams.get("step") ?? "1");
 }
 
 function setStepInUrl(step: number) {
@@ -77,13 +72,9 @@ export default function OnboardingWizard() {
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
       setState(j);
 
+      // prefer URL step; fallback to server step
       const urlStep = getStepFromUrl();
-      const nextStep = urlStep ?? safeStep(j.currentStep || 1);
-
-      // If URL had no step, set it so subsequent refreshes are stable
-      if (urlStep == null) setStepInUrl(nextStep);
-
-      setStep(nextStep);
+      setStep(urlStep || safeStep(j.currentStep || 1));
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -92,6 +83,8 @@ export default function OnboardingWizard() {
   }
 
   useEffect(() => {
+    const s = getStepFromUrl();
+    setStep(s);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -104,19 +97,15 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
-
     const res = await fetch("/api/onboarding/state", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
     });
-
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-
-    // ✅ Set step in URL immediately so refresh can't snap us back to 1
-    go(2);
     await refresh();
+    go(2);
   }
 
   async function runMockAnalysis() {
@@ -136,9 +125,8 @@ export default function OnboardingWizard() {
     });
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-
-    go(4);
     await refresh();
+    go(4);
   }
 
   if (loading) {
@@ -151,8 +139,7 @@ export default function OnboardingWizard() {
     );
   }
 
-  // /onboarding is protected → if you’re here, you’re signed in.
-  const existingUserContext = true;
+  const existingUserContext = Boolean(state?.tenantId); // pragmatic: if we already have tenant context, don't ask for name/email again
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -167,9 +154,7 @@ export default function OnboardingWizard() {
           </div>
           <div className="shrink-0 text-right">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">
-              {state?.tenantName ? state.tenantName : "New tenant"}
-            </div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">{state?.tenantName ? state.tenantName : "New tenant"}</div>
           </div>
         </div>
 
@@ -261,7 +246,7 @@ function Step1({
 
         {existingUser ? (
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-            You’re signed in — we’ll use your account profile for name + email.
+            We already know who you are from your login — no need to re-enter your name and email.
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
@@ -318,6 +303,38 @@ function Step2({
 }) {
   const [running, setRunning] = useState(false);
 
+  // ✅ Auto-run once: if a website exists and we don't have analysis yet.
+  const autoRanRef = useRef(false);
+
+  useEffect(() => {
+    if (autoRanRef.current) return;
+
+    const hasWebsite = String(website ?? "").trim().length > 0;
+    const hasAnalysis = Boolean(aiAnalysis);
+
+    // Mark as handled either way so we never loop on re-renders.
+    autoRanRef.current = true;
+
+    if (!hasWebsite || hasAnalysis) return;
+
+    let alive = true;
+
+    setRunning(true);
+    onRun()
+      .catch(() => {
+        // Parent sets the top-level error; we don't double-report here.
+      })
+      .finally(() => {
+        if (alive) setRunning(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [website, aiAnalysis, onRun]);
+
+  const buttonLabel = aiAnalysis ? "Re-run AI analysis (mock)" : "Run AI analysis (mock)";
+
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">AI fit check</div>
@@ -344,7 +361,7 @@ function Step2({
             }
           }}
         >
-          {running ? "Analyzing…" : "Run AI analysis (mock)"}
+          {running ? "Analyzing…" : buttonLabel}
         </button>
 
         {aiAnalysis ? (
@@ -409,6 +426,7 @@ function Step3({
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
+      // default selection: server selectedKey, else AI suggestion if present in list, else first item
       const serverSel = String(j.selectedKey ?? "").trim();
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const next =
