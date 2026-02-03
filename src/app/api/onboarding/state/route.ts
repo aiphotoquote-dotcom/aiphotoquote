@@ -12,6 +12,13 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function firstRow(r: any): any | null {
+  if (!r) return null;
+  if (Array.isArray(r)) return r[0] ?? null;
+  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
+  return null;
+}
+
 function slugify(name: string) {
   const base = safeTrim(name)
     .toLowerCase()
@@ -24,8 +31,8 @@ function slugify(name: string) {
 
 /**
  * Ensure we have an app_users row for this Clerk user.
- * IMPORTANT: your DB has a UNIQUE INDEX, not a named UNIQUE CONSTRAINT,
- * so we must use ON CONFLICT (auth_provider, auth_subject) instead of ON CONSTRAINT.
+ * IMPORTANT: use ON CONFLICT (auth_provider, auth_subject) because your DB has a UNIQUE INDEX,
+ * not a named UNIQUE CONSTRAINT.
  */
 async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
   const a = await auth();
@@ -46,7 +53,7 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
     returning id
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? null;
+  const row = firstRow(r);
   const appUserId = row?.id ? String(row.id) : null;
   if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
 
@@ -65,7 +72,7 @@ async function findTenantForClerkUser(clerkUserId: string): Promise<string | nul
     limit 1
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? null;
+  const row = firstRow(r);
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
@@ -102,7 +109,7 @@ export async function GET() {
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
+    const row = firstRow(r);
 
     return NextResponse.json(
       {
@@ -171,7 +178,7 @@ export async function POST(req: Request) {
         returning id
       `);
 
-      const trow: any = (tIns as any)?.rows?.[0] ?? null;
+      const trow = firstRow(tIns);
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
