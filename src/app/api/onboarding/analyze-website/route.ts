@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,13 @@ export async function POST() {
     const a = await auth();
     const clerkUserId = a.userId;
     if (!clerkUserId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+
+    // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
+    const cfg = await loadPlatformLlmConfig();
+    const onboardingModel =
+      String((cfg as any)?.models?.onboardingModel ?? "").trim() ||
+      String((cfg as any)?.models?.estimatorModel ?? "").trim() ||
+      "gpt-4o-mini";
 
     // ✅ Prod schema: tenant_members.clerk_user_id (text), no user_id column.
     const rTenant = await db.execute(sql`
@@ -49,6 +57,9 @@ export async function POST() {
         : "No website provided; we’ll confirm industry via questions next.",
       analyzedAt: new Date().toISOString(),
       source: "mock_v1",
+
+      // ✅ NEW: model provenance (so Step 2 is governed by PCC)
+      modelUsed: onboardingModel,
     };
 
     await db.execute(sql`
@@ -62,9 +73,6 @@ export async function POST() {
 
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: mock }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, { status: 500 });
   }
 }
