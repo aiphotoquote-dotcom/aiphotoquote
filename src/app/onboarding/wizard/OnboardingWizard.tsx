@@ -34,52 +34,6 @@ type IndustriesResponse = {
   message?: string;
 };
 
-type PricingRules = {
-  minJob: number | null;
-  typicalLow: number | null;
-  typicalHigh: number | null;
-  maxWithoutInspection: number | null;
-  tone: string | null;
-  riskPosture: string | null;
-  alwaysEstimateLanguage: boolean | null;
-};
-
-type PricingSetup = {
-  billingModel?: "hourly" | "flat" | "estimate_only";
-  laborRate?: number | null;
-  minimumCharge?: number | null;
-  materialsMarkupPct?: number | null;
-  updatedAt?: string;
-  source?: string;
-};
-
-type PricingGetResponse = {
-  ok: boolean;
-  tenantId: string;
-  pricingEnabled: boolean | null;
-  pricingRules: PricingRules;
-  pricingSetup: PricingSetup | null;
-  error?: string;
-  message?: string;
-};
-
-type PricingPostBody = {
-  pricingEnabled: boolean;
-  billingModel: "hourly" | "flat" | "estimate_only";
-  laborRate: number | null;
-  minimumCharge: number | null;
-  materialsMarkupPct: number | null;
-
-  minJob: number | null;
-  typicalLow: number | null;
-  typicalHigh: number | null;
-  maxWithoutInspection: number | null;
-
-  tone: string;
-  riskPosture: string;
-  alwaysEstimateLanguage: boolean;
-};
-
 function safeStep(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return 1;
@@ -98,12 +52,27 @@ function setStepInUrl(step: number) {
   window.history.replaceState({}, "", url.toString());
 }
 
-function toNumOrNull(v: string) {
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-  const n = Number(s);
-  if (!Number.isFinite(n)) return null;
-  return n;
+async function fetchJson(url: string, init?: RequestInit, timeoutMs = 20000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, { ...init, signal: ac.signal, cache: "no-store" as any });
+
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    const isJson = ct.includes("application/json");
+
+    // If server returned HTML/redirect/etc, capture text for debugging
+    if (!isJson) {
+      const text = await res.text().catch(() => "");
+      return { res, json: null as any, text, isJson: false };
+    }
+
+    const json = await res.json().catch(() => null);
+    return { res, json, text: "", isJson: true };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 export default function OnboardingWizard() {
@@ -120,9 +89,21 @@ export default function OnboardingWizard() {
   async function refresh() {
     setErr(null);
     try {
-      const res = await fetch("/api/onboarding/state", { method: "GET", cache: "no-store" });
-      const j = (await res.json().catch(() => null)) as OnboardingState | null;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+      const { res, json, text, isJson } = await fetchJson("/api/onboarding/state", { method: "GET" }, 20000);
+
+      if (!isJson) {
+        throw new Error(
+          `GET /api/onboarding/state returned non-JSON (HTTP ${res.status}). ` +
+            `content-type=${res.headers.get("content-type") || "(none)"} ` +
+            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
+        );
+      }
+
+      const j = json as OnboardingState | null;
+      if (!res.ok || !j?.ok) {
+        throw new Error(j?.message || j?.error || `GET failed (HTTP ${res.status})`);
+      }
+
       setState(j);
 
       // prefer URL step; fallback to server step
@@ -148,51 +129,91 @@ export default function OnboardingWizard() {
     setStep(s);
   }
 
+  // IMPORTANT: do not throw here — setErr and return false so the button never “hangs”
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
-    const res = await fetch("/api/onboarding/state", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ step: 1, ...payload }),
-    });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-    await refresh();
-    go(2);
+    try {
+      const { res, json, text, isJson } = await fetchJson(
+        "/api/onboarding/state",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ step: 1, ...payload }),
+        },
+        20000
+      );
+
+      if (!isJson) {
+        throw new Error(
+          `POST /api/onboarding/state returned non-JSON (HTTP ${res.status}). ` +
+            `content-type=${res.headers.get("content-type") || "(none)"} ` +
+            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
+        );
+      }
+
+      const j = json as any;
+      if (!res.ok || !j?.ok) {
+        throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+      }
+
+      await refresh();
+      go(2);
+      return true;
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+      return false;
+    }
   }
 
   async function runMockAnalysis() {
     setErr(null);
-    const res = await fetch("/api/onboarding/analyze-website", { method: "POST" });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
-    await refresh();
+    try {
+      const { res, json, text, isJson } = await fetchJson("/api/onboarding/analyze-website", { method: "POST" }, 20000);
+
+      if (!isJson) {
+        throw new Error(
+          `POST /api/onboarding/analyze-website returned non-JSON (HTTP ${res.status}). ` +
+            `content-type=${res.headers.get("content-type") || "(none)"} ` +
+            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
+        );
+      }
+
+      const j = json as any;
+      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+      await refresh();
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    }
   }
 
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string }) {
     setErr(null);
-    const res = await fetch("/api/onboarding/industries", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(args),
-    });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-    await refresh();
-    go(4);
-  }
+    try {
+      const { res, json, text, isJson } = await fetchJson(
+        "/api/onboarding/industries",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(args),
+        },
+        20000
+      );
 
-  async function savePricing(payload: PricingPostBody) {
-    setErr(null);
-    const res = await fetch("/api/onboarding/pricing", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-    await refresh();
-    go(5);
+      if (!isJson) {
+        throw new Error(
+          `POST /api/onboarding/industries returned non-JSON (HTTP ${res.status}). ` +
+            `content-type=${res.headers.get("content-type") || "(none)"} ` +
+            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
+        );
+      }
+
+      const j = json as any;
+      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+      await refresh();
+      go(4);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    }
   }
 
   if (loading) {
@@ -247,8 +268,6 @@ export default function OnboardingWizard() {
             />
           ) : step === 3 ? (
             <Step3 aiAnalysis={state?.aiAnalysis} onBack={() => go(2)} onSubmit={saveIndustrySelection} />
-          ) : step === 4 ? (
-            <Step4 onBack={() => go(3)} onSubmit={savePricing} />
           ) : (
             <ComingSoon step={step} onBack={() => go(step - 1)} />
           )}
@@ -290,7 +309,7 @@ function Step1({
   onSubmit,
 }: {
   existingUser: boolean;
-  onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<void>;
+  onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<boolean>;
 }) {
   const [businessName, setBusinessName] = useState("");
   const [ownerName, setOwnerName] = useState("");
@@ -449,8 +468,17 @@ function Step3({
     setErr(null);
     setLoading(true);
     try {
-      const res = await fetch("/api/onboarding/industries", { method: "GET", cache: "no-store" });
-      const j = (await res.json().catch(() => null)) as IndustriesResponse | null;
+      const { res, json, text, isJson } = await fetchJson("/api/onboarding/industries", { method: "GET" }, 20000);
+
+      if (!isJson) {
+        throw new Error(
+          `GET /api/onboarding/industries returned non-JSON (HTTP ${res.status}). ` +
+            `content-type=${res.headers.get("content-type") || "(none)"} ` +
+            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
+        );
+      }
+
+      const j = (json ?? null) as IndustriesResponse | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
       const list = Array.isArray(j.industries) ? j.industries : [];
@@ -587,240 +615,12 @@ function Step3({
   );
 }
 
-function Step4({
-  onBack,
-  onSubmit,
-}: {
-  onBack: () => void;
-  onSubmit: (payload: PricingPostBody) => Promise<void>;
-}) {
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const [pricingEnabled, setPricingEnabled] = useState(true);
-
-  const [billingModel, setBillingModel] = useState<"hourly" | "flat" | "estimate_only">("estimate_only");
-  const [laborRate, setLaborRate] = useState<string>("");
-  const [minimumCharge, setMinimumCharge] = useState<string>("");
-  const [materialsMarkupPct, setMaterialsMarkupPct] = useState<string>("");
-
-  const [minJob, setMinJob] = useState<string>("");
-  const [typicalLow, setTypicalLow] = useState<string>("");
-  const [typicalHigh, setTypicalHigh] = useState<string>("");
-  const [maxWithoutInspection, setMaxWithoutInspection] = useState<string>("");
-
-  const [tone, setTone] = useState<string>("value");
-  const [riskPosture, setRiskPosture] = useState<string>("conservative");
-  const [alwaysEstimateLanguage, setAlwaysEstimateLanguage] = useState<boolean>(true);
-
-  async function load() {
-    setErr(null);
-    setLoading(true);
-    try {
-      const res = await fetch("/api/onboarding/pricing", { method: "GET", cache: "no-store" });
-      const j = (await res.json().catch(() => null)) as PricingGetResponse | null;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
-
-      setPricingEnabled(j.pricingEnabled == null ? true : Boolean(j.pricingEnabled));
-
-      const setup = j.pricingSetup ?? {};
-      const rules = j.pricingRules ?? ({} as any);
-
-      const bm = setup?.billingModel;
-      if (bm === "hourly" || bm === "flat" || bm === "estimate_only") setBillingModel(bm);
-
-      setLaborRate(setup?.laborRate == null ? "" : String(setup.laborRate));
-      setMinimumCharge(setup?.minimumCharge == null ? "" : String(setup.minimumCharge));
-      setMaterialsMarkupPct(setup?.materialsMarkupPct == null ? "" : String(setup.materialsMarkupPct));
-
-      setMinJob(rules?.minJob == null ? "" : String(rules.minJob));
-      setTypicalLow(rules?.typicalLow == null ? "" : String(rules.typicalLow));
-      setTypicalHigh(rules?.typicalHigh == null ? "" : String(rules.typicalHigh));
-      setMaxWithoutInspection(rules?.maxWithoutInspection == null ? "" : String(rules.maxWithoutInspection));
-
-      setTone(String(rules?.tone ?? "value"));
-      setRiskPosture(String(rules?.riskPosture ?? "conservative"));
-      setAlwaysEstimateLanguage(rules?.alwaysEstimateLanguage == null ? true : Boolean(rules.alwaysEstimateLanguage));
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const canSave = true; // soft validate v1 (server clamps)
-
-  return (
-    <div>
-      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Pricing model</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        Tell us how your shop charges so we can tailor estimates and guardrails.
-      </div>
-
-      {err ? (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-          {err}
-        </div>
-      ) : null}
-
-      {loading ? (
-        <div className="mt-6 text-sm text-gray-600 dark:text-gray-300">Loading pricing setup…</div>
-      ) : (
-        <div className="mt-6 grid gap-6">
-          <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Enable pricing</div>
-              <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={pricingEnabled}
-                  onChange={(e) => setPricingEnabled(e.target.checked)}
-                />
-                On
-              </label>
-            </div>
-            <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-              Turn this off if you only want “inspection required / contact us” style outcomes.
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Billing approach</div>
-
-            <label className="mt-3 block">
-              <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Billing model</div>
-              <select
-                value={billingModel}
-                onChange={(e) => setBillingModel(e.target.value as any)}
-                className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                <option value="estimate_only">Estimate-only (recommended)</option>
-                <option value="hourly">Hourly labor + materials</option>
-                <option value="flat">Flat rate / package pricing</option>
-              </select>
-            </label>
-
-            <div className="mt-4 grid gap-4 md:grid-cols-3">
-              <Field label="Labor rate ($/hr)" value={laborRate} onChange={setLaborRate} placeholder="125" />
-              <Field label="Minimum charge ($)" value={minimumCharge} onChange={setMinimumCharge} placeholder="250" />
-              <Field label="Materials markup (%)" value={materialsMarkupPct} onChange={setMaterialsMarkupPct} placeholder="25" />
-            </div>
-
-            <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-              These are used as onboarding defaults and stored for audit; we’ll refine the DB model later.
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Guardrails for estimates</div>
-            <div className="mt-2 grid gap-4 md:grid-cols-2">
-              <Field label="Minimum job ($)" value={minJob} onChange={setMinJob} placeholder="200" />
-              <Field label="Max without inspection ($)" value={maxWithoutInspection} onChange={setMaxWithoutInspection} placeholder="2500" />
-              <Field label="Typical low ($)" value={typicalLow} onChange={setTypicalLow} placeholder="800" />
-              <Field label="Typical high ($)" value={typicalHigh} onChange={setTypicalHigh} placeholder="1800" />
-            </div>
-
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <label className="block">
-                <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Tone</div>
-                <select
-                  value={tone}
-                  onChange={(e) => setTone(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                >
-                  <option value="value">Value</option>
-                  <option value="premium">Premium</option>
-                  <option value="direct">Direct</option>
-                </select>
-              </label>
-
-              <label className="block">
-                <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Risk posture</div>
-                <select
-                  value={riskPosture}
-                  onChange={(e) => setRiskPosture(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                >
-                  <option value="conservative">Conservative</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="aggressive">Aggressive</option>
-                </select>
-              </label>
-            </div>
-
-            <label className="mt-4 flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={alwaysEstimateLanguage}
-                onChange={(e) => setAlwaysEstimateLanguage(e.target.checked)}
-              />
-              Always use “estimate” language (recommended)
-            </label>
-          </div>
-        </div>
-      )}
-
-      <div className="mt-6 grid grid-cols-2 gap-3">
-        <button
-          type="button"
-          className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-          onClick={onBack}
-          disabled={saving}
-        >
-          Back
-        </button>
-        <button
-          type="button"
-          className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-          disabled={!canSave || saving}
-          onClick={async () => {
-            setSaving(true);
-            setErr(null);
-            try {
-              await onSubmit({
-                pricingEnabled,
-                billingModel,
-                laborRate: toNumOrNull(laborRate),
-                minimumCharge: toNumOrNull(minimumCharge),
-                materialsMarkupPct: toNumOrNull(materialsMarkupPct),
-
-                minJob: toNumOrNull(minJob),
-                typicalLow: toNumOrNull(typicalLow),
-                typicalHigh: toNumOrNull(typicalHigh),
-                maxWithoutInspection: toNumOrNull(maxWithoutInspection),
-
-                tone: String(tone || "value"),
-                riskPosture: String(riskPosture || "conservative"),
-                alwaysEstimateLanguage: Boolean(alwaysEstimateLanguage),
-              });
-            } catch (e: any) {
-              setErr(e?.message ?? String(e));
-            } finally {
-              setSaving(false);
-            }
-          }}
-        >
-          {saving ? "Saving…" : "Continue"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function ComingSoon({ step, onBack }: { step: number; onBack: () => void }) {
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Step {step} coming next</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        Wizard shell is in place. Next we’ll implement plan selection + checkout.
+        Wizard shell is in place. Next we’ll implement pricing model setup + plan selection.
       </div>
 
       <button
