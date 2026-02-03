@@ -1,20 +1,12 @@
 // src/components/pcc/llm/LlmManagerClient.tsx
 "use client";
 
-import React, { useMemo, useState, useEffect } from "react";
-
-import { safeStr, numClamp, normalizeBlockedTopics } from "@/components/pcc/llm/helpers/normalize";
-import { promptPreview } from "@/components/pcc/llm/helpers/preview";
-import {
-  defaultRenderPromptPreamble,
-  defaultRenderPromptTemplate,
-  defaultStylePreset,
-  type RenderStyleKey,
-} from "@/components/pcc/llm/helpers/defaults";
-import { TEXT_MODEL_OPTIONS, IMAGE_MODEL_OPTIONS } from "@/components/pcc/llm/helpers/modelOptions";
+import React, { useMemo, useState } from "react";
 
 type GuardrailsMode = "strict" | "balanced" | "permissive";
 type PiiHandling = "redact" | "allow" | "deny";
+
+type RenderStyleKey = "photoreal" | "clean_oem" | "custom";
 
 export type PlatformLlmConfig = {
   version?: number;
@@ -90,14 +82,65 @@ async function apiPost(config: PlatformLlmConfig): Promise<ApiPostResp> {
   return res.json();
 }
 
-function isInOptions(value: string, options: Array<{ value: string }>) {
-  return options.some((o) => o.value === value);
+function safeStr(v: unknown, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
 }
 
-function pickInitialSelect(value: string, options: Array<{ value: string }>) {
-  const v = safeStr(value, "");
-  if (!v) return options[0]?.value ?? "custom";
-  return isInOptions(v, options) ? v : "custom";
+function numClamp(v: unknown, min: number, max: number, fallback: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function normalizeBlockedTopics(raw: string): string[] {
+  const parts = raw
+    .split(/\n|,/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parts) {
+    const k = p.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+  }
+  return out;
+}
+
+function promptPreview(s: string, max = 220) {
+  const t = String(s ?? "");
+  if (t.length <= max) return t;
+  return t.slice(0, max) + "…";
+}
+
+function defaultRenderPromptPreamble() {
+  return [
+    "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
+    "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
+    "No nudity, no explicit content, no weapons, no illegal activity.",
+  ].join("\n");
+}
+
+function defaultRenderPromptTemplate() {
+  return [
+    "{renderPromptPreamble}",
+    "Generate a realistic 'after' concept rendering based on the customer's photos.",
+    "Do NOT add text or watermarks.",
+    "Style: {style}",
+    "{serviceTypeLine}",
+    "{summaryLine}",
+    "{customerNotesLine}",
+    "{tenantRenderNotesLine}",
+  ].join("\n");
+}
+
+function defaultStylePreset(key: RenderStyleKey) {
+  if (key === "clean_oem") return "clean OEM refresh, factory-correct look, neutral lighting, product photo feel";
+  if (key === "custom") return "custom show-style upgrade, premium materials, dramatic but tasteful lighting";
+  return "photorealistic, clean lighting, product photography feel";
 }
 
 export function LlmManagerClient({
@@ -116,12 +159,13 @@ export function LlmManagerClient({
     const models = cfg?.models ?? {};
     const prompts = cfg?.prompts ?? {};
     const guardrails = cfg?.guardrails ?? {};
+
     const presets = (prompts as any)?.renderStylePresets ?? {};
 
     return {
       estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
       qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
-      renderModel: safeStr(models.renderModel, "gpt-image-1"),
+      renderModel: safeStr(models.renderModel, "gpt-4o-mini"),
 
       // ✅ NEW
       onboardingModel: safeStr((models as any)?.onboardingModel, "gpt-4o-mini"),
@@ -146,35 +190,12 @@ export function LlmManagerClient({
     };
   }, [cfg]);
 
-  // --- model selects + custom values ---
-  const [estimatorModelSelect, setEstimatorModelSelect] = useState(() =>
-    pickInitialSelect(form.estimatorModel, TEXT_MODEL_OPTIONS)
-  );
-  const [qaModelSelect, setQaModelSelect] = useState(() => pickInitialSelect(form.qaModel, TEXT_MODEL_OPTIONS));
-  const [renderModelSelect, setRenderModelSelect] = useState(() =>
-    pickInitialSelect(form.renderModel, IMAGE_MODEL_OPTIONS)
-  );
+  const [estimatorModel, setEstimatorModel] = useState(form.estimatorModel);
+  const [qaModel, setQaModel] = useState(form.qaModel);
+  const [renderModel, setRenderModel] = useState(form.renderModel);
 
-  // ✅ NEW onboarding select (uses TEXT options)
-  const [onboardingModelSelect, setOnboardingModelSelect] = useState(() =>
-    pickInitialSelect(form.onboardingModel, TEXT_MODEL_OPTIONS)
-  );
-
-  const [estimatorModelCustom, setEstimatorModelCustom] = useState(() => form.estimatorModel);
-  const [qaModelCustom, setQaModelCustom] = useState(() => form.qaModel);
-  const [renderModelCustom, setRenderModelCustom] = useState(() => form.renderModel);
-
-  // ✅ NEW onboarding custom
-  const [onboardingModelCustom, setOnboardingModelCustom] = useState(() => form.onboardingModel);
-
-  function effectiveTextModel(selectVal: string, customVal: string, fallback: string) {
-    if (selectVal !== "custom") return safeStr(selectVal, fallback);
-    return safeStr(customVal, fallback);
-  }
-  function effectiveImageModel(selectVal: string, customVal: string, fallback: string) {
-    if (selectVal !== "custom") return safeStr(selectVal, fallback);
-    return safeStr(customVal, fallback);
-  }
+  // ✅ NEW
+  const [onboardingModel, setOnboardingModel] = useState(form.onboardingModel);
 
   const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(form.quoteEstimatorSystem);
   const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(form.qaQuestionGeneratorSystem);
@@ -208,25 +229,18 @@ export function LlmManagerClient({
       const g = c.guardrails ?? {};
       const presets = (p as any)?.renderStylePresets ?? {};
 
-      const est = safeStr(m.estimatorModel, "gpt-4o-mini");
-      const qa = safeStr(m.qaModel, "gpt-4o-mini");
-      const ren = safeStr(m.renderModel, "gpt-image-1");
-      const onb = safeStr((m as any)?.onboardingModel, "gpt-4o-mini");
+      setEstimatorModel(safeStr(m.estimatorModel, "gpt-4o-mini"));
+      setQaModel(safeStr(m.qaModel, "gpt-4o-mini"));
+      setRenderModel(safeStr(m.renderModel, "gpt-4o-mini"));
 
-      setEstimatorModelSelect(pickInitialSelect(est, TEXT_MODEL_OPTIONS));
-      setQaModelSelect(pickInitialSelect(qa, TEXT_MODEL_OPTIONS));
-      setRenderModelSelect(pickInitialSelect(ren, IMAGE_MODEL_OPTIONS));
-      setOnboardingModelSelect(pickInitialSelect(onb, TEXT_MODEL_OPTIONS));
-
-      setEstimatorModelCustom(est);
-      setQaModelCustom(qa);
-      setRenderModelCustom(ren);
-      setOnboardingModelCustom(onb);
+      // ✅ NEW
+      setOnboardingModel(safeStr((m as any)?.onboardingModel, "gpt-4o-mini"));
 
       setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
       setQaQuestionGeneratorSystem(safeStr(p.qaQuestionGeneratorSystem, ""));
       setExtraSystemPreamble(safeStr(p.extraSystemPreamble, ""));
 
+      // ✅ Render prompt controls (PCC)
       setRenderPromptPreamble(safeStr((p as any)?.renderPromptPreamble, ""));
       setRenderPromptTemplate(safeStr((p as any)?.renderPromptTemplate, ""));
       setRenderStylePhotoreal(safeStr(presets?.photoreal, ""));
@@ -249,27 +263,23 @@ export function LlmManagerClient({
     setMsg(null);
     setSaving(true);
     try {
-      const estimatorModel = effectiveTextModel(estimatorModelSelect, estimatorModelCustom, "gpt-4o-mini");
-      const qaModel = effectiveTextModel(qaModelSelect, qaModelCustom, "gpt-4o-mini");
-      const renderModel = effectiveImageModel(renderModelSelect, renderModelCustom, "gpt-image-1");
-
-      // ✅ NEW
-      const onboardingModel = effectiveTextModel(onboardingModelSelect, onboardingModelCustom, "gpt-4o-mini");
-
       const next: PlatformLlmConfig = {
         version: cfg?.version ?? 1,
         updatedAt: cfg?.updatedAt ?? null,
         models: {
-          estimatorModel,
-          qaModel,
-          renderModel,
-          onboardingModel,
+          estimatorModel: safeStr(estimatorModel, "gpt-4o-mini"),
+          qaModel: safeStr(qaModel, "gpt-4o-mini"),
+          renderModel: safeStr(renderModel, "gpt-4o-mini"),
+
+          // ✅ NEW
+          onboardingModel: safeStr(onboardingModel, "gpt-4o-mini"),
         },
         prompts: {
           extraSystemPreamble: String(extraSystemPreamble ?? ""),
           quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
           qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
 
+          // ✅ Render prompt controls (PCC)
           renderPromptPreamble: String(renderPromptPreamble ?? ""),
           renderPromptTemplate: String(renderPromptTemplate ?? ""),
           renderStylePresets: {
@@ -306,6 +316,7 @@ export function LlmManagerClient({
 
   return (
     <div className="space-y-6">
+      {/* Effective preview (read-only) */}
       {effective ? (
         <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -380,6 +391,7 @@ export function LlmManagerClient({
         </div>
       ) : null}
 
+      {/* Existing Config card */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -430,103 +442,48 @@ export function LlmManagerClient({
           </p>
 
           <div className="mt-4 space-y-4">
-            {/* Estimator */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Estimator model</label>
-              <select
-                value={estimatorModelSelect}
-                onChange={(e) => setEstimatorModelSelect(e.target.value)}
+              <input
+                value={estimatorModel}
+                onChange={(e) => setEstimatorModel(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                {TEXT_MODEL_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              {estimatorModelSelect === "custom" ? (
-                <input
-                  value={estimatorModelCustom}
-                  onChange={(e) => setEstimatorModelCustom(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  placeholder="enter custom text model id…"
-                />
-              ) : null}
+                placeholder="gpt-4o-mini"
+              />
             </div>
 
-            {/* QA */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&amp;A model</label>
-              <select
-                value={qaModelSelect}
-                onChange={(e) => setQaModelSelect(e.target.value)}
+              <input
+                value={qaModel}
+                onChange={(e) => setQaModel(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                {TEXT_MODEL_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              {qaModelSelect === "custom" ? (
-                <input
-                  value={qaModelCustom}
-                  onChange={(e) => setQaModelCustom(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  placeholder="enter custom text model id…"
-                />
-              ) : null}
+                placeholder="gpt-4o-mini"
+              />
             </div>
 
             {/* ✅ NEW Onboarding */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding model</label>
-              <select
-                value={onboardingModelSelect}
-                onChange={(e) => setOnboardingModelSelect(e.target.value)}
+              <input
+                value={onboardingModel}
+                onChange={(e) => setOnboardingModel(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                {TEXT_MODEL_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              {onboardingModelSelect === "custom" ? (
-                <input
-                  value={onboardingModelCustom}
-                  onChange={(e) => setOnboardingModelCustom(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  placeholder="enter custom onboarding text model id…"
-                />
-              ) : null}
+                placeholder="gpt-4o-mini"
+              />
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 Used by onboarding AI (website analysis + fit + industry suggestion).
               </div>
             </div>
 
-            {/* Render */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render model</label>
-              <select
-                value={renderModelSelect}
-                onChange={(e) => setRenderModelSelect(e.target.value)}
+              <input
+                value={renderModel}
+                onChange={(e) => setRenderModel(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                {IMAGE_MODEL_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              {renderModelSelect === "custom" ? (
-                <input
-                  value={renderModelCustom}
-                  onChange={(e) => setRenderModelCustom(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  placeholder="enter custom image model id…"
-                />
-              ) : null}
+                placeholder="gpt-image-1"
+              />
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 This is what /api/quote/render uses for image generation.
               </div>
@@ -534,7 +491,6 @@ export function LlmManagerClient({
           </div>
         </section>
 
-        {/* Guardrails section unchanged */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Guardrails</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -610,11 +566,169 @@ export function LlmManagerClient({
         </section>
       </div>
 
-      {/* NOTE:
-         Your original file likely continues with prompt-set editors + render prompt editors.
-         Those are intentionally untouched in this change. If your repo file contains them,
-         keep them as-is below this point.
-      */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Prompt sets</h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">System prompts. Keep them tight and deterministic.</p>
+
+        <div className="mt-4 space-y-4">
+          <div>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble</label>
+            <textarea
+              value={extraSystemPreamble}
+              onChange={(e) => setExtraSystemPreamble(e.target.value)}
+              className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              placeholder="Prepended to BOTH prompts (optional)…"
+            />
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system</label>
+              <textarea
+                value={quoteEstimatorSystem}
+                onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
+                className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                placeholder="System prompt used for estimate generation…"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&amp;A question generator system</label>
+              <textarea
+                value={qaQuestionGeneratorSystem}
+                onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
+                className="mt-1 h-72 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                placeholder="System prompt used to generate clarifying questions…"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ✅ NEW: Render Prompt Controls */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Rendering prompts</h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          Controls used by <span className="font-mono">/api/quote/render</span>. Tenant chooses style key in AI Policy
+          (photoreal / clean_oem / custom) and we map that key to these presets.
+        </p>
+
+        <div className="mt-4 space-y-6">
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render prompt preamble</label>
+              <button
+                type="button"
+                onClick={() => setRenderPromptPreamble(defaultRenderPromptPreamble())}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Reset default
+              </button>
+            </div>
+            <textarea
+              value={renderPromptPreamble}
+              onChange={(e) => setRenderPromptPreamble(e.target.value)}
+              className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              placeholder={defaultRenderPromptPreamble()}
+            />
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Prepended to the final render prompt. Keep it safety-focused and “no text/watermark”.
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render prompt template</label>
+              <button
+                type="button"
+                onClick={() => setRenderPromptTemplate(defaultRenderPromptTemplate())}
+                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Reset default
+              </button>
+            </div>
+            <textarea
+              value={renderPromptTemplate}
+              onChange={(e) => setRenderPromptTemplate(e.target.value)}
+              className="mt-1 h-56 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              placeholder={defaultRenderPromptTemplate()}
+            />
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 space-y-1">
+              <div className="font-semibold">Available tokens</div>
+              <div className="font-mono">
+                {"{renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}"}
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Style presets</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              These map tenant style keys to a style string injected into the prompt as{" "}
+              <span className="font-mono">{"{style}"}</span>.
+            </div>
+
+            <div className="mt-4 grid gap-6 lg:grid-cols-3">
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">photoreal</label>
+                  <button
+                    type="button"
+                    onClick={() => setRenderStylePhotoreal(defaultStylePreset("photoreal"))}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  >
+                    Default
+                  </button>
+                </div>
+                <textarea
+                  value={renderStylePhotoreal}
+                  onChange={(e) => setRenderStylePhotoreal(e.target.value)}
+                  className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder={defaultStylePreset("photoreal")}
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">clean_oem</label>
+                  <button
+                    type="button"
+                    onClick={() => setRenderStyleCleanOem(defaultStylePreset("clean_oem"))}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  >
+                    Default
+                  </button>
+                </div>
+                <textarea
+                  value={renderStyleCleanOem}
+                  onChange={(e) => setRenderStyleCleanOem(e.target.value)}
+                  className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder={defaultStylePreset("clean_oem")}
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">custom</label>
+                  <button
+                    type="button"
+                    onClick={() => setRenderStyleCustom(defaultStylePreset("custom"))}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  >
+                    Default
+                  </button>
+                </div>
+                <textarea
+                  value={renderStyleCustom}
+                  onChange={(e) => setRenderStyleCustom(e.target.value)}
+                  className="mt-1 h-40 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder={defaultStylePreset("custom")}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
