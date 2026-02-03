@@ -1,3 +1,5 @@
+// src/app/api/onboarding/state/route.ts
+
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
