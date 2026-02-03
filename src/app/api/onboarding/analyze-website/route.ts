@@ -8,35 +8,24 @@ import { db } from "@/lib/db/client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
 export async function POST() {
   try {
     const a = await auth();
-    const userId = (a as any)?.userId as string | null;
+    const clerkUserId = a.userId;
+    if (!clerkUserId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
 
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
-    }
-
+    // ✅ Prod schema: tenant_members.clerk_user_id (text), no user_id column.
     const rTenant = await db.execute(sql`
       select tm.tenant_id
       from tenant_members tm
-      join app_users au on au.id = tm.user_id
-      where au.auth_provider = 'clerk' and au.auth_subject = ${userId}
+      where tm.clerk_user_id = ${clerkUserId}
       order by tm.created_at asc
       limit 1
     `);
 
-    const rowT: any = (rTenant as any)?.rows?.[0] ?? (Array.isArray(rTenant) ? (rTenant as any)[0] : null);
+    const rowT: any = (rTenant as any)?.rows?.[0] ?? null;
     const tenantId = rowT?.tenant_id ? String(rowT.tenant_id) : null;
-
-    if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
-    }
+    if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
 
     const r = await db.execute(sql`
       select website
@@ -45,8 +34,8 @@ export async function POST() {
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-    const website = safeTrim(row?.website ?? "");
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    const website = String(row?.website ?? "").trim();
 
     // Mock v1 (auditable); we’ll swap to OpenAI next.
     const mock = {
