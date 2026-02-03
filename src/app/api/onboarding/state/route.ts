@@ -34,9 +34,8 @@ function firstRow(r: any): any | null {
 
 /**
  * Ensures an app_users row exists for the currently logged-in Clerk user.
- * IMPORTANT:
- * - Use column-based ON CONFLICT so we don't depend on a constraint name.
- * - Normalize db.execute() result shape so returning id is read reliably.
+ * - Uses ON CONFLICT(auth_provider, auth_subject) to avoid depending on constraint names.
+ * - Normalizes db.execute() shape for returning id.
  */
 async function ensureAppUser(): Promise<{
   appUserId: string;
@@ -65,19 +64,20 @@ async function ensureAppUser(): Promise<{
 
   const row: any = firstRow(r);
   const appUserId = row?.id ? String(row.id) : "";
-  if (!appUserId) {
-    // make the error more actionable next time
-    throw new Error("FAILED_TO_UPSERT_APP_USER");
-  }
+  if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
 
   return { appUserId, clerkUserId, email, name };
 }
 
+/**
+ * IMPORTANT: Some environments have tenant_members.user_id as TEXT (legacy),
+ * while others have UUID. Make the lookup type-agnostic by comparing as text.
+ */
 async function findTenantForClerkUser(_clerkUserId: string, appUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
     select tm.tenant_id
     from tenant_members tm
-    where tm.user_id = ${appUserId}::uuid
+    where tm.user_id::text = ${String(appUserId)}::text
     order by tm.created_at asc
     limit 1
   `);
