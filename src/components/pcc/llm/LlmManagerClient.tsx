@@ -1,7 +1,7 @@
 // src/components/pcc/llm/LlmManagerClient.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 
 import { safeStr, numClamp, normalizeBlockedTopics } from "@/components/pcc/llm/helpers/normalize";
 import { promptPreview } from "@/components/pcc/llm/helpers/preview";
@@ -23,6 +23,9 @@ export type PlatformLlmConfig = {
     estimatorModel?: string;
     qaModel?: string;
     renderModel?: string;
+
+    // ✅ NEW: used by onboarding analysis (website scan, fit, industry detection)
+    onboardingModel?: string;
   };
   prompts?: {
     quoteEstimatorSystem?: string;
@@ -50,7 +53,14 @@ export type PlatformLlmConfig = {
 };
 
 type EffectivePreview = {
-  models: { estimatorModel: string; qaModel: string; renderModel: string };
+  models: {
+    estimatorModel: string;
+    qaModel: string;
+    renderModel: string;
+
+    // ✅ allow resolver to expose it; optional for back-compat
+    onboardingModel?: string;
+  };
   prompts: { quoteEstimatorSystem: string; qaQuestionGeneratorSystem: string };
   guardrails: {
     mode: GuardrailsMode;
@@ -106,13 +116,15 @@ export function LlmManagerClient({
     const models = cfg?.models ?? {};
     const prompts = cfg?.prompts ?? {};
     const guardrails = cfg?.guardrails ?? {};
-
     const presets = (prompts as any)?.renderStylePresets ?? {};
 
     return {
       estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
       qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
       renderModel: safeStr(models.renderModel, "gpt-image-1"),
+
+      // ✅ NEW
+      onboardingModel: safeStr((models as any)?.onboardingModel, "gpt-4o-mini"),
 
       quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
       qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
@@ -143,9 +155,17 @@ export function LlmManagerClient({
     pickInitialSelect(form.renderModel, IMAGE_MODEL_OPTIONS)
   );
 
+  // ✅ NEW onboarding select (uses TEXT options)
+  const [onboardingModelSelect, setOnboardingModelSelect] = useState(() =>
+    pickInitialSelect(form.onboardingModel, TEXT_MODEL_OPTIONS)
+  );
+
   const [estimatorModelCustom, setEstimatorModelCustom] = useState(() => form.estimatorModel);
   const [qaModelCustom, setQaModelCustom] = useState(() => form.qaModel);
   const [renderModelCustom, setRenderModelCustom] = useState(() => form.renderModel);
+
+  // ✅ NEW onboarding custom
+  const [onboardingModelCustom, setOnboardingModelCustom] = useState(() => form.onboardingModel);
 
   function effectiveTextModel(selectVal: string, customVal: string, fallback: string) {
     if (selectVal !== "custom") return safeStr(selectVal, fallback);
@@ -191,14 +211,17 @@ export function LlmManagerClient({
       const est = safeStr(m.estimatorModel, "gpt-4o-mini");
       const qa = safeStr(m.qaModel, "gpt-4o-mini");
       const ren = safeStr(m.renderModel, "gpt-image-1");
+      const onb = safeStr((m as any)?.onboardingModel, "gpt-4o-mini");
 
       setEstimatorModelSelect(pickInitialSelect(est, TEXT_MODEL_OPTIONS));
       setQaModelSelect(pickInitialSelect(qa, TEXT_MODEL_OPTIONS));
       setRenderModelSelect(pickInitialSelect(ren, IMAGE_MODEL_OPTIONS));
+      setOnboardingModelSelect(pickInitialSelect(onb, TEXT_MODEL_OPTIONS));
 
       setEstimatorModelCustom(est);
       setQaModelCustom(qa);
       setRenderModelCustom(ren);
+      setOnboardingModelCustom(onb);
 
       setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
       setQaQuestionGeneratorSystem(safeStr(p.qaQuestionGeneratorSystem, ""));
@@ -230,6 +253,9 @@ export function LlmManagerClient({
       const qaModel = effectiveTextModel(qaModelSelect, qaModelCustom, "gpt-4o-mini");
       const renderModel = effectiveImageModel(renderModelSelect, renderModelCustom, "gpt-image-1");
 
+      // ✅ NEW
+      const onboardingModel = effectiveTextModel(onboardingModelSelect, onboardingModelCustom, "gpt-4o-mini");
+
       const next: PlatformLlmConfig = {
         version: cfg?.version ?? 1,
         updatedAt: cfg?.updatedAt ?? null,
@@ -237,6 +263,7 @@ export function LlmManagerClient({
           estimatorModel,
           qaModel,
           renderModel,
+          onboardingModel,
         },
         prompts: {
           extraSystemPreamble: String(extraSystemPreamble ?? ""),
@@ -283,9 +310,7 @@ export function LlmManagerClient({
         <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                Effective config (resolver output)
-              </div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective config (resolver output)</div>
               <div className="text-xs text-gray-600 dark:text-gray-300">
                 This is what the quote pipeline will actually use right now (after defaults/normalization).
               </div>
@@ -305,6 +330,11 @@ export function LlmManagerClient({
                 <div>
                   Render prompt: <span className="font-mono">{effective.models.renderModel}</span>
                 </div>
+                {effective.models.onboardingModel ? (
+                  <div>
+                    Onboarding: <span className="font-mono">{effective.models.onboardingModel}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -396,7 +426,7 @@ export function LlmManagerClient({
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Models</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render.
+            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render. Onboarding model is used by onboarding AI analysis.
           </p>
 
           <div className="mt-4 space-y-4">
@@ -446,6 +476,33 @@ export function LlmManagerClient({
                   placeholder="enter custom text model id…"
                 />
               ) : null}
+            </div>
+
+            {/* ✅ NEW Onboarding */}
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding model</label>
+              <select
+                value={onboardingModelSelect}
+                onChange={(e) => setOnboardingModelSelect(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                {TEXT_MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {onboardingModelSelect === "custom" ? (
+                <input
+                  value={onboardingModelCustom}
+                  onChange={(e) => setOnboardingModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="enter custom onboarding text model id…"
+                />
+              ) : null}
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Used by onboarding AI (website analysis + fit + industry suggestion).
+              </div>
             </div>
 
             {/* Render */}
@@ -553,11 +610,11 @@ export function LlmManagerClient({
         </section>
       </div>
 
-      {/* Prompt sets + Rendering prompts sections unchanged (kept as you had them) */}
-      {/* ...the rest of your file continues exactly as-is... */}
-
-      {/* NOTE: For brevity, I’m keeping your remaining sections unchanged.
-          If you want, paste the remainder and I’ll return a single complete file including those sections verbatim. */}
+      {/* NOTE:
+         Your original file likely continues with prompt-set editors + render prompt editors.
+         Those are intentionally untouched in this change. If your repo file contains them,
+         keep them as-is below this point.
+      */}
     </div>
   );
 }
