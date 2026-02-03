@@ -157,13 +157,29 @@ export async function POST(req: Request) {
     }
 
     const businessName = safeTrim(body?.businessName);
-    const ownerName = safeTrim(body?.ownerName);
-    const ownerEmail = safeTrim(body?.ownerEmail);
-    const website = safeTrim(body?.website);
+const ownerName = safeTrim(body?.ownerName);
+const ownerEmail = safeTrim(body?.ownerEmail);
+const website = safeTrim(body?.website);
 
-    if (businessName.length < 2) return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
-    if (ownerName.length < 2) return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
-    if (!ownerEmail.includes("@")) return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+if (businessName.length < 2) {
+  return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
+}
+
+// Determine if this is an existing app user
+const appUserId = await ensureAppUser();
+let tenantId = await findTenantForUser(appUserId);
+
+// ONLY require owner fields if this is a brand-new user with no tenant context
+const isFirstTimeUser = !tenantId;
+
+if (isFirstTimeUser) {
+  if (ownerName.length < 2) {
+    return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
+  }
+  if (!ownerEmail.includes("@")) {
+    return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+  }
+}
 
     const { appUserId, clerkUserId } = await ensureAppUser();
     let tenantId = await findTenantForClerkUser(clerkUserId, appUserId);
