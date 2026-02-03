@@ -25,13 +25,12 @@ function slugify(name: string) {
 }
 
 /**
- * ✅ Core fix:
- * Do NOT use "ON CONFLICT ON CONSTRAINT <name>" because prod constraint names can differ.
- * Always use the column list: ON CONFLICT (auth_provider, auth_subject)
+ * Ensure we have an app_users row for this Clerk user.
+ * Returns both portable appUserId + clerkUserId.
  */
 async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
   const a = await auth();
-  const clerkUserId = a.userId;
+  const clerkUserId = a?.userId ?? null;
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
 
   const u = await currentUser();
@@ -41,40 +40,39 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   const r = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (gen_random_uuid(), 'clerk', ${clerkUserId}, ${email}, ${name}, now(), now())
-    on conflict (auth_provider, auth_subject) do update
-    set
-      email = coalesce(excluded.email, app_users.email),
-      name = coalesce(excluded.name, app_users.name),
-      updated_at = now()
+    on conflict on constraint app_users_provider_subject_uq do update
+    set email = coalesce(excluded.email, app_users.email),
+        name = coalesce(excluded.name, app_users.name),
+        updated_at = now()
     returning id
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const appUserId = row?.id ? String(row.id) : "";
+  const row: any = (r as any)?.rows?.[0] ?? null;
+  const appUserId = row?.id ? String(row.id) : null;
   if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
 
   return { appUserId, clerkUserId };
 }
 
 /**
- * ✅ Prod schema: tenant_members has clerk_user_id (text), NOT user_id (uuid)
+ * Your prod DB tenant_members uses clerk_user_id (NOT user_id).
  */
 async function findTenantForClerkUser(clerkUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
-    select tm.tenant_id
-    from tenant_members tm
-    where tm.clerk_user_id = ${clerkUserId}
-      and (tm.status is null or tm.status = 'active')
-    order by tm.created_at asc
+    select tenant_id
+    from tenant_members
+    where clerk_user_id = ${clerkUserId}
+    order by created_at asc
     limit 1
   `);
+
   const row: any = (r as any)?.rows?.[0] ?? null;
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
 export async function GET() {
   try {
-    const { clerkUserId } = await ensureAppUser();
+    const { appUserId, clerkUserId } = await ensureAppUser();
     const tenantId = await findTenantForClerkUser(clerkUserId);
 
     if (!tenantId) {
@@ -135,16 +133,34 @@ export async function POST(req: Request) {
     }
 
     const businessName = safeTrim(body?.businessName);
-    const ownerName = safeTrim(body?.ownerName);
-    const ownerEmail = safeTrim(body?.ownerEmail);
     const website = safeTrim(body?.website);
 
     if (businessName.length < 2) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
     }
 
-    // Existing user flow: allow ownerName/ownerEmail to be omitted (we already have Clerk profile)
     const { appUserId, clerkUserId } = await ensureAppUser();
+
+    // ✅ If client didn’t send owner fields (because user is logged in), derive them from Clerk
+    let ownerName = safeTrim(body?.ownerName);
+    let ownerEmail = safeTrim(body?.ownerEmail);
+
+    if (!ownerName || !ownerEmail) {
+      const u = await currentUser();
+      ownerEmail = ownerEmail || (u?.emailAddresses?.[0]?.emailAddress ?? "");
+      ownerName = ownerName || (u?.fullName ?? u?.firstName ?? "");
+      ownerName = safeTrim(ownerName);
+      ownerEmail = safeTrim(ownerEmail);
+    }
+
+    // We still enforce these, but now “logged-in path” satisfies them automatically
+    if (ownerName.length < 2) {
+      return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
+    }
+    if (!ownerEmail.includes("@")) {
+      return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+    }
+
     let tenantId = await findTenantForClerkUser(clerkUserId);
 
     // Create tenant if first time
@@ -152,10 +168,9 @@ export async function POST(req: Request) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
 
-      // NOTE: We only rely on columns that have historically existed in your DB.
       const tIns = await db.execute(sql`
-        insert into tenants (id, name, slug, created_at)
-        values (gen_random_uuid(), ${businessName}, ${slug}, now())
+        insert into tenants (id, name, slug, owner_user_id, owner_clerk_user_id, created_at)
+        values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, ${clerkUserId}, now())
         returning id
       `);
 
@@ -163,17 +178,14 @@ export async function POST(req: Request) {
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
-      // ✅ tenant_members schema (no id column, uses clerk_user_id)
+      // prod tenant_members columns: tenant_id, clerk_user_id, role, status, created_at, updated_at
       await db.execute(sql`
         insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
-        select ${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now()
-        where not exists (
-          select 1 from tenant_members tm
-          where tm.tenant_id = ${tenantId}::uuid and tm.clerk_user_id = ${clerkUserId}
-        )
+        values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
+        on conflict do nothing
       `);
 
-      // seed minimal settings (industry_key required)
+      // seed minimal settings (industryKey required)
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
         values (${tenantId}::uuid, 'service', ${businessName}, now())
