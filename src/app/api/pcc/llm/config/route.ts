@@ -23,6 +23,9 @@ const ModelsSchema = z
     estimatorModel: z.string().min(1).optional(),
     qaModel: z.string().min(1).optional(),
     renderModel: z.string().min(1).optional(),
+
+    // ✅ NEW: used by onboarding analysis
+    onboardingModel: z.string().min(1).optional(),
   })
   .partial()
   .optional();
@@ -108,6 +111,9 @@ function normalizeConfig(input: any): PlatformLlmConfig {
       estimatorModel: String(models.estimatorModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
       qaModel: String(models.qaModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
       renderModel: String(models.renderModel ?? "gpt-image-1").trim() || "gpt-image-1",
+
+      // ✅ NEW
+      onboardingModel: String((models as any).onboardingModel ?? "gpt-4o-mini").trim() || "gpt-4o-mini",
     },
 
     // Keep shape aligned with PlatformLlmConfig typing
