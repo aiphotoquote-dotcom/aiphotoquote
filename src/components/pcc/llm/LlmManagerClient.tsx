@@ -50,7 +50,7 @@ type EffectivePreview = {
     qaModel: string;
     renderModel: string;
 
-    // ✅ allow resolver to expose it; optional for back-compat
+    // ✅ optional for back-compat
     onboardingModel?: string;
   };
   prompts: { quoteEstimatorSystem: string; qaQuestionGeneratorSystem: string };
@@ -438,7 +438,7 @@ export function LlmManagerClient({
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Models</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render. Onboarding model is used by onboarding AI analysis.
+            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render.
           </p>
 
           <div className="mt-4 space-y-4">
@@ -462,7 +462,7 @@ export function LlmManagerClient({
               />
             </div>
 
-            {/* ✅ NEW Onboarding */}
+            {/* ✅ NEW */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding model</label>
               <input
@@ -664,8 +664,7 @@ export function LlmManagerClient({
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Style presets</div>
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              These map tenant style keys to a style string injected into the prompt as{" "}
-              <span className="font-mono">{"{style}"}</span>.
+              These map tenant style keys to a style string injected into the prompt as <span className="font-mono">{"{style}"}</span>.
             </div>
 
             <div className="mt-4 grid gap-6 lg:grid-cols-3">
