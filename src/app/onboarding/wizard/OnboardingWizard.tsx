@@ -40,10 +40,16 @@ function safeStep(v: any) {
   return Math.max(1, Math.min(6, Math.floor(n)));
 }
 
-function getStepFromUrl(): number {
-  if (typeof window === "undefined") return 1;
+/**
+ * ✅ IMPORTANT:
+ * Return null if the URL does not contain ?step=
+ * (so refresh() can fall back to server currentStep)
+ */
+function getStepFromUrl(): number | null {
+  if (typeof window === "undefined") return null;
   const url = new URL(window.location.href);
-  return safeStep(url.searchParams.get("step") ?? "1");
+  if (!url.searchParams.has("step")) return null;
+  return safeStep(url.searchParams.get("step"));
 }
 
 function setStepInUrl(step: number) {
@@ -71,9 +77,13 @@ export default function OnboardingWizard() {
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
       setState(j);
 
-      // prefer URL step; fallback to server step
       const urlStep = getStepFromUrl();
-      setStep(urlStep || safeStep(j.currentStep || 1));
+      const nextStep = urlStep ?? safeStep(j.currentStep || 1);
+
+      // If URL had no step, set it so subsequent refreshes are stable
+      if (urlStep == null) setStepInUrl(nextStep);
+
+      setStep(nextStep);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -82,8 +92,6 @@ export default function OnboardingWizard() {
   }
 
   useEffect(() => {
-    const s = getStepFromUrl();
-    setStep(s);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -96,15 +104,19 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
+
     const res = await fetch("/api/onboarding/state", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
     });
+
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-    await refresh();
+
+    // ✅ Set step in URL immediately so refresh can't snap us back to 1
     go(2);
+    await refresh();
   }
 
   async function runMockAnalysis() {
@@ -124,8 +136,9 @@ export default function OnboardingWizard() {
     });
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-    await refresh();
+
     go(4);
+    await refresh();
   }
 
   if (loading) {
@@ -138,11 +151,7 @@ export default function OnboardingWizard() {
     );
   }
 
-  /**
-   * ✅ FIX:
-   * Existing user should be based on being authenticated, not whether we already have a tenant.
-   * Because /onboarding is protected by Clerk middleware, if you can see this page, you're logged in.
-   */
+  // /onboarding is protected → if you’re here, you’re signed in.
   const existingUserContext = true;
 
   return (
@@ -158,7 +167,9 @@ export default function OnboardingWizard() {
           </div>
           <div className="shrink-0 text-right">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">{state?.tenantName ? state.tenantName : "New tenant"}</div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">
+              {state?.tenantName ? state.tenantName : "New tenant"}
+            </div>
           </div>
         </div>
 
@@ -255,7 +266,13 @@ function Step1({
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Your name" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
-            <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
+            <Field
+              label="Your email"
+              value={ownerEmail}
+              onChange={setOwnerEmail}
+              placeholder="you@shop.com"
+              type="email"
+            />
           </div>
         )}
 
