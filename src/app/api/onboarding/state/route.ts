@@ -1,5 +1,3 @@
-// src/app/api/onboarding/state/route.ts
-
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
@@ -26,7 +24,8 @@ function slugify(name: string) {
 
 /**
  * Ensure we have an app_users row for this Clerk user.
- * Returns both portable appUserId + clerkUserId.
+ * IMPORTANT: your DB has a UNIQUE INDEX, not a named UNIQUE CONSTRAINT,
+ * so we must use ON CONFLICT (auth_provider, auth_subject) instead of ON CONSTRAINT.
  */
 async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
   const a = await auth();
@@ -40,7 +39,7 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   const r = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (gen_random_uuid(), 'clerk', ${clerkUserId}, ${email}, ${name}, now(), now())
-    on conflict on constraint app_users_provider_subject_uq do update
+    on conflict (auth_provider, auth_subject) do update
     set email = coalesce(excluded.email, app_users.email),
         name = coalesce(excluded.name, app_users.name),
         updated_at = now()
@@ -72,7 +71,7 @@ async function findTenantForClerkUser(clerkUserId: string): Promise<string | nul
 
 export async function GET() {
   try {
-    const { appUserId, clerkUserId } = await ensureAppUser();
+    const { clerkUserId } = await ensureAppUser();
     const tenantId = await findTenantForClerkUser(clerkUserId);
 
     if (!tenantId) {
@@ -141,7 +140,7 @@ export async function POST(req: Request) {
 
     const { appUserId, clerkUserId } = await ensureAppUser();
 
-    // ✅ If client didn’t send owner fields (because user is logged in), derive them from Clerk
+    // If client omitted owner fields (signed-in path), derive from Clerk
     let ownerName = safeTrim(body?.ownerName);
     let ownerEmail = safeTrim(body?.ownerEmail);
 
@@ -153,7 +152,6 @@ export async function POST(req: Request) {
       ownerEmail = safeTrim(ownerEmail);
     }
 
-    // We still enforce these, but now “logged-in path” satisfies them automatically
     if (ownerName.length < 2) {
       return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
     }
@@ -163,7 +161,6 @@ export async function POST(req: Request) {
 
     let tenantId = await findTenantForClerkUser(clerkUserId);
 
-    // Create tenant if first time
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -178,14 +175,12 @@ export async function POST(req: Request) {
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
-      // prod tenant_members columns: tenant_id, clerk_user_id, role, status, created_at, updated_at
       await db.execute(sql`
         insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
         values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
         on conflict do nothing
       `);
 
-      // seed minimal settings (industryKey required)
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
         values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -194,7 +189,6 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
-      // keep tenant name aligned
       await db.execute(sql`
         update tenants
         set name = ${businessName}
@@ -208,7 +202,6 @@ export async function POST(req: Request) {
       `);
     }
 
-    // upsert onboarding state
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
