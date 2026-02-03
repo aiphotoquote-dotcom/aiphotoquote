@@ -23,8 +23,9 @@ function slugify(name: string) {
 }
 
 /**
- * Ensure the portable app_users row exists for this Clerk user.
- * NOTE: This does NOT drive tenant membership yet (prod DB uses tenant_members.clerk_user_id).
+ * ✅ Core fix:
+ * Do NOT use "ON CONFLICT ON CONSTRAINT <name>" because prod constraint names can differ.
+ * Always use the column list: ON CONFLICT (auth_provider, auth_subject)
  */
 async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
   const a = await auth();
@@ -35,43 +36,37 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
   const name = u?.fullName ?? u?.firstName ?? null;
 
-  // Upsert by (auth_provider, auth_subject) unique constraint
   const r = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (gen_random_uuid(), 'clerk', ${clerkUserId}, ${email}, ${name}, now(), now())
-    on conflict on constraint app_users_provider_subject_uq
-    do update set
+    on conflict (auth_provider, auth_subject) do update
+    set
       email = coalesce(excluded.email, app_users.email),
       name = coalesce(excluded.name, app_users.name),
       updated_at = now()
     returning id
   `);
 
-  const row: any =
-    (r as any)?.rows?.[0] ??
-    (Array.isArray(r) ? (r as any)[0] : null);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const appUserId = row?.id ? String(row.id) : "";
+  if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
 
-  if (!row?.id) throw new Error("FAILED_TO_UPSERT_APP_USER");
-
-  return { appUserId: String(row.id), clerkUserId };
+  return { appUserId, clerkUserId };
 }
 
 /**
- * IMPORTANT: prod schema uses tenant_members.clerk_user_id (text), NOT user_id uuid.
+ * ✅ Prod schema: tenant_members has clerk_user_id (text), NOT user_id (uuid)
  */
 async function findTenantForClerkUser(clerkUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
     select tm.tenant_id
     from tenant_members tm
     where tm.clerk_user_id = ${clerkUserId}
+      and (tm.status is null or tm.status = 'active')
     order by tm.created_at asc
     limit 1
   `);
-
-  const row: any =
-    (r as any)?.rows?.[0] ??
-    (Array.isArray(r) ? (r as any)[0] : null);
-
+  const row: any = (r as any)?.rows?.[0] ?? null;
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
@@ -108,9 +103,7 @@ export async function GET() {
       limit 1
     `);
 
-    const row: any =
-      (r as any)?.rows?.[0] ??
-      (Array.isArray(r) ? (r as any)[0] : null);
+    const row: any = (r as any)?.rows?.[0] ?? null;
 
     return NextResponse.json(
       {
@@ -148,14 +141,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
     }
 
-    // We only require ownerName/ownerEmail when provided (existing-user flow can omit them)
-    if (ownerName && ownerName.length < 2) {
-      return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
-    }
-    if (ownerEmail && !ownerEmail.includes("@")) {
-      return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
-    }
-
+    // Existing user flow: allow ownerName/ownerEmail to be omitted (we already have Clerk profile)
     const { appUserId, clerkUserId } = await ensureAppUser();
     let tenantId = await findTenantForClerkUser(clerkUserId);
 
@@ -164,27 +150,28 @@ export async function POST(req: Request) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
 
+      // NOTE: We only rely on columns that have historically existed in your DB.
       const tIns = await db.execute(sql`
-        insert into tenants (id, name, slug, owner_user_id, created_at)
-        values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, now())
+        insert into tenants (id, name, slug, created_at)
+        values (gen_random_uuid(), ${businessName}, ${slug}, now())
         returning id
       `);
 
-      const trow: any =
-        (tIns as any)?.rows?.[0] ??
-        (Array.isArray(tIns) ? (tIns as any)[0] : null);
-
+      const trow: any = (tIns as any)?.rows?.[0] ?? null;
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
-      // ✅ Match prod schema: tenant_members has clerk_user_id + status (no user_id column)
+      // ✅ tenant_members schema (no id column, uses clerk_user_id)
       await db.execute(sql`
         insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
-        values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
-        on conflict do nothing
+        select ${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now()
+        where not exists (
+          select 1 from tenant_members tm
+          where tm.tenant_id = ${tenantId}::uuid and tm.clerk_user_id = ${clerkUserId}
+        )
       `);
 
-      // seed minimal settings (industryKey required)
+      // seed minimal settings (industry_key required)
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
         values (${tenantId}::uuid, 'service', ${businessName}, now())
