@@ -23,12 +23,15 @@ function slugify(name: string) {
 }
 
 /**
- * Robust upsert that does NOT depend on a specific constraint name.
- * Works as long as a unique index/constraint exists on (auth_provider, auth_subject).
+ * Ensures an app_users row exists for the currently logged-in Clerk user.
+ * Returns both IDs for downstream joins.
+ *
+ * Uses an UPSERT so existing users don't error on duplicates.
  */
-async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
-  const { userId } = await auth();
-  if (!userId) throw new Error("UNAUTHENTICATED");
+async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string; email: string | null; name: string | null }> {
+  const a = await auth();
+  const clerkUserId = (a as any)?.userId ? String((a as any).userId) : "";
+  if (!clerkUserId) throw new Error("UNAUTHENTICATED");
 
   const u = await currentUser();
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
@@ -36,8 +39,8 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
 
   const r = await db.execute(sql`
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
-    values (gen_random_uuid(), 'clerk', ${userId}, ${email}, ${name}, now(), now())
-    on conflict (auth_provider, auth_subject)
+    values (gen_random_uuid(), 'clerk', ${clerkUserId}, ${email}, ${name}, now(), now())
+    on conflict on constraint app_users_provider_subject_uq
     do update set
       email = coalesce(excluded.email, app_users.email),
       name = coalesce(excluded.name, app_users.name),
@@ -45,61 +48,28 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
     returning id
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  if (!row?.id) throw new Error("FAILED_TO_UPSERT_APP_USER");
+  const row: any = (r as any)?.rows?.[0] ?? null;
+  const appUserId = row?.id ? String(row.id) : "";
+  if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
 
-  return { appUserId: String(row.id), clerkUserId: userId };
+  return { appUserId, clerkUserId, email, name };
 }
 
 /**
- * Find an onboarding tenant for this Clerk user.
- * Primary path uses tenants.owner_clerk_user_id (back-compat and typically present in prod).
- * Fallback tries tenant_members/app_users linkage (best effort).
+ * Find the first tenant for a given app user (authoritative).
+ * (We keep clerkUserId in signature for flexibility, but primary join is appUserId.)
  */
-async function findTenantForClerkUser(clerkUserId: string, appUserId: string): Promise<string | null> {
-  // 1) Primary: back-compat owner pointer
-  try {
-    const r1 = await db.execute(sql`
-      select id
-      from tenants
-      where owner_clerk_user_id = ${clerkUserId}
-      limit 1
-    `);
-    const row1: any = (r1 as any)?.rows?.[0] ?? (Array.isArray(r1) ? (r1 as any)[0] : null);
-    if (row1?.id) return String(row1.id);
-  } catch {
-    // ignore
-  }
+async function findTenantForClerkUser(_clerkUserId: string, appUserId: string): Promise<string | null> {
+  const r = await db.execute(sql`
+    select tm.tenant_id
+    from tenant_members tm
+    where tm.user_id = ${appUserId}::uuid
+    order by tm.created_at asc
+    limit 1
+  `);
 
-  // 2) Secondary: portable owner pointer (newer schema)
-  try {
-    const r2 = await db.execute(sql`
-      select id
-      from tenants
-      where owner_user_id::text = ${appUserId}::text
-      limit 1
-    `);
-    const row2: any = (r2 as any)?.rows?.[0] ?? (Array.isArray(r2) ? (r2 as any)[0] : null);
-    if (row2?.id) return String(row2.id);
-  } catch {
-    // ignore
-  }
-
-  // 3) Fallback: tenant_members (only if schema supports it in prod)
-  try {
-    const r3 = await db.execute(sql`
-      select tm.tenant_id
-      from tenant_members tm
-      where tm.user_id::text = ${appUserId}::text
-      limit 1
-    `);
-    const row3: any = (r3 as any)?.rows?.[0] ?? (Array.isArray(r3) ? (r3 as any)[0] : null);
-    if (row3?.tenant_id) return String(row3.tenant_id);
-  } catch {
-    // ignore — prod may not have user_id, which is exactly what we’re protecting against
-  }
-
-  return null;
+  const row: any = (r as any)?.rows?.[0] ?? null;
+  return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
 export async function GET() {
@@ -157,32 +127,33 @@ export async function POST(req: Request) {
     }
 
     const businessName = safeTrim(body?.businessName);
-const ownerName = safeTrim(body?.ownerName);
-const ownerEmail = safeTrim(body?.ownerEmail);
-const website = safeTrim(body?.website);
+    const website = safeTrim(body?.website);
 
-if (businessName.length < 2) {
-  return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
-}
+    if (businessName.length < 2) {
+      return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
+    }
 
-// Determine if this is an existing app user
-const appUserId = await ensureAppUser();
-let tenantId = await findTenantForUser(appUserId);
-
-// ONLY require owner fields if this is a brand-new user with no tenant context
-const isFirstTimeUser = !tenantId;
-
-if (isFirstTimeUser) {
-  if (ownerName.length < 2) {
-    return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
-  }
-  if (!ownerEmail.includes("@")) {
-    return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
-  }
-}
-
-    const { appUserId, clerkUserId } = await ensureAppUser();
+    // Identify user + existing tenant context (if any)
+    const { appUserId, clerkUserId, email: clerkEmail, name: clerkName } = await ensureAppUser();
     let tenantId = await findTenantForClerkUser(clerkUserId, appUserId);
+
+    // Only require owner name/email if this is truly first-time AND Clerk didn't give us anything usable.
+    // UI may omit these for existing users, which is correct.
+    const ownerNameInput = safeTrim(body?.ownerName);
+    const ownerEmailInput = safeTrim(body?.ownerEmail);
+
+    const resolvedOwnerName = ownerNameInput || safeTrim(clerkName);
+    const resolvedOwnerEmail = ownerEmailInput || safeTrim(clerkEmail);
+
+    const isFirstTimeUser = !tenantId;
+    if (isFirstTimeUser) {
+      if (resolvedOwnerName.length < 2) {
+        return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
+      }
+      if (!resolvedOwnerEmail.includes("@")) {
+        return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+      }
+    }
 
     // Create tenant if first time
     if (!tenantId) {
@@ -190,8 +161,8 @@ if (isFirstTimeUser) {
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
 
       const tIns = await db.execute(sql`
-        insert into tenants (id, name, slug, owner_user_id, owner_clerk_user_id, created_at)
-        values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, ${clerkUserId}, now())
+        insert into tenants (id, name, slug, owner_user_id, created_at)
+        values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, now())
         returning id
       `);
 
@@ -199,16 +170,11 @@ if (isFirstTimeUser) {
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
-      // best-effort membership insert (ignore if schema differs)
-      try {
-        await db.execute(sql`
-          insert into tenant_members (id, tenant_id, user_id, role, created_at)
-          values (gen_random_uuid(), ${tenantId}::uuid, ${appUserId}::uuid, 'owner', now())
-          on conflict do nothing
-        `);
-      } catch {
-        // ignore
-      }
+      await db.execute(sql`
+        insert into tenant_members (id, tenant_id, user_id, role, created_at)
+        values (gen_random_uuid(), ${tenantId}::uuid, ${appUserId}::uuid, 'owner', now())
+        on conflict do nothing
+      `);
 
       // seed minimal settings (industryKey required)
       await db.execute(sql`
