@@ -52,29 +52,6 @@ function setStepInUrl(step: number) {
   window.history.replaceState({}, "", url.toString());
 }
 
-async function fetchJson(url: string, init?: RequestInit, timeoutMs = 20000) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(url, { ...init, signal: ac.signal, cache: "no-store" as any });
-
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    const isJson = ct.includes("application/json");
-
-    // If server returned HTML/redirect/etc, capture text for debugging
-    if (!isJson) {
-      const text = await res.text().catch(() => "");
-      return { res, json: null as any, text, isJson: false };
-    }
-
-    const json = await res.json().catch(() => null);
-    return { res, json, text: "", isJson: true };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
 export default function OnboardingWizard() {
   const [step, setStep] = useState<number>(1);
   const [loading, setLoading] = useState(true);
@@ -89,21 +66,9 @@ export default function OnboardingWizard() {
   async function refresh() {
     setErr(null);
     try {
-      const { res, json, text, isJson } = await fetchJson("/api/onboarding/state", { method: "GET" }, 20000);
-
-      if (!isJson) {
-        throw new Error(
-          `GET /api/onboarding/state returned non-JSON (HTTP ${res.status}). ` +
-            `content-type=${res.headers.get("content-type") || "(none)"} ` +
-            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
-        );
-      }
-
-      const j = json as OnboardingState | null;
-      if (!res.ok || !j?.ok) {
-        throw new Error(j?.message || j?.error || `GET failed (HTTP ${res.status})`);
-      }
-
+      const res = await fetch("/api/onboarding/state", { method: "GET", cache: "no-store" });
+      const j = (await res.json().catch(() => null)) as OnboardingState | null;
+      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
       setState(j);
 
       // prefer URL step; fallback to server step
@@ -129,91 +94,38 @@ export default function OnboardingWizard() {
     setStep(s);
   }
 
-  // IMPORTANT: do not throw here — setErr and return false so the button never “hangs”
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
-    try {
-      const { res, json, text, isJson } = await fetchJson(
-        "/api/onboarding/state",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ step: 1, ...payload }),
-        },
-        20000
-      );
-
-      if (!isJson) {
-        throw new Error(
-          `POST /api/onboarding/state returned non-JSON (HTTP ${res.status}). ` +
-            `content-type=${res.headers.get("content-type") || "(none)"} ` +
-            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
-        );
-      }
-
-      const j = json as any;
-      if (!res.ok || !j?.ok) {
-        throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-      }
-
-      await refresh();
-      go(2);
-      return true;
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-      return false;
-    }
+    const res = await fetch("/api/onboarding/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ step: 1, ...payload }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    await refresh();
+    go(2);
   }
 
   async function runMockAnalysis() {
     setErr(null);
-    try {
-      const { res, json, text, isJson } = await fetchJson("/api/onboarding/analyze-website", { method: "POST" }, 20000);
-
-      if (!isJson) {
-        throw new Error(
-          `POST /api/onboarding/analyze-website returned non-JSON (HTTP ${res.status}). ` +
-            `content-type=${res.headers.get("content-type") || "(none)"} ` +
-            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
-        );
-      }
-
-      const j = json as any;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
-      await refresh();
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    }
+    const res = await fetch("/api/onboarding/analyze-website", { method: "POST" });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+    await refresh();
   }
 
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string }) {
     setErr(null);
-    try {
-      const { res, json, text, isJson } = await fetchJson(
-        "/api/onboarding/industries",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(args),
-        },
-        20000
-      );
-
-      if (!isJson) {
-        throw new Error(
-          `POST /api/onboarding/industries returned non-JSON (HTTP ${res.status}). ` +
-            `content-type=${res.headers.get("content-type") || "(none)"} ` +
-            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
-        );
-      }
-
-      const j = json as any;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
-      await refresh();
-      go(4);
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    }
+    const res = await fetch("/api/onboarding/industries", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(args),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    await refresh();
+    go(4);
   }
 
   if (loading) {
@@ -226,7 +138,12 @@ export default function OnboardingWizard() {
     );
   }
 
-  const existingUserContext = Boolean(state?.tenantId);
+  /**
+   * ✅ FIX:
+   * Existing user should be based on being authenticated, not whether we already have a tenant.
+   * Because /onboarding is protected by Clerk middleware, if you can see this page, you're logged in.
+   */
+  const existingUserContext = true;
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -309,7 +226,7 @@ function Step1({
   onSubmit,
 }: {
   existingUser: boolean;
-  onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<boolean>;
+  onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<void>;
 }) {
   const [businessName, setBusinessName] = useState("");
   const [ownerName, setOwnerName] = useState("");
@@ -333,7 +250,7 @@ function Step1({
 
         {existingUser ? (
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-            We already know who you are from your login — no need to re-enter your name and email.
+            You’re signed in — we’ll use your account profile for name + email.
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
@@ -468,17 +385,8 @@ function Step3({
     setErr(null);
     setLoading(true);
     try {
-      const { res, json, text, isJson } = await fetchJson("/api/onboarding/industries", { method: "GET" }, 20000);
-
-      if (!isJson) {
-        throw new Error(
-          `GET /api/onboarding/industries returned non-JSON (HTTP ${res.status}). ` +
-            `content-type=${res.headers.get("content-type") || "(none)"} ` +
-            (text ? `body=${text.slice(0, 400)}${text.length > 400 ? "…" : ""}` : "")
-        );
-      }
-
-      const j = (json ?? null) as IndustriesResponse | null;
+      const res = await fetch("/api/onboarding/industries", { method: "GET", cache: "no-store" });
+      const j = (await res.json().catch(() => null)) as IndustriesResponse | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
       const list = Array.isArray(j.industries) ? j.industries : [];
