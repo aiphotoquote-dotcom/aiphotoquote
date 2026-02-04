@@ -11,6 +11,7 @@ import {
   defaultStylePreset,
   type RenderStyleKey,
 } from "@/components/pcc/llm/helpers/defaults";
+import { TEXT_MODEL_OPTIONS, IMAGE_MODEL_OPTIONS } from "@/components/pcc/llm/helpers/modelOptions";
 
 type GuardrailsMode = "strict" | "balanced" | "permissive";
 type PiiHandling = "redact" | "allow" | "deny";
@@ -22,6 +23,9 @@ export type PlatformLlmConfig = {
     estimatorModel?: string;
     qaModel?: string;
     renderModel?: string;
+
+    // ✅ NEW: used by onboarding analysis (website scan, fit, industry detection)
+    onboardingModel?: string;
   };
   prompts?: {
     quoteEstimatorSystem?: string;
@@ -49,7 +53,12 @@ export type PlatformLlmConfig = {
 };
 
 type EffectivePreview = {
-  models: { estimatorModel: string; qaModel: string; renderModel: string };
+  models: {
+    estimatorModel: string;
+    qaModel: string;
+    renderModel: string;
+    onboardingModel?: string;
+  };
   prompts: { quoteEstimatorSystem: string; qaQuestionGeneratorSystem: string };
   guardrails: {
     mode: GuardrailsMode;
@@ -79,6 +88,16 @@ async function apiPost(config: PlatformLlmConfig): Promise<ApiPostResp> {
   return res.json();
 }
 
+function isInOptions(value: string, options: Array<{ value: string }>) {
+  return options.some((o) => o.value === value);
+}
+
+function pickInitialSelect(value: string, options: Array<{ value: string }>) {
+  const v = safeStr(value, "");
+  if (!v) return options[0]?.value ?? "custom";
+  return isInOptions(v, options) ? v : "custom";
+}
+
 export function LlmManagerClient({
   initialConfig,
   effective,
@@ -95,13 +114,15 @@ export function LlmManagerClient({
     const models = cfg?.models ?? {};
     const prompts = cfg?.prompts ?? {};
     const guardrails = cfg?.guardrails ?? {};
-
     const presets = (prompts as any)?.renderStylePresets ?? {};
 
     return {
       estimatorModel: safeStr(models.estimatorModel, "gpt-4o-mini"),
       qaModel: safeStr(models.qaModel, "gpt-4o-mini"),
-      renderModel: safeStr(models.renderModel, "gpt-4o-mini"),
+      renderModel: safeStr(models.renderModel, "gpt-image-1"),
+
+      // ✅ NEW
+      onboardingModel: safeStr((models as any)?.onboardingModel, "gpt-4o-mini"),
 
       quoteEstimatorSystem: safeStr(prompts.quoteEstimatorSystem, ""),
       qaQuestionGeneratorSystem: safeStr(prompts.qaQuestionGeneratorSystem, ""),
@@ -123,9 +144,31 @@ export function LlmManagerClient({
     };
   }, [cfg]);
 
-  const [estimatorModel, setEstimatorModel] = useState(form.estimatorModel);
-  const [qaModel, setQaModel] = useState(form.qaModel);
-  const [renderModel, setRenderModel] = useState(form.renderModel);
+  // --- model selects + custom values ---
+  const [estimatorModelSelect, setEstimatorModelSelect] = useState(() =>
+    pickInitialSelect(form.estimatorModel, TEXT_MODEL_OPTIONS)
+  );
+  const [qaModelSelect, setQaModelSelect] = useState(() => pickInitialSelect(form.qaModel, TEXT_MODEL_OPTIONS));
+  const [onboardingModelSelect, setOnboardingModelSelect] = useState(() =>
+    pickInitialSelect(form.onboardingModel, TEXT_MODEL_OPTIONS)
+  );
+  const [renderModelSelect, setRenderModelSelect] = useState(() =>
+    pickInitialSelect(form.renderModel, IMAGE_MODEL_OPTIONS)
+  );
+
+  const [estimatorModelCustom, setEstimatorModelCustom] = useState(() => form.estimatorModel);
+  const [qaModelCustom, setQaModelCustom] = useState(() => form.qaModel);
+  const [onboardingModelCustom, setOnboardingModelCustom] = useState(() => form.onboardingModel);
+  const [renderModelCustom, setRenderModelCustom] = useState(() => form.renderModel);
+
+  function effectiveTextModel(selectVal: string, customVal: string, fallback: string) {
+    if (selectVal !== "custom") return safeStr(selectVal, fallback);
+    return safeStr(customVal, fallback);
+  }
+  function effectiveImageModel(selectVal: string, customVal: string, fallback: string) {
+    if (selectVal !== "custom") return safeStr(selectVal, fallback);
+    return safeStr(customVal, fallback);
+  }
 
   const [quoteEstimatorSystem, setQuoteEstimatorSystem] = useState(form.quoteEstimatorSystem);
   const [qaQuestionGeneratorSystem, setQaQuestionGeneratorSystem] = useState(form.qaQuestionGeneratorSystem);
@@ -159,15 +202,25 @@ export function LlmManagerClient({
       const g = c.guardrails ?? {};
       const presets = (p as any)?.renderStylePresets ?? {};
 
-      setEstimatorModel(safeStr(m.estimatorModel, "gpt-4o-mini"));
-      setQaModel(safeStr(m.qaModel, "gpt-4o-mini"));
-      setRenderModel(safeStr(m.renderModel, "gpt-4o-mini"));
+      const est = safeStr(m.estimatorModel, "gpt-4o-mini");
+      const qa = safeStr(m.qaModel, "gpt-4o-mini");
+      const onb = safeStr((m as any)?.onboardingModel, "gpt-4o-mini");
+      const ren = safeStr(m.renderModel, "gpt-image-1");
+
+      setEstimatorModelSelect(pickInitialSelect(est, TEXT_MODEL_OPTIONS));
+      setQaModelSelect(pickInitialSelect(qa, TEXT_MODEL_OPTIONS));
+      setOnboardingModelSelect(pickInitialSelect(onb, TEXT_MODEL_OPTIONS));
+      setRenderModelSelect(pickInitialSelect(ren, IMAGE_MODEL_OPTIONS));
+
+      setEstimatorModelCustom(est);
+      setQaModelCustom(qa);
+      setOnboardingModelCustom(onb);
+      setRenderModelCustom(ren);
 
       setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
       setQaQuestionGeneratorSystem(safeStr(p.qaQuestionGeneratorSystem, ""));
       setExtraSystemPreamble(safeStr(p.extraSystemPreamble, ""));
 
-      // ✅ Render prompt controls (PCC)
       setRenderPromptPreamble(safeStr((p as any)?.renderPromptPreamble, ""));
       setRenderPromptTemplate(safeStr((p as any)?.renderPromptTemplate, ""));
       setRenderStylePhotoreal(safeStr(presets?.photoreal, ""));
@@ -190,20 +243,25 @@ export function LlmManagerClient({
     setMsg(null);
     setSaving(true);
     try {
+      const estimatorModel = effectiveTextModel(estimatorModelSelect, estimatorModelCustom, "gpt-4o-mini");
+      const qaModel = effectiveTextModel(qaModelSelect, qaModelCustom, "gpt-4o-mini");
+      const onboardingModel = effectiveTextModel(onboardingModelSelect, onboardingModelCustom, "gpt-4o-mini");
+      const renderModel = effectiveImageModel(renderModelSelect, renderModelCustom, "gpt-image-1");
+
       const next: PlatformLlmConfig = {
         version: cfg?.version ?? 1,
         updatedAt: cfg?.updatedAt ?? null,
         models: {
-          estimatorModel: safeStr(estimatorModel, "gpt-4o-mini"),
-          qaModel: safeStr(qaModel, "gpt-4o-mini"),
-          renderModel: safeStr(renderModel, "gpt-4o-mini"),
+          estimatorModel,
+          qaModel,
+          onboardingModel,
+          renderModel,
         },
         prompts: {
           extraSystemPreamble: String(extraSystemPreamble ?? ""),
           quoteEstimatorSystem: String(quoteEstimatorSystem ?? ""),
           qaQuestionGeneratorSystem: String(qaQuestionGeneratorSystem ?? ""),
 
-          // ✅ Render prompt controls (PCC)
           renderPromptPreamble: String(renderPromptPreamble ?? ""),
           renderPromptTemplate: String(renderPromptTemplate ?? ""),
           renderStylePresets: {
@@ -245,7 +303,9 @@ export function LlmManagerClient({
         <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective config (resolver output)</div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Effective config (resolver output)
+              </div>
               <div className="text-xs text-gray-600 dark:text-gray-300">
                 This is what the quote pipeline will actually use right now (after defaults/normalization).
               </div>
@@ -265,6 +325,11 @@ export function LlmManagerClient({
                 <div>
                   Render prompt: <span className="font-mono">{effective.models.renderModel}</span>
                 </div>
+                {effective.models.onboardingModel ? (
+                  <div>
+                    Onboarding: <span className="font-mono">{effective.models.onboardingModel}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -310,7 +375,7 @@ export function LlmManagerClient({
         </div>
       ) : null}
 
-      {/* Existing Config card */}
+      {/* Stored config */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -354,41 +419,112 @@ export function LlmManagerClient({
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
+        {/* Models */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Models</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render.
+            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render. Onboarding model is used
+            by onboarding AI analysis.
           </p>
 
           <div className="mt-4 space-y-4">
+            {/* Estimator */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Estimator model</label>
-              <input
-                value={estimatorModel}
-                onChange={(e) => setEstimatorModel(e.target.value)}
+              <select
+                value={estimatorModelSelect}
+                onChange={(e) => setEstimatorModelSelect(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="gpt-4o-mini"
-              />
+              >
+                {TEXT_MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {estimatorModelSelect === "custom" ? (
+                <input
+                  value={estimatorModelCustom}
+                  onChange={(e) => setEstimatorModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="enter custom text model id…"
+                />
+              ) : null}
             </div>
 
+            {/* QA */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&amp;A model</label>
-              <input
-                value={qaModel}
-                onChange={(e) => setQaModel(e.target.value)}
+              <select
+                value={qaModelSelect}
+                onChange={(e) => setQaModelSelect(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="gpt-4o-mini"
-              />
+              >
+                {TEXT_MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {qaModelSelect === "custom" ? (
+                <input
+                  value={qaModelCustom}
+                  onChange={(e) => setQaModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="enter custom text model id…"
+                />
+              ) : null}
             </div>
 
+            {/* Onboarding */}
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding model</label>
+              <select
+                value={onboardingModelSelect}
+                onChange={(e) => setOnboardingModelSelect(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                {TEXT_MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {onboardingModelSelect === "custom" ? (
+                <input
+                  value={onboardingModelCustom}
+                  onChange={(e) => setOnboardingModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="enter custom onboarding text model id…"
+                />
+              ) : null}
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Used by onboarding AI (website analysis + fit + industry suggestion).
+              </div>
+            </div>
+
+            {/* Render */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render model</label>
-              <input
-                value={renderModel}
-                onChange={(e) => setRenderModel(e.target.value)}
+              <select
+                value={renderModelSelect}
+                onChange={(e) => setRenderModelSelect(e.target.value)}
                 className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                placeholder="gpt-image-1"
-              />
+              >
+                {IMAGE_MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {renderModelSelect === "custom" ? (
+                <input
+                  value={renderModelCustom}
+                  onChange={(e) => setRenderModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="enter custom image model id…"
+                />
+              ) : null}
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 This is what /api/quote/render uses for image generation.
               </div>
@@ -396,6 +532,7 @@ export function LlmManagerClient({
           </div>
         </section>
 
+        {/* Guardrails */}
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Guardrails</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -471,6 +608,7 @@ export function LlmManagerClient({
         </section>
       </div>
 
+      {/* Prompt sets */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Prompt sets</h2>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">System prompts. Keep them tight and deterministic.</p>
@@ -498,7 +636,9 @@ export function LlmManagerClient({
             </div>
 
             <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&amp;A question generator system</label>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Q&amp;A question generator system
+              </label>
               <textarea
                 value={qaQuestionGeneratorSystem}
                 onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
@@ -510,7 +650,7 @@ export function LlmManagerClient({
         </div>
       </section>
 
-      {/* ✅ NEW: Render Prompt Controls */}
+      {/* Rendering prompts */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Rendering prompts</h2>
         <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -558,7 +698,7 @@ export function LlmManagerClient({
               className="mt-1 h-56 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
               placeholder={defaultRenderPromptTemplate()}
             />
-            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 space-y-1">
+            <div className="mt-2 space-y-1 text-xs text-gray-500 dark:text-gray-400">
               <div className="font-semibold">Available tokens</div>
               <div className="font-mono">
                 {"{renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}"}
@@ -579,7 +719,7 @@ export function LlmManagerClient({
                   <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">photoreal</label>
                   <button
                     type="button"
-                    onClick={() => setRenderStylePhotoreal(defaultStylePreset("photoreal" as RenderStyleKey))}
+                    onClick={() => setRenderStylePhotoreal(defaultStylePreset("photoreal"))}
                     className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                   >
                     Default
@@ -598,7 +738,7 @@ export function LlmManagerClient({
                   <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">clean_oem</label>
                   <button
                     type="button"
-                    onClick={() => setRenderStyleCleanOem(defaultStylePreset("clean_oem" as RenderStyleKey))}
+                    onClick={() => setRenderStyleCleanOem(defaultStylePreset("clean_oem"))}
                     className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                   >
                     Default
@@ -617,7 +757,7 @@ export function LlmManagerClient({
                   <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">custom</label>
                   <button
                     type="button"
-                    onClick={() => setRenderStyleCustom(defaultStylePreset("custom" as RenderStyleKey))}
+                    onClick={() => setRenderStyleCustom(defaultStylePreset("custom"))}
                     className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                   >
                     Default
