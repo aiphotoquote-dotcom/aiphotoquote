@@ -198,9 +198,11 @@ export default function OnboardingWizard() {
     );
   }
 
-  // Existing-user UX should be based on authentication, NOT whether a tenant already exists.
-  // If the API doesn't return anything explicit, assume "logged-in" since onboarding is protected.
+  // onboarding is protected; if you're here you're logged in
   const existingUserContext = true;
+
+  // ✅ FIX: don’t mix ?? and || without parentheses
+  const tenantLabel = String(((state?.tenantId ?? urlTenantId) || "(none)")).trim();
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -216,7 +218,7 @@ export default function OnboardingWizard() {
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span>
               {" • "}
-              Tenant: <span className="font-mono">{String(state?.tenantId ?? urlTenantId || "(none)")}</span>
+              Tenant: <span className="font-mono">{tenantLabel}</span>
             </div>
           </div>
 
@@ -319,13 +321,7 @@ function Step1({
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Your name" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
-            <Field
-              label="Your email"
-              value={ownerEmail}
-              onChange={setOwnerEmail}
-              placeholder="you@shop.com"
-              type="email"
-            />
+            <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
           </div>
         )}
 
@@ -371,7 +367,6 @@ function Step2({
 }) {
   const [running, setRunning] = useState(false);
 
-  // ✅ Auto-run once: if a website exists and we don't have analysis yet.
   const autoRanRef = useRef(false);
 
   useEffect(() => {
@@ -380,7 +375,6 @@ function Step2({
     const hasWebsite = String(website ?? "").trim().length > 0;
     const hasAnalysis = Boolean(aiAnalysis);
 
-    // Mark as handled either way so we never loop on re-renders.
     autoRanRef.current = true;
 
     if (!hasWebsite || hasAnalysis) return;
@@ -389,9 +383,7 @@ function Step2({
 
     setRunning(true);
     onRun()
-      .catch(() => {
-        // Parent sets the top-level error; we don't double-report here.
-      })
+      .catch(() => {})
       .finally(() => {
         if (alive) setRunning(false);
       });
@@ -503,7 +495,6 @@ function Step3({
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      // default selection: server selectedKey, else AI suggestion if present in list, else first item
       const serverSel = String(j.selectedKey ?? "").trim();
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const next =
