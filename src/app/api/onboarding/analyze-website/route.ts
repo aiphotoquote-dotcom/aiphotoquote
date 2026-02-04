@@ -2,16 +2,12 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
-import { cookies } from "next/headers";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const ONBOARDING_TENANT_COOKIE = "onboarding_tenant_id";
-type Mode = "new" | "update";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -23,6 +19,12 @@ function firstRow(r: any): any | null {
   if (Array.isArray(r)) return r[0] ?? null;
   if (Array.isArray(r.rows)) return r.rows[0] ?? null;
   return null;
+}
+
+async function requireAuthed(): Promise<{ clerkUserId: string }> {
+  const { userId } = await auth();
+  if (!userId) throw new Error("UNAUTHENTICATED");
+  return { clerkUserId: userId };
 }
 
 async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
@@ -37,50 +39,15 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-function parseMode(req: Request): Mode {
-  try {
-    const u = new URL(req.url);
-    const m = safeTrim(u.searchParams.get("mode")).toLowerCase();
-    return m === "update" ? "update" : "new";
-  } catch {
-    return "new";
-  }
-}
-
-function parseTenantIdQuery(req: Request): string {
-  try {
-    const u = new URL(req.url);
-    return safeTrim(u.searchParams.get("tenantId"));
-  } catch {
-    return "";
-  }
-}
-
 export async function POST(req: Request) {
   try {
-    const a = await auth();
-    const clerkUserId = a.userId;
-    if (!clerkUserId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
+    const { clerkUserId } = await requireAuthed();
 
-    const mode = parseMode(req);
+    const body = await req.json().catch(() => null);
+    const tenantId = safeTrim(body?.tenantId);
+    if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
 
-    const body = await req.json().catch(() => ({}));
-    const bodyTenantId = safeTrim((body as any)?.tenantId);
-
-    let tenantId: string | null = null;
-
-    if (mode === "update") {
-      // update: tenantId can come from query or body
-      const qTenantId = parseTenantIdQuery(req);
-      tenantId = bodyTenantId || qTenantId;
-      if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
-      await requireMembership(clerkUserId, tenantId);
-    } else {
-      // new: prefer body tenantId (from state) else cookie
-      tenantId = bodyTenantId || safeTrim((await cookies()).get(ONBOARDING_TENANT_COOKIE)?.value ?? "");
-      if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
-      await requireMembership(clerkUserId, tenantId);
-    }
+    await requireMembership(clerkUserId, tenantId);
 
     // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
     const cfg = await loadPlatformLlmConfig();
@@ -96,8 +63,8 @@ export async function POST(req: Request) {
       limit 1
     `);
 
-    const row: any = firstRow(r);
-    const website = safeTrim(row?.website);
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    const website = String(row?.website ?? "").trim();
 
     // Mock v1 (auditable); we’ll swap to OpenAI next.
     const mock = {
@@ -126,7 +93,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: mock }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const status = msg === "FORBIDDEN_TENANT" ? 403 : 500;
+    const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }

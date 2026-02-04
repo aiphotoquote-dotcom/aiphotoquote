@@ -1,3 +1,4 @@
+// src/app/api/onboarding/industries/route.ts
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
@@ -29,26 +30,12 @@ function firstRow(r: any): any | null {
   return null;
 }
 
-/**
- * Returns the "first" tenant for this user (legacy fallback).
- * IMPORTANT: uses tenant_members.clerk_user_id (prod schema)
- */
-async function findFirstTenantForClerkUser(clerkUserId: string): Promise<string | null> {
-  const r = await db.execute(sql`
-    select tenant_id
-    from tenant_members
-    where clerk_user_id = ${clerkUserId}
-    order by created_at asc
-    limit 1
-  `);
-
-  const row = firstRow(r);
-  return row?.tenant_id ? String(row.tenant_id) : null;
+async function requireAuthed(): Promise<{ clerkUserId: string }> {
+  const { userId } = await auth();
+  if (!userId) throw new Error("UNAUTHENTICATED");
+  return { clerkUserId: userId };
 }
 
-/**
- * Authorization gate: user must be a member of tenantId
- */
 async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
   const r = await db.execute(sql`
     select 1 as ok
@@ -57,12 +44,11 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
       and clerk_user_id = ${clerkUserId}
     limit 1
   `);
-
   const row = firstRow(r);
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-function getTenantIdFromRequest(req: Request): string {
+function getTenantIdFromReq(req: Request): string {
   try {
     const u = new URL(req.url);
     return safeTrim(u.searchParams.get("tenantId"));
@@ -72,36 +58,16 @@ function getTenantIdFromRequest(req: Request): string {
 }
 
 /**
- * Resolve tenant context:
- * - If request includes tenantId (query for GET, or body for POST) => require membership
- * - Else => fall back to first tenant (legacy)
- */
-async function resolveTenantId(req: Request, body?: any): Promise<{ clerkUserId: string; tenantId: string }> {
-  const a = await auth();
-  const clerkUserId = a?.userId ?? null;
-  if (!clerkUserId) throw new Error("UNAUTHENTICATED");
-
-  const fromQuery = getTenantIdFromRequest(req);
-  const fromBody = safeTrim(body?.tenantId);
-  const explicitTenantId = fromBody || fromQuery;
-
-  if (explicitTenantId) {
-    await requireMembership(clerkUserId, explicitTenantId);
-    return { clerkUserId, tenantId: explicitTenantId };
-  }
-
-  const first = await findFirstTenantForClerkUser(clerkUserId);
-  if (!first) throw new Error("NO_TENANT");
-  return { clerkUserId, tenantId: first };
-}
-
-/**
  * GET: return platform industries + tenant-specific sub-industries
  * POST: set selected industry for tenant (platform or tenant sub-industry)
  */
 export async function GET(req: Request) {
   try {
-    const { tenantId } = await resolveTenantId(req);
+    const { clerkUserId } = await requireAuthed();
+    const tenantId = getTenantIdFromReq(req);
+    if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+
+    await requireMembership(clerkUserId, tenantId);
 
     const rPlatform = await db.execute(sql`
       select id, key, label, description
@@ -150,16 +116,20 @@ export async function GET(req: Request) {
     );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const status =
-      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : msg === "NO_TENANT" ? 400 : 500;
+    const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
 
 export async function POST(req: Request) {
   try {
+    const { clerkUserId } = await requireAuthed();
+
     const body = await req.json().catch(() => null);
-    const { tenantId } = await resolveTenantId(req, body);
+    const tenantId = safeTrim(body?.tenantId);
+    if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+
+    await requireMembership(clerkUserId, tenantId);
 
     const rawKey = safeTrim(body?.industryKey);
     const rawLabel = safeTrim(body?.industryLabel);
@@ -181,7 +151,6 @@ export async function POST(req: Request) {
 
       const row: any = (rUpsert as any)?.rows?.[0] ?? null;
       createdSubIndustryId = row?.id ? String(row.id) : null;
-
       keyToSet = key;
     }
 
@@ -205,14 +174,10 @@ export async function POST(req: Request) {
           updated_at = now()
     `);
 
-    return NextResponse.json(
-      { ok: true, tenantId, industryKey: keyToSet, createdSubIndustryId },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, tenantId, industryKey: keyToSet, createdSubIndustryId }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const status =
-      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : msg === "NO_TENANT" ? 400 : 500;
+    const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }

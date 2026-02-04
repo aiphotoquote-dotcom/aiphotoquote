@@ -5,8 +5,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type OnboardingState = {
   ok: boolean;
+
+  // tenant context for THIS wizard run
   tenantId: string | null;
   tenantName: string | null;
+
+  // auth context (so "existing user" isn't inferred from tenantId)
+  isAuthenticated?: boolean;
+
   currentStep: number;
   completed: boolean;
   website: string | null;
@@ -39,10 +45,24 @@ function safeStep(v: any) {
   return Math.max(1, Math.min(6, Math.floor(n)));
 }
 
-function getStepFromUrl(): number {
-  if (typeof window === "undefined") return 1;
+type OnboardingMode = "new" | "update" | "existing";
+
+function safeMode(v: any): OnboardingMode {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "update") return "update";
+  if (s === "existing") return "existing";
+  return "new";
+}
+
+function getUrlCtx() {
+  if (typeof window === "undefined") {
+    return { step: 1, mode: "new" as OnboardingMode, tenantId: "" };
+  }
   const url = new URL(window.location.href);
-  return safeStep(url.searchParams.get("step") ?? "1");
+  const step = safeStep(url.searchParams.get("step") ?? "1");
+  const mode = safeMode(url.searchParams.get("mode"));
+  const tenantId = String(url.searchParams.get("tenantId") ?? "").trim();
+  return { step, mode, tenantId };
 }
 
 function setStepInUrl(step: number) {
@@ -51,8 +71,25 @@ function setStepInUrl(step: number) {
   window.history.replaceState({}, "", url.toString());
 }
 
+function buildStateUrl(mode: OnboardingMode, tenantId: string) {
+  const u = new URL("/api/onboarding/state", window.location.origin);
+  u.searchParams.set("mode", mode);
+  if ((mode === "update" || mode === "existing") && tenantId) {
+    u.searchParams.set("tenantId", tenantId);
+  }
+  return u.pathname + u.search;
+}
+
+function buildIndustriesUrl(tenantId: string) {
+  const u = new URL("/api/onboarding/industries", window.location.origin);
+  u.searchParams.set("tenantId", tenantId);
+  return u.pathname + u.search;
+}
+
 export default function OnboardingWizard() {
-  const [step, setStep] = useState<number>(1);
+  const [{ mode, tenantId: urlTenantId }, setUrlCtx] = useState(() => getUrlCtx());
+  const [step, setStep] = useState<number>(() => getUrlCtx().step);
+
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -65,12 +102,13 @@ export default function OnboardingWizard() {
   async function refresh() {
     setErr(null);
     try {
-      const res = await fetch("/api/onboarding/state", { method: "GET", cache: "no-store" });
+      const res = await fetch(buildStateUrl(mode, urlTenantId), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
       setState(j);
 
-      const urlStep = getStepFromUrl();
+      // prefer URL step; fallback to server step
+      const urlStep = getUrlCtx().step;
       setStep(urlStep || safeStep(j.currentStep || 1));
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -80,8 +118,9 @@ export default function OnboardingWizard() {
   }
 
   useEffect(() => {
-    const s = getStepFromUrl();
-    setStep(s);
+    const ctx = getUrlCtx();
+    setUrlCtx({ mode: ctx.mode, tenantId: ctx.tenantId } as any);
+    setStep(ctx.step);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -94,13 +133,25 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
-    const res = await fetch("/api/onboarding/state", {
+
+    // For update/existing, tenantId is sourced from URL (edit target).
+    // For new, we do NOT send tenantId; server will create a new tenant regardless of existing memberships.
+    const postBody: any = {
+      step: 1,
+      mode,
+      ...(mode === "update" || mode === "existing" ? { tenantId: urlTenantId } : {}),
+      ...payload,
+    };
+
+    const res = await fetch(buildStateUrl(mode, urlTenantId), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ step: 1, ...payload }),
+      body: JSON.stringify(postBody),
     });
+
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+
     await refresh();
     go(2);
   }
@@ -119,6 +170,7 @@ export default function OnboardingWizard() {
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+
     await refresh();
   }
 
@@ -136,6 +188,7 @@ export default function OnboardingWizard() {
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+
     await refresh();
     go(4);
   }
@@ -150,7 +203,9 @@ export default function OnboardingWizard() {
     );
   }
 
-  const existingUserContext = Boolean(state?.tenantId);
+  // ✅ Existing user should NOT be inferred from tenantId.
+  // If this page is behind auth, this will be true.
+  const existingUserContext = Boolean(state?.isAuthenticated ?? true);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -162,11 +217,20 @@ export default function OnboardingWizard() {
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               We’ll tailor your quoting experience in just a few steps.
             </div>
-          </div>
-          <div className="shrink-0 text-right">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Step {step} / 6
+
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Mode: <span className="font-mono">{mode}</span>
+              {mode === "update" || mode === "existing" ? (
+                <>
+                  {" "}
+                  • Tenant: <span className="font-mono">{urlTenantId || "(missing)"}</span>
+                </>
+              ) : null}
             </div>
+          </div>
+
+          <div className="shrink-0 text-right">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
             <div className="text-xs text-gray-600 dark:text-gray-300">
               {state?.tenantName ? state.tenantName : "New tenant"}
             </div>
@@ -205,7 +269,7 @@ export default function OnboardingWizard() {
   );
 }
 
-/* --- rest of file unchanged EXCEPT Step3 signature + its GET call now includes tenantId --- */
+/* ---------- UI SUBCOMPONENTS (unchanged style) ---------- */
 
 function Field({
   label,
@@ -247,12 +311,16 @@ function Step1({
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const can = businessName.trim().length >= 2 && (existingUser ? true : ownerName.trim().length >= 2 && ownerEmail.trim().includes("@"));
+  const can =
+    businessName.trim().length >= 2 &&
+    (existingUser ? true : ownerName.trim().length >= 2 && ownerEmail.trim().includes("@"));
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Business identity</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This helps us personalize your estimates, emails, and branding.</div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+        This helps us personalize your estimates, emails, and branding.
+      </div>
 
       <div className="mt-6 grid gap-4">
         <Field label="Business name" value={businessName} onChange={setBusinessName} placeholder="Maggio Upholstery" />
@@ -338,7 +406,9 @@ function Step2({
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">AI fit check</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">If you provided a website, we’ll scan it to tailor your setup.</div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+        If you provided a website, we’ll scan it to tailor your setup.
+      </div>
 
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
@@ -422,11 +492,7 @@ function Step3({
       const tid = String(tenantId ?? "").trim();
       if (!tid) throw new Error("NO_TENANT: missing tenantId for industries load.");
 
-      const res = await fetch(`/api/onboarding/industries?tenantId=${encodeURIComponent(tid)}`, {
-        method: "GET",
-        cache: "no-store",
-      });
-
+      const res = await fetch(buildIndustriesUrl(tid), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as IndustriesResponse | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
