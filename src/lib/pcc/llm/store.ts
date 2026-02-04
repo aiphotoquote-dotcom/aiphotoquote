@@ -45,32 +45,78 @@ async function getBlobPointerIfExists(): Promise<BlobPointer | null> {
   }
 }
 
+function isPlainObject(v: any) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Merge envCfg (defaults) + blobCfg (overrides).
+ * Blob wins, so UI persists even if PCC_LLM_CONFIG is set.
+ */
+function mergeConfig(envCfg: PlatformLlmConfig, blobCfg: PlatformLlmConfig): PlatformLlmConfig {
+  return {
+    ...envCfg,
+    ...blobCfg,
+
+    // merge nested objects (blob wins)
+    models: {
+      ...(isPlainObject((envCfg as any).models) ? (envCfg as any).models : {}),
+      ...(isPlainObject((blobCfg as any).models) ? (blobCfg as any).models : {}),
+    },
+
+    prompts: {
+      ...(isPlainObject((envCfg as any).prompts) ? (envCfg as any).prompts : {}),
+      ...(isPlainObject((blobCfg as any).prompts) ? (blobCfg as any).prompts : {}),
+      // renderStylePresets is nested too
+      renderStylePresets: {
+        ...(isPlainObject((envCfg as any).prompts?.renderStylePresets) ? (envCfg as any).prompts.renderStylePresets : {}),
+        ...(isPlainObject((blobCfg as any).prompts?.renderStylePresets) ? (blobCfg as any).prompts.renderStylePresets : {}),
+      },
+    },
+
+    guardrails: {
+      ...(isPlainObject((envCfg as any).guardrails) ? (envCfg as any).guardrails : {}),
+      ...(isPlainObject((blobCfg as any).guardrails) ? (blobCfg as any).guardrails : {}),
+    },
+  };
+}
+
+async function loadFromBlob(): Promise<PlatformLlmConfig | null> {
+  const ptr = await getBlobPointerIfExists();
+  if (!ptr) return null;
+
+  try {
+    const bustUrl = `${ptr.url}${ptr.url.includes("?") ? "&" : "?"}v=${encodeURIComponent(ptr.versionToken)}`;
+
+    const res = await fetch(bustUrl, {
+      cache: "no-store",
+      next: { revalidate: 0 },
+    });
+
+    if (!res.ok) throw new Error(`Failed to fetch LLM config: ${res.status}`);
+
+    const txt = await res.text();
+    const cfg = safeParse(txt);
+    return cfg ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadPlatformLlmConfig(): Promise<PlatformLlmConfig> {
-  // 1) Env override first (fast, deploy-friendly)
+  // 1) Read env (as defaults / seed)
   const envRaw = process.env.PCC_LLM_CONFIG?.trim();
   const envCfg = safeParse(envRaw || null);
+
+  // 2) Read blob (persistent)
+  const blobCfg = await loadFromBlob();
+
+  // If BOTH exist: merge, blob wins (so UI saves persist)
+  if (envCfg && blobCfg) return mergeConfig(envCfg, blobCfg);
+
+  // If ONLY one exists, use it
+  if (blobCfg) return blobCfg;
   if (envCfg) return envCfg;
-
-  // 2) Blob (persistent)
-  const ptr = await getBlobPointerIfExists();
-  if (ptr) {
-    try {
-      const bustUrl = `${ptr.url}${ptr.url.includes("?") ? "&" : "?"}v=${encodeURIComponent(ptr.versionToken)}`;
-
-      const res = await fetch(bustUrl, {
-        cache: "no-store",
-        next: { revalidate: 0 },
-      });
-
-      if (!res.ok) throw new Error(`Failed to fetch LLM config: ${res.status}`);
-
-      const txt = await res.text();
-      const cfg = safeParse(txt);
-      if (cfg) return cfg;
-    } catch {
-      // fallthrough
-    }
-  }
 
   // 3) Default
   return defaultPlatformLlmConfig();
