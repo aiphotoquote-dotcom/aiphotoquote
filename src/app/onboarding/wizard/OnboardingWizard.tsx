@@ -52,7 +52,6 @@ function safeMode(v: any): Mode {
 function normalizeWebsiteInput(raw: string) {
   const s = String(raw ?? "").trim();
   if (!s) return "";
-  // If user typed "kwickeycustoms.com" or "www.foo.com" -> make it a URL
   if (!/^https?:\/\//i.test(s)) return `https://${s}`;
   return s;
 }
@@ -91,12 +90,26 @@ function buildIndustriesUrl(tenantId: string) {
   return `/api/onboarding/industries?${qs.toString()}`;
 }
 
+async function readJson(res: Response) {
+  const j = await res.json().catch(() => null);
+  return j as any;
+}
+
+function bestErrorMessage(res: Response, j: any) {
+  const msg = String(j?.message || j?.error || "").trim();
+  if (msg) return msg;
+  return `Request failed (HTTP ${res.status})`;
+}
+
 export default function OnboardingWizard() {
   const [{ step, mode, tenantId }, setNav] = useState(() => getUrlParams());
 
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // Tiny debug to confirm taps on mobile actually executed code
+  const [lastAction, setLastAction] = useState<string>("");
 
   const pct = useMemo(() => {
     const total = 6;
@@ -135,9 +148,8 @@ export default function OnboardingWizard() {
       const navTenantId = String(explicit?.tenantId ?? tenantId ?? "").trim();
 
       const res = await fetch(buildStateUrl(navMode, navTenantId), { method: "GET", cache: "no-store" });
-      const j = (await res.json().catch(() => null)) as OnboardingState | null;
-
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+      const j = await readJson(res);
+      if (!res.ok || !j?.ok) throw new Error(bestErrorMessage(res, j));
 
       setState(j);
 
@@ -146,6 +158,7 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
+      // Keep step URL/state aligned
       const urlStep = getUrlParams().step;
       const nextStep = urlStep || safeStep(j.currentStep || 1);
 
@@ -170,6 +183,7 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
+    setLastAction("Saving Step 1…");
     try {
       const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
         method: "POST",
@@ -181,83 +195,86 @@ export default function OnboardingWizard() {
         }),
       });
 
-      const j = await res.json().catch(() => null);
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+      const j = await readJson(res);
+      if (!res.ok || !j?.ok) throw new Error(bestErrorMessage(res, j));
 
       const newTenantId = String(j.tenantId ?? "").trim();
       if (newTenantId) setTenantInNav(newTenantId);
 
       await refresh({ tenantId: newTenantId || tenantId });
+      setLastAction("Step 1 saved.");
       go(2);
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
+      const msg = e?.message ?? String(e);
+      setErr(msg);
+      setLastAction(`Save Step 1 failed: ${msg}`);
       throw e;
     }
   }
 
-  // ✅ IMPORTANT:
-  // Always persist website BEFORE analyzing.
-  // Use mode=update for this persistence step so we don't accidentally create a new tenant.
   async function runMockAnalysis() {
-    setErr(null);
-
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
-    if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
-
-    // 1) Persist current website/name to tenant_onboarding for THIS tenant
-    //    (prevents stale DB reads in analyze-website)
-    const businessName = String(state?.tenantName ?? "").trim();
-    const website = normalizeWebsiteInput(String(state?.website ?? "").trim());
-
-    if (businessName.length >= 2) {
-      const resPersist = await fetch(buildStateUrl("update", tid), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          step: 1,
-          tenantId: tid,
-          businessName,
-          website: website || undefined,
-          // ownerName/ownerEmail optional; API will derive from Clerk if missing
-        }),
-      });
-
-      const jp = await resPersist.json().catch(() => null);
-      if (!resPersist.ok || !jp?.ok) {
-        throw new Error(jp?.message || jp?.error || `Persist failed (HTTP ${resPersist.status})`);
-      }
+    if (!tid) {
+      const msg = "NO_TENANT: missing tenantId for analysis.";
+      setErr(msg);
+      setLastAction(msg);
+      throw new Error(msg);
     }
 
-    // 2) Now analyze (DB is guaranteed to have the website we just persisted)
-    const res = await fetch("/api/onboarding/analyze-website", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId: tid }),
-    });
+    setErr(null);
+    setLastAction(`Running AI analysis for ${tid.slice(0, 8)}…`);
 
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+    try {
+      const res = await fetch("/api/onboarding/analyze-website", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tenantId: tid }),
+      });
 
-    await refresh({ tenantId: tid });
+      const j = await readJson(res);
+      if (!res.ok || !j?.ok) throw new Error(bestErrorMessage(res, j));
+
+      await refresh({ tenantId: tid });
+      setLastAction("AI analysis complete.");
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      setErr(msg);
+      setLastAction(`AI analysis failed: ${msg}`);
+      throw e;
+    }
   }
 
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string }) {
-    setErr(null);
-
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
-    if (!tid) throw new Error("NO_TENANT: missing tenantId for industry save.");
+    if (!tid) {
+      const msg = "NO_TENANT: missing tenantId for industry save.";
+      setErr(msg);
+      setLastAction(msg);
+      throw new Error(msg);
+    }
 
-    const res = await fetch("/api/onboarding/industries", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId: tid, ...args }),
-    });
+    setErr(null);
+    setLastAction("Saving industry…");
 
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    try {
+      const res = await fetch("/api/onboarding/industries", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tenantId: tid, ...args }),
+      });
 
-    await refresh({ tenantId: tid });
-    go(4);
+      const j = await readJson(res);
+      if (!res.ok || !j?.ok) throw new Error(bestErrorMessage(res, j));
+
+      await refresh({ tenantId: tid });
+      setLastAction("Industry saved.");
+      go(4);
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      setErr(msg);
+      setLastAction(`Save industry failed: ${msg}`);
+      throw e;
+    }
   }
 
   if (loading) {
@@ -287,6 +304,12 @@ export default function OnboardingWizard() {
               Mode: <span className="font-mono">{mode}</span> {" • "}
               Tenant: <span className="font-mono">{displayTenantId}</span>
             </div>
+
+            {lastAction ? (
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Last action: <span className="font-mono">{lastAction}</span>
+              </div>
+            ) : null}
           </div>
 
           <div className="shrink-0 text-right">
@@ -557,7 +580,7 @@ function Step3({
 
       const res = await fetch(buildIndustriesUrl(tid), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as IndustriesResponse | null;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+      if (!res.ok || !j?.ok) throw new Error(String(j?.message || j?.error || `HTTP ${res.status}`));
 
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
