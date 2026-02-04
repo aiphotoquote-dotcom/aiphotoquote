@@ -61,9 +61,9 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
 }
 
 /**
- * Your prod DB tenant_members uses clerk_user_id (NOT user_id).
+ * Returns the "first" tenant for this user (legacy/default behavior).
  */
-async function findTenantForClerkUser(clerkUserId: string): Promise<string | null> {
+async function findFirstTenantForClerkUser(clerkUserId: string): Promise<string | null> {
   const r = await db.execute(sql`
     select tenant_id
     from tenant_members
@@ -76,10 +76,46 @@ async function findTenantForClerkUser(clerkUserId: string): Promise<string | nul
   return row?.tenant_id ? String(row.tenant_id) : null;
 }
 
-export async function GET() {
+/**
+ * Ensure the user is a member of tenantId (authorization gate for edit flows).
+ */
+async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
+  const r = await db.execute(sql`
+    select 1 as ok
+    from tenant_members
+    where tenant_id = ${tenantId}::uuid
+      and clerk_user_id = ${clerkUserId}
+    limit 1
+  `);
+  const row = firstRow(r);
+  if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
+}
+
+/**
+ * Resolve tenant context:
+ * - If URL has ?tenantId=<uuid> => treat as edit flow (must be a member)
+ * - Else: default to the first tenant (legacy behavior)
+ */
+function getTenantIdFromRequest(req: Request): string {
+  try {
+    const u = new URL(req.url);
+    return safeTrim(u.searchParams.get("tenantId"));
+  } catch {
+    return "";
+  }
+}
+
+export async function GET(req: Request) {
   try {
     const { clerkUserId } = await ensureAppUser();
-    const tenantId = await findTenantForClerkUser(clerkUserId);
+
+    const explicitTenantId = getTenantIdFromRequest(req);
+    let tenantId = explicitTenantId || (await findFirstTenantForClerkUser(clerkUserId));
+
+    // If caller explicitly asked for a tenant, enforce membership
+    if (explicitTenantId) {
+      await requireMembership(clerkUserId, explicitTenantId);
+    }
 
     if (!tenantId) {
       return NextResponse.json(
@@ -125,7 +161,8 @@ export async function GET() {
     );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const status = msg === "UNAUTHENTICATED" ? 401 : 500;
+    const status =
+      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
@@ -140,6 +177,12 @@ export async function POST(req: Request) {
 
     const businessName = safeTrim(body?.businessName);
     const website = safeTrim(body?.website);
+
+    // Optional controls to support the 3 entry points:
+    // - tenantId: edit a specific tenant
+    // - createNewTenant: force creating a new tenant even if user already has one
+    const requestedTenantId = safeTrim(body?.tenantId);
+    const createNewTenant = Boolean(body?.createNewTenant);
 
     if (businessName.length < 2) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
@@ -166,8 +209,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
     }
 
-    let tenantId = await findTenantForClerkUser(clerkUserId);
+    let tenantId: string | null = null;
 
+    // 1) Explicit edit flow
+    if (requestedTenantId) {
+      await requireMembership(clerkUserId, requestedTenantId);
+      tenantId = requestedTenantId;
+    }
+
+    // 2) Existing user / new tenant (force create)
+    if (!tenantId && createNewTenant) {
+      tenantId = null; // explicit
+    }
+
+    // 3) Default legacy behavior: use first tenant if it exists
+    if (!tenantId && !createNewTenant) {
+      tenantId = await findFirstTenantForClerkUser(clerkUserId);
+    }
+
+    // If no tenant context, create a new tenant
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -196,6 +256,7 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
+      // Update existing tenant identity
       await db.execute(sql`
         update tenants
         set name = ${businessName}
@@ -209,6 +270,7 @@ export async function POST(req: Request) {
       `);
     }
 
+    // ✅ Persist website to tenant_onboarding so analyze-website can read it
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
@@ -221,7 +283,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, tenantId }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const status = msg === "UNAUTHENTICATED" ? 401 : 500;
+    const status =
+      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
