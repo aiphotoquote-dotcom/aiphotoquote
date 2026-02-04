@@ -1,5 +1,4 @@
-//src/app/onboarding/wizard/OnboardingWizard.tsx
-
+// src/app/onboarding/wizard/OnboardingWizard.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -53,6 +52,16 @@ function setStepInUrl(step: number) {
   window.history.replaceState({}, "", url.toString());
 }
 
+async function readJsonSafe(res: Response) {
+  const j = await res.json().catch(() => null);
+  return j;
+}
+
+function errFrom(res: Response, j: any) {
+  const msg = String(j?.message || j?.error || "").trim();
+  return msg || `HTTP ${res.status}`;
+}
+
 export default function OnboardingWizard() {
   const [step, setStep] = useState<number>(1);
   const [loading, setLoading] = useState(true);
@@ -68,8 +77,8 @@ export default function OnboardingWizard() {
     setErr(null);
     try {
       const res = await fetch("/api/onboarding/state", { method: "GET", cache: "no-store" });
-      const j = (await res.json().catch(() => null)) as OnboardingState | null;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+      const j = (await readJsonSafe(res)) as OnboardingState | null;
+      if (!res.ok || !j?.ok) throw new Error(errFrom(res, j));
       setState(j);
 
       // prefer URL step; fallback to server step
@@ -102,17 +111,22 @@ export default function OnboardingWizard() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
     });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    const j = await readJsonSafe(res);
+    if (!res.ok || !j?.ok) throw new Error(errFrom(res, j));
     await refresh();
     go(2);
   }
 
   async function runMockAnalysis() {
     setErr(null);
-    const res = await fetch("/api/onboarding/analyze-website", { method: "POST" });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+    const res = await fetch("/api/onboarding/analyze-website", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // optional payload (route accepts empty too)
+      body: JSON.stringify({}),
+    });
+    const j = await readJsonSafe(res);
+    if (!res.ok || !j?.ok) throw new Error(errFrom(res, j));
     await refresh();
   }
 
@@ -123,8 +137,8 @@ export default function OnboardingWizard() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(args),
     });
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    const j = await readJsonSafe(res);
+    if (!res.ok || !j?.ok) throw new Error(errFrom(res, j));
     await refresh();
     go(4);
   }
@@ -139,7 +153,7 @@ export default function OnboardingWizard() {
     );
   }
 
-  const existingUserContext = Boolean(state?.tenantId); // pragmatic: if we already have tenant context, don't ask for name/email again
+  const existingUserContext = Boolean(state?.tenantId);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -251,13 +265,7 @@ function Step1({
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Your name" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
-            <Field
-              label="Your email"
-              value={ownerEmail}
-              onChange={setOwnerEmail}
-              placeholder="you@shop.com"
-              type="email"
-            />
+            <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
           </div>
         )}
 
@@ -302,6 +310,7 @@ function Step2({
   onBack: () => void;
 }) {
   const [running, setRunning] = useState(false);
+  const [localErr, setLocalErr] = useState<string | null>(null);
 
   // ✅ Auto-run once: if a website exists and we don't have analysis yet.
   const autoRanRef = useRef(false);
@@ -312,17 +321,18 @@ function Step2({
     const hasWebsite = String(website ?? "").trim().length > 0;
     const hasAnalysis = Boolean(aiAnalysis);
 
-    // Mark as handled either way so we never loop on re-renders.
     autoRanRef.current = true;
-
     if (!hasWebsite || hasAnalysis) return;
 
     let alive = true;
 
     setRunning(true);
+    setLocalErr(null);
+
     onRun()
-      .catch(() => {
-        // Parent sets the top-level error; we don't double-report here.
+      .catch((e: any) => {
+        if (!alive) return;
+        setLocalErr(e?.message ?? String(e));
       })
       .finally(() => {
         if (alive) setRunning(false);
@@ -334,6 +344,7 @@ function Step2({
   }, [website, aiAnalysis, onRun]);
 
   const buttonLabel = aiAnalysis ? "Re-run AI analysis (mock)" : "Run AI analysis (mock)";
+  const modelUsed = String(aiAnalysis?.modelUsed ?? "").trim();
 
   return (
     <div>
@@ -345,7 +356,18 @@ function Step2({
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
         <div className="mt-1 break-words text-gray-700 dark:text-gray-300">{website || "(none provided)"}</div>
+        {modelUsed ? (
+          <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+            Model used: <span className="font-mono">{modelUsed}</span>
+          </div>
+        ) : null}
       </div>
+
+      {localErr ? (
+        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          {localErr}
+        </div>
+      ) : null}
 
       <div className="mt-4 grid gap-3">
         <button
@@ -354,8 +376,11 @@ function Step2({
           disabled={running}
           onClick={async () => {
             setRunning(true);
+            setLocalErr(null);
             try {
               await onRun();
+            } catch (e: any) {
+              setLocalErr(e?.message ?? String(e));
             } finally {
               setRunning(false);
             }
@@ -420,13 +445,12 @@ function Step3({
     setLoading(true);
     try {
       const res = await fetch("/api/onboarding/industries", { method: "GET", cache: "no-store" });
-      const j = (await res.json().catch(() => null)) as IndustriesResponse | null;
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+      const j = (await readJsonSafe(res)) as IndustriesResponse | null;
+      if (!res.ok || !j?.ok) throw new Error(errFrom(res, j));
 
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      // default selection: server selectedKey, else AI suggestion if present in list, else first item
       const serverSel = String(j.selectedKey ?? "").trim();
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const next =
