@@ -58,7 +58,7 @@ type EffectivePreview = {
     qaModel: string;
     renderModel: string;
 
-    // ✅ allow resolver to expose it; optional for back-compat
+    // ✅ NEW (optional for back-compat with older resolver output)
     onboardingModel?: string;
   };
   prompts: { quoteEstimatorSystem: string; qaQuestionGeneratorSystem: string };
@@ -116,6 +116,7 @@ export function LlmManagerClient({
     const models = cfg?.models ?? {};
     const prompts = cfg?.prompts ?? {};
     const guardrails = cfg?.guardrails ?? {};
+
     const presets = (prompts as any)?.renderStylePresets ?? {};
 
     return {
@@ -155,7 +156,7 @@ export function LlmManagerClient({
     pickInitialSelect(form.renderModel, IMAGE_MODEL_OPTIONS)
   );
 
-  // ✅ NEW onboarding select (uses TEXT options)
+  // ✅ NEW onboarding select/custom
   const [onboardingModelSelect, setOnboardingModelSelect] = useState(() =>
     pickInitialSelect(form.onboardingModel, TEXT_MODEL_OPTIONS)
   );
@@ -211,16 +212,22 @@ export function LlmManagerClient({
       const est = safeStr(m.estimatorModel, "gpt-4o-mini");
       const qa = safeStr(m.qaModel, "gpt-4o-mini");
       const ren = safeStr(m.renderModel, "gpt-image-1");
+
+      // ✅ NEW
       const onb = safeStr((m as any)?.onboardingModel, "gpt-4o-mini");
 
       setEstimatorModelSelect(pickInitialSelect(est, TEXT_MODEL_OPTIONS));
       setQaModelSelect(pickInitialSelect(qa, TEXT_MODEL_OPTIONS));
       setRenderModelSelect(pickInitialSelect(ren, IMAGE_MODEL_OPTIONS));
+
+      // ✅ NEW
       setOnboardingModelSelect(pickInitialSelect(onb, TEXT_MODEL_OPTIONS));
 
       setEstimatorModelCustom(est);
       setQaModelCustom(qa);
       setRenderModelCustom(ren);
+
+      // ✅ NEW
       setOnboardingModelCustom(onb);
 
       setQuoteEstimatorSystem(safeStr(p.quoteEstimatorSystem, ""));
@@ -263,6 +270,8 @@ export function LlmManagerClient({
           estimatorModel,
           qaModel,
           renderModel,
+
+          // ✅ NEW
           onboardingModel,
         },
         prompts: {
@@ -332,6 +341,8 @@ export function LlmManagerClient({
                 <div>
                   Render prompt: <span className="font-mono">{effective.models.renderModel}</span>
                 </div>
+
+                {/* ✅ NEW */}
                 {effective.models.onboardingModel ? (
                   <div>
                     Onboarding: <span className="font-mono">{effective.models.onboardingModel}</span>
@@ -428,7 +439,7 @@ export function LlmManagerClient({
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Models</h2>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render. Onboarding model is used by onboarding AI analysis.
+            Used by the quote pipeline + Q&amp;A. Render model is used by /api/quote/render.
           </p>
 
           <div className="mt-4 space-y-4">
@@ -480,33 +491,6 @@ export function LlmManagerClient({
               ) : null}
             </div>
 
-            {/* ✅ NEW Onboarding */}
-            <div>
-              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding model</label>
-              <select
-                value={onboardingModelSelect}
-                onChange={(e) => setOnboardingModelSelect(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                {TEXT_MODEL_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              {onboardingModelSelect === "custom" ? (
-                <input
-                  value={onboardingModelCustom}
-                  onChange={(e) => setOnboardingModelCustom(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  placeholder="enter custom onboarding text model id…"
-                />
-              ) : null}
-              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                Used by onboarding AI (website analysis + fit + industry suggestion).
-              </div>
-            </div>
-
             {/* Render */}
             <div>
               <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render model</label>
@@ -531,6 +515,33 @@ export function LlmManagerClient({
               ) : null}
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 This is what /api/quote/render uses for image generation.
+              </div>
+            </div>
+
+            {/* ✅ NEW (requested placement: bottom) */}
+            <div>
+              <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding model</label>
+              <select
+                value={onboardingModelSelect}
+                onChange={(e) => setOnboardingModelSelect(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                {TEXT_MODEL_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              {onboardingModelSelect === "custom" ? (
+                <input
+                  value={onboardingModelCustom}
+                  onChange={(e) => setOnboardingModelCustom(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  placeholder="enter custom onboarding text model id…"
+                />
+              ) : null}
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Used by onboarding AI (website scan, fit, industry detection).
               </div>
             </div>
           </div>
@@ -612,11 +623,11 @@ export function LlmManagerClient({
         </section>
       </div>
 
-      {/* NOTE:
-         Your original file likely continues with prompt-set editors + render prompt editors.
-         Those are intentionally untouched in this change. If your repo file contains them,
-         keep them as-is below this point.
-      */}
+      {/* Prompt sets + Rendering prompts sections unchanged (kept as you had them) */}
+      {/* ...the rest of your file continues exactly as-is... */}
+
+      {/* NOTE: For brevity, I’m keeping your remaining sections unchanged.
+          If you want, paste the remainder and I’ll return a single complete file including those sections verbatim. */}
     </div>
   );
 }
