@@ -49,6 +49,14 @@ function safeMode(v: any): Mode {
   return "new";
 }
 
+function normalizeWebsiteInput(raw: string) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  // If user typed "kwickeycustoms.com" or "www.foo.com" -> make it a URL
+  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
+  return s;
+}
+
 function getUrlParams() {
   if (typeof window === "undefined") return { step: 1, mode: "new" as Mode, tenantId: "" };
   const url = new URL(window.location.href);
@@ -162,21 +170,29 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
+    try {
+      const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          step: 1,
+          ...payload,
+          website: payload.website ? normalizeWebsiteInput(payload.website) : undefined,
+        }),
+      });
 
-    const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ step: 1, ...payload }),
-    });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
 
-    const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+      const newTenantId = String(j.tenantId ?? "").trim();
+      if (newTenantId) setTenantInNav(newTenantId);
 
-    const newTenantId = String(j.tenantId ?? "").trim();
-    if (newTenantId) setTenantInNav(newTenantId);
-
-    await refresh({ tenantId: newTenantId || tenantId });
-    go(2);
+      await refresh({ tenantId: newTenantId || tenantId });
+      go(2);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+      throw e;
+    }
   }
 
   async function runMockAnalysis() {
@@ -630,11 +646,8 @@ function Step3({
             setSaving(true);
             setErr(null);
             try {
-              if (createMode) {
-                await onSubmit({ industryLabel: newLabel.trim() });
-              } else {
-                await onSubmit({ industryKey: selectedKey });
-              }
+              if (createMode) await onSubmit({ industryLabel: newLabel.trim() });
+              else await onSubmit({ industryKey: selectedKey });
             } catch (e: any) {
               setErr(e?.message ?? String(e));
             } finally {
