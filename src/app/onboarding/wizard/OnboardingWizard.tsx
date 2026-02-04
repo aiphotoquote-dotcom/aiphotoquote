@@ -3,10 +3,11 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type OnboardingMode = "new" | "update" | "existing";
+type Mode = "new" | "update" | "existing";
 
 type OnboardingState = {
   ok: boolean;
+  isAuthenticated?: boolean;
   tenantId: string | null;
   tenantName: string | null;
   currentStep: number;
@@ -14,6 +15,7 @@ type OnboardingState = {
   website: string | null;
   aiAnalysis: any | null;
 
+  // allow API error shapes without TS pain
   error?: string;
   message?: string;
 };
@@ -41,45 +43,68 @@ function safeStep(v: any) {
   return Math.max(1, Math.min(6, Math.floor(n)));
 }
 
-function safeMode(v: any): OnboardingMode {
-  const s = String(v ?? "").trim().toLowerCase();
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function safeMode(v: any): Mode {
+  const s = safeTrim(v).toLowerCase();
   if (s === "update") return "update";
   if (s === "existing") return "existing";
   return "new";
 }
 
-function getCtxFromUrl(): { step: number; mode: OnboardingMode; tenantId: string } {
-  if (typeof window === "undefined") return { step: 1, mode: "new", tenantId: "" };
-  const url = new URL(window.location.href);
-  const step = safeStep(url.searchParams.get("step") ?? "1");
-  const mode = safeMode(url.searchParams.get("mode"));
-  const tenantId = String(url.searchParams.get("tenantId") ?? "").trim();
+function readUrl() {
+  if (typeof window === "undefined") {
+    return { step: 1, mode: "new" as Mode, tenantId: "" };
+  }
+  const u = new URL(window.location.href);
+  const step = safeStep(u.searchParams.get("step") ?? "1");
+  const mode = safeMode(u.searchParams.get("mode"));
+  const tenantId = safeTrim(u.searchParams.get("tenantId"));
   return { step, mode, tenantId };
 }
 
-function setStepInUrl(step: number) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("step", String(step));
-  window.history.replaceState({}, "", url.toString());
+function writeUrl(next: { step?: number; mode?: Mode; tenantId?: string | null }, opts?: { replace?: boolean }) {
+  if (typeof window === "undefined") return;
+
+  const u = new URL(window.location.href);
+
+  if (typeof next.step === "number") {
+    u.searchParams.set("step", String(next.step));
+  }
+
+  if (next.mode) {
+    u.searchParams.set("mode", next.mode);
+  } else if (!u.searchParams.get("mode")) {
+    // default mode=new if absent
+    u.searchParams.set("mode", "new");
+  }
+
+  if (next.tenantId === null || next.tenantId === "") {
+    u.searchParams.delete("tenantId");
+  } else if (typeof next.tenantId === "string" && next.tenantId.trim()) {
+    u.searchParams.set("tenantId", next.tenantId.trim());
+  }
+
+  if (opts?.replace) window.history.replaceState({}, "", u.toString());
+  else window.history.pushState({}, "", u.toString());
 }
 
-function setTenantIdInUrl(tenantId: string) {
-  const url = new URL(window.location.href);
-  if (tenantId) url.searchParams.set("tenantId", tenantId);
-  window.history.replaceState({}, "", url.toString());
-}
-
-function buildStateUrl(mode: OnboardingMode, tenantId: string) {
-  const u = new URL("/api/onboarding/state", window.location.origin);
-  u.searchParams.set("mode", mode);
-  if (tenantId) u.searchParams.set("tenantId", tenantId);
-  return u.pathname + u.search;
+function buildStateUrl(mode: Mode, tenantId: string) {
+  // /api/onboarding/state expects query params
+  const params = new URLSearchParams();
+  params.set("mode", mode);
+  if (tenantId) params.set("tenantId", tenantId);
+  return `/api/onboarding/state?${params.toString()}`;
 }
 
 export default function OnboardingWizard() {
-  const [step, setStep] = useState<number>(1);
-  const [mode, setMode] = useState<OnboardingMode>("new");
-  const [urlTenantId, setUrlTenantId] = useState<string>("");
+  const initial = useMemo(() => readUrl(), []);
+  const [step, setStep] = useState<number>(initial.step);
+  const [mode, setMode] = useState<Mode>(initial.mode);
+  const [urlTenantId, setUrlTenantId] = useState<string>(initial.tenantId);
 
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
@@ -90,24 +115,43 @@ export default function OnboardingWizard() {
     return Math.round(((Math.min(step, total) - 1) / (total - 1)) * 100);
   }, [step]);
 
+  // 🔑 RULE: If mode=new, onboarding assumes "create new tenant".
+  // If URL contains tenantId from an existing tenant, strip it on load.
+  useEffect(() => {
+    const u = readUrl();
+
+    const nextMode = u.mode;
+    const nextStep = u.step;
+    const nextTenantId = u.tenantId;
+
+    setMode(nextMode);
+    setStep(nextStep);
+
+    if (nextMode === "new" && nextTenantId) {
+      // remove accidental tenantId (wrong entry point)
+      writeUrl({ tenantId: null }, { replace: true });
+      setUrlTenantId("");
+    } else {
+      setUrlTenantId(nextTenantId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function refresh() {
     setErr(null);
     try {
-      const res = await fetch(buildStateUrl(mode, urlTenantId), { method: "GET", cache: "no-store" });
+      const tid = safeTrim(urlTenantId);
+      const res = await fetch(buildStateUrl(mode, tid), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
+
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+
       setState(j);
 
-      // Keep URL tenantId in sync if server returns one (important for mode=new after Step 1)
-      const serverTid = String(j.tenantId ?? "").trim();
-      if (serverTid && !urlTenantId) {
-        setUrlTenantId(serverTid);
-        setTenantIdInUrl(serverTid);
-      }
-
-      // prefer URL step; fallback to server step
-      const urlStep = getCtxFromUrl().step;
-      setStep(urlStep || safeStep(j.currentStep || 1));
+      // Prefer URL step; fallback to server step
+      const u = readUrl();
+      const nextStep = u.step || safeStep(j.currentStep || 1);
+      setStep(nextStep);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -116,24 +160,22 @@ export default function OnboardingWizard() {
   }
 
   useEffect(() => {
-    const ctx = getCtxFromUrl();
-    setMode(ctx.mode);
-    setUrlTenantId(ctx.tenantId);
-    setStep(ctx.step);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mode, urlTenantId]);
 
   function go(next: number) {
     const s = safeStep(next);
-    setStepInUrl(s);
     setStep(s);
+    writeUrl({ step: s }, { replace: true });
   }
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
 
-    const res = await fetch(buildStateUrl(mode, urlTenantId), {
+    // POST goes to /api/onboarding/state with query mode (+ tenantId if update/existing)
+    const tid = safeTrim(urlTenantId);
+    const res = await fetch(buildStateUrl(mode, tid), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
@@ -142,11 +184,12 @@ export default function OnboardingWizard() {
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
 
-    // ✅ critical: persist the newly created tenantId into the URL so Step 2/3 have context
-    const tid = String(j?.tenantId ?? "").trim();
-    if (tid) {
-      setUrlTenantId(tid);
-      setTenantIdInUrl(tid);
+    // If mode=new, the API returns the newly created tenantId.
+    // We must set it into the URL for subsequent steps.
+    const newTenantId = safeTrim(j?.tenantId);
+    if (newTenantId) {
+      setUrlTenantId(newTenantId);
+      writeUrl({ tenantId: newTenantId }, { replace: true });
     }
 
     await refresh();
@@ -156,34 +199,36 @@ export default function OnboardingWizard() {
   async function runMockAnalysis() {
     setErr(null);
 
-    const tenantId = String(state?.tenantId ?? "").trim();
-    if (!tenantId) throw new Error("NO_TENANT: onboarding state did not include tenantId.");
+    const tid = safeTrim(state?.tenantId) || safeTrim(urlTenantId);
+    if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
     const res = await fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId }),
+      body: JSON.stringify({ tenantId: tid }),
     });
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+
     await refresh();
   }
 
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string }) {
     setErr(null);
 
-    const tenantId = String(state?.tenantId ?? "").trim();
-    if (!tenantId) throw new Error("NO_TENANT: onboarding state did not include tenantId.");
+    const tid = safeTrim(state?.tenantId) || safeTrim(urlTenantId);
+    if (!tid) throw new Error("NO_TENANT: missing tenantId for industry save.");
 
     const res = await fetch("/api/onboarding/industries", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId, ...args }),
+      body: JSON.stringify({ tenantId: tid, ...args }),
     });
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+
     await refresh();
     go(4);
   }
@@ -198,11 +243,7 @@ export default function OnboardingWizard() {
     );
   }
 
-  // onboarding is protected; if you're here you're logged in
-  const existingUserContext = true;
-
-  // ✅ FIX: don’t mix ?? and || without parentheses
-  const tenantLabel = String(((state?.tenantId ?? urlTenantId) || "(none)")).trim();
+  const bannerTenantName = mode === "new" ? "New tenant" : state?.tenantName ? state.tenantName : "Tenant";
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -215,16 +256,17 @@ export default function OnboardingWizard() {
               We’ll tailor your quoting experience in just a few steps.
             </div>
 
+            {/* Debug line (optional, but helpful while wiring entrypoints) */}
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span>
               {" • "}
-              Tenant: <span className="font-mono">{tenantLabel}</span>
+              Tenant: <span className="font-mono">{safeTrim(urlTenantId) || "(none)"}</span>
             </div>
           </div>
 
           <div className="shrink-0 text-right">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">{state?.tenantName ? state.tenantName : "New tenant"}</div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">{bannerTenantName}</div>
           </div>
         </div>
 
@@ -240,7 +282,7 @@ export default function OnboardingWizard() {
 
         <div className="mt-6">
           {step === 1 ? (
-            <Step1 existingUser={existingUserContext} onSubmit={saveStep1} />
+            <Step1 mode={mode} onSubmit={saveStep1} />
           ) : step === 2 ? (
             <Step2
               website={state?.website || ""}
@@ -250,7 +292,7 @@ export default function OnboardingWizard() {
               onBack={() => go(1)}
             />
           ) : step === 3 ? (
-            <Step3 tenantId={state?.tenantId || null} aiAnalysis={state?.aiAnalysis} onBack={() => go(2)} onSubmit={saveIndustrySelection} />
+            <Step3 tenantId={safeTrim(state?.tenantId) || safeTrim(urlTenantId) || null} aiAnalysis={state?.aiAnalysis} onBack={() => go(2)} onSubmit={saveIndustrySelection} />
           ) : (
             <ComingSoon step={step} onBack={() => go(step - 1)} />
           )}
@@ -288,10 +330,10 @@ function Field({
 }
 
 function Step1({
-  existingUser,
+  mode,
   onSubmit,
 }: {
-  existingUser: boolean;
+  mode: Mode;
   onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<void>;
 }) {
   const [businessName, setBusinessName] = useState("");
@@ -300,30 +342,27 @@ function Step1({
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const can =
-    businessName.trim().length >= 2 &&
-    (existingUser ? true : ownerName.trim().length >= 2 && ownerEmail.trim().includes("@"));
+  // We assume logged-in is common; but we still allow manual owner fields if needed.
+  // In mode=new we typically want “create new tenant”; owner fields can be derived server-side if omitted.
+  const can = businessName.trim().length >= 2;
+
+  const helper =
+    mode === "new"
+      ? "You’re creating a new tenant. We can pull your name/email from your login if you leave them blank."
+      : "You’re updating an existing tenant. We can pull your name/email from your login if you leave them blank.";
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Business identity</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        This helps us personalize your estimates, emails, and branding.
-      </div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{helper}</div>
 
       <div className="mt-6 grid gap-4">
         <Field label="Business name" value={businessName} onChange={setBusinessName} placeholder="Maggio Upholstery" />
 
-        {existingUser ? (
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-            We already know who you are from your login — no need to re-enter your name and email.
-          </div>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Your name" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
-            <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
-          </div>
-        )}
+        <div className="grid gap-4 md:grid-cols-2">
+          <Field label="Your name (optional)" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
+          <Field label="Your email (optional)" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
+        </div>
 
         <Field label="Website (optional)" value={website} onChange={setWebsite} placeholder="https://yourshop.com" />
       </div>
@@ -338,8 +377,8 @@ function Step1({
             await onSubmit({
               businessName: businessName.trim(),
               website: website.trim() || undefined,
-              ownerName: existingUser ? undefined : ownerName.trim(),
-              ownerEmail: existingUser ? undefined : ownerEmail.trim(),
+              ownerName: ownerName.trim() || undefined,
+              ownerEmail: ownerEmail.trim() || undefined,
             });
           } finally {
             setSaving(false);
@@ -367,6 +406,7 @@ function Step2({
 }) {
   const [running, setRunning] = useState(false);
 
+  // Auto-run once if a website exists and we don't have analysis yet.
   const autoRanRef = useRef(false);
 
   useEffect(() => {
@@ -376,12 +416,11 @@ function Step2({
     const hasAnalysis = Boolean(aiAnalysis);
 
     autoRanRef.current = true;
-
     if (!hasWebsite || hasAnalysis) return;
 
     let alive = true;
-
     setRunning(true);
+
     onRun()
       .catch(() => {})
       .finally(() => {
@@ -481,7 +520,7 @@ function Step3({
     setErr(null);
     setLoading(true);
     try {
-      const tid = String(tenantId ?? "").trim();
+      const tid = safeTrim(tenantId);
       if (!tid) throw new Error("NO_TENANT: missing tenantId for industries load.");
 
       const res = await fetch(`/api/onboarding/industries?tenantId=${encodeURIComponent(tid)}`, {
@@ -495,6 +534,7 @@ function Step3({
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
+      // default selection: server selectedKey, else AI suggestion if present in list, else first item
       const serverSel = String(j.selectedKey ?? "").trim();
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const next =
