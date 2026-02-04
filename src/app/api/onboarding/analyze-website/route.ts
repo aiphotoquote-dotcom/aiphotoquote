@@ -21,6 +21,14 @@ function firstRow(r: any): any | null {
   return null;
 }
 
+function normalizeWebsite(raw: string) {
+  const s = safeTrim(raw);
+  if (!s) return "";
+  // If user typed "example.com" or "www.example.com", make it a real URL-ish string.
+  if (/^https?:\/\//i.test(s)) return s;
+  return `https://${s}`;
+}
+
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -39,6 +47,17 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
+async function readOnboardingWebsite(tenantId: string): Promise<string> {
+  const r = await db.execute(sql`
+    select website
+    from tenant_onboarding
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+  const row: any = (r as any)?.rows?.[0] ?? null;
+  return safeTrim(row?.website);
+}
+
 export async function POST(req: Request) {
   try {
     const { clerkUserId } = await requireAuthed();
@@ -52,28 +71,26 @@ export async function POST(req: Request) {
     // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
     const cfg = await loadPlatformLlmConfig();
     const onboardingModel =
-      String((cfg as any)?.models?.onboardingModel ?? "").trim() ||
-      String((cfg as any)?.models?.estimatorModel ?? "").trim() ||
+      safeTrim((cfg as any)?.models?.onboardingModel) ||
+      safeTrim((cfg as any)?.models?.estimatorModel) ||
       "gpt-4o-mini";
 
-    const r = await db.execute(sql`
-      select website
-      from tenant_onboarding
-      where tenant_id = ${tenantId}::uuid
-      limit 1
-    `);
+    // Prefer website passed from client (wizard), fallback to DB.
+    const websiteFromBody = safeTrim(body?.website);
+    const websiteFromDb = await readOnboardingWebsite(tenantId);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    const website = String(row?.website ?? "").trim();
+    const website = normalizeWebsite(websiteFromBody || websiteFromDb);
 
     // Mock v1 (auditable); we’ll swap to OpenAI next.
+    const hasWebsite = website.length > 0;
+
     const mock = {
-      fit: website ? true : "unknown",
-      confidenceScore: website ? 0.78 : 0.52,
+      fit: hasWebsite ? true : "unknown",
+      confidenceScore: hasWebsite ? 0.78 : 0.52,
       suggestedIndustryKey: "marine",
       detectedServices: ["upholstery", "marine seating", "repairs", "custom work"],
       billingSignals: ["estimate-based", "mixed"],
-      notes: website
+      notes: hasWebsite
         ? "Website suggests a service business that benefits from photo-based estimating."
         : "No website provided; we’ll confirm industry via questions next.",
       analyzedAt: new Date().toISOString(),
@@ -81,16 +98,26 @@ export async function POST(req: Request) {
       modelUsed: onboardingModel,
     };
 
+    // Persist AI analysis AND also persist website if we have it (keeps Step 2 + analysis consistent)
     await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${JSON.stringify(mock)}::jsonb, 2, false, now(), now())
+      insert into tenant_onboarding (tenant_id, website, ai_analysis, current_step, completed, created_at, updated_at)
+      values (
+        ${tenantId}::uuid,
+        ${website || null},
+        ${JSON.stringify(mock)}::jsonb,
+        2,
+        false,
+        now(),
+        now()
+      )
       on conflict (tenant_id) do update
-      set ai_analysis = excluded.ai_analysis,
+      set website = coalesce(excluded.website, tenant_onboarding.website),
+          ai_analysis = excluded.ai_analysis,
           current_step = greatest(tenant_onboarding.current_step, 2),
           updated_at = now()
     `);
 
-    return NextResponse.json({ ok: true, tenantId, aiAnalysis: mock }, { status: 200 });
+    return NextResponse.json({ ok: true, tenantId, website: website || null, aiAnalysis: mock }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
