@@ -22,13 +22,6 @@ function safeMode(v: unknown): Mode {
   return "new";
 }
 
-function normalizeWebsiteInput(raw: string) {
-  const s = safeTrim(raw);
-  if (!s) return "";
-  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
-  return s;
-}
-
 function firstRow(r: any): any | null {
   if (!r) return null;
   if (Array.isArray(r)) return r[0] ?? null;
@@ -113,12 +106,30 @@ async function readTenantOnboarding(tenantId: string) {
 
   const row = firstRow(r);
 
+  const aiAnalysis = row?.ai_analysis ?? null;
+  const meta = aiAnalysis?.meta ?? null;
+
+  const aiAnalysisStatus = String(meta?.status ?? "").trim() || (aiAnalysis ? "complete" : "idle");
+  const aiAnalysisRound = Number(meta?.round ?? 0) || (aiAnalysis ? 1 : 0);
+  const aiAnalysisLastAction = String(meta?.lastAction ?? "").trim() || (aiAnalysis ? "AI analysis complete." : "");
+  const aiAnalysisError = String(meta?.error ?? "").trim() || null;
+  const aiAnalysisConfidenceTarget = Number(aiAnalysis?.confidence?.target ?? 0.8) || 0.8;
+  const aiAnalysisUserCorrection = meta?.userCorrection ?? null;
+
   return {
     tenantName: row?.tenant_name ?? null,
     currentStep: row?.current_step ?? 1,
     completed: row?.completed ?? false,
     website: row?.website ?? null,
-    aiAnalysis: row?.ai_analysis ?? null,
+    aiAnalysis: aiAnalysis ?? null,
+
+    // derived for UI convenience
+    aiAnalysisStatus,
+    aiAnalysisRound,
+    aiAnalysisLastAction,
+    aiAnalysisError,
+    aiAnalysisConfidenceTarget,
+    aiAnalysisUserCorrection,
   };
 }
 
@@ -127,7 +138,7 @@ export async function GET(req: Request) {
     const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
-    // mode=new + no tenantId => brand new wizard session
+    // ✅ mode=new with NO tenantId -> start a fresh onboarding session (no tenant created yet)
     if (mode === "new" && !tenantId) {
       return NextResponse.json(
         {
@@ -139,6 +150,13 @@ export async function GET(req: Request) {
           completed: false,
           website: null,
           aiAnalysis: null,
+
+          aiAnalysisStatus: "idle",
+          aiAnalysisRound: 0,
+          aiAnalysisLastAction: "",
+          aiAnalysisError: null,
+          aiAnalysisConfidenceTarget: 0.8,
+          aiAnalysisUserCorrection: null,
         },
         { status: 200 }
       );
@@ -181,8 +199,7 @@ export async function POST(req: Request) {
     }
 
     const businessName = safeTrim(body?.businessName);
-    const websiteRaw = safeTrim(body?.website);
-    const website = websiteRaw ? normalizeWebsiteInput(websiteRaw) : "";
+    const website = safeTrim(body?.website);
 
     if (businessName.length < 2) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
@@ -196,16 +213,15 @@ export async function POST(req: Request) {
 
     if (!ownerName || !ownerEmail) {
       const u = await currentUser();
-      ownerEmail = ownerEmail || safeTrim(u?.emailAddresses?.[0]?.emailAddress ?? "");
-      ownerName = ownerName || safeTrim(u?.fullName ?? u?.firstName ?? "");
+      ownerEmail = ownerEmail || (u?.emailAddresses?.[0]?.emailAddress ?? "");
+      ownerName = ownerName || (u?.fullName ?? u?.firstName ?? "");
+      ownerName = safeTrim(ownerName);
+      ownerEmail = safeTrim(ownerEmail);
     }
 
-    // ✅ If Clerk has no name, derive from email prefix so we don’t hard-fail onboarding
     if (ownerName.length < 2) {
-      const prefix = ownerEmail.includes("@") ? ownerEmail.split("@")[0] : "";
-      ownerName = safeTrim(prefix) || "Account Owner";
+      return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
     }
-
     if (!ownerEmail.includes("@")) {
       return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
     }
