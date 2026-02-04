@@ -7,10 +7,7 @@ type Mode = "new" | "update" | "existing";
 
 type OnboardingState = {
   ok: boolean;
-
-  // ✅ auth signal (your /api/onboarding/state returns this)
   isAuthenticated?: boolean;
-
   tenantId: string | null;
   tenantName: string | null;
   currentStep: number;
@@ -39,11 +36,6 @@ type IndustriesResponse = {
   message?: string;
 };
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
 function safeStep(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return 1;
@@ -51,43 +43,44 @@ function safeStep(v: any) {
 }
 
 function safeMode(v: any): Mode {
-  const s = safeTrim(v).toLowerCase();
+  const s = String(v ?? "").trim().toLowerCase();
   if (s === "update") return "update";
   if (s === "existing") return "existing";
   return "new";
 }
 
-function getUrlState() {
+function getUrlCtx() {
   if (typeof window === "undefined") return { step: 1, mode: "new" as Mode, tenantId: "" };
 
   const url = new URL(window.location.href);
   const step = safeStep(url.searchParams.get("step") ?? "1");
   const mode = safeMode(url.searchParams.get("mode"));
-  const tenantId = safeTrim(url.searchParams.get("tenantId"));
+  const tenantId = String(url.searchParams.get("tenantId") ?? "").trim();
   return { step, mode, tenantId };
 }
 
-function setUrlParams(next: { step?: number; mode?: Mode; tenantId?: string | null }) {
-  if (typeof window === "undefined") return;
-
+function setStepInUrl(step: number) {
   const url = new URL(window.location.href);
-  if (typeof next.step === "number") url.searchParams.set("step", String(safeStep(next.step)));
-  if (next.mode) url.searchParams.set("mode", next.mode);
-  if (next.tenantId === null) url.searchParams.delete("tenantId");
-  if (typeof next.tenantId === "string") {
-    const t = safeTrim(next.tenantId);
-    if (t) url.searchParams.set("tenantId", t);
-    else url.searchParams.delete("tenantId");
-  }
-
+  url.searchParams.set("step", String(step));
   window.history.replaceState({}, "", url.toString());
+}
+
+function buildStateUrl(mode: Mode, tenantId: string) {
+  const qs = new URLSearchParams();
+  qs.set("mode", mode);
+  if (tenantId) qs.set("tenantId", tenantId);
+  return `/api/onboarding/state?${qs.toString()}`;
+}
+
+function buildIndustriesUrl(mode: Mode, tenantId: string) {
+  const qs = new URLSearchParams();
+  qs.set("mode", mode);
+  if (tenantId) qs.set("tenantId", tenantId);
+  return `/api/onboarding/industries?${qs.toString()}`;
 }
 
 export default function OnboardingWizard() {
   const [step, setStep] = useState<number>(1);
-  const [mode, setMode] = useState<Mode>("new");
-  const [urlTenantId, setUrlTenantId] = useState<string>("");
-
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -97,38 +90,25 @@ export default function OnboardingWizard() {
     return Math.round(((Math.min(step, total) - 1) / (total - 1)) * 100);
   }, [step]);
 
-  function resolveStep(nextState: OnboardingState | null) {
-    const u = getUrlState();
-    const serverStep = safeStep(nextState?.currentStep ?? 1);
-
-    // ✅ critical rule: in mode=new you cannot skip Step 1 unless server says you're already past it
-    // (this prevents /onboarding?step=2 from bypassing Step 1 in a fresh session)
-    if (u.mode === "new" && serverStep < 2) return 1;
-
-    // otherwise allow URL to drive nav, but never below 1..6
-    return safeStep(u.step || serverStep);
+  function go(next: number) {
+    const s = safeStep(next);
+    setStepInUrl(s);
+    setStep(s);
   }
 
   async function refresh() {
     setErr(null);
     try {
-      const u = getUrlState();
-      setMode(u.mode);
-      setUrlTenantId(u.tenantId);
-
-      const qs = new URLSearchParams();
-      qs.set("mode", u.mode);
-      if (u.tenantId) qs.set("tenantId", u.tenantId);
-
-      const res = await fetch(`/api/onboarding/state?${qs.toString()}`, { method: "GET", cache: "no-store" });
+      const ctx = getUrlCtx();
+      const res = await fetch(buildStateUrl(ctx.mode, ctx.tenantId), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
       setState(j);
 
-      const nextStep = resolveStep(j);
-      setStep(nextStep);
-      setUrlParams({ step: nextStep, mode: u.mode, tenantId: u.tenantId || j.tenantId || null });
+      // prefer URL step; fallback to server step
+      const urlStep = ctx.step;
+      setStep(urlStep || safeStep(j.currentStep || 1));
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -137,40 +117,18 @@ export default function OnboardingWizard() {
   }
 
   useEffect(() => {
-    const u = getUrlState();
-    setMode(u.mode);
-    setUrlTenantId(u.tenantId);
-    setStep(u.step);
+    const ctx = getUrlCtx();
+    setStep(ctx.step);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function go(next: number) {
-    const s = safeStep(next);
-
-    // ✅ do not allow jumping past Step 1 for mode=new unless we actually have a tenant and server says >=2
-    // (client-side guard; server is still source of truth)
-    if (mode === "new" && s >= 2) {
-      const serverStep = safeStep(state?.currentStep ?? 1);
-      if (serverStep < 2) {
-        setStep(1);
-        setUrlParams({ step: 1, mode, tenantId: state?.tenantId ?? urlTenantId ?? null });
-        return;
-      }
-    }
-
-    setStep(s);
-    setUrlParams({ step: s, mode, tenantId: state?.tenantId ?? urlTenantId ?? null });
-  }
-
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
 
-    const qs = new URLSearchParams();
-    qs.set("mode", mode);
-    if (urlTenantId) qs.set("tenantId", urlTenantId);
+    const ctx = getUrlCtx();
 
-    const res = await fetch(`/api/onboarding/state?${qs.toString()}`, {
+    const res = await fetch(buildStateUrl(ctx.mode, ctx.tenantId), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
@@ -179,13 +137,13 @@ export default function OnboardingWizard() {
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
 
-    const newTenantId = safeTrim(j?.tenantId);
-    if (newTenantId) {
-      setUrlTenantId(newTenantId);
-      setUrlParams({ tenantId: newTenantId, mode, step: 2 });
-    } else {
-      // fallback: keep URL as-is
-      setUrlParams({ mode, step: 2 });
+    // If we just created a tenant in mode=new, ensure URL gains tenantId so ALL future calls are scoped.
+    const newTenantId = String(j?.tenantId ?? "").trim();
+    if (newTenantId && typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("tenantId", newTenantId);
+      url.searchParams.set("mode", ctx.mode || "new");
+      window.history.replaceState({}, "", url.toString());
     }
 
     await refresh();
@@ -195,8 +153,9 @@ export default function OnboardingWizard() {
   async function runMockAnalysis() {
     setErr(null);
 
-    const tenantId = safeTrim(state?.tenantId) || safeTrim(urlTenantId);
-    if (!tenantId) throw new Error("NO_TENANT: onboarding state did not include tenantId.");
+    const ctx = getUrlCtx();
+    const tenantId = String(ctx.tenantId || state?.tenantId || "").trim();
+    if (!tenantId) throw new Error("NO_TENANT: missing tenantId in URL/state.");
 
     const res = await fetch("/api/onboarding/analyze-website", {
       method: "POST",
@@ -206,14 +165,16 @@ export default function OnboardingWizard() {
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+
     await refresh();
   }
 
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string }) {
     setErr(null);
 
-    const tenantId = safeTrim(state?.tenantId) || safeTrim(urlTenantId);
-    if (!tenantId) throw new Error("NO_TENANT: onboarding state did not include tenantId.");
+    const ctx = getUrlCtx();
+    const tenantId = String(ctx.tenantId || state?.tenantId || "").trim();
+    if (!tenantId) throw new Error("NO_TENANT: missing tenantId in URL/state.");
 
     const res = await fetch("/api/onboarding/industries", {
       method: "POST",
@@ -223,6 +184,7 @@ export default function OnboardingWizard() {
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+
     await refresh();
     go(4);
   }
@@ -237,10 +199,9 @@ export default function OnboardingWizard() {
     );
   }
 
-  // ✅ You ARE logged in (this route requires auth). Treat as existing user even if tenantId is null.
-  const existingUserContext = Boolean(state?.isAuthenticated ?? true);
-
-  const activeTenantId = safeTrim(state?.tenantId) || safeTrim(urlTenantId) || "(none)";
+  const ctx = getUrlCtx();
+  const effectiveTenantId = String(ctx.tenantId || state?.tenantId || "").trim();
+  const existingUserContext = Boolean(state?.isAuthenticated); // logged-in user = true, regardless of tenantId existence
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -253,9 +214,10 @@ export default function OnboardingWizard() {
               We’ll tailor your quoting experience in just a few steps.
             </div>
 
+            {/* tiny debug line, safe + helpful */}
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              Mode: <span className="font-mono">{mode}</span> {" • "}
-              Tenant: <span className="font-mono">{activeTenantId}</span>
+              Mode: <span className="font-mono">{ctx.mode}</span> {" • "}
+              Tenant: <span className="font-mono">{effectiveTenantId || "(none)"}</span>
             </div>
           </div>
 
@@ -287,7 +249,13 @@ export default function OnboardingWizard() {
               onBack={() => go(1)}
             />
           ) : step === 3 ? (
-            <Step3 tenantId={safeTrim(state?.tenantId) || safeTrim(urlTenantId) || null} aiAnalysis={state?.aiAnalysis} onBack={() => go(2)} onSubmit={saveIndustrySelection} />
+            <Step3
+              mode={ctx.mode}
+              tenantId={effectiveTenantId || null}
+              aiAnalysis={state?.aiAnalysis}
+              onBack={() => go(2)}
+              onSubmit={saveIndustrySelection}
+            />
           ) : (
             <ComingSoon step={step} onBack={() => go(step - 1)} />
           )}
@@ -296,8 +264,6 @@ export default function OnboardingWizard() {
     </div>
   );
 }
-
-/* ----------------------- UI helpers + Steps ----------------------- */
 
 function Field({
   label,
@@ -493,11 +459,13 @@ function Step2({
 }
 
 function Step3({
+  mode,
   tenantId,
   aiAnalysis,
   onBack,
   onSubmit,
 }: {
+  mode: Mode;
   tenantId: string | null;
   aiAnalysis: any | null | undefined;
   onBack: () => void;
@@ -517,14 +485,10 @@ function Step3({
     setErr(null);
     setLoading(true);
     try {
-      const tid = safeTrim(tenantId);
+      const tid = String(tenantId ?? "").trim();
       if (!tid) throw new Error("NO_TENANT: missing tenantId for industries load.");
 
-      const res = await fetch(`/api/onboarding/industries?tenantId=${encodeURIComponent(tid)}`, {
-        method: "GET",
-        cache: "no-store",
-      });
-
+      const res = await fetch(buildIndustriesUrl(mode, tid), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as IndustriesResponse | null;
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
@@ -549,7 +513,7 @@ function Step3({
   useEffect(() => {
     loadIndustries();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenantId]);
+  }, [mode, tenantId]);
 
   const canSave = createMode ? newLabel.trim().length >= 2 : Boolean(selectedKey);
 
