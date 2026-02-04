@@ -1,7 +1,7 @@
 // src/components/pcc/llm/LlmManagerClient.tsx
 "use client";
 
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState } from "react";
 
 import { safeStr, numClamp, normalizeBlockedTopics } from "@/components/pcc/llm/helpers/normalize";
 import { promptPreview } from "@/components/pcc/llm/helpers/preview";
@@ -310,7 +310,9 @@ export function LlmManagerClient({
         <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective config (resolver output)</div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                Effective config (resolver output)
+              </div>
               <div className="text-xs text-gray-600 dark:text-gray-300">
                 This is what the quote pipeline will actually use right now (after defaults/normalization).
               </div>
