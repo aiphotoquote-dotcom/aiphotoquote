@@ -63,7 +63,8 @@ function setUrlParams(next: { step?: number; mode?: Mode; tenantId?: string }) {
   if (typeof next.step === "number") url.searchParams.set("step", String(safeStep(next.step)));
   if (next.mode) url.searchParams.set("mode", next.mode);
   if (typeof next.tenantId === "string") {
-    if (next.tenantId.trim()) url.searchParams.set("tenantId", next.tenantId.trim());
+    const tid = next.tenantId.trim();
+    if (tid) url.searchParams.set("tenantId", tid);
     else url.searchParams.delete("tenantId");
   }
   window.history.replaceState({}, "", url.toString());
@@ -94,6 +95,19 @@ export default function OnboardingWizard() {
     return Math.round(((Math.min(step, total) - 1) / (total - 1)) * 100);
   }, [step]);
 
+  const displayTenantId = useMemo(() => {
+    const a = String(state?.tenantId ?? "").trim();
+    if (a) return a;
+    const b = String(tenantId ?? "").trim();
+    if (b) return b;
+    return "(none)";
+  }, [state?.tenantId, tenantId]);
+
+  const displayTenantName = useMemo(() => {
+    const n = String(state?.tenantName ?? "").trim();
+    return n || "New tenant";
+  }, [state?.tenantName]);
+
   function go(nextStep: number) {
     const s = safeStep(nextStep);
     setUrlParams({ step: s });
@@ -110,7 +124,7 @@ export default function OnboardingWizard() {
     setErr(null);
     try {
       const navMode = explicit?.mode ?? mode;
-      const navTenantId = (explicit?.tenantId ?? tenantId).trim();
+      const navTenantId = String(explicit?.tenantId ?? tenantId ?? "").trim();
 
       const res = await fetch(buildStateUrl(navMode, navTenantId), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
@@ -119,15 +133,14 @@ export default function OnboardingWizard() {
 
       setState(j);
 
-      // If server returns a tenantId (e.g., after POST), make sure URL tracks it
       const serverTenantId = String(j.tenantId ?? "").trim();
       if (serverTenantId && serverTenantId !== navTenantId) {
         setTenantInNav(serverTenantId);
       }
 
-      // Prefer URL step; fallback to server step
       const urlStep = getUrlParams().step;
       const nextStep = urlStep || safeStep(j.currentStep || 1);
+
       if (nextStep !== step) {
         setUrlParams({ step: nextStep });
         setNav((p) => ({ ...p, step: nextStep }));
@@ -150,8 +163,7 @@ export default function OnboardingWizard() {
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
 
-    // IMPORTANT: keep wizard context by calling state endpoint WITH mode + tenantId (if present)
-    const res = await fetch(buildStateUrl(mode, tenantId.trim()), {
+    const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ step: 1, ...payload }),
@@ -214,7 +226,6 @@ export default function OnboardingWizard() {
     );
   }
 
-  // If user is logged in, we do NOT require name/email.
   const existingUserContext = Boolean(state?.isAuthenticated ?? true);
 
   return (
@@ -227,14 +238,16 @@ export default function OnboardingWizard() {
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               We’ll tailor your quoting experience in just a few steps.
             </div>
+
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
-              Tenant: <span className="font-mono">{String(state?.tenantId ?? tenantId || "(none)")}</span>
+              Tenant: <span className="font-mono">{displayTenantId}</span>
             </div>
           </div>
+
           <div className="shrink-0 text-right">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">{state?.tenantName ? state.tenantName : "New tenant"}</div>
+            <div className="text-xs text-gray-600 dark:text-gray-300">{displayTenantName}</div>
           </div>
         </div>
 
