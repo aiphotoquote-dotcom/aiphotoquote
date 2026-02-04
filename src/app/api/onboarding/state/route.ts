@@ -1,11 +1,17 @@
+// src/app/api/onboarding/state/route.ts
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
+import { cookies } from "next/headers";
 
 import { db } from "@/lib/db/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const ONBOARDING_TENANT_COOKIE = "onboarding_tenant_id";
+
+type Mode = "new" | "update";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -29,12 +35,30 @@ function slugify(name: string) {
   return base || `tenant-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+function parseMode(req: Request): Mode {
+  try {
+    const u = new URL(req.url);
+    const m = safeTrim(u.searchParams.get("mode")).toLowerCase();
+    return m === "update" ? "update" : "new";
+  } catch {
+    return "new";
+  }
+}
+
+function parseTenantId(req: Request): string {
+  try {
+    const u = new URL(req.url);
+    return safeTrim(u.searchParams.get("tenantId"));
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Ensure we have an app_users row for this Clerk user.
- * IMPORTANT: use ON CONFLICT (auth_provider, auth_subject) because your DB has a UNIQUE INDEX,
- * not a named UNIQUE CONSTRAINT.
+ * IMPORTANT: use ON CONFLICT (auth_provider, auth_subject) because your DB has a UNIQUE INDEX.
  */
-async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string }> {
+async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string; signedIn: true }> {
   const a = await auth();
   const clerkUserId = a?.userId ?? null;
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
@@ -57,27 +81,11 @@ async function ensureAppUser(): Promise<{ appUserId: string; clerkUserId: string
   const appUserId = row?.id ? String(row.id) : null;
   if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
 
-  return { appUserId, clerkUserId };
+  return { appUserId, clerkUserId, signedIn: true };
 }
 
 /**
- * Returns the "first" tenant for this user (legacy/default behavior).
- */
-async function findFirstTenantForClerkUser(clerkUserId: string): Promise<string | null> {
-  const r = await db.execute(sql`
-    select tenant_id
-    from tenant_members
-    where clerk_user_id = ${clerkUserId}
-    order by created_at asc
-    limit 1
-  `);
-
-  const row = firstRow(r);
-  return row?.tenant_id ? String(row.tenant_id) : null;
-}
-
-/**
- * Ensure the user is a member of tenantId (authorization gate for edit flows).
+ * Ensure the user is a member of tenantId (authorization gate for update flows).
  */
 async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
   const r = await db.execute(sql`
@@ -92,35 +100,44 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
 }
 
 /**
- * Resolve tenant context:
- * - If URL has ?tenantId=<uuid> => treat as edit flow (must be a member)
- * - Else: default to the first tenant (legacy behavior)
+ * Resolve tenant context for onboarding:
+ * - mode=update => tenantId must be provided (query), and membership is enforced.
+ * - mode=new (default) => use onboarding cookie if present; otherwise no tenant until Step 1 creates one.
+ *
+ * NOTE: We intentionally DO NOT fallback to "first tenant" anymore for onboarding new flows.
  */
-function getTenantIdFromRequest(req: Request): string {
-  try {
-    const u = new URL(req.url);
-    return safeTrim(u.searchParams.get("tenantId"));
-  } catch {
-    return "";
+async function resolveTenantId(req: Request, clerkUserId: string): Promise<{ mode: Mode; tenantId: string | null }> {
+  const mode = parseMode(req);
+
+  if (mode === "update") {
+    const tenantId = parseTenantId(req);
+    if (!tenantId) throw new Error("TENANT_ID_REQUIRED");
+    await requireMembership(clerkUserId, tenantId);
+    return { mode, tenantId };
   }
+
+  // mode=new
+  const jar = await cookies();
+  const cookieTenantId = safeTrim(jar.get(ONBOARDING_TENANT_COOKIE)?.value ?? "");
+  if (!cookieTenantId) return { mode, tenantId: null };
+
+  // If cookie is set, ensure membership (it should be, but don’t trust it blindly)
+  await requireMembership(clerkUserId, cookieTenantId);
+  return { mode, tenantId: cookieTenantId };
 }
 
 export async function GET(req: Request) {
   try {
-    const { clerkUserId } = await ensureAppUser();
+    const { clerkUserId, signedIn } = await ensureAppUser();
 
-    const explicitTenantId = getTenantIdFromRequest(req);
-    let tenantId = explicitTenantId || (await findFirstTenantForClerkUser(clerkUserId));
-
-    // If caller explicitly asked for a tenant, enforce membership
-    if (explicitTenantId) {
-      await requireMembership(clerkUserId, explicitTenantId);
-    }
+    const { mode, tenantId } = await resolveTenantId(req, clerkUserId);
 
     if (!tenantId) {
       return NextResponse.json(
         {
           ok: true,
+          mode,
+          signedIn,
           tenantId: null,
           tenantName: null,
           currentStep: 1,
@@ -150,6 +167,8 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         ok: true,
+        mode,
+        signedIn,
         tenantId,
         tenantName: row?.tenant_name ?? null,
         currentStep: row?.current_step ?? 1,
@@ -162,7 +181,7 @@ export async function GET(req: Request) {
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status =
-      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
+      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : msg === "TENANT_ID_REQUIRED" ? 400 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
@@ -178,11 +197,12 @@ export async function POST(req: Request) {
     const businessName = safeTrim(body?.businessName);
     const website = safeTrim(body?.website);
 
-    // Optional controls to support the 3 entry points:
-    // - tenantId: edit a specific tenant
-    // - createNewTenant: force creating a new tenant even if user already has one
+    // NEW behavior:
+    // - mode=update => updates the specified tenantId (must be member)
+    // - mode=new (default) => ALWAYS creates a new tenant (or continues the cookie tenant if already created)
+    const reqMode = safeTrim(body?.mode).toLowerCase();
+    const mode: Mode = reqMode === "update" ? "update" : "new";
     const requestedTenantId = safeTrim(body?.tenantId);
-    const createNewTenant = Boolean(body?.createNewTenant);
 
     if (businessName.length < 2) {
       return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
@@ -209,26 +229,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
     }
 
+    // Resolve target tenant
     let tenantId: string | null = null;
 
-    // 1) Explicit edit flow
-    if (requestedTenantId) {
+    if (mode === "update") {
+      if (!requestedTenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
       await requireMembership(clerkUserId, requestedTenantId);
       tenantId = requestedTenantId;
+    } else {
+      // mode=new: if we already created a tenant for this onboarding session, reuse it
+      const jar = await cookies();
+      const cookieTenantId = safeTrim(jar.get(ONBOARDING_TENANT_COOKIE)?.value ?? "");
+      if (cookieTenantId) {
+        await requireMembership(clerkUserId, cookieTenantId);
+        tenantId = cookieTenantId;
+      }
     }
 
-    // 2) Existing user / new tenant (force create)
-    if (!tenantId && createNewTenant) {
-      tenantId = null; // explicit
-    }
-
-    // 3) Default legacy behavior: use first tenant if it exists
-    if (!tenantId && !createNewTenant) {
-      tenantId = await findFirstTenantForClerkUser(clerkUserId);
-    }
-
-    // If no tenant context, create a new tenant
-    if (!tenantId) {
+    // Create new tenant if needed (mode=new, no cookie tenant yet)
+    if (!tenantId && mode === "new") {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
 
@@ -255,22 +274,24 @@ export async function POST(req: Request) {
         set business_name = excluded.business_name,
             updated_at = now()
       `);
-    } else {
-      // Update existing tenant identity
-      await db.execute(sql`
-        update tenants
-        set name = ${businessName}
-        where id = ${tenantId}::uuid
-      `);
-
-      await db.execute(sql`
-        update tenant_settings
-        set business_name = ${businessName}, updated_at = now()
-        where tenant_id = ${tenantId}::uuid
-      `);
     }
 
-    // ✅ Persist website to tenant_onboarding so analyze-website can read it
+    if (!tenantId) throw new Error("NO_TENANT");
+
+    // Update identity (both update + new flows)
+    await db.execute(sql`
+      update tenants
+      set name = ${businessName}
+      where id = ${tenantId}::uuid
+    `);
+
+    await db.execute(sql`
+      update tenant_settings
+      set business_name = ${businessName}, updated_at = now()
+      where tenant_id = ${tenantId}::uuid
+    `);
+
+    // Persist website to tenant_onboarding so analyze-website can read it
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
@@ -280,11 +301,30 @@ export async function POST(req: Request) {
           updated_at = now()
     `);
 
-    return NextResponse.json({ ok: true, tenantId }, { status: 200 });
+    const res = NextResponse.json({ ok: true, tenantId, mode }, { status: 200 });
+
+    // For mode=new, lock the session to this tenant via cookie
+    if (mode === "new") {
+      res.cookies.set(ONBOARDING_TENANT_COOKIE, tenantId, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: true,
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7, // 7 days
+      });
+    }
+
+    return res;
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status =
-      msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
+      msg === "UNAUTHENTICATED"
+        ? 401
+        : msg === "FORBIDDEN_TENANT"
+        ? 403
+        : msg === "TENANT_ID_REQUIRED"
+        ? 400
+        : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }

@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
-import { z } from "zod";
+import { cookies } from "next/headers";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
@@ -10,10 +10,51 @@ import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const ReqSchema = z.object({
-  // Preferred: wizard sends this (works for existing user/new tenant)
-  tenantId: z.string().uuid().optional(),
-});
+const ONBOARDING_TENANT_COOKIE = "onboarding_tenant_id";
+type Mode = "new" | "update";
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function firstRow(r: any): any | null {
+  if (!r) return null;
+  if (Array.isArray(r)) return r[0] ?? null;
+  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
+  return null;
+}
+
+async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
+  const r = await db.execute(sql`
+    select 1 as ok
+    from tenant_members
+    where tenant_id = ${tenantId}::uuid
+      and clerk_user_id = ${clerkUserId}
+    limit 1
+  `);
+  const row = firstRow(r);
+  if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
+}
+
+function parseMode(req: Request): Mode {
+  try {
+    const u = new URL(req.url);
+    const m = safeTrim(u.searchParams.get("mode")).toLowerCase();
+    return m === "update" ? "update" : "new";
+  } catch {
+    return "new";
+  }
+}
+
+function parseTenantIdQuery(req: Request): string {
+  try {
+    const u = new URL(req.url);
+    return safeTrim(u.searchParams.get("tenantId"));
+  } catch {
+    return "";
+  }
+}
 
 export async function POST(req: Request) {
   try {
@@ -21,13 +62,24 @@ export async function POST(req: Request) {
     const clerkUserId = a.userId;
     if (!clerkUserId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
 
+    const mode = parseMode(req);
+
     const body = await req.json().catch(() => ({}));
-    const parsed = ReqSchema.safeParse(body ?? {});
-    if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "INVALID_BODY", message: "Invalid JSON body.", issues: parsed.error.issues },
-        { status: 400 }
-      );
+    const bodyTenantId = safeTrim((body as any)?.tenantId);
+
+    let tenantId: string | null = null;
+
+    if (mode === "update") {
+      // update: tenantId can come from query or body
+      const qTenantId = parseTenantIdQuery(req);
+      tenantId = bodyTenantId || qTenantId;
+      if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+      await requireMembership(clerkUserId, tenantId);
+    } else {
+      // new: prefer body tenantId (from state) else cookie
+      tenantId = bodyTenantId || safeTrim((await cookies()).get(ONBOARDING_TENANT_COOKIE)?.value ?? "");
+      if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
+      await requireMembership(clerkUserId, tenantId);
     }
 
     // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
@@ -37,26 +89,6 @@ export async function POST(req: Request) {
       String((cfg as any)?.models?.estimatorModel ?? "").trim() ||
       "gpt-4o-mini";
 
-    // ✅ Tenant resolution:
-    // 1) Prefer explicit tenantId from wizard
-    // 2) Fallback: first membership (legacy behavior)
-    let tenantId: string | null = parsed.data.tenantId ? String(parsed.data.tenantId) : null;
-
-    if (!tenantId) {
-      const rTenant = await db.execute(sql`
-        select tm.tenant_id
-        from tenant_members tm
-        where tm.clerk_user_id = ${clerkUserId}
-        order by tm.created_at asc
-        limit 1
-      `);
-
-      const rowT: any = (rTenant as any)?.rows?.[0] ?? null;
-      tenantId = rowT?.tenant_id ? String(rowT.tenant_id) : null;
-    }
-
-    if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
-
     const r = await db.execute(sql`
       select website
       from tenant_onboarding
@@ -64,8 +96,8 @@ export async function POST(req: Request) {
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    const website = String(row?.website ?? "").trim();
+    const row: any = firstRow(r);
+    const website = safeTrim(row?.website);
 
     // Mock v1 (auditable); we’ll swap to OpenAI next.
     const mock = {
@@ -79,8 +111,6 @@ export async function POST(req: Request) {
         : "No website provided; we’ll confirm industry via questions next.",
       analyzedAt: new Date().toISOString(),
       source: "mock_v1",
-
-      // ✅ model provenance (governed by PCC)
       modelUsed: onboardingModel,
     };
 
@@ -95,6 +125,8 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: mock }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, { status: 500 });
+    const msg = e?.message ?? String(e);
+    const status = msg === "FORBIDDEN_TENANT" ? 403 : 500;
+    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
