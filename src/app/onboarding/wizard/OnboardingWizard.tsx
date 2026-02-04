@@ -195,12 +195,40 @@ export default function OnboardingWizard() {
     }
   }
 
+  // ✅ IMPORTANT:
+  // Always persist website BEFORE analyzing.
+  // Use mode=update for this persistence step so we don't accidentally create a new tenant.
   async function runMockAnalysis() {
     setErr(null);
 
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
+    // 1) Persist current website/name to tenant_onboarding for THIS tenant
+    //    (prevents stale DB reads in analyze-website)
+    const businessName = String(state?.tenantName ?? "").trim();
+    const website = normalizeWebsiteInput(String(state?.website ?? "").trim());
+
+    if (businessName.length >= 2) {
+      const resPersist = await fetch(buildStateUrl("update", tid), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          step: 1,
+          tenantId: tid,
+          businessName,
+          website: website || undefined,
+          // ownerName/ownerEmail optional; API will derive from Clerk if missing
+        }),
+      });
+
+      const jp = await resPersist.json().catch(() => null);
+      if (!resPersist.ok || !jp?.ok) {
+        throw new Error(jp?.message || jp?.error || `Persist failed (HTTP ${resPersist.status})`);
+      }
+    }
+
+    // 2) Now analyze (DB is guaranteed to have the website we just persisted)
     const res = await fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
