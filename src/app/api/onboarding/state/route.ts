@@ -120,9 +120,8 @@ export async function GET(req: Request) {
     const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
-    // ✅ Default behavior: onboarding assumes "create a new tenant"
-    // mode=new always returns a fresh onboarding session, even if a tenantId is present in the URL.
-    if (mode === "new") {
+    // ✅ mode=new + no tenantId => brand new onboarding session shell
+    if (mode === "new" && !tenantId) {
       return NextResponse.json(
         {
           ok: true,
@@ -138,7 +137,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ update/existing requires tenantId
+    // ✅ any request with tenantId => must be a member + read that tenant’s onboarding state
     if (!tenantId) {
       return NextResponse.json(
         { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
@@ -203,18 +202,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
     }
 
+    // ✅ KEY CHANGE:
+    // If a tenantId is provided (query or body), treat it as the active wizard tenant and update it,
+    // EVEN in mode=new. This prevents “mode=new always creates a new tenant” from losing website/state.
+    const requestedTenantId = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
+
     let tenantId: string | null = null;
 
-    // update/existing targets a specific tenant
-    if (mode === "update" || mode === "existing") {
-      const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-      if (!t) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
-      await requireMembership(clerkUserId, t);
-      tenantId = t;
+    if (requestedTenantId) {
+      await requireMembership(clerkUserId, requestedTenantId);
+      tenantId = requestedTenantId;
     }
 
-    // mode=new always creates a new tenant
+    // If no tenantId was supplied, then:
+    // - mode=update|existing requires a tenantId (explicit edit flow)
+    // - mode=new creates a brand new tenant
+    if (!tenantId && (mode === "update" || mode === "existing")) {
+      return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+    }
+
     if (!tenantId) {
+      // Create new tenant
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
 
@@ -242,6 +250,7 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
+      // Update existing tenant identity (wizard tenant)
       await db.execute(sql`
         update tenants
         set name = ${businessName}
@@ -257,6 +266,7 @@ export async function POST(req: Request) {
       `);
     }
 
+    // Persist website to tenant_onboarding (this is what Step 2 displays)
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
