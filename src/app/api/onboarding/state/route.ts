@@ -57,9 +57,6 @@ async function requireAuthed(): Promise<{ clerkUserId: string }> {
   return { clerkUserId };
 }
 
-/**
- * Ensure membership for explicit edit tenant.
- */
 async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
   const r = await db.execute(sql`
     select 1 as ok
@@ -72,10 +69,6 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-/**
- * Ensure app_users row exists (portable identity).
- * IMPORTANT: uses ON CONFLICT (auth_provider, auth_subject) because your DB has a UNIQUE INDEX.
- */
 async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }> {
   const u = await currentUser();
   const email = u?.emailAddresses?.[0]?.emailAddress ?? null;
@@ -97,13 +90,38 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   return { appUserId };
 }
 
+async function readTenantOnboarding(tenantId: string) {
+  const r = await db.execute(sql`
+    select
+      t.name as tenant_name,
+      o.current_step,
+      o.completed,
+      o.website,
+      o.ai_analysis
+    from tenants t
+    left join tenant_onboarding o on o.tenant_id = t.id
+    where t.id = ${tenantId}::uuid
+    limit 1
+  `);
+
+  const row = firstRow(r);
+
+  return {
+    tenantName: row?.tenant_name ?? null,
+    currentStep: row?.current_step ?? 1,
+    completed: row?.completed ?? false,
+    website: row?.website ?? null,
+    aiAnalysis: row?.ai_analysis ?? null,
+  };
+}
+
 export async function GET(req: Request) {
   try {
-    const { mode, tenantId: rawTenantId } = getQuery(req);
+    const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
-    // ✅ default is NEW tenant (even if the user already has tenants)
-    if (mode === "new") {
+    // ✅ If mode=new with NO tenantId -> start a fresh onboarding session
+    if (mode === "new" && !tenantId) {
       return NextResponse.json(
         {
           ok: true,
@@ -119,42 +137,23 @@ export async function GET(req: Request) {
       );
     }
 
-    // update/existing requires explicit tenantId
-    const tenantId = safeTrim(rawTenantId);
+    // ✅ If tenantId is present (mode=new or mode=update/existing), treat it as the active wizard tenant
     if (!tenantId) {
       return NextResponse.json(
-        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for mode=update/existing" },
+        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
         { status: 400 }
       );
     }
 
     await requireMembership(clerkUserId, tenantId);
-
-    const r = await db.execute(sql`
-      select
-        t.name as tenant_name,
-        o.current_step,
-        o.completed,
-        o.website,
-        o.ai_analysis
-      from tenants t
-      left join tenant_onboarding o on o.tenant_id = t.id
-      where t.id = ${tenantId}::uuid
-      limit 1
-    `);
-
-    const row = firstRow(r);
+    const data = await readTenantOnboarding(tenantId);
 
     return NextResponse.json(
       {
         ok: true,
         isAuthenticated: true,
         tenantId,
-        tenantName: row?.tenant_name ?? null,
-        currentStep: row?.current_step ?? 1,
-        completed: row?.completed ?? false,
-        website: row?.website ?? null,
-        aiAnalysis: row?.ai_analysis ?? null,
+        ...data,
       },
       { status: 200 }
     );
@@ -184,7 +183,7 @@ export async function POST(req: Request) {
 
     const { appUserId } = await ensureAppUser(clerkUserId);
 
-    // If client omitted owner fields (signed-in path), derive from Clerk
+    // derive owner fields if omitted
     let ownerName = safeTrim(body?.ownerName);
     let ownerEmail = safeTrim(body?.ownerEmail);
 
@@ -205,17 +204,15 @@ export async function POST(req: Request) {
 
     let tenantId: string | null = null;
 
-    // ✅ mode=update/existing: must target an existing tenant and user must be a member
+    // update/existing targets a specific tenant
     if (mode === "update" || mode === "existing") {
       const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-      if (!t) {
-        return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
-      }
+      if (!t) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
       await requireMembership(clerkUserId, t);
       tenantId = t;
     }
 
-    // ✅ mode=new: ALWAYS create a new tenant (do NOT "pick first tenant")
+    // mode=new always creates a new tenant
     if (!tenantId) {
       const baseSlug = slugify(businessName);
       const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
@@ -244,7 +241,6 @@ export async function POST(req: Request) {
             updated_at = now()
       `);
     } else {
-      // update identity for an existing tenant
       await db.execute(sql`
         update tenants
         set name = ${businessName}
@@ -260,7 +256,6 @@ export async function POST(req: Request) {
       `);
     }
 
-    // Persist website + advance to step 2
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
