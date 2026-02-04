@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
+import { z } from "zod";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
@@ -9,14 +10,25 @@ import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const ReqSchema = z.object({
+  // Preferred: wizard sends this (works for existing user/new tenant)
+  tenantId: z.string().uuid().optional(),
+});
+
 export async function POST(req: Request) {
   try {
     const a = await auth();
     const clerkUserId = a.userId;
     if (!clerkUserId) return NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 });
 
-    // Body is optional for now (future: might include website override)
-    await req.json().catch(() => null);
+    const body = await req.json().catch(() => ({}));
+    const parsed = ReqSchema.safeParse(body ?? {});
+    if (!parsed.success) {
+      return NextResponse.json(
+        { ok: false, error: "INVALID_BODY", message: "Invalid JSON body.", issues: parsed.error.issues },
+        { status: 400 }
+      );
+    }
 
     // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
     const cfg = await loadPlatformLlmConfig();
@@ -25,18 +37,24 @@ export async function POST(req: Request) {
       String((cfg as any)?.models?.estimatorModel ?? "").trim() ||
       "gpt-4o-mini";
 
-    console.log("[onboarding/analyze-website] model selected:", onboardingModel);
+    // ✅ Tenant resolution:
+    // 1) Prefer explicit tenantId from wizard
+    // 2) Fallback: first membership (legacy behavior)
+    let tenantId: string | null = parsed.data.tenantId ? String(parsed.data.tenantId) : null;
 
-    const rTenant = await db.execute(sql`
-      select tm.tenant_id
-      from tenant_members tm
-      where tm.clerk_user_id = ${clerkUserId}
-      order by tm.created_at asc
-      limit 1
-    `);
+    if (!tenantId) {
+      const rTenant = await db.execute(sql`
+        select tm.tenant_id
+        from tenant_members tm
+        where tm.clerk_user_id = ${clerkUserId}
+        order by tm.created_at asc
+        limit 1
+      `);
 
-    const rowT: any = (rTenant as any)?.rows?.[0] ?? null;
-    const tenantId = rowT?.tenant_id ? String(rowT.tenant_id) : null;
+      const rowT: any = (rTenant as any)?.rows?.[0] ?? null;
+      tenantId = rowT?.tenant_id ? String(rowT.tenant_id) : null;
+    }
+
     if (!tenantId) return NextResponse.json({ ok: false, error: "NO_TENANT" }, { status: 400 });
 
     const r = await db.execute(sql`
@@ -62,7 +80,7 @@ export async function POST(req: Request) {
       analyzedAt: new Date().toISOString(),
       source: "mock_v1",
 
-      // ✅ model provenance governed by PCC
+      // ✅ model provenance (governed by PCC)
       modelUsed: onboardingModel,
     };
 
@@ -77,10 +95,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: mock }, { status: 200 });
   } catch (e: any) {
-    console.error("[onboarding/analyze-website] error:", e);
-    return NextResponse.json(
-      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: "INTERNAL", message: e?.message ?? String(e) }, { status: 500 });
   }
 }
