@@ -120,8 +120,9 @@ export async function GET(req: Request) {
     const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
-    // ✅ If mode=new with NO tenantId -> start a fresh onboarding session
-    if (mode === "new" && !tenantId) {
+    // ✅ Default behavior: onboarding assumes "create a new tenant"
+    // mode=new always returns a fresh onboarding session, even if a tenantId is present in the URL.
+    if (mode === "new") {
       return NextResponse.json(
         {
           ok: true,
@@ -137,7 +138,7 @@ export async function GET(req: Request) {
       );
     }
 
-    // ✅ If tenantId is present (mode=new or mode=update/existing), treat it as the active wizard tenant
+    // ✅ update/existing requires tenantId
     if (!tenantId) {
       return NextResponse.json(
         { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
