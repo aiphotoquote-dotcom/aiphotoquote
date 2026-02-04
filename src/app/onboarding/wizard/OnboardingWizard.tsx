@@ -8,6 +8,7 @@ type Mode = "new" | "update" | "existing";
 type OnboardingState = {
   ok: boolean;
   isAuthenticated?: boolean;
+
   tenantId: string | null;
   tenantName: string | null;
   currentStep: number;
@@ -15,7 +16,6 @@ type OnboardingState = {
   website: string | null;
   aiAnalysis: any | null;
 
-  // allow API error shapes without TS pain
   error?: string;
   message?: string;
 };
@@ -71,16 +71,10 @@ function writeUrl(next: { step?: number; mode?: Mode; tenantId?: string | null }
 
   const u = new URL(window.location.href);
 
-  if (typeof next.step === "number") {
-    u.searchParams.set("step", String(next.step));
-  }
+  if (typeof next.step === "number") u.searchParams.set("step", String(next.step));
 
-  if (next.mode) {
-    u.searchParams.set("mode", next.mode);
-  } else if (!u.searchParams.get("mode")) {
-    // default mode=new if absent
-    u.searchParams.set("mode", "new");
-  }
+  if (next.mode) u.searchParams.set("mode", next.mode);
+  else if (!u.searchParams.get("mode")) u.searchParams.set("mode", "new");
 
   if (next.tenantId === null || next.tenantId === "") {
     u.searchParams.delete("tenantId");
@@ -93,7 +87,6 @@ function writeUrl(next: { step?: number; mode?: Mode; tenantId?: string | null }
 }
 
 function buildStateUrl(mode: Mode, tenantId: string) {
-  // /api/onboarding/state expects query params
   const params = new URLSearchParams();
   params.set("mode", mode);
   if (tenantId) params.set("tenantId", tenantId);
@@ -115,24 +108,18 @@ export default function OnboardingWizard() {
     return Math.round(((Math.min(step, total) - 1) / (total - 1)) * 100);
   }, [step]);
 
-  // 🔑 RULE: If mode=new, onboarding assumes "create new tenant".
-  // If URL contains tenantId from an existing tenant, strip it on load.
+  // RULE: mode=new means "create a new tenant".
+  // If URL has tenantId while mode=new, strip it (wrong entry point).
   useEffect(() => {
     const u = readUrl();
+    setMode(u.mode);
+    setStep(u.step);
 
-    const nextMode = u.mode;
-    const nextStep = u.step;
-    const nextTenantId = u.tenantId;
-
-    setMode(nextMode);
-    setStep(nextStep);
-
-    if (nextMode === "new" && nextTenantId) {
-      // remove accidental tenantId (wrong entry point)
+    if (u.mode === "new" && u.tenantId) {
       writeUrl({ tenantId: null }, { replace: true });
       setUrlTenantId("");
     } else {
-      setUrlTenantId(nextTenantId);
+      setUrlTenantId(u.tenantId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -148,7 +135,7 @@ export default function OnboardingWizard() {
 
       setState(j);
 
-      // Prefer URL step; fallback to server step
+      // prefer URL step; fallback to server step
       const u = readUrl();
       const nextStep = u.step || safeStep(j.currentStep || 1);
       setStep(nextStep);
@@ -173,7 +160,6 @@ export default function OnboardingWizard() {
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
 
-    // POST goes to /api/onboarding/state with query mode (+ tenantId if update/existing)
     const tid = safeTrim(urlTenantId);
     const res = await fetch(buildStateUrl(mode, tid), {
       method: "POST",
@@ -184,8 +170,6 @@ export default function OnboardingWizard() {
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
 
-    // If mode=new, the API returns the newly created tenantId.
-    // We must set it into the URL for subsequent steps.
     const newTenantId = safeTrim(j?.tenantId);
     if (newTenantId) {
       setUrlTenantId(newTenantId);
@@ -256,7 +240,6 @@ export default function OnboardingWizard() {
               We’ll tailor your quoting experience in just a few steps.
             </div>
 
-            {/* Debug line (optional, but helpful while wiring entrypoints) */}
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span>
               {" • "}
@@ -282,7 +265,7 @@ export default function OnboardingWizard() {
 
         <div className="mt-6">
           {step === 1 ? (
-            <Step1 mode={mode} onSubmit={saveStep1} />
+            <Step1 isAuthed={Boolean(state?.isAuthenticated)} onSubmit={saveStep1} />
           ) : step === 2 ? (
             <Step2
               website={state?.website || ""}
@@ -292,7 +275,12 @@ export default function OnboardingWizard() {
               onBack={() => go(1)}
             />
           ) : step === 3 ? (
-            <Step3 tenantId={safeTrim(state?.tenantId) || safeTrim(urlTenantId) || null} aiAnalysis={state?.aiAnalysis} onBack={() => go(2)} onSubmit={saveIndustrySelection} />
+            <Step3
+              tenantId={safeTrim(state?.tenantId) || safeTrim(urlTenantId) || null}
+              aiAnalysis={state?.aiAnalysis}
+              onBack={() => go(2)}
+              onSubmit={saveIndustrySelection}
+            />
           ) : (
             <ComingSoon step={step} onBack={() => go(step - 1)} />
           )}
@@ -330,10 +318,10 @@ function Field({
 }
 
 function Step1({
-  mode,
+  isAuthed,
   onSubmit,
 }: {
-  mode: Mode;
+  isAuthed: boolean;
   onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<void>;
 }) {
   const [businessName, setBusinessName] = useState("");
@@ -342,27 +330,30 @@ function Step1({
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // We assume logged-in is common; but we still allow manual owner fields if needed.
-  // In mode=new we typically want “create new tenant”; owner fields can be derived server-side if omitted.
-  const can = businessName.trim().length >= 2;
-
-  const helper =
-    mode === "new"
-      ? "You’re creating a new tenant. We can pull your name/email from your login if you leave them blank."
-      : "You’re updating an existing tenant. We can pull your name/email from your login if you leave them blank.";
+  const can =
+    businessName.trim().length >= 2 &&
+    (isAuthed ? true : ownerName.trim().length >= 2 && ownerEmail.trim().includes("@"));
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Business identity</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{helper}</div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+        This helps us personalize your estimates, emails, and branding.
+      </div>
 
       <div className="mt-6 grid gap-4">
         <Field label="Business name" value={businessName} onChange={setBusinessName} placeholder="Maggio Upholstery" />
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <Field label="Your name (optional)" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
-          <Field label="Your email (optional)" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
-        </div>
+        {isAuthed ? (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+            You’re logged in — no need to re-enter your name and email.
+          </div>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field label="Your name" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
+            <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
+          </div>
+        )}
 
         <Field label="Website (optional)" value={website} onChange={setWebsite} placeholder="https://yourshop.com" />
       </div>
@@ -377,8 +368,8 @@ function Step1({
             await onSubmit({
               businessName: businessName.trim(),
               website: website.trim() || undefined,
-              ownerName: ownerName.trim() || undefined,
-              ownerEmail: ownerEmail.trim() || undefined,
+              ownerName: isAuthed ? undefined : ownerName.trim(),
+              ownerEmail: isAuthed ? undefined : ownerEmail.trim(),
             });
           } finally {
             setSaving(false);
@@ -405,8 +396,6 @@ function Step2({
   onBack: () => void;
 }) {
   const [running, setRunning] = useState(false);
-
-  // Auto-run once if a website exists and we don't have analysis yet.
   const autoRanRef = useRef(false);
 
   useEffect(() => {
@@ -420,7 +409,6 @@ function Step2({
 
     let alive = true;
     setRunning(true);
-
     onRun()
       .catch(() => {})
       .finally(() => {
@@ -534,7 +522,6 @@ function Step3({
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      // default selection: server selectedKey, else AI suggestion if present in list, else first item
       const serverSel = String(j.selectedKey ?? "").trim();
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const next =
