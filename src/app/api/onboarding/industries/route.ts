@@ -16,11 +16,12 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-function firstRow(r: any) {
+function firstRow(r: unknown): any | null {
   if (!r) return null;
   if (Array.isArray(r)) return r[0] ?? null;
-  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
-  if (typeof r === "object" && r && 0 in r) return (r as any)[0] ?? null;
+  const rr = r as any;
+  if (Array.isArray(rr?.rows)) return rr.rows[0] ?? null;
+  if (typeof rr === "object" && rr && 0 in rr) return (rr as any)[0] ?? null;
   return null;
 }
 
@@ -35,9 +36,7 @@ function toIndustryKey(raw: string) {
 }
 
 function labelFromKey(key: string) {
-  return key
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return key.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /* ---------------- auth ---------------- */
@@ -62,6 +61,13 @@ async function requireMembership(clerkUserId: string, tenantId: string) {
 
 /* ---------------- db helpers ---------------- */
 
+type IndustryRow = {
+  id: string;
+  key: string;
+  label: string;
+  description: string | null;
+};
+
 async function ensureIndustryExists(key: string, label?: string | null) {
   const industryKey = toIndustryKey(key);
   if (!industryKey) return;
@@ -82,23 +88,28 @@ async function ensureIndustryExists(key: string, label?: string | null) {
   `);
 }
 
-async function listIndustries() {
+async function listIndustries(): Promise<IndustryRow[]> {
   const r = await db.execute(sql`
     select id, key, label, description
     from industries
     order by label asc
   `);
 
-  const rows = Array.isArray((r as any)?.rows) ? (r as any).rows : Array.isArray(r) ? r : [];
-  return rows.map((x) => ({
-    id: String(x.id),
-    key: String(x.key),
-    label: String(x.label),
-    description: x.description ? String(x.description) : null,
-  }));
+  const rr = r as any;
+  const rows: unknown[] = Array.isArray(rr?.rows) ? rr.rows : Array.isArray(r) ? (r as any[]) : [];
+
+  return rows.map((x: unknown) => {
+    const row = x as any;
+    return {
+      id: String(row?.id ?? ""),
+      key: String(row?.key ?? ""),
+      label: String(row?.label ?? ""),
+      description: row?.description ? String(row.description) : null,
+    };
+  });
 }
 
-async function getSuggestedIndustryKey(tenantId: string) {
+async function getSuggestedIndustryKey(tenantId: string): Promise<string> {
   const r = await db.execute(sql`
     select ai_analysis
     from tenant_onboarding
@@ -146,6 +157,7 @@ export async function GET(req: Request) {
     const tenantId = parsed.data.tenantId;
     await requireMembership(clerkUserId, tenantId);
 
+    // Auto-accept AI suggestion (best UX)
     const suggestedKey = await getSuggestedIndustryKey(tenantId);
     if (suggestedKey) {
       await ensureIndustryExists(suggestedKey, null);
@@ -154,12 +166,15 @@ export async function GET(req: Request) {
 
     const industries = await listIndustries();
 
-    return NextResponse.json({
-      ok: true,
-      tenantId,
-      selectedKey: suggestedKey || null,
-      industries,
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        tenantId,
+        selectedKey: suggestedKey || null,
+        industries,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -171,7 +186,7 @@ export async function POST(req: Request) {
   try {
     const clerkUserId = await requireAuthed();
 
-    const body = await req.json();
+    const body = await req.json().catch(() => null);
     const parsed = PostSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json({ ok: false, error: "BAD_REQUEST" }, { status: 400 });
@@ -182,10 +197,12 @@ export async function POST(req: Request) {
 
     if (industryLabel) {
       const key = toIndustryKey(industryLabel);
+      if (!key) return NextResponse.json({ ok: false, error: "BAD_INDUSTRY_LABEL" }, { status: 400 });
       await ensureIndustryExists(key, industryLabel);
       await setTenantIndustry(tenantId, key);
     } else if (industryKey) {
       const key = toIndustryKey(industryKey);
+      if (!key) return NextResponse.json({ ok: false, error: "BAD_INDUSTRY_KEY" }, { status: 400 });
       await ensureIndustryExists(key, null);
       await setTenantIndustry(tenantId, key);
     } else {
@@ -194,11 +211,14 @@ export async function POST(req: Request) {
 
     const industries = await listIndustries();
 
-    return NextResponse.json({
-      ok: true,
-      tenantId,
-      industries,
-    });
+    return NextResponse.json(
+      {
+        ok: true,
+        tenantId,
+        industries,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
