@@ -14,6 +14,12 @@ type OnboardingState = {
   website: string | null;
   aiAnalysis: any | null;
 
+  // NOTE: state API may also return convenience fields; we ignore if missing
+  aiAnalysisStatus?: string | null;
+  aiAnalysisRound?: number | null;
+  aiAnalysisLastAction?: string | null;
+  aiAnalysisError?: string | null;
+
   error?: string;
   message?: string;
 };
@@ -108,13 +114,77 @@ function formatHttpError(j: any, res: Response) {
   return msg || `Request failed (HTTP ${res.status})`;
 }
 
+function getMetaStatus(aiAnalysis: any | null | undefined) {
+  const s = String(aiAnalysis?.meta?.status ?? "").trim();
+  return s || "";
+}
+
+function getMetaLastAction(aiAnalysis: any | null | undefined) {
+  const s = String(aiAnalysis?.meta?.lastAction ?? "").trim();
+  return s || "";
+}
+
+function getPreviewText(aiAnalysis: any | null | undefined) {
+  // Primary
+  const p = String(aiAnalysis?.extractedTextPreview ?? "").trim();
+  if (p) return p;
+
+  // Secondary: sometimes people store it nested
+  const p2 = String(aiAnalysis?.debug?.extractedTextPreview ?? "").trim();
+  if (p2) return p2;
+
+  // Otherwise empty
+  return "";
+}
+
+function summarizeFetchDebug(aiAnalysis: any | null | undefined) {
+  const fd = aiAnalysis?.fetchDebug ?? null;
+  if (!fd) return null;
+
+  const aggregateChars = Number(fd?.aggregateChars ?? 0) || 0;
+  const pagesUsed: string[] = Array.isArray(fd?.pagesUsed) ? fd.pagesUsed : [];
+  const attempted: any[] = Array.isArray(fd?.attempted) ? fd.attempted : [];
+  const pagesAttempted: any[] = Array.isArray(fd?.pagesAttempted) ? fd.pagesAttempted : [];
+
+  // Simple “why” heuristics for UI
+  let hint: string | null = null;
+  if (aggregateChars < 200) {
+    // look for notes
+    const notes: string[] = [];
+    for (const a of attempted) {
+      const n = String(a?.note ?? "").trim();
+      if (n) notes.push(n);
+    }
+    for (const a of pagesAttempted) {
+      const n = String(a?.note ?? "").trim();
+      if (n) notes.push(n);
+    }
+    const uniq = Array.from(new Set(notes)).slice(0, 2);
+    hint = uniq.length
+      ? uniq.join(" / ")
+      : "Very little readable text was extracted. This usually means the site is JS-rendered, blocked, or mostly images.";
+  }
+
+  return { aggregateChars, pagesUsed, attemptedCount: attempted.length, pagesAttemptedCount: pagesAttempted.length, hint };
+}
+
 export default function OnboardingWizard() {
   const [{ step, mode, tenantId }, setNav] = useState(() => getUrlParams());
 
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // keep local UX action (button clicks)
   const [lastAction, setLastAction] = useState<string | null>(null);
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const pct = useMemo(() => {
     const total = 6;
@@ -134,6 +204,14 @@ export default function OnboardingWizard() {
     return n || "New tenant";
   }, [state?.tenantName]);
 
+  const serverLastAction = useMemo(() => {
+    // Prefer derived state fields if present, else aiAnalysis.meta.lastAction
+    const a = String(state?.aiAnalysisLastAction ?? "").trim();
+    if (a) return a;
+    const b = getMetaLastAction(state?.aiAnalysis);
+    return b || "";
+  }, [state?.aiAnalysisLastAction, state?.aiAnalysis]);
+
   function go(nextStep: number) {
     const s = safeStep(nextStep);
     setUrlParams({ step: s });
@@ -146,7 +224,7 @@ export default function OnboardingWizard() {
     setNav((p) => ({ ...p, tenantId: clean }));
   }
 
-  async function refresh(explicit?: { mode?: Mode; tenantId?: string }) {
+  async function refresh(explicit?: { mode?: Mode; tenantId?: string }): Promise<OnboardingState | null> {
     setErr(null);
     try {
       const navMode = explicit?.mode ?? mode;
@@ -157,7 +235,7 @@ export default function OnboardingWizard() {
 
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
-      setState(j);
+      if (mountedRef.current) setState(j);
 
       const serverTenantId = String(j.tenantId ?? "").trim();
       if (serverTenantId && serverTenantId !== navTenantId) {
@@ -171,10 +249,13 @@ export default function OnboardingWizard() {
         setUrlParams({ step: nextStep });
         setNav((p) => ({ ...p, step: nextStep }));
       }
+
+      return j;
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
+      if (mountedRef.current) setErr(e?.message ?? String(e));
+      return null;
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }
 
@@ -185,6 +266,27 @@ export default function OnboardingWizard() {
     refresh({ mode: p.mode, tenantId: p.tenantId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function sleep(ms: number) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function pollAnalysisUntilSettled(tid: string) {
+    const start = Date.now();
+    const maxMs = 45_000;
+
+    while (mountedRef.current && Date.now() - start < maxMs) {
+      const j = await refresh({ tenantId: tid });
+
+      const status =
+        String(j?.aiAnalysisStatus ?? "").trim() ||
+        String(j?.aiAnalysis?.meta?.status ?? "").trim();
+
+      if (status && status.toLowerCase() !== "running") return;
+
+      await sleep(650);
+    }
+  }
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
@@ -218,15 +320,21 @@ export default function OnboardingWizard() {
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
-    const res = await fetch("/api/onboarding/analyze-website", {
+    // Kick off request (do not await yet)
+    const req = fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tenantId: tid }),
     });
 
+    // Immediately poll so UI reflects DB "running" meta updates while POST is still in-flight
+    const poll = pollAnalysisUntilSettled(tid).catch(() => null);
+
+    const res = await req;
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
+    await poll;
     await refresh({ tenantId: tid });
     setLastAction("AI analysis complete.");
   }
@@ -238,15 +346,20 @@ export default function OnboardingWizard() {
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for confirmation.");
 
-    const res = await fetch("/api/onboarding/confirm-website", {
+    const req = fetch("/api/onboarding/confirm-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tenantId: tid, ...args }),
     });
 
+    // Only poll if the "no" path triggers a re-run
+    const poll = args.answer === "no" ? pollAnalysisUntilSettled(tid).catch(() => null) : Promise.resolve();
+
+    const res = await req;
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
+    await poll;
     await refresh({ tenantId: tid });
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
@@ -300,7 +413,10 @@ export default function OnboardingWizard() {
               Tenant: <span className="font-mono">{displayTenantId}</span>
             </div>
 
-            {lastAction ? (
+            {/* prefer server last action, fall back to local click-based action */}
+            {serverLastAction ? (
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Last action: {serverLastAction}</div>
+            ) : lastAction ? (
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Last action: {lastAction}</div>
             ) : null}
           </div>
@@ -328,6 +444,8 @@ export default function OnboardingWizard() {
             <Step2
               website={state?.website || ""}
               aiAnalysis={state?.aiAnalysis}
+              aiAnalysisStatus={String(state?.aiAnalysisStatus ?? "").trim() || getMetaStatus(state?.aiAnalysis)}
+              aiAnalysisError={String(state?.aiAnalysisError ?? "").trim()}
               onRun={runWebsiteAnalysis}
               onConfirm={confirmWebsiteAnalysis}
               onNext={() => go(3)}
@@ -447,6 +565,8 @@ function Step1({
 function Step2({
   website,
   aiAnalysis,
+  aiAnalysisStatus,
+  aiAnalysisError,
   onRun,
   onConfirm,
   onNext,
@@ -455,6 +575,8 @@ function Step2({
 }: {
   website: string;
   aiAnalysis: any | null | undefined;
+  aiAnalysisStatus?: string;
+  aiAnalysisError?: string | null;
   onRun: () => Promise<void>;
   onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
   onNext: () => void;
@@ -471,6 +593,13 @@ function Step2({
 
   const businessGuess = String(aiAnalysis?.businessGuess ?? "").trim();
   const questions: string[] = Array.isArray(aiAnalysis?.questions) ? aiAnalysis.questions : [];
+
+  const preview = getPreviewText(aiAnalysis);
+  const fetchSummary = summarizeFetchDebug(aiAnalysis);
+
+  // Prefer server status if present (avoid “stuck analyzing” UX)
+  const serverSaysAnalyzing = String(aiAnalysisStatus ?? "").toLowerCase() === "running";
+  const showAnalyzing = running || serverSaysAnalyzing;
 
   useEffect(() => {
     if (autoRanRef.current) return;
@@ -509,11 +638,17 @@ function Step2({
         <div className="mt-1 break-words text-gray-700 dark:text-gray-300">{website || "(none provided)"}</div>
       </div>
 
+      {aiAnalysisError ? (
+        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          {aiAnalysisError}
+        </div>
+      ) : null}
+
       <div className="mt-4 grid gap-3">
         <button
           type="button"
           className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white disabled:opacity-50"
-          disabled={running}
+          disabled={showAnalyzing}
           onClick={async () => {
             setRunning(true);
             try {
@@ -525,7 +660,7 @@ function Step2({
             }
           }}
         >
-          {running ? "Analyzing…" : aiAnalysis ? "Re-run website analysis" : "Run website analysis"}
+          {showAnalyzing ? "Analyzing…" : aiAnalysis ? "Re-run website analysis" : "Run website analysis"}
         </button>
 
         {aiAnalysis ? (
@@ -600,7 +735,7 @@ function Step2({
                   value={feedback}
                   onChange={(e) => setFeedback(e.target.value)}
                   rows={4}
-                  placeholder="Example: We paint fiberglass boats (topsides + hull), do gelcoat repair, and custom vinyl striping. We do not do upholstery."
+                  placeholder="Example: We do custom automotive upholstery (seats + door panels), headliners, and marine vinyl repairs. We do not do painting."
                   className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none dark:border-emerald-900/40 dark:bg-gray-950 dark:text-gray-100"
                 />
               </div>
@@ -618,8 +753,35 @@ function Step2({
 
             <details className="mt-3">
               <summary className="cursor-pointer text-xs font-semibold opacity-90">Debug preview (text sample)</summary>
+
+              {fetchSummary ? (
+                <div className="mt-2 rounded-xl border border-emerald-300/40 bg-white/60 p-3 text-[11px] leading-snug dark:bg-black/20">
+                  <div className="font-semibold">Extractor summary</div>
+                  <div className="mt-1">
+                    Aggregate chars: <span className="font-mono">{fetchSummary.aggregateChars}</span>
+                    {" • "}
+                    Pages used: <span className="font-mono">{fetchSummary.pagesUsed.length}</span>
+                    {" • "}
+                    Base attempts: <span className="font-mono">{fetchSummary.attemptedCount}</span>
+                  </div>
+                  {fetchSummary.pagesUsed.length ? (
+                    <div className="mt-1 break-words">
+                      Used:
+                      <ul className="mt-1 list-disc pl-5">
+                        {fetchSummary.pagesUsed.slice(0, 4).map((u, i) => (
+                          <li key={i} className="break-all">
+                            {u}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {fetchSummary.hint ? <div className="mt-2 italic opacity-90">{fetchSummary.hint}</div> : null}
+                </div>
+              ) : null}
+
               <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-snug">
-                {String(aiAnalysis?.extractedTextPreview ?? "").trim() || "(no preview)"}
+                {preview || "(no preview — extractor did not capture readable text)"}
               </pre>
             </details>
           </div>

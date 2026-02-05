@@ -90,61 +90,36 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   return { appUserId };
 }
 
-function getConfidence(ai: any): number {
-  const n = Number(ai?.confidenceScore ?? 0);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function getNeedsConfirmation(ai: any): boolean {
-  const v = ai?.needsConfirmation;
-  if (typeof v === "boolean") return v;
-  return getConfidence(ai) < 0.8;
-}
-
-function getLastCorrection(ai: any): any | null {
-  const hist = Array.isArray(ai?.confirmationHistory) ? ai.confirmationHistory : [];
-  // find the most recent "no" (correction) entry
-  for (let i = hist.length - 1; i >= 0; i--) {
-    const h = hist[i];
-    if (h && h.answer === "no") return h;
-  }
-  return null;
-}
-
+/**
+ * ✅ Derive UI-friendly analysis fields from the persisted ai_analysis.meta
+ * We DO NOT infer anything from confidenceScore/needsConfirmation anymore —
+ * analyze-website + confirm-website now own the lifecycle state via meta.status.
+ */
 function deriveAiMeta(aiAnalysis: any | null) {
   const target = 0.8;
 
-  if (!aiAnalysis) {
-    return {
-      aiAnalysisStatus: "idle",
-      aiAnalysisRound: 0,
-      aiAnalysisLastAction: "",
-      aiAnalysisError: null as string | null,
-      aiAnalysisConfidenceTarget: target,
-      aiAnalysisUserCorrection: null as any | null,
-    };
-  }
+  const meta = aiAnalysis?.meta && typeof aiAnalysis.meta === "object" ? aiAnalysis.meta : {};
+  const statusRaw = String(meta?.status ?? "").trim().toLowerCase();
 
-  const conf = getConfidence(aiAnalysis);
-  const needs = getNeedsConfirmation(aiAnalysis);
-  const hist = Array.isArray(aiAnalysis?.confirmationHistory) ? aiAnalysis.confirmationHistory : [];
-  const lastCorr = getLastCorrection(aiAnalysis);
-  const confirmed = Boolean(aiAnalysis?.confirmedByUser) || (!needs && conf >= target);
+  const status =
+    statusRaw === "running" || statusRaw === "complete" || statusRaw === "error"
+      ? statusRaw
+      : aiAnalysis
+      ? "complete"
+      : "idle";
 
-  const round = Math.max(1, hist.length ? hist.length : 1);
+  const round = Number(meta?.round ?? 0) || (aiAnalysis ? 1 : 0);
 
-  let lastAction = "";
-  if (confirmed) lastAction = "AI analysis complete.";
-  else if (needs) lastAction = "Waiting for your confirmation/correction.";
-  else lastAction = "AI analysis complete.";
+  const lastAction = String(meta?.lastAction ?? "").trim();
+  const err = safeTrim(meta?.error);
 
   return {
-    aiAnalysisStatus: "complete",
+    aiAnalysisStatus: status,
     aiAnalysisRound: round,
     aiAnalysisLastAction: lastAction,
-    aiAnalysisError: null as string | null,
+    aiAnalysisError: err || null,
     aiAnalysisConfidenceTarget: target,
-    aiAnalysisUserCorrection: lastCorr,
+    aiAnalysisUserCorrection: meta?.userCorrection ?? null,
   };
 }
 
@@ -169,8 +144,8 @@ async function readTenantOnboarding(tenantId: string) {
 
   return {
     tenantName: row?.tenant_name ?? null,
-    currentStep: row?.current_step ?? 1,
-    completed: row?.completed ?? false,
+    currentStep: Number(row?.current_step ?? 1) || 1,
+    completed: Boolean(row?.completed ?? false),
     website: row?.website ?? null,
     aiAnalysis: aiAnalysis ?? null,
     ...derived,
@@ -323,6 +298,7 @@ export async function POST(req: Request) {
       `);
     }
 
+    // Ensure onboarding row exists and advances to step 2
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())

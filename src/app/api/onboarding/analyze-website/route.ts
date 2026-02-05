@@ -90,16 +90,10 @@ function buildCandidateBaseUrls(raw: string): string[] {
   const bareHost = host.replace(/^www\./i, "");
   const wwwHost = `www.${bareHost}`;
 
-  const candidates = [
-    `https://${bareHost}`,
-    `https://${wwwHost}`,
-    `http://${bareHost}`,
-    `http://${wwwHost}`,
-  ];
+  const candidates = [`https://${bareHost}`, `https://${wwwHost}`, `http://${bareHost}`, `http://${wwwHost}`];
 
   if (hadScheme) candidates.unshift(normalizeUrl(s));
 
-  // dedup
   const out: string[] = [];
   const seen = new Set<string>();
   for (const c of candidates) {
@@ -145,7 +139,6 @@ async function fetchText(url: string, timeoutMs = 12_000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
-  // Browser-ish headers
   const UA =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
@@ -164,7 +157,11 @@ async function fetchText(url: string, timeoutMs = 12_000) {
     });
 
     const ct = String(res.headers.get("content-type") ?? "");
-    const isHtml = ct.includes("text/html") || ct.includes("application/xhtml+xml") || ct.includes("application/xml") || ct.includes("text/xml");
+    const isHtml =
+      ct.includes("text/html") ||
+      ct.includes("application/xhtml+xml") ||
+      ct.includes("application/xml") ||
+      ct.includes("text/xml");
 
     const raw = await res.text().catch(() => "");
     const bytes = Buffer.byteLength(raw || "", "utf8");
@@ -183,12 +180,11 @@ async function fetchText(url: string, timeoutMs = 12_000) {
       finalUrl,
       rawBytes: bytes,
       extractedText: clipped,
-      note:
-        !res.ok
-          ? "HTTP not ok"
-          : extractedChars < 200
-          ? "Very little extractable text (JS-rendered site or blocking likely)"
-          : undefined,
+      note: !res.ok
+        ? "HTTP not ok"
+        : extractedChars < 200
+        ? "Very little extractable text (JS-rendered site or blocking likely)"
+        : undefined,
     };
   } finally {
     clearTimeout(t);
@@ -208,7 +204,6 @@ function sameHost(a: string, b: string) {
 function joinUrl(base: string, path: string) {
   try {
     const u = new URL(base);
-    // ensure base has no path
     u.pathname = "/";
     const out = new URL(path, u.toString());
     return out.toString().replace(/\/+$/g, "");
@@ -240,7 +235,6 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
     return { extractedText: "", extractedTextPreview: "", fetchDebug: debug };
   }
 
-  // 1) Try to find a working base URL
   let basePick: any | null = null;
 
   for (const base of baseCandidates) {
@@ -260,13 +254,11 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
 
       if (!basePick) basePick = r;
 
-      // prefer an OK response with decent text
       if (r.ok && (r.extractedText?.length ?? 0) >= 400) {
         basePick = r;
         break;
       }
 
-      // else keep best: OK beats non-OK; longer beats shorter
       const bestOk = Boolean(basePick?.ok);
       const curOk = Boolean(r.ok);
       const bestLen = Number(basePick?.extractedText?.length ?? 0);
@@ -294,12 +286,10 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
 
   const baseUrl = chosenFinalUrl;
 
-  // 2) If homepage text is weak, try sitemap + common content paths
   const pages: string[] = [];
   const homeText = String(basePick?.extractedText ?? "");
   const homeLen = homeText.length;
 
-  // Always include home first
   pages.push(baseUrl);
 
   const commonPaths = ["/about", "/about-us", "/services", "/service", "/contact", "/portfolio", "/gallery", "/work"];
@@ -308,7 +298,6 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
     if (u) pages.push(u);
   }
 
-  // Try sitemap(s) if homepage is thin
   if (homeLen < 400) {
     const sitemapUrls = [joinUrl(baseUrl, "/sitemap.xml"), joinUrl(baseUrl, "/sitemap_index.xml")].filter(Boolean);
     for (const sm of sitemapUrls) {
@@ -328,12 +317,11 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
 
         if (smRes.ok) {
           const locs = extractSitemapLocs(String(smRes.extractedText ?? ""), 8);
-          // keep only same host URLs
           for (const loc of locs) {
             if (!sameHost(baseUrl, loc)) continue;
             pages.push(loc);
           }
-          if (locs.length) break; // got something, stop trying more sitemaps
+          if (locs.length) break;
         }
       } catch (e: any) {
         debug.pagesAttempted.push({
@@ -349,7 +337,6 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
     }
   }
 
-  // Dedup pages, limit to 6 total fetches (home + 5)
   const pageList: string[] = [];
   const seen = new Set<string>();
   for (const p of pages) {
@@ -360,7 +347,6 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
     if (pageList.length >= 6) break;
   }
 
-  // Fetch pages and aggregate text
   let aggregate = "";
   const pagesUsed: string[] = [];
 
@@ -382,7 +368,6 @@ async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
         note: r.note,
       });
 
-      // Only use OK pages with *some* signal
       if (r.ok && len >= 150) {
         pagesUsed.push(pageUrl);
         aggregate += `\n\n=== PAGE: ${pageUrl} ===\n${text}`;
@@ -480,23 +465,31 @@ function buildUserPrompt(args: {
 }
 
 function pickModelFromPcc(cfg: any) {
-  const m =
+  return (
     String(cfg?.models?.onboardingModel ?? "").trim() ||
     String(cfg?.models?.estimatorModel ?? "").trim() ||
-    "gpt-4o-mini";
-  return m;
+    "gpt-4o-mini"
+  );
+}
+
+function withMeta(base: any, meta: any) {
+  // Preserve existing meta if present, but allow override fields in meta param.
+  const prevMeta = base?.meta && typeof base.meta === "object" ? base.meta : {};
+  return { ...(base || {}), meta: { ...prevMeta, ...(meta || {}) } };
 }
 
 export async function POST(req: Request) {
+  let tenantId = "";
   try {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-    const tenantId = safeTrim(body?.tenantId);
+    tenantId = safeTrim(body?.tenantId);
     if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
 
     await requireMembership(clerkUserId, tenantId);
 
+    // Read onboarding row (website + any prior analysis/meta)
     const r = await db.execute(sql`
       select website, ai_analysis
       from tenant_onboarding
@@ -508,15 +501,71 @@ export async function POST(req: Request) {
     const websiteRaw = String(row?.website ?? "").trim();
     const website = normalizeUrl(websiteRaw);
 
+    const priorAnalysis = row?.ai_analysis ?? null;
+    const prevRound = Number(priorAnalysis?.meta?.round ?? 0) || 0;
+    const nextRound = prevRound + 1;
+
+    // ✅ Immediately store "running" so UI has something real to show
+    const runningStub = withMeta(
+      {
+        ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
+        website: website || null,
+      },
+      {
+        status: "running",
+        round: nextRound,
+        lastAction: "Fetching website text…",
+        error: null,
+        startedAt: new Date().toISOString(),
+      }
+    );
+
+    await db.execute(sql`
+      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
+      values (${tenantId}::uuid, ${JSON.stringify(runningStub)}::jsonb, 2, false, now(), now())
+      on conflict (tenant_id) do update
+      set ai_analysis = excluded.ai_analysis,
+          current_step = greatest(tenant_onboarding.current_step, 2),
+          updated_at = now()
+    `);
+
+    // Extract website text
     const extracted = website
       ? await fetchWebsiteTextSmart(website)
-      : { extractedText: "", extractedTextPreview: "", fetchDebug: { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 } };
+      : {
+          extractedText: "",
+          extractedTextPreview: "",
+          fetchDebug: { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 } as FetchDebug,
+        };
 
     const extractedText = extracted.extractedText ?? "";
     const extractedTextPreview = extracted.extractedTextPreview ?? "";
     const fetchDebug = extracted.fetchDebug ?? { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 };
 
-    const priorAnalysis = row?.ai_analysis ?? null;
+    // Update lastAction after extraction
+    const afterFetchStub = withMeta(
+      {
+        ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
+        website: website || null,
+        extractedTextPreview: extractedTextPreview || "",
+        fetchDebug,
+      },
+      {
+        status: "running",
+        round: nextRound,
+        lastAction: extractedTextPreview
+          ? "Website text extracted. Asking AI to summarize…"
+          : "Could not extract much website text. Asking AI to best-effort summarize…",
+        error: null,
+      }
+    );
+
+    await db.execute(sql`
+      update tenant_onboarding
+      set ai_analysis = ${JSON.stringify(afterFetchStub)}::jsonb,
+          updated_at = now()
+      where tenant_id = ${tenantId}::uuid
+    `);
 
     const cfg = await loadPlatformLlmConfig();
     const model = pickModelFromPcc(cfg);
@@ -524,6 +573,7 @@ export async function POST(req: Request) {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error("MISSING_OPENAI_API_KEY");
 
+    // If we extracted almost nothing, still try the model — but expect low confidence
     const client = new OpenAI({ apiKey });
 
     const resp = await client.chat.completions.create({
@@ -548,24 +598,46 @@ export async function POST(req: Request) {
     const json = safeJsonParse(content);
     const parsed = json ? AnalysisSchema.safeParse(json) : null;
 
+    // Helper to finalize and persist
+    async function persistFinal(aiAnalysis: any) {
+      const final = withMeta(aiAnalysis, {
+        status: "complete",
+        round: nextRound,
+        lastAction: "AI analysis complete.",
+        error: null,
+        finishedAt: new Date().toISOString(),
+      });
+
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
+        values (${tenantId}::uuid, ${JSON.stringify(final)}::jsonb, 2, false, now(), now())
+        on conflict (tenant_id) do update
+        set ai_analysis = excluded.ai_analysis,
+            current_step = greatest(tenant_onboarding.current_step, 2),
+            updated_at = now()
+      `);
+
+      return final;
+    }
+
     if (!parsed || !parsed.success) {
+      const siteWasThin = (extractedTextPreview || "").length < 50;
+
       const fallback = {
-        businessGuess:
-          extractedTextPreview && extractedTextPreview.length > 50
-            ? "We fetched your website but the AI response was not usable. Please retry."
-            : "We couldn’t extract readable text from your website (it may be blocked or JS-rendered). Please describe what you do and what you service (cars/boats/etc.).",
+        businessGuess: siteWasThin
+          ? "We couldn’t extract readable text from your website (it may be blocked or JS-rendered)."
+          : "We fetched your website, but the AI response wasn’t usable. Please retry.",
         fit: "maybe" as const,
-        fitReason:
-          extractedTextPreview && extractedTextPreview.length > 50
-            ? "Model output was not valid for our schema."
-            : "We didn’t get enough website text to confidently evaluate fit.",
+        fitReason: siteWasThin
+          ? "We didn’t get enough website text to confidently evaluate fit."
+          : "Model output was not valid for our schema.",
         suggestedIndustryKey: "service",
         questions: [
           "What do you work on most (cars/trucks/boats/other)?",
           "What are your top 3 services?",
           "Do you mostly do upgrades, repairs, or both?",
         ],
-        confidenceScore: 0.25,
+        confidenceScore: siteWasThin ? 0.2 : 0.3,
         needsConfirmation: true,
         detectedServices: [],
         billingSignals: [],
@@ -578,16 +650,8 @@ export async function POST(req: Request) {
         rawModelOutputPreview: clamp(content || "", 1200),
       };
 
-      await db.execute(sql`
-        insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-        values (${tenantId}::uuid, ${JSON.stringify(fallback)}::jsonb, 2, false, now(), now())
-        on conflict (tenant_id) do update
-        set ai_analysis = excluded.ai_analysis,
-            current_step = greatest(tenant_onboarding.current_step, 2),
-            updated_at = now()
-      `);
-
-      return NextResponse.json({ ok: true, tenantId, aiAnalysis: fallback }, { status: 200 });
+      const final = await persistFinal(fallback);
+      return NextResponse.json({ ok: true, tenantId, aiAnalysis: final }, { status: 200 });
     }
 
     const analysis = {
@@ -600,19 +664,49 @@ export async function POST(req: Request) {
       fetchDebug,
     };
 
-    await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${JSON.stringify(analysis)}::jsonb, 2, false, now(), now())
-      on conflict (tenant_id) do update
-      set ai_analysis = excluded.ai_analysis,
-          current_step = greatest(tenant_onboarding.current_step, 2),
-          updated_at = now()
-    `);
-
-    return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
+    const final = await persistFinal(analysis);
+    return NextResponse.json({ ok: true, tenantId, aiAnalysis: final }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
+
+    // Best-effort: write meta error so UI shows something meaningful
+    try {
+      if (tenantId) {
+        const r = await db.execute(sql`
+          select ai_analysis
+          from tenant_onboarding
+          where tenant_id = ${tenantId}::uuid
+          limit 1
+        `);
+        const row: any = (r as any)?.rows?.[0] ?? null;
+        const prior = row?.ai_analysis ?? null;
+        const prevRound = Number(prior?.meta?.round ?? 0) || 0;
+
+        const errored = withMeta(
+          {
+            ...(typeof prior === "object" && prior ? prior : {}),
+          },
+          {
+            status: "error",
+            round: prevRound || 1,
+            lastAction: "AI analysis failed.",
+            error: msg,
+            failedAt: new Date().toISOString(),
+          }
+        );
+
+        await db.execute(sql`
+          update tenant_onboarding
+          set ai_analysis = ${JSON.stringify(errored)}::jsonb,
+              updated_at = now()
+          where tenant_id = ${tenantId}::uuid
+        `);
+      }
+    } catch {
+      // swallow
+    }
+
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
