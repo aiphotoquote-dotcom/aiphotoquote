@@ -103,12 +103,18 @@ function needsConfirmation(aiAnalysis: any | null | undefined) {
   return getConfidence(aiAnalysis) < 0.8;
 }
 
+function formatHttpError(j: any, res: Response) {
+  const msg = String(j?.message || j?.error || "").trim();
+  return msg || `Request failed (HTTP ${res.status})`;
+}
+
 export default function OnboardingWizard() {
   const [{ step, mode, tenantId }, setNav] = useState(() => getUrlParams());
 
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [lastAction, setLastAction] = useState<string | null>(null);
 
   const pct = useMemo(() => {
     const total = 6;
@@ -182,6 +188,7 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
+    setLastAction(null);
 
     const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
       method: "POST",
@@ -194,38 +201,39 @@ export default function OnboardingWizard() {
     });
 
     const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
     const newTenantId = String(j.tenantId ?? "").trim();
     if (newTenantId) setTenantInNav(newTenantId);
 
     await refresh({ tenantId: newTenantId || tenantId });
+    setLastAction("Saved business identity.");
     go(2);
   }
 
   async function runWebsiteAnalysis() {
     setErr(null);
+    setLastAction(null);
 
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
-    // ✅ IMPORTANT: send website from state so analyzer can't "forget" it
-    const website = String(state?.website ?? "").trim();
-
     const res = await fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId: tid, website }),
+      body: JSON.stringify({ tenantId: tid }),
     });
 
     const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
     await refresh({ tenantId: tid });
+    setLastAction("AI analysis complete.");
   }
 
   async function confirmWebsiteAnalysis(args: { answer: "yes" | "no"; feedback?: string }) {
     setErr(null);
+    setLastAction(null);
 
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for confirmation.");
@@ -237,13 +245,15 @@ export default function OnboardingWizard() {
     });
 
     const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Confirm failed (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
     await refresh({ tenantId: tid });
+    setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string }) {
     setErr(null);
+    setLastAction(null);
 
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for industry save.");
@@ -255,9 +265,10 @@ export default function OnboardingWizard() {
     });
 
     const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
     await refresh({ tenantId: tid });
+    setLastAction("Industry saved.");
     go(4);
   }
 
@@ -288,6 +299,10 @@ export default function OnboardingWizard() {
               Mode: <span className="font-mono">{mode}</span> {" • "}
               Tenant: <span className="font-mono">{displayTenantId}</span>
             </div>
+
+            {lastAction ? (
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Last action: {lastAction}</div>
+            ) : null}
           </div>
 
           <div className="shrink-0 text-right">
@@ -317,6 +332,7 @@ export default function OnboardingWizard() {
               onConfirm={confirmWebsiteAnalysis}
               onNext={() => go(3)}
               onBack={() => go(1)}
+              onError={(m) => setErr(m)}
             />
           ) : step === 3 ? (
             <Step3
@@ -435,6 +451,7 @@ function Step2({
   onConfirm,
   onNext,
   onBack,
+  onError,
 }: {
   website: string;
   aiAnalysis: any | null | undefined;
@@ -442,6 +459,7 @@ function Step2({
   onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
   onNext: () => void;
   onBack: () => void;
+  onError: (msg: string) => void;
 }) {
   const [running, setRunning] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -466,7 +484,10 @@ function Step2({
     let alive = true;
     setRunning(true);
     onRun()
-      .catch(() => {})
+      .catch((e: any) => {
+        const msg = e?.message ?? String(e);
+        onError(msg);
+      })
       .finally(() => {
         if (alive) setRunning(false);
       });
@@ -474,7 +495,7 @@ function Step2({
     return () => {
       alive = false;
     };
-  }, [website, aiAnalysis, onRun]);
+  }, [website, aiAnalysis, onRun, onError]);
 
   return (
     <div>
@@ -497,6 +518,8 @@ function Step2({
             setRunning(true);
             try {
               await onRun();
+            } catch (e: any) {
+              onError(e?.message ?? String(e));
             } finally {
               setRunning(false);
             }
@@ -540,6 +563,8 @@ function Step2({
                     try {
                       await onConfirm({ answer: "yes" });
                       setFeedback("");
+                    } catch (e: any) {
+                      onError(e?.message ?? String(e));
                     } finally {
                       setConfirming(false);
                     }
@@ -556,6 +581,8 @@ function Step2({
                     setConfirming(true);
                     try {
                       await onConfirm({ answer: "no", feedback: feedback.trim() || undefined });
+                    } catch (e: any) {
+                      onError(e?.message ?? String(e));
                     } finally {
                       setConfirming(false);
                     }
