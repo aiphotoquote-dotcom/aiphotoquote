@@ -2,6 +2,8 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
+import OpenAI from "openai";
+import { z } from "zod";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
@@ -12,14 +14,6 @@ export const dynamic = "force-dynamic";
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
-}
-
-function normalizeWebsite(raw: string) {
-  const s = safeTrim(raw);
-  if (!s) return "";
-  // If user typed "kwickeycustoms.com" or "www.foo.com" -> make it a URL
-  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
-  return s;
 }
 
 function firstRow(r: any): any | null {
@@ -47,107 +41,266 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
+function clamp(s: string, max: number) {
+  const t = String(s ?? "");
+  if (t.length <= max) return t;
+  return t.slice(0, max);
+}
+
+function normalizeUrl(raw: string) {
+  const s = safeTrim(raw);
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
+  return s;
+}
+
+function stripHtmlToText(html: string) {
+  // Basic + fast: remove script/style, tags, collapse whitespace.
+  const withoutScripts = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+  const noTags = withoutScripts.replace(/<[^>]+>/g, " ");
+  const decoded = noTags
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+  return decoded.replace(/\s+/g, " ").trim();
+}
+
+async function fetchWebsiteText(url: string) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent": "AIPhotoQuoteBot/1.0 (+https://aiphotoquote.com)",
+        accept: "text/html,application/xhtml+xml",
+      },
+    });
+
+    const ct = String(res.headers.get("content-type") ?? "");
+    const isHtml = ct.includes("text/html") || ct.includes("application/xhtml+xml");
+
+    const raw = await res.text().catch(() => "");
+    const text = isHtml ? stripHtmlToText(raw) : raw;
+    // Keep a reasonable budget for the model
+    const clipped = clamp(text, 12_000);
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      contentType: ct,
+      extractedText: clipped,
+      extractedTextPreview: clamp(clipped, 900),
+    };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+const AnalysisSchema = z.object({
+  // Explain back to user what we think they do
+  businessGuess: z.string().min(1),
+
+  // Whether AIPhotoQuote is a good fit and why
+  fit: z.enum(["good", "maybe", "poor"]),
+  fitReason: z.string().min(1),
+
+  // Industry categorization guess
+  suggestedIndustryKey: z.string().min(1),
+
+  // Short, human, actionable questions to confirm
+  questions: z.array(z.string()).min(1).max(6),
+
+  // Confidence 0..1 (we show as %)
+  confidenceScore: z.number().min(0).max(1),
+
+  // If low confidence, we keep asking
+  needsConfirmation: z.boolean(),
+
+  detectedServices: z.array(z.string()).default([]),
+  billingSignals: z.array(z.string()).default([]),
+});
+
+function buildSystemPrompt() {
+  return [
+    "You are onboarding intelligence for AIPhotoQuote.",
+    "Your job: read a business website text and produce an explain-back summary and fit assessment.",
+    "",
+    "Rules:",
+    "- Be specific about what the business does (what they service + top services).",
+    "- If uncertain, say so and ask clarifying questions.",
+    "- Keep it customer-friendly and non-salesy.",
+    "- Output MUST be valid JSON matching the schema requested.",
+    "- confidenceScore is 0..1 and should reflect how certain you are.",
+    "- needsConfirmation should be true when confidenceScore < 0.8.",
+  ].join("\n");
+}
+
+function buildUserPrompt(args: {
+  url: string;
+  extractedText: string;
+  prior?: any | null;
+  correction?: { answer: "yes" | "no"; feedback?: string } | null;
+}) {
+  const { url, extractedText, prior, correction } = args;
+
+  const priorBlock = prior
+    ? `PRIOR_ANALYSIS_JSON:\n${JSON.stringify(prior, null, 2)}\n`
+    : `PRIOR_ANALYSIS_JSON:\n(null)\n`;
+
+  const correctionBlock = correction
+    ? `USER_CONFIRMATION:\n${JSON.stringify(correction, null, 2)}\n`
+    : `USER_CONFIRMATION:\n(null)\n`;
+
+  return [
+    `WEBSITE_URL: ${url}`,
+    "",
+    priorBlock,
+    correctionBlock,
+    "WEBSITE_TEXT (clipped):",
+    extractedText || "(no text extracted)",
+    "",
+    "TASK:",
+    "1) Write businessGuess: 2-5 sentences describing what the business likely does (what they service + top services).",
+    "2) Decide fit: good/maybe/poor for using photo-based quoting.",
+    "3) Provide fitReason: 1-3 sentences.",
+    "4) Pick suggestedIndustryKey (short snake-case or kebab-case; examples: marine, auto, upholstery, auto-restyling, boat-paint, general-contractor).",
+    "5) Provide 3-6 short questions to confirm.",
+    "6) Provide detectedServices and billingSignals (best-effort).",
+    "7) Provide confidenceScore 0..1 and needsConfirmation boolean.",
+    "",
+    "Output ONLY JSON.",
+  ].join("\n");
+}
+
+function pickModelFromPcc(cfg: any) {
+  const m =
+    String(cfg?.models?.onboardingModel ?? "").trim() ||
+    String(cfg?.models?.estimatorModel ?? "").trim() ||
+    "gpt-4o-mini";
+  return m;
+}
+
 export async function POST(req: Request) {
   try {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-
     const tenantId = safeTrim(body?.tenantId);
     if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
 
     await requireMembership(clerkUserId, tenantId);
 
-    // ✅ IMPORTANT: accept website from the client (Step2 sends it) and persist it
-    const bodyWebsite = normalizeWebsite(body?.website);
-
-    // If website wasn’t provided in body, fall back to whatever is in tenant_onboarding (legacy)
-    const existing = await db.execute(sql`
-      select website
+    // Read website from onboarding table
+    const r = await db.execute(sql`
+      select website, ai_analysis
       from tenant_onboarding
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
-    const existingRow: any = (existing as any)?.rows?.[0] ?? null;
-    const dbWebsite = normalizeWebsite(existingRow?.website);
 
-    const website = bodyWebsite || dbWebsite;
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    const websiteRaw = String(row?.website ?? "").trim();
+    const website = normalizeUrl(websiteRaw);
 
-    // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
+    // Extract text (or empty)
+    const extracted = website ? await fetchWebsiteText(website) : null;
+    const extractedText = extracted?.extractedText ?? "";
+    const extractedTextPreview = extracted?.extractedTextPreview ?? "";
+
+    const priorAnalysis = row?.ai_analysis ?? null;
+
+    // PCC model selection (we’ll port prompts later)
     const cfg = await loadPlatformLlmConfig();
-    const onboardingModel =
-      String((cfg as any)?.models?.onboardingModel ?? "").trim() ||
-      String((cfg as any)?.models?.estimatorModel ?? "").trim() ||
-      "gpt-4o-mini";
+    const model = pickModelFromPcc(cfg);
 
-    /**
-     * Mock v2 (auditable, UI-friendly)
-     * This matches the Step2 UI expectations:
-     * - businessGuess: string
-     * - confidenceScore: number 0..1
-     * - needsConfirmation: boolean
-     * - questions: string[]
-     * - suggestedIndustryKey: string
-     * - extractedTextPreview: string
-     */
-    const hasWebsite = Boolean(website);
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error("MISSING_OPENAI_API_KEY");
 
-    const confidenceScore = hasWebsite ? 0.72 : 0.52; // mock – later driven by LLM + confirmations
-    const needsConfirmation = confidenceScore < 0.8;
+    const client = new OpenAI({ apiKey });
 
-    const aiAnalysis = {
-      source: "mock_v2",
-      modelUsed: onboardingModel,
+    const resp = await client.chat.completions.create({
+      model,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: buildSystemPrompt() },
+        {
+          role: "user",
+          content: buildUserPrompt({
+            url: website || "(none provided)",
+            extractedText,
+            prior: priorAnalysis,
+            correction: null,
+          }),
+        },
+      ],
+    });
+
+    const content = resp.choices?.[0]?.message?.content ?? "";
+    const parsed = AnalysisSchema.safeParse(JSON.parse(content));
+
+    if (!parsed.success) {
+      // store something helpful for debugging
+      const fallback = {
+        businessGuess: "We couldn’t parse the analysis result. Please retry.",
+        fit: "maybe",
+        fitReason: "Model output was not valid for our schema.",
+        suggestedIndustryKey: "service",
+        questions: [
+          "What do you work on most (cars/trucks/boats/other)?",
+          "What are your top 3 services?",
+          "Do you mostly do upgrades, repairs, or both?",
+        ],
+        confidenceScore: 0.3,
+        needsConfirmation: true,
+        detectedServices: [],
+        billingSignals: [],
+        analyzedAt: new Date().toISOString(),
+        source: "llm_v1_parse_fail",
+        modelUsed: model,
+        extractedTextPreview,
+      };
+
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
+        values (${tenantId}::uuid, ${JSON.stringify(fallback)}::jsonb, 2, false, now(), now())
+        on conflict (tenant_id) do update
+        set ai_analysis = excluded.ai_analysis,
+            current_step = greatest(tenant_onboarding.current_step, 2),
+            updated_at = now()
+      `);
+
+      return NextResponse.json({ ok: true, tenantId, aiAnalysis: fallback }, { status: 200 });
+    }
+
+    const analysis = {
+      ...parsed.data,
       analyzedAt: new Date().toISOString(),
-
+      source: "llm_v1",
+      modelUsed: model,
+      extractedTextPreview,
       website: website || null,
-
-      // What the UI shows
-      businessGuess: hasWebsite
-        ? `Based on your website (${website}), it looks like you offer custom automotive work and related services. If that’s not accurate, tell us what you actually do (what you service + the types of work).`
-        : "No website was provided, so I can’t auto-detect what you do yet. Tell me what you service (boats/cars/etc.) and what kind of work you perform.",
-
-      questions: hasWebsite
-        ? [
-            "What do you work on most (cars/trucks/boats/other)?",
-            "What are your top 3 services (short list)?",
-            "Do you do mostly cosmetic upgrades, repairs, or both?",
-            "Do you serve retail customers, businesses, or both?",
-          ]
-        : [
-            "What kind of work do you do (short description)?",
-            "Who do you typically serve (boats/cars/homes/other)?",
-          ],
-
-      confidenceScore,
-      needsConfirmation,
-
-      // Used later by Step3 + industry selection
-      suggestedIndustryKey: "automotive",
-
-      detectedServices: hasWebsite
-        ? ["custom automotive work", "upgrades", "repairs"]
-        : ["unknown"],
-
-      billingSignals: ["estimate-based", "mixed"],
-
-      extractedTextPreview: hasWebsite
-        ? `Mock preview: Successfully received website URL: ${website}`
-        : "Mock preview: No website stored yet.",
     };
 
-    // ✅ Upsert: persist website + analysis and bump step
     await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, website, ai_analysis, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${website || null}, ${JSON.stringify(aiAnalysis)}::jsonb, 2, false, now(), now())
+      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
+      values (${tenantId}::uuid, ${JSON.stringify(analysis)}::jsonb, 2, false, now(), now())
       on conflict (tenant_id) do update
-      set website = excluded.website,
-          ai_analysis = excluded.ai_analysis,
+      set ai_analysis = excluded.ai_analysis,
           current_step = greatest(tenant_onboarding.current_step, 2),
           updated_at = now()
     `);
 
-    return NextResponse.json({ ok: true, tenantId, aiAnalysis }, { status: 200 });
+    return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
