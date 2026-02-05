@@ -11,6 +11,9 @@ export type PlatformLlmConfig = {
     estimatorModel: string;
     qaModel: string;
 
+    // ✅ NEW: Used for business understanding + onboarding classification
+    onboardingModel: string;
+
     // Used for /api/quote/render (optional)
     renderModel?: string;
   };
@@ -25,15 +28,10 @@ export type PlatformLlmConfig = {
     // Optional extra preamble prepended to BOTH system prompts
     extraSystemPreamble?: string;
 
-    // ✅ NEW: used by /api/quote/render
+    // ✅ Render pipeline
     renderPromptPreamble?: string;
-
-    // ✅ NEW: template used by /api/quote/render
-    // Supports placeholders:
-    // {renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}
     renderPromptTemplate?: string;
 
-    // ✅ NEW: PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
     renderStylePresets?: {
       photoreal?: string;
       clean_oem?: string;
@@ -42,17 +40,10 @@ export type PlatformLlmConfig = {
   };
 
   guardrails: {
-    // UI/API expects these (safe to default)
     mode?: GuardrailsMode;
     piiHandling?: PiiHandling;
-
-    // Simple keyword/topic blocks (V1). We'll evolve this later.
     blockedTopics: string[];
-
-    // Platform cap (tenant setting can be lower, not higher)
     maxQaQuestions: number;
-
-    // Optional: keep around for future response_format/token tuning
     maxOutputTokens?: number;
   };
 
@@ -62,13 +53,18 @@ export type PlatformLlmConfig = {
 export function defaultPlatformLlmConfig(): PlatformLlmConfig {
   return {
     version: 1,
+
     models: {
       estimatorModel: "gpt-4o-mini",
       qaModel: "gpt-4o-mini",
 
-      // NOTE: this is just a stored value; image generation is separate.
+      // ✅ Default onboarding intelligence
+      onboardingModel: "gpt-4.1",
+
+      // Image generation handled separately
       renderModel: "gpt-image-1",
     },
+
     prompts: {
       extraSystemPreamble: [
         "You are producing an estimate for legitimate service work.",
@@ -94,7 +90,6 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "Return ONLY valid JSON matching the provided schema.",
       ].join("\n"),
 
-      // ✅ NEW defaults for render prompting
       renderPromptPreamble: [
         "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
         "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
@@ -120,6 +115,7 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "{tenantRenderNotesLine}",
       ].join("\n"),
     },
+
     guardrails: {
       mode: "balanced",
       piiHandling: "redact",
@@ -127,6 +123,7 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
       maxQaQuestions: 3,
       maxOutputTokens: 1200,
     },
+
     updatedAt: new Date().toISOString(),
   };
 }
