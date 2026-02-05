@@ -9,22 +9,14 @@ import { db } from "@/lib/db/client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type IndustryItem = {
-  id: string;
-  key: string;
-  label: string;
-  description: string | null;
-  source: "platform" | "tenant";
-};
-
-/* --------------------- utils --------------------- */
+/* ---------------- utils ---------------- */
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
 }
 
-function firstRow(r: any): any | null {
+function firstRow(r: any) {
   if (!r) return null;
   if (Array.isArray(r)) return r[0] ?? null;
   if (Array.isArray(r.rows)) return r.rows[0] ?? null;
@@ -32,13 +24,31 @@ function firstRow(r: any): any | null {
   return null;
 }
 
-async function requireAuthed(): Promise<{ clerkUserId: string }> {
-  const { userId } = await auth();
-  if (!userId) throw new Error("UNAUTHENTICATED");
-  return { clerkUserId: userId };
+function toIndustryKey(raw: string) {
+  return safeTrim(raw)
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
 }
 
-async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
+function labelFromKey(key: string) {
+  return key
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/* ---------------- auth ---------------- */
+
+async function requireAuthed() {
+  const { userId } = await auth();
+  if (!userId) throw new Error("UNAUTHENTICATED");
+  return userId;
+}
+
+async function requireMembership(clerkUserId: string, tenantId: string) {
   const r = await db.execute(sql`
     select 1 as ok
     from tenant_members
@@ -50,42 +60,45 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-function toIndustryKey(raw: string) {
-  const s = safeTrim(raw).toLowerCase();
-  if (!s) return "";
-  // allow snake/kebab from AI; normalize spaces -> underscores
-  return s
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 48);
+/* ---------------- db helpers ---------------- */
+
+async function ensureIndustryExists(key: string, label?: string | null) {
+  const industryKey = toIndustryKey(key);
+  if (!industryKey) return;
+
+  const exists = await db.execute(sql`
+    select 1 as ok
+    from industries
+    where key = ${industryKey}
+    limit 1
+  `);
+
+  if (firstRow(exists)?.ok) return;
+
+  await db.execute(sql`
+    insert into industries (key, label, description)
+    values (${industryKey}, ${label ?? labelFromKey(industryKey)}, null)
+    on conflict (key) do nothing
+  `);
 }
 
-function titleFromKey(key: string) {
-  const s = safeTrim(key).replace(/[-_]+/g, " ");
-  if (!s) return "Industry";
-  return s.replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
-async function listIndustries(): Promise<IndustryItem[]> {
+async function listIndustries() {
   const r = await db.execute(sql`
     select id, key, label, description
     from industries
     order by label asc
   `);
 
-  const rows: any[] = Array.isArray((r as any)?.rows) ? (r as any).rows : Array.isArray(r) ? r : [];
+  const rows = Array.isArray((r as any)?.rows) ? (r as any).rows : Array.isArray(r) ? r : [];
   return rows.map((x) => ({
     id: String(x.id),
     key: String(x.key),
     label: String(x.label),
-    description: x.description == null ? null : String(x.description),
-    source: "platform",
+    description: x.description ? String(x.description) : null,
   }));
 }
 
-async function getSuggestedIndustryKeyFromOnboarding(tenantId: string): Promise<string> {
+async function getSuggestedIndustryKey(tenantId: string) {
   const r = await db.execute(sql`
     select ai_analysis
     from tenant_onboarding
@@ -93,116 +106,60 @@ async function getSuggestedIndustryKeyFromOnboarding(tenantId: string): Promise<
     limit 1
   `);
   const row = firstRow(r);
-  const suggested = safeTrim(row?.ai_analysis?.suggestedIndustryKey);
-  return toIndustryKey(suggested);
+  return toIndustryKey(row?.ai_analysis?.suggestedIndustryKey ?? "");
 }
 
-async function getSelectedIndustryKeyFromTenantSettings(tenantId: string): Promise<string> {
-  const r = await db.execute(sql`
-    select industry_key
-    from tenant_settings
-    where tenant_id = ${tenantId}::uuid
-    limit 1
-  `);
-  const row = firstRow(r);
-  return toIndustryKey(row?.industry_key ?? "");
-}
-
-async function setTenantIndustryKey(tenantId: string, industryKey: string) {
+async function setTenantIndustry(tenantId: string, key: string) {
   await db.execute(sql`
     insert into tenant_settings (tenant_id, industry_key, updated_at)
-    values (${tenantId}::uuid, ${industryKey}, now())
+    values (${tenantId}::uuid, ${key}, now())
     on conflict (tenant_id) do update
     set industry_key = excluded.industry_key,
         updated_at = now()
   `);
 }
 
-async function ensureIndustryExists(industryKey: string, label?: string | null): Promise<void> {
-  const key = toIndustryKey(industryKey);
-  if (!key) return;
+/* ---------------- schema ---------------- */
 
-  const exists = await db.execute(sql`
-    select 1 as ok
-    from industries
-    where key = ${key}
-    limit 1
-  `);
-  const row = firstRow(exists);
-  if (row?.ok) return;
-
-  const computedLabel = safeTrim(label) || titleFromKey(key);
-
-  // Create a platform industry immediately so UX never blocks.
-  await db.execute(sql`
-    insert into industries (id, key, label, description)
-    values (gen_random_uuid(), ${key}, ${computedLabel}, null)
-    on conflict (key) do nothing
-  `);
-}
-
-/* --------------------- schema --------------------- */
-
-const GetQuerySchema = z.object({
+const GetSchema = z.object({
   tenantId: z.string().min(1),
 });
 
-const PostBodySchema = z.object({
+const PostSchema = z.object({
   tenantId: z.string().min(1),
   industryKey: z.string().optional(),
   industryLabel: z.string().optional(),
 });
 
-/* --------------------- handlers --------------------- */
+/* ---------------- handlers ---------------- */
 
 export async function GET(req: Request) {
   try {
-    const { clerkUserId } = await requireAuthed();
+    const clerkUserId = await requireAuthed();
 
     const u = new URL(req.url);
-    const parsed = GetQuerySchema.safeParse({ tenantId: u.searchParams.get("tenantId") });
+    const parsed = GetSchema.safeParse({ tenantId: u.searchParams.get("tenantId") });
     if (!parsed.success) {
-      return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "tenantId is required." }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
     }
 
-    const tenantId = safeTrim(parsed.data.tenantId);
+    const tenantId = parsed.data.tenantId;
     await requireMembership(clerkUserId, tenantId);
 
-    // 1) Pull AI suggestion
-    const suggestedKey = await getSuggestedIndustryKeyFromOnboarding(tenantId);
-
-    // 2) If suggested doesn't exist yet, auto-create it (platform list)
+    const suggestedKey = await getSuggestedIndustryKey(tenantId);
     if (suggestedKey) {
       await ensureIndustryExists(suggestedKey, null);
+      await setTenantIndustry(tenantId, suggestedKey);
     }
 
-    // 3) Load platform industries (now includes suggested if it was missing)
     const industries = await listIndustries();
 
-    // 4) Determine selectedKey:
-    // - if tenant_settings already has a valid industry_key, keep it
-    // - else if AI suggested exists, auto-select it AND persist it to tenant_settings
-    // - else fall back to null (user will pick/create)
-    const currentSelected = await getSelectedIndustryKeyFromTenantSettings(tenantId);
-    const currentSelectedExists = currentSelected && industries.some((x) => x.key === currentSelected);
-
-    let selectedKey: string | null = currentSelectedExists ? currentSelected : null;
-
-    const suggestedExists = suggestedKey && industries.some((x) => x.key === suggestedKey);
-    if (!selectedKey && suggestedExists) {
-      selectedKey = suggestedKey;
-      await setTenantIndustryKey(tenantId, suggestedKey);
-    }
-
-    return NextResponse.json(
-      {
-        ok: true,
-        tenantId,
-        selectedKey: selectedKey || null,
-        industries,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({
+      ok: true,
+      tenantId,
+      selectedKey: suggestedKey || null,
+      industries,
+    });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -212,57 +169,36 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const { clerkUserId } = await requireAuthed();
+    const clerkUserId = await requireAuthed();
 
-    const bodyRaw = await req.json().catch(() => null);
-    const parsed = PostBodySchema.safeParse(bodyRaw);
+    const body = await req.json();
+    const parsed = PostSchema.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "Invalid request body." }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "BAD_REQUEST" }, { status: 400 });
     }
 
-    const tenantId = safeTrim(parsed.data.tenantId);
-    const industryKeyRaw = safeTrim(parsed.data.industryKey);
-    const industryLabelRaw = safeTrim(parsed.data.industryLabel);
-
+    const { tenantId, industryKey, industryLabel } = parsed.data;
     await requireMembership(clerkUserId, tenantId);
 
-    // Create-new path (user typed label)
-    if (industryLabelRaw) {
-      let key = toIndustryKey(industryLabelRaw);
-      if (!key) key = `industry_${Math.random().toString(16).slice(2, 8)}`;
-
-      // ensure unique-ish (if key already exists, suffix)
-      const exists = await db.execute(sql`
-        select 1 as ok
-        from industries
-        where key = ${key}
-        limit 1
-      `);
-      const row = firstRow(exists);
-      if (row?.ok) key = `${key}_${Math.random().toString(16).slice(2, 6)}`;
-
-      await ensureIndustryExists(key, industryLabelRaw);
-      await setTenantIndustryKey(tenantId, key);
-
-      const industries = await listIndustries();
-      return NextResponse.json({ ok: true, tenantId, selectedKey: key, industries }, { status: 200 });
+    if (industryLabel) {
+      const key = toIndustryKey(industryLabel);
+      await ensureIndustryExists(key, industryLabel);
+      await setTenantIndustry(tenantId, key);
+    } else if (industryKey) {
+      const key = toIndustryKey(industryKey);
+      await ensureIndustryExists(key, null);
+      await setTenantIndustry(tenantId, key);
+    } else {
+      return NextResponse.json({ ok: false, error: "NO_INDUSTRY" }, { status: 400 });
     }
-
-    // Select-existing path
-    const industryKey = toIndustryKey(industryKeyRaw);
-    if (!industryKey) {
-      return NextResponse.json(
-        { ok: false, error: "BAD_REQUEST", message: "industryKey or industryLabel is required." },
-        { status: 400 }
-      );
-    }
-
-    // If user picked a key that doesn't exist (edge case), create it so we never block.
-    await ensureIndustryExists(industryKey, null);
-    await setTenantIndustryKey(tenantId, industryKey);
 
     const industries = await listIndustries();
-    return NextResponse.json({ ok: true, tenantId, selectedKey: industryKey, industries }, { status: 200 });
+
+    return NextResponse.json({
+      ok: true,
+      tenantId,
+      industries,
+    });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
