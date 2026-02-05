@@ -9,9 +9,24 @@ import { db } from "@/lib/db/client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* --------------------- utils --------------------- */
+/* --------------------- types --------------------- */
 
-type Mode = "new" | "update" | "existing";
+type IndustryRow = {
+  id: string;
+  key: string;
+  label: string;
+  description: string | null;
+};
+
+type ApiIndustryItem = {
+  id: string;
+  key: string;
+  label: string;
+  description: string | null;
+  source: "platform";
+};
+
+/* --------------------- utils --------------------- */
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -22,8 +37,6 @@ function firstRow(r: any): any | null {
   if (!r) return null;
   if (Array.isArray(r)) return r[0] ?? null;
   if (Array.isArray((r as any).rows)) return (r as any).rows[0] ?? null;
-  // drizzle RowList sometimes is array-like
-  if (typeof r === "object" && r !== null && (r as any)[0]) return (r as any)[0] ?? null;
   return null;
 }
 
@@ -31,26 +44,7 @@ function rowsOf(r: any): any[] {
   if (!r) return [];
   if (Array.isArray(r)) return r;
   if (Array.isArray((r as any).rows)) return (r as any).rows;
-  // drizzle RowList sometimes is array-like
-  if (typeof r === "object" && r !== null && typeof (r as any).length === "number") {
-    try {
-      return Array.from(r as any);
-    } catch {
-      return [];
-    }
-  }
   return [];
-}
-
-function titleFromKey(key: string) {
-  // marine_repair -> Marine Repair
-  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
-  if (!s) return "Service";
-  return s
-    .split(" ")
-    .filter(Boolean)
-    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-    .join(" ");
 }
 
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
@@ -71,21 +65,57 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-function dbErrMessage(e: any) {
-  // Drizzle/postgres errors usually carry message + code + detail
-  const msg = String(e?.message ?? "").trim();
-  const code = String(e?.code ?? "").trim();
-  const detail = String(e?.detail ?? "").trim();
-  const hint = String(e?.hint ?? "").trim();
+function titleFromKey(key: string) {
+  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
+  if (!s) return "Service";
+  return s
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
-  const parts = [
-    msg || "Database error",
-    code ? `code=${code}` : "",
-    detail ? `detail=${detail}` : "",
-    hint ? `hint=${hint}` : "",
-  ].filter(Boolean);
+async function getSuggestedIndustryKey(tenantId: string): Promise<string> {
+  const r = await db.execute(sql`
+    select ai_analysis
+    from tenant_onboarding
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+  const row = firstRow(r);
+  const ai = row?.ai_analysis ?? null;
+  return safeTrim(ai?.suggestedIndustryKey ?? "");
+}
 
-  return parts.join(" | ");
+async function listIndustries(): Promise<ApiIndustryItem[]> {
+  const r = await db.execute(sql`
+    select id, key, label, description
+    from industries
+    order by label asc
+  `);
+
+  const rows = rowsOf(r) as any[];
+
+  return rows.map((x: any) => ({
+    id: String(x.id),
+    key: String(x.key),
+    label: String(x.label),
+    description: x.description == null ? null : String(x.description),
+    source: "platform" as const,
+  }));
+}
+
+async function ensureIndustryExists(industryKey: string): Promise<void> {
+  const key = safeTrim(industryKey);
+  if (!key) return;
+
+  const label = titleFromKey(key);
+
+  await db.execute(sql`
+    insert into industries (key, label, description)
+    values (${key}, ${label}, null)
+    on conflict (key) do nothing
+  `);
 }
 
 /* --------------------- schema --------------------- */
@@ -96,93 +126,9 @@ const GetSchema = z.object({
 
 const PostSchema = z.object({
   tenantId: z.string().min(1),
-  // caller either selects an existing key OR creates a new label
   industryKey: z.string().optional(),
   industryLabel: z.string().optional(),
 });
-
-/* --------------------- core ops --------------------- */
-
-async function readSuggestedKeyFromAiAnalysis(tenantId: string): Promise<string> {
-  const r = await db.execute(sql`
-    select ai_analysis
-    from tenant_onboarding
-    where tenant_id = ${tenantId}::uuid
-    limit 1
-  `);
-  const row = firstRow(r);
-  const ai = row?.ai_analysis ?? null;
-  const suggested = safeTrim(ai?.suggestedIndustryKey ?? "");
-  return suggested;
-}
-
-async function ensureIndustryExistsByKey(key: string): Promise<void> {
-  const k = safeTrim(key);
-  if (!k) return;
-
-  const label = titleFromKey(k);
-
-  // IMPORTANT:
-  // We explicitly set id = gen_random_uuid() to avoid depending on DB defaults.
-  // This makes the insert succeed even if industries.id has no DEFAULT.
-  await db.execute(sql`
-    insert into industries (id, key, label, description)
-    values (gen_random_uuid(), ${k}, ${label}, null)
-    on conflict (key) do nothing
-  `);
-}
-
-async function listIndustries(): Promise<
-  { id: string; key: string; label: string; description: string | null; source: "platform" | "tenant" }[]
-> {
-  const r = await db.execute(sql`
-    select id, key, label, description
-    from industries
-    order by label asc
-  `);
-
-  const rows = rowsOf(r);
-  return rows.map((x: any) => ({
-    id: String(x.id),
-    key: String(x.key),
-    label: String(x.label),
-    description: x.description == null ? null : String(x.description),
-    source: "platform" as const,
-  }));
-}
-
-async function readSelectedIndustryKey(tenantId: string): Promise<string | null> {
-  const r = await db.execute(sql`
-    select industry_key
-    from tenant_settings
-    where tenant_id = ${tenantId}::uuid
-    limit 1
-  `);
-  const row = firstRow(r);
-  const k = safeTrim(row?.industry_key ?? "");
-  return k || null;
-}
-
-async function saveSelectedIndustryKey(tenantId: string, key: string): Promise<void> {
-  const k = safeTrim(key);
-  if (!k) return;
-
-  await db.execute(sql`
-    insert into tenant_settings (tenant_id, industry_key, updated_at)
-    values (${tenantId}::uuid, ${k}, now())
-    on conflict (tenant_id) do update
-    set industry_key = excluded.industry_key,
-        updated_at = now()
-  `);
-
-  // advance onboarding step
-  await db.execute(sql`
-    update tenant_onboarding
-    set current_step = greatest(current_step, 4),
-        updated_at = now()
-    where tenant_id = ${tenantId}::uuid
-  `);
-}
 
 /* --------------------- handlers --------------------- */
 
@@ -193,55 +139,29 @@ export async function GET(req: Request) {
     const u = new URL(req.url);
     const parsed = GetSchema.safeParse({ tenantId: u.searchParams.get("tenantId") });
     if (!parsed.success) {
-      return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required." }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "tenantId is required." }, { status: 400 });
     }
 
-    const tenantId = safeTrim(parsed.data.tenantId);
+    const tenantId = parsed.data.tenantId;
     await requireMembership(clerkUserId, tenantId);
 
-    // 1) read AI suggestion and attempt auto-create (safe even if it already exists)
-    const suggested = await readSuggestedKeyFromAiAnalysis(tenantId);
-    if (suggested) {
-      try {
-        await ensureIndustryExistsByKey(suggested);
-      } catch (e: any) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "DB_INDUSTRY_AUTO_CREATE_FAILED",
-            message: dbErrMessage(e),
-          },
-          { status: 500 }
-        );
-      }
+    // 1) Get AI suggestion
+    const suggestedKey = await getSuggestedIndustryKey(tenantId);
+
+    // 2) Auto-create if missing (this is your desired UX)
+    if (suggestedKey) {
+      await ensureIndustryExists(suggestedKey);
     }
 
-    // 2) list industries
-    let industries: any[] = [];
-    try {
-      industries = await listIndustries();
-    } catch (e: any) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "DB_INDUSTRY_LIST_FAILED",
-          message: dbErrMessage(e),
-        },
-        { status: 500 }
-      );
-    }
+    // 3) Return list
+    const industries = await listIndustries();
 
-    const selectedKey = await readSelectedIndustryKey(tenantId);
+    // 4) Pick default selected key
+    const selectedKey =
+      (suggestedKey && industries.some((x) => x.key === suggestedKey) ? suggestedKey : null) ??
+      (industries[0]?.key ?? null);
 
-    return NextResponse.json(
-      {
-        ok: true,
-        tenantId,
-        selectedKey,
-        industries,
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true, tenantId, selectedKey, industries }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -265,51 +185,46 @@ export async function POST(req: Request) {
     const industryKey = safeTrim(parsed.data.industryKey);
     const industryLabel = safeTrim(parsed.data.industryLabel);
 
-    // Create-new mode: label provided
-    if (industryLabel) {
-      // convert label to a stable key: "Marine Repair" -> "marine_repair"
+    // Create-new path (tenant typed label)
+    if (industryLabel && !industryKey) {
       const key = industryLabel
         .toLowerCase()
         .replace(/&/g, "and")
         .replace(/[^a-z0-9]+/g, "_")
         .replace(/^_+|_+$/g, "")
-        .slice(0, 48) || "service";
+        .slice(0, 64);
 
-      try {
-        await db.execute(sql`
-          insert into industries (id, key, label, description)
-          values (gen_random_uuid(), ${key}, ${industryLabel}, null)
-          on conflict (key) do update
-          set label = excluded.label
-        `);
-      } catch (e: any) {
-        return NextResponse.json(
-          { ok: false, error: "DB_INDUSTRY_CREATE_FAILED", message: dbErrMessage(e) },
-          { status: 500 }
-        );
-      }
+      await db.execute(sql`
+        insert into industries (key, label, description)
+        values (${key}, ${industryLabel}, null)
+        on conflict (key) do update
+        set label = excluded.label
+      `);
 
-      await saveSelectedIndustryKey(tenantId, key);
+      await db.execute(sql`
+        update tenant_settings
+        set industry_key = ${key},
+            updated_at = now()
+        where tenant_id = ${tenantId}::uuid
+      `);
 
       return NextResponse.json({ ok: true, tenantId, selectedKey: key }, { status: 200 });
     }
 
-    // Select-existing mode
+    // Select-existing path
     if (!industryKey) {
-      return NextResponse.json({ ok: false, error: "INDUSTRY_REQUIRED", message: "industryKey or industryLabel is required." }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "INDUSTRY_REQUIRED", message: "Choose an industry." }, { status: 400 });
     }
 
-    // ensure exists (safe), then save to tenant_settings
-    try {
-      await ensureIndustryExistsByKey(industryKey);
-    } catch (e: any) {
-      return NextResponse.json(
-        { ok: false, error: "DB_INDUSTRY_ENSURE_FAILED", message: dbErrMessage(e) },
-        { status: 500 }
-      );
-    }
+    // Ensure key exists (safety)
+    await ensureIndustryExists(industryKey);
 
-    await saveSelectedIndustryKey(tenantId, industryKey);
+    await db.execute(sql`
+      update tenant_settings
+      set industry_key = ${industryKey},
+          updated_at = now()
+      where tenant_id = ${tenantId}::uuid
+    `);
 
     return NextResponse.json({ ok: true, tenantId, selectedKey: industryKey }, { status: 200 });
   } catch (e: any) {
