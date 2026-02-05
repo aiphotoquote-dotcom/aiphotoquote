@@ -209,10 +209,13 @@ export default function OnboardingWizard() {
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
+    // ✅ IMPORTANT: send website from state so analyzer can't "forget" it
+    const website = String(state?.website ?? "").trim();
+
     const res = await fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId: tid }),
+      body: JSON.stringify({ tenantId: tid, website }),
     });
 
     const j = await res.json().catch(() => null);
