@@ -55,7 +55,6 @@ function normalizeUrl(raw: string) {
 }
 
 function stripHtmlToText(html: string) {
-  // Basic + fast: remove script/style, tags, collapse whitespace.
   const withoutScripts = html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ");
@@ -70,12 +69,10 @@ function stripHtmlToText(html: string) {
   return decoded.replace(/\s+/g, " ").trim();
 }
 
-function buildCandidateUrls(raw: string): string[] {
+function buildCandidateBaseUrls(raw: string): string[] {
   const s = safeTrim(raw);
   if (!s) return [];
 
-  // If they provided a full URL, also try a couple normalized variants.
-  // If they provided only a host, generate http/https and www/no-www.
   let host = s;
   let hadScheme = false;
 
@@ -90,12 +87,9 @@ function buildCandidateUrls(raw: string): string[] {
   }
 
   host = host.replace(/\/+$/g, "");
-  host = host.replace(/^www\./i, (m) => m.toLowerCase()); // normalize
-
   const bareHost = host.replace(/^www\./i, "");
-  const wwwHost = bareHost.startsWith("www.") ? bareHost : `www.${bareHost}`;
+  const wwwHost = `www.${bareHost}`;
 
-  // Prefer https first
   const candidates = [
     `https://${bareHost}`,
     `https://${wwwHost}`,
@@ -103,12 +97,9 @@ function buildCandidateUrls(raw: string): string[] {
     `http://${wwwHost}`,
   ];
 
-  // If original was a full URL, try it first (with path)
-  if (hadScheme) {
-    candidates.unshift(normalizeUrl(s));
-  }
+  if (hadScheme) candidates.unshift(normalizeUrl(s));
 
-  // Dedup while preserving order
+  // dedup
   const out: string[] = [];
   const seen = new Set<string>();
   for (const c of candidates) {
@@ -120,30 +111,41 @@ function buildCandidateUrls(raw: string): string[] {
   return out;
 }
 
-type FetchDebug = {
-  attempted: Array<{
-    url: string;
-    ok: boolean;
-    status: number;
-    statusText?: string;
-    contentType: string;
-    finalUrl?: string;
-    bytes: number;
-    extractedChars: number;
-    note?: string;
-  }>;
-  chosenUrl?: string;
-  chosenFinalUrl?: string;
-  chosenStatus?: number;
-  chosenContentType?: string;
-  chosenExtractedChars?: number;
+function safeJsonParse(s: string) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+type Attempt = {
+  url: string;
+  ok: boolean;
+  status: number;
+  statusText?: string;
+  contentType: string;
+  finalUrl?: string;
+  bytes: number;
+  extractedChars: number;
+  note?: string;
 };
 
-async function fetchOne(url: string) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 12_000);
+type FetchDebug = {
+  attempted: Attempt[];
+  pagesAttempted: Attempt[];
+  pagesUsed: string[];
+  chosenFinalUrl?: string;
+  chosenContentType?: string;
+  chosenStatus?: number;
+  aggregateChars: number;
+};
 
-  // Realistic browser-ish headers (many sites will serve empty/blocked HTML to bot UAs)
+async function fetchText(url: string, timeoutMs = 12_000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Browser-ish headers
   const UA =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
@@ -158,12 +160,11 @@ async function fetchOne(url: string) {
         "accept-language": "en-US,en;q=0.9",
         "cache-control": "no-cache",
         pragma: "no-cache",
-        // NOTE: Adding sec-fetch headers can help sometimes, but can also hurt.
       },
     });
 
     const ct = String(res.headers.get("content-type") ?? "");
-    const isHtml = ct.includes("text/html") || ct.includes("application/xhtml+xml");
+    const isHtml = ct.includes("text/html") || ct.includes("application/xhtml+xml") || ct.includes("application/xml") || ct.includes("text/xml");
 
     const raw = await res.text().catch(() => "");
     const bytes = Buffer.byteLength(raw || "", "utf8");
@@ -171,10 +172,7 @@ async function fetchOne(url: string) {
     const text = isHtml ? stripHtmlToText(raw) : raw;
     const clipped = clamp(text, 12_000);
 
-    // If the site is JS-rendered, stripped text can be tiny.
-    // We still return it, but mark it for diagnostics.
     const extractedChars = clipped.length;
-
     const finalUrl = (res as any)?.url ? String((res as any).url) : undefined;
 
     return {
@@ -185,7 +183,6 @@ async function fetchOne(url: string) {
       finalUrl,
       rawBytes: bytes,
       extractedText: clipped,
-      extractedTextPreview: clamp(clipped, 900),
       note:
         !res.ok
           ? "HTTP not ok"
@@ -198,18 +195,59 @@ async function fetchOne(url: string) {
   }
 }
 
-async function fetchWebsiteTextSmart(rawUrl: string) {
-  const candidates = buildCandidateUrls(rawUrl);
-  const debug: FetchDebug = { attempted: [] };
+function sameHost(a: string, b: string) {
+  try {
+    const A = new URL(a);
+    const B = new URL(b);
+    return A.host === B.host;
+  } catch {
+    return false;
+  }
+}
 
-  let best: any | null = null;
+function joinUrl(base: string, path: string) {
+  try {
+    const u = new URL(base);
+    // ensure base has no path
+    u.pathname = "/";
+    const out = new URL(path, u.toString());
+    return out.toString().replace(/\/+$/g, "");
+  } catch {
+    return "";
+  }
+}
 
-  for (const url of candidates) {
+function extractSitemapLocs(xmlText: string, max = 8): string[] {
+  const out: string[] = [];
+  const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xmlText)) && out.length < max) {
+    out.push(String(m[1]));
+  }
+  return out;
+}
+
+async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
+  const debug: FetchDebug = {
+    attempted: [],
+    pagesAttempted: [],
+    pagesUsed: [],
+    aggregateChars: 0,
+  };
+
+  const baseCandidates = buildCandidateBaseUrls(rawWebsiteUrl);
+  if (!baseCandidates.length) {
+    return { extractedText: "", extractedTextPreview: "", fetchDebug: debug };
+  }
+
+  // 1) Try to find a working base URL
+  let basePick: any | null = null;
+
+  for (const base of baseCandidates) {
     try {
-      const r = await fetchOne(url);
-
+      const r = await fetchText(base);
       debug.attempted.push({
-        url,
+        url: base,
         ok: Boolean(r.ok),
         status: Number(r.status ?? 0),
         statusText: r.statusText,
@@ -220,31 +258,27 @@ async function fetchWebsiteTextSmart(rawUrl: string) {
         note: r.note,
       });
 
-      // Choose first successful response with meaningful text.
-      if (r.ok && (r.extractedText?.length ?? 0) >= 200) {
-        best = r;
+      if (!basePick) basePick = r;
+
+      // prefer an OK response with decent text
+      if (r.ok && (r.extractedText?.length ?? 0) >= 400) {
+        basePick = r;
         break;
       }
 
-      // Otherwise, keep the "best so far":
-      // - any OK response beats non-OK
-      // - higher extracted chars beats lower
-      if (!best) best = r;
-      else {
-        const bestOk = Boolean(best.ok);
-        const curOk = Boolean(r.ok);
-        const bestLen = Number(best.extractedText?.length ?? 0);
-        const curLen = Number(r.extractedText?.length ?? 0);
+      // else keep best: OK beats non-OK; longer beats shorter
+      const bestOk = Boolean(basePick?.ok);
+      const curOk = Boolean(r.ok);
+      const bestLen = Number(basePick?.extractedText?.length ?? 0);
+      const curLen = Number(r.extractedText?.length ?? 0);
 
-        if (curOk && !bestOk) best = r;
-        else if (curOk === bestOk && curLen > bestLen) best = r;
-      }
+      if (curOk && !bestOk) basePick = r;
+      else if (curOk === bestOk && curLen > bestLen) basePick = r;
     } catch (e: any) {
       debug.attempted.push({
-        url,
+        url: base,
         ok: false,
         status: 0,
-        statusText: "",
         contentType: "",
         bytes: 0,
         extractedChars: 0,
@@ -253,23 +287,130 @@ async function fetchWebsiteTextSmart(rawUrl: string) {
     }
   }
 
-  if (!best) {
-    return {
-      extractedText: "",
-      extractedTextPreview: "",
-      fetchDebug: debug,
-    };
+  const chosenFinalUrl = String(basePick?.finalUrl ?? baseCandidates[0]);
+  debug.chosenFinalUrl = chosenFinalUrl;
+  debug.chosenContentType = String(basePick?.contentType ?? "");
+  debug.chosenStatus = Number(basePick?.status ?? 0);
+
+  const baseUrl = chosenFinalUrl;
+
+  // 2) If homepage text is weak, try sitemap + common content paths
+  const pages: string[] = [];
+  const homeText = String(basePick?.extractedText ?? "");
+  const homeLen = homeText.length;
+
+  // Always include home first
+  pages.push(baseUrl);
+
+  const commonPaths = ["/about", "/about-us", "/services", "/service", "/contact", "/portfolio", "/gallery", "/work"];
+  for (const p of commonPaths) {
+    const u = joinUrl(baseUrl, p);
+    if (u) pages.push(u);
   }
 
-  debug.chosenUrl = candidates[0] || rawUrl;
-  debug.chosenFinalUrl = best.finalUrl;
-  debug.chosenStatus = best.status;
-  debug.chosenContentType = best.contentType;
-  debug.chosenExtractedChars = Number(best.extractedText?.length ?? 0);
+  // Try sitemap(s) if homepage is thin
+  if (homeLen < 400) {
+    const sitemapUrls = [joinUrl(baseUrl, "/sitemap.xml"), joinUrl(baseUrl, "/sitemap_index.xml")].filter(Boolean);
+    for (const sm of sitemapUrls) {
+      try {
+        const smRes = await fetchText(sm, 10_000);
+        debug.pagesAttempted.push({
+          url: sm,
+          ok: Boolean(smRes.ok),
+          status: Number(smRes.status ?? 0),
+          statusText: smRes.statusText,
+          contentType: String(smRes.contentType ?? ""),
+          finalUrl: smRes.finalUrl,
+          bytes: Number(smRes.rawBytes ?? 0),
+          extractedChars: Number(smRes.extractedText?.length ?? 0),
+          note: smRes.note,
+        });
+
+        if (smRes.ok) {
+          const locs = extractSitemapLocs(String(smRes.extractedText ?? ""), 8);
+          // keep only same host URLs
+          for (const loc of locs) {
+            if (!sameHost(baseUrl, loc)) continue;
+            pages.push(loc);
+          }
+          if (locs.length) break; // got something, stop trying more sitemaps
+        }
+      } catch (e: any) {
+        debug.pagesAttempted.push({
+          url: sm,
+          ok: false,
+          status: 0,
+          contentType: "",
+          bytes: 0,
+          extractedChars: 0,
+          note: `Sitemap fetch error: ${e?.message ?? String(e)}`,
+        });
+      }
+    }
+  }
+
+  // Dedup pages, limit to 6 total fetches (home + 5)
+  const pageList: string[] = [];
+  const seen = new Set<string>();
+  for (const p of pages) {
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pageList.push(p);
+    if (pageList.length >= 6) break;
+  }
+
+  // Fetch pages and aggregate text
+  let aggregate = "";
+  const pagesUsed: string[] = [];
+
+  for (const pageUrl of pageList) {
+    try {
+      const r = await fetchText(pageUrl);
+      const text = String(r.extractedText ?? "");
+      const len = text.length;
+
+      debug.pagesAttempted.push({
+        url: pageUrl,
+        ok: Boolean(r.ok),
+        status: Number(r.status ?? 0),
+        statusText: r.statusText,
+        contentType: String(r.contentType ?? ""),
+        finalUrl: r.finalUrl,
+        bytes: Number(r.rawBytes ?? 0),
+        extractedChars: len,
+        note: r.note,
+      });
+
+      // Only use OK pages with *some* signal
+      if (r.ok && len >= 150) {
+        pagesUsed.push(pageUrl);
+        aggregate += `\n\n=== PAGE: ${pageUrl} ===\n${text}`;
+      }
+
+      if (aggregate.length >= 12_000) break;
+    } catch (e: any) {
+      debug.pagesAttempted.push({
+        url: pageUrl,
+        ok: false,
+        status: 0,
+        contentType: "",
+        bytes: 0,
+        extractedChars: 0,
+        note: `Page fetch error: ${e?.message ?? String(e)}`,
+      });
+    }
+  }
+
+  aggregate = clamp(aggregate.trim(), 12_000);
+  debug.pagesUsed = pagesUsed;
+  debug.aggregateChars = aggregate.length;
+
+  const preview = clamp(aggregate, 900);
 
   return {
-    extractedText: String(best.extractedText ?? ""),
-    extractedTextPreview: String(best.extractedTextPreview ?? ""),
+    extractedText: aggregate,
+    extractedTextPreview: preview,
     fetchDebug: debug,
   };
 }
@@ -322,7 +463,7 @@ function buildUserPrompt(args: {
     "",
     priorBlock,
     correctionBlock,
-    "WEBSITE_TEXT (clipped):",
+    "WEBSITE_TEXT (clipped, may include multiple pages):",
     extractedText || "(no text extracted)",
     "",
     "TASK:",
@@ -346,14 +487,6 @@ function pickModelFromPcc(cfg: any) {
   return m;
 }
 
-function safeJsonParse(s: string) {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-}
-
 export async function POST(req: Request) {
   try {
     const { clerkUserId } = await requireAuthed();
@@ -364,7 +497,6 @@ export async function POST(req: Request) {
 
     await requireMembership(clerkUserId, tenantId);
 
-    // Read website + prior ai_analysis from onboarding table
     const r = await db.execute(sql`
       select website, ai_analysis
       from tenant_onboarding
@@ -376,18 +508,16 @@ export async function POST(req: Request) {
     const websiteRaw = String(row?.website ?? "").trim();
     const website = normalizeUrl(websiteRaw);
 
-    // Extract text (or empty) with diagnostics
     const extracted = website
       ? await fetchWebsiteTextSmart(website)
-      : { extractedText: "", extractedTextPreview: "", fetchDebug: { attempted: [] as any[] } };
+      : { extractedText: "", extractedTextPreview: "", fetchDebug: { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 } };
 
     const extractedText = extracted.extractedText ?? "";
     const extractedTextPreview = extracted.extractedTextPreview ?? "";
-    const fetchDebug = extracted.fetchDebug ?? { attempted: [] };
+    const fetchDebug = extracted.fetchDebug ?? { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 };
 
     const priorAnalysis = row?.ai_analysis ?? null;
 
-    // PCC model selection (we’ll port prompts later)
     const cfg = await loadPlatformLlmConfig();
     const model = pickModelFromPcc(cfg);
 
@@ -423,7 +553,7 @@ export async function POST(req: Request) {
         businessGuess:
           extractedTextPreview && extractedTextPreview.length > 50
             ? "We fetched your website but the AI response was not usable. Please retry."
-            : "We couldn’t extract readable text from your website (it may be blocked or JS-rendered). Please describe your business in a sentence or two.",
+            : "We couldn’t extract readable text from your website (it may be blocked or JS-rendered). Please describe what you do and what you service (cars/boats/etc.).",
         fit: "maybe" as const,
         fitReason:
           extractedTextPreview && extractedTextPreview.length > 50
