@@ -32,7 +32,13 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
       and clerk_user_id = ${clerkUserId}
     limit 1
   `);
-  if (!r?.rows?.[0]?.ok) throw new Error("FORBIDDEN_TENANT");
+
+  const row =
+    Array.isArray(r) ? r[0] :
+    Array.isArray((r as any)?.rows) ? (r as any).rows[0] :
+    null;
+
+  if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
 function normalizeUrl(raw: string) {
