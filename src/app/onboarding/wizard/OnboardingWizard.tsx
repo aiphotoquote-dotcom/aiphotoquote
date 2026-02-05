@@ -1,4 +1,3 @@
-// src/app/onboarding/wizard/OnboardingWizard.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -14,14 +13,6 @@ type OnboardingState = {
   completed: boolean;
   website: string | null;
   aiAnalysis: any | null;
-
-  // derived from aiAnalysis.meta by the API
-  aiAnalysisStatus?: "idle" | "running" | "complete" | "error" | string;
-  aiAnalysisRound?: number;
-  aiAnalysisLastAction?: string | null;
-  aiAnalysisError?: string | null;
-  aiAnalysisConfidenceTarget?: number | null;
-  aiAnalysisUserCorrection?: string | null;
 
   error?: string;
   message?: string;
@@ -75,13 +66,16 @@ function getUrlParams() {
 
 function setUrlParams(next: { step?: number; mode?: Mode; tenantId?: string }) {
   const url = new URL(window.location.href);
+
   if (typeof next.step === "number") url.searchParams.set("step", String(safeStep(next.step)));
   if (next.mode) url.searchParams.set("mode", next.mode);
+
   if (typeof next.tenantId === "string") {
     const tid = next.tenantId.trim();
     if (tid) url.searchParams.set("tenantId", tid);
     else url.searchParams.delete("tenantId");
   }
+
   window.history.replaceState({}, "", url.toString());
 }
 
@@ -96,6 +90,17 @@ function buildIndustriesUrl(tenantId: string) {
   const qs = new URLSearchParams();
   qs.set("tenantId", tenantId);
   return `/api/onboarding/industries?${qs.toString()}`;
+}
+
+function getConfidence(aiAnalysis: any | null | undefined) {
+  const n = Number(aiAnalysis?.confidenceScore ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function needsConfirmation(aiAnalysis: any | null | undefined) {
+  const v = aiAnalysis?.needsConfirmation;
+  if (typeof v === "boolean") return v;
+  return getConfidence(aiAnalysis) < 0.8;
 }
 
 export default function OnboardingWizard() {
@@ -177,53 +182,59 @@ export default function OnboardingWizard() {
 
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
-    try {
-      const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          step: 1,
-          ...payload,
-          website: payload.website ? normalizeWebsiteInput(payload.website) : undefined,
-        }),
-      });
 
-      const j = await res.json().catch(() => null);
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
+    const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        step: 1,
+        ...payload,
+        website: payload.website ? normalizeWebsiteInput(payload.website) : undefined,
+      }),
+    });
 
-      const newTenantId = String(j.tenantId ?? "").trim();
-      if (newTenantId) setTenantInNav(newTenantId);
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Save failed (HTTP ${res.status})`);
 
-      await refresh({ tenantId: newTenantId || tenantId });
-      go(2);
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-      throw e;
-    }
+    const newTenantId = String(j.tenantId ?? "").trim();
+    if (newTenantId) setTenantInNav(newTenantId);
+
+    await refresh({ tenantId: newTenantId || tenantId });
+    go(2);
   }
 
-  async function runMockAnalysis(args?: { userCorrection?: string }) {
+  async function runWebsiteAnalysis() {
     setErr(null);
 
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
-    const nextRound = Math.max(1, Number(state?.aiAnalysisRound ?? state?.aiAnalysis?.meta?.round ?? 0) + 1 || 1);
-    const target = Number(state?.aiAnalysisConfidenceTarget ?? state?.aiAnalysis?.confidence?.target ?? 0.8) || 0.8;
-
     const res = await fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        tenantId: tid,
-        round: nextRound,
-        confidenceTarget: target,
-        userCorrection: args?.userCorrection ? String(args.userCorrection) : undefined,
-      }),
+      body: JSON.stringify({ tenantId: tid }),
     });
 
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Analyze failed (HTTP ${res.status})`);
+
+    await refresh({ tenantId: tid });
+  }
+
+  async function confirmWebsiteAnalysis(args: { answer: "yes" | "no"; feedback?: string }) {
+    setErr(null);
+
+    const tid = String(state?.tenantId ?? tenantId ?? "").trim();
+    if (!tid) throw new Error("NO_TENANT: missing tenantId for confirmation.");
+
+    const res = await fetch("/api/onboarding/confirm-website", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: tid, ...args }),
+    });
+
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Confirm failed (HTTP ${res.status})`);
 
     await refresh({ tenantId: tid });
   }
@@ -258,7 +269,6 @@ export default function OnboardingWizard() {
   }
 
   const existingUserContext = Boolean(state?.isAuthenticated ?? true);
-  const lastAction = String(state?.aiAnalysisLastAction ?? "").trim();
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -275,8 +285,6 @@ export default function OnboardingWizard() {
               Mode: <span className="font-mono">{mode}</span> {" • "}
               Tenant: <span className="font-mono">{displayTenantId}</span>
             </div>
-
-            {lastAction ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Last action: {lastAction}</div> : null}
           </div>
 
           <div className="shrink-0 text-right">
@@ -302,11 +310,8 @@ export default function OnboardingWizard() {
             <Step2
               website={state?.website || ""}
               aiAnalysis={state?.aiAnalysis}
-              analysisStatus={String(state?.aiAnalysisStatus ?? "")}
-              analysisRound={Number(state?.aiAnalysisRound ?? 0)}
-              confidenceTarget={Number(state?.aiAnalysisConfidenceTarget ?? state?.aiAnalysis?.confidence?.target ?? 0.8)}
-              onRun={() => runMockAnalysis()}
-              onSubmitCorrection={(text) => runMockAnalysis({ userCorrection: text })}
+              onRun={runWebsiteAnalysis}
+              onConfirm={confirmWebsiteAnalysis}
               onNext={() => go(3)}
               onBack={() => go(1)}
             />
@@ -423,38 +428,28 @@ function Step1({
 function Step2({
   website,
   aiAnalysis,
-  analysisStatus,
-  analysisRound,
-  confidenceTarget,
   onRun,
-  onSubmitCorrection,
+  onConfirm,
   onNext,
   onBack,
 }: {
   website: string;
   aiAnalysis: any | null | undefined;
-  analysisStatus: string;
-  analysisRound: number;
-  confidenceTarget: number;
   onRun: () => Promise<void>;
-  onSubmitCorrection: (text: string) => Promise<void>;
+  onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
   onNext: () => void;
   onBack: () => void;
 }) {
   const [running, setRunning] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [feedback, setFeedback] = useState("");
   const autoRanRef = useRef(false);
 
-  const summaryText = String(aiAnalysis?.businessSummary?.whatWeThinkYouDo ?? "").trim();
-  const services = Array.isArray(aiAnalysis?.businessSummary?.services) ? aiAnalysis.businessSummary.services : [];
-  const markets = Array.isArray(aiAnalysis?.businessSummary?.markets) ? aiAnalysis.businessSummary.markets : [];
-  const customers = Array.isArray(aiAnalysis?.businessSummary?.typicalCustomers) ? aiAnalysis.businessSummary.typicalCustomers : [];
+  const conf = getConfidence(aiAnalysis);
+  const mustConfirm = needsConfirmation(aiAnalysis);
 
-  const needsConfirmation = Boolean(aiAnalysis?.confidence?.needsConfirmation);
-  const confScore = Number(aiAnalysis?.confidence?.score ?? 0);
-  const target = Number(aiAnalysis?.confidence?.target ?? confidenceTarget ?? 0.8);
-
-  const [correction, setCorrection] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const businessGuess = String(aiAnalysis?.businessGuess ?? "").trim();
+  const questions: string[] = Array.isArray(aiAnalysis?.questions) ? aiAnalysis.questions : [];
 
   useEffect(() => {
     if (autoRanRef.current) return;
@@ -478,14 +473,11 @@ function Step2({
     };
   }, [website, aiAnalysis, onRun]);
 
-  const buttonLabel = aiAnalysis ? "Re-run AI analysis (mock)" : "Run AI analysis (mock)";
-  const disabled = running || analysisStatus === "running";
-
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">AI fit check</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        We’ll read your website (and your confirmation) to tailor setup.
+        We’ll scan your website to understand what you do, then confirm it with you.
       </div>
 
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
@@ -497,7 +489,7 @@ function Step2({
         <button
           type="button"
           className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white disabled:opacity-50"
-          disabled={disabled}
+          disabled={running}
           onClick={async () => {
             setRunning(true);
             try {
@@ -507,74 +499,99 @@ function Step2({
             }
           }}
         >
-          {disabled ? "Analyzing…" : buttonLabel}
+          {running ? "Analyzing…" : aiAnalysis ? "Re-run website analysis" : "Run website analysis"}
         </button>
 
         {aiAnalysis ? (
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-            <div className="font-semibold">What we think you do</div>
-            <div className="mt-2 text-sm">{summaryText || "—"}</div>
-
-            <div className="mt-3 grid gap-2 text-xs">
-              <div>
-                <span className="font-semibold">Confidence:</span>{" "}
-                <span className="font-mono">{confScore.toFixed(2)}</span>{" "}
-                <span className="text-emerald-900/70 dark:text-emerald-100/70">/ target</span>{" "}
-                <span className="font-mono">{target.toFixed(2)}</span>
-                {analysisRound ? (
-                  <span className="ml-2 text-emerald-900/70 dark:text-emerald-100/70">
-                    (round {analysisRound})
-                  </span>
-                ) : null}
+            <div className="flex items-center justify-between gap-3">
+              <div className="font-semibold">What we think you do</div>
+              <div className="text-xs">
+                Confidence: <span className="font-mono">{Math.round(conf * 100)}%</span>
               </div>
-
-              {services.length ? <div><span className="font-semibold">Services:</span> {services.join(", ")}</div> : null}
-              {markets.length ? <div><span className="font-semibold">Markets:</span> {markets.join(", ")}</div> : null}
-              {customers.length ? <div><span className="font-semibold">Customers:</span> {customers.join(", ")}</div> : null}
             </div>
 
-            {needsConfirmation ? (
-              <div className="mt-4 rounded-xl border border-emerald-300/60 bg-white/60 p-3 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black/20 dark:text-emerald-100">
-                <div className="font-semibold">Confirm or correct</div>
-                <div className="mt-1 text-xs opacity-80">
-                  Does the description above sound right? If not, correct us in 1–3 sentences.
-                </div>
+            <div className="mt-2 text-sm">{businessGuess || "Analysis returned no summary."}</div>
 
-                <textarea
-                  className="mt-3 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-emerald-400 dark:border-emerald-900/40 dark:bg-gray-950 dark:text-gray-100"
-                  rows={3}
-                  value={correction}
-                  onChange={(e) => setCorrection(e.target.value)}
-                  placeholder='Example: "We do custom boat upholstery and repair vinyl seating for pontoons and ski boats. We also do custom covers."'
-                />
+            {questions.length ? (
+              <div className="mt-3 text-xs opacity-90">
+                <div className="font-semibold">Quick check</div>
+                <ul className="mt-1 list-disc pl-5">
+                  {questions.slice(0, 4).map((q, i) => (
+                    <li key={i}>{String(q)}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
 
+            <div className="mt-4 rounded-xl border border-emerald-300/40 bg-white/60 p-3 dark:bg-black/20">
+              <div className="text-xs font-semibold">Does this sound correct?</div>
+
+              <div className="mt-2 grid gap-2 md:grid-cols-2">
                 <button
                   type="button"
-                  className="mt-3 w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                  disabled={submitting || correction.trim().length < 10}
+                  className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  disabled={confirming}
                   onClick={async () => {
-                    setSubmitting(true);
+                    setConfirming(true);
                     try {
-                      await onSubmitCorrection(correction.trim());
-                      setCorrection("");
+                      await onConfirm({ answer: "yes" });
+                      setFeedback("");
                     } finally {
-                      setSubmitting(false);
+                      setConfirming(false);
                     }
                   }}
                 >
-                  {submitting ? "Submitting…" : "Submit correction + re-analyze"}
+                  {confirming ? "Saving…" : "Yes, that’s right"}
+                </button>
+
+                <button
+                  type="button"
+                  className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 disabled:opacity-50 dark:text-emerald-100"
+                  disabled={confirming}
+                  onClick={async () => {
+                    setConfirming(true);
+                    try {
+                      await onConfirm({ answer: "no", feedback: feedback.trim() || undefined });
+                    } finally {
+                      setConfirming(false);
+                    }
+                  }}
+                >
+                  {confirming ? "Saving…" : "Not quite"}
                 </button>
               </div>
-            ) : (
-              <div className="mt-4 rounded-xl border border-emerald-300/40 bg-white/50 p-3 text-xs text-emerald-950 dark:border-emerald-900/40 dark:bg-black/20 dark:text-emerald-100">
-                Confidence is high enough — you can proceed.
-              </div>
-            )}
 
-            <div className="mt-4">
-              <div className="font-semibold">Raw result</div>
-              <pre className="mt-2 whitespace-pre-wrap break-words text-xs">{JSON.stringify(aiAnalysis, null, 2)}</pre>
+              <div className="mt-2">
+                <div className="text-xs text-emerald-950/80 dark:text-emerald-100/80">
+                  If not correct, tell us what you do (boats/cars/etc. + services). We’ll re-evaluate.
+                </div>
+                <textarea
+                  value={feedback}
+                  onChange={(e) => setFeedback(e.target.value)}
+                  rows={4}
+                  placeholder="Example: We paint fiberglass boats (topsides + hull), do gelcoat repair, and custom vinyl striping. We do not do upholstery."
+                  className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none dark:border-emerald-900/40 dark:bg-gray-950 dark:text-gray-100"
+                />
+              </div>
+
+              {mustConfirm ? (
+                <div className="mt-2 text-xs text-emerald-950/80 dark:text-emerald-100/80">
+                  We’ll ask for confirmation until confidence is high enough to categorize your business automatically.
+                </div>
+              ) : (
+                <div className="mt-2 text-xs text-emerald-950/80 dark:text-emerald-100/80">
+                  Nice — confidence looks good. You can continue to industry selection.
+                </div>
+              )}
             </div>
+
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs font-semibold opacity-90">Debug preview (text sample)</summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-snug">
+                {String(aiAnalysis?.extractedTextPreview ?? "").trim() || "(no preview)"}
+              </pre>
+            </details>
           </div>
         ) : (
           <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
@@ -591,13 +608,27 @@ function Step2({
         >
           Back
         </button>
-        <button
-          type="button"
-          className="rounded-2xl bg-black py-3 text-sm font-semibold text-white dark:bg-white dark:text-black"
-          onClick={onNext}
-        >
-          Continue
-        </button>
+
+        <div className="grid gap-2">
+          <button
+            type="button"
+            className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+            disabled={!aiAnalysis || mustConfirm}
+            onClick={onNext}
+            title={mustConfirm ? "Please confirm/correct the website analysis first." : ""}
+          >
+            Continue
+          </button>
+
+          <button
+            type="button"
+            className="rounded-2xl border border-gray-200 bg-white py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            disabled={!aiAnalysis}
+            onClick={onNext}
+          >
+            Continue anyway
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -640,6 +671,7 @@ function Step3({
 
       const serverSel = String(j.selectedKey ?? "").trim();
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
+
       const next =
         (serverSel && list.some((x) => x.key === serverSel) ? serverSel : "") ||
         (hasSuggested ? suggestedKey : "") ||

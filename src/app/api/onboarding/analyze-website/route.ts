@@ -1,4 +1,3 @@
-// src/app/api/onboarding/analyze-website/route.ts
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
@@ -21,13 +20,6 @@ function firstRow(r: any): any | null {
   return null;
 }
 
-function normalizeWebsiteForDisplay(raw: string) {
-  const s = safeTrim(raw);
-  if (!s) return "";
-  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
-  return s;
-}
-
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -46,183 +38,162 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-type AnalyzeReq = {
-  tenantId?: string;
-  round?: number;
-  confidenceTarget?: number;
-  userCorrection?: string;
-  force?: boolean;
-};
-
-type WebsiteAnalysis = {
-  businessSummary: {
-    whatWeThinkYouDo: string;
-    services: string[];
-    markets: string[];
-    typicalCustomers: string[];
-  };
-  fit: {
-    verdict: "good" | "maybe" | "not_sure" | "not_a_fit";
-    score: number; // 0-1
-    notes: string;
-  };
-  confidence: {
-    score: number; // 0-1
-    target: number; // 0-1
-    needsConfirmation: boolean;
-    reason: string;
-  };
-  suggestedIndustryKey: string;
-  suggestedIndustryLabel?: string;
-  detectedServices: string[];
-  billingSignals: string[];
-  notes: string;
-  analyzedAt: string;
-  source: "mock_v2";
-  modelUsed: string;
-  meta: {
-    round: number;
-    status: "idle" | "running" | "complete" | "error";
-    lastAction: string;
-    userCorrection: string | null;
-    website: string;
-    mode: "website_only" | "website_plus_user_confirmation";
-  };
-};
-
-function clamp01(n: number) {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(1, n));
+function normalizeWebsiteUrl(raw: string): string {
+  const s = safeTrim(raw);
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) return `https://${s}`;
+  return s;
 }
 
-function safeTarget(v: unknown) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 0.8;
-  return clamp01(n);
+function pickCandidatePages(baseUrl: string) {
+  // Keep it small and predictable
+  const u = new URL(baseUrl);
+  const origin = u.origin;
+  return [
+    origin,
+    `${origin}/services`,
+    `${origin}/service`,
+    `${origin}/about`,
+    `${origin}/contact`,
+    `${origin}/portfolio`,
+    `${origin}/gallery`,
+  ];
 }
 
-function safeRound(v: unknown) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 1;
-  return Math.max(1, Math.min(6, Math.floor(n)));
+async function fetchText(url: string, timeoutMs = 10000): Promise<string> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      cache: "no-store",
+      next: { revalidate: 0 },
+      signal: ctrl.signal,
+      headers: {
+        // Some sites behave better with a UA
+        "user-agent": "AIPhotoQuote-OnboardingBot/1.0",
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+
+    if (!res.ok) return "";
+
+    const ct = String(res.headers.get("content-type") ?? "").toLowerCase();
+    if (!ct.includes("text/html") && !ct.includes("application/xhtml") && !ct.includes("text/plain")) {
+      return "";
+    }
+
+    return await res.text();
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(t);
+  }
 }
 
-function isLikelyMarineFromWebsite(website: string) {
-  const s = website.toLowerCase();
-  return s.includes("boat") || s.includes("marine") || s.includes("yacht") || s.includes("dock");
+function stripHtmlToText(html: string): string {
+  if (!html) return "";
+  let s = html;
+
+  // remove scripts/styles
+  s = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ");
+  s = s.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
+
+  // remove nav/footer-ish blocks a bit (best-effort)
+  s = s.replace(/<nav\b[^<]*(?:(?!<\/nav>)<[^<]*)*<\/nav>/gi, " ");
+  s = s.replace(/<footer\b[^<]*(?:(?!<\/footer>)<[^<]*)*<\/footer>/gi, " ");
+
+  // collapse tags
+  s = s.replace(/<\/(p|div|br|li|h[1-6])>/gi, "\n");
+  s = s.replace(/<[^>]+>/g, " ");
+
+  // decode a couple common entities
+  s = s.replace(/&nbsp;/g, " ");
+  s = s.replace(/&amp;/g, "&");
+  s = s.replace(/&quot;/g, '"');
+  s = s.replace(/&#39;/g, "'");
+
+  // normalize whitespace
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/\n\s*\n\s*\n+/g, "\n\n");
+  return s.trim();
 }
 
-function mockInfer(website: string, userCorrection: string | null, target: number, round: number, modelUsed: string): WebsiteAnalysis {
-  const hasWebsite = Boolean(safeTrim(website));
-  const hasCorrection = Boolean(safeTrim(userCorrection ?? ""));
+function clampText(s: string, maxChars: number) {
+  const t = safeTrim(s);
+  if (t.length <= maxChars) return t;
+  return t.slice(0, maxChars) + "\n…(truncated)";
+}
 
-  const websiteDisp = normalizeWebsiteForDisplay(website);
+function scoreAndInfer(text: string) {
+  const t = text.toLowerCase();
 
-  // --- Mock “what we think you do”
-  // You can make this smarter later; for now we keep it deterministic and auditable.
-  let whatWeThinkYouDo = "";
-  let services: string[] = [];
-  let markets: string[] = [];
-  let customers: string[] = [];
+  const keywords = [
+    { k: ["upholstery", "reupholstery", "vinyl", "canvas", "marine upholstery"], tag: "upholstery" },
+    { k: ["boat", "marine", "yacht", "pontoon"], tag: "marine" },
+    { k: ["auto", "automotive", "car", "truck"], tag: "automotive" },
+    { k: ["paint", "painting", "gelcoat", "wrap", "bodywork"], tag: "paint" },
+    { k: ["detailing", "ceramic coating", "ppf"], tag: "detailing" },
+    { k: ["fabrication", "welding", "custom"], tag: "custom" },
+  ];
 
-  if (!hasWebsite) {
-    whatWeThinkYouDo =
-      "We didn’t detect a website. Based on your onboarding inputs, you appear to run a service business that could benefit from photo-based estimates.";
-    services = ["estimates from photos", "custom service work"];
-    markets = ["local / regional"];
-    customers = ["consumers", "small businesses"];
-  } else if (!hasCorrection) {
-    // Round 1: website-only
-    const marine = isLikelyMarineFromWebsite(websiteDisp);
-    whatWeThinkYouDo = marine
-      ? "From your website, it looks like you offer marine-related services — likely upholstery/repairs/custom work for boats and marine seating."
-      : "From your website, it looks like you run a service business that performs custom work and repairs where customers often request estimates before committing.";
-    services = marine
-      ? ["marine upholstery", "marine seating", "repairs", "custom work"]
-      : ["repairs", "custom work", "service estimates"];
-    markets = marine ? ["marinas", "coastal / lakes"] : ["local / regional"];
-    customers = marine ? ["boat owners", "marinas", "captains"] : ["consumers", "small businesses"];
-  } else {
-    // Round 2+: incorporate user correction
-    whatWeThinkYouDo =
-      `You confirmed/corrected your business as: "${safeTrim(userCorrection)}". ` +
-      "Based on that, we’ll tailor AI Photo Quote to your services and customer language.";
-    services = ["custom quoting", "photo-based estimating", "service fulfillment"];
-    markets = ["your operating region"];
-    customers = ["your target customers"];
+  const hits: string[] = [];
+  for (const group of keywords) {
+    if (group.k.some((x) => t.includes(x))) hits.push(group.tag);
   }
 
-  // --- Mock fit + confidence
-  let confidenceScore = 0.52;
-  let fitScore = 0.55;
-  let fitVerdict: WebsiteAnalysis["fit"]["verdict"] = "not_sure";
-  let fitNotes = "";
+  // base confidence
+  let confidence = 0.52;
+  if (text.length > 600) confidence += 0.12;
+  if (text.length > 2000) confidence += 0.10;
+  confidence += Math.min(0.18, hits.length * 0.04);
 
-  if (hasWebsite && !hasCorrection) {
-    confidenceScore = 0.78;
-    fitScore = 0.82;
-    fitVerdict = "good";
-    fitNotes = "Website signals a service business where photo-based estimates and consistent intake reduce back-and-forth.";
-  } else if (hasWebsite && hasCorrection) {
-    confidenceScore = 0.88; // “rises” after confirmation
-    fitScore = 0.86;
-    fitVerdict = "good";
-    fitNotes = "Your confirmation increased our confidence in the service scope and messaging.";
-  } else if (!hasWebsite && hasCorrection) {
-    confidenceScore = 0.74;
-    fitScore = 0.78;
-    fitVerdict = "maybe";
-    fitNotes = "Even without a website, your confirmation helps; we can still configure the intake and prompts.";
-  } else {
-    confidenceScore = 0.52;
-    fitScore = 0.62;
-    fitVerdict = "not_sure";
-    fitNotes = "We need either a website or a short confirmation from you to tailor the setup.";
-  }
+  confidence = Math.max(0.45, Math.min(0.88, confidence));
 
-  const needsConfirmation = confidenceScore < target;
-  const reason = needsConfirmation
-    ? "We need you to confirm/correct what we think you do to raise confidence before auto-configuring industry defaults."
-    : "Confidence is high enough to proceed with industry defaults.";
+  // suggested industry (simple mapping)
+  let suggestedIndustryKey = "service";
+  if (hits.includes("marine") && hits.includes("upholstery")) suggestedIndustryKey = "marine";
+  else if (hits.includes("upholstery")) suggestedIndustryKey = "upholstery";
+  else if (hits.includes("paint")) suggestedIndustryKey = "paint";
+  else if (hits.includes("detailing")) suggestedIndustryKey = "detailing";
+  else if (hits.includes("automotive")) suggestedIndustryKey = "automotive";
 
-  const suggestedIndustryKey = "marine"; // for now; later from PCC prompt/model
+  // build a friendly “what you do” line
+  const lines: string[] = [];
+  if (hits.includes("marine")) lines.push("boats / marine work");
+  if (hits.includes("automotive")) lines.push("cars / trucks");
+  if (hits.includes("upholstery")) lines.push("upholstery (seats, cushions, interiors)");
+  if (hits.includes("paint")) lines.push("painting / refinishing");
+  if (hits.includes("detailing")) lines.push("detailing / coatings");
+  if (hits.includes("custom")) lines.push("custom work");
+
+  const businessGuess =
+    lines.length > 0
+      ? `It looks like your business focuses on ${lines.join(", ")}.`
+      : `It looks like you run a service business, but I couldn’t confidently determine the exact specialty from the site text.`;
+
+  const detectedServices =
+    hits.includes("upholstery")
+      ? ["repairs", "custom upholstery", "replacement upholstery", "materials selection"]
+      : hits.includes("paint")
+      ? ["prep", "paint/refinish", "spot repairs", "custom color/finish"]
+      : ["estimates", "service work", "customer consultation"];
+
+  const questions: string[] = [];
+  questions.push("Does the description above sound accurate?");
+  if (!hits.includes("upholstery")) questions.push("Do you do upholstery (seats/cushions/interiors), or is your core service different?");
+  if (!hits.includes("paint")) questions.push("Do you do painting/refinishing, or is the work mostly repair/customization?");
+  if (!hits.includes("marine")) questions.push("Do you serve boats/marine customers, or is it mainly automotive/other?");
 
   return {
-    businessSummary: {
-      whatWeThinkYouDo,
-      services,
-      markets,
-      typicalCustomers: customers,
-    },
-    fit: {
-      verdict: fitVerdict,
-      score: clamp01(fitScore),
-      notes: fitNotes,
-    },
-    confidence: {
-      score: clamp01(confidenceScore),
-      target,
-      needsConfirmation,
-      reason,
-    },
+    confidenceScore: confidence,
     suggestedIndustryKey,
-    suggestedIndustryLabel: "Marine",
-    detectedServices: services,
-    billingSignals: ["estimate-based", "mixed"],
-    notes: hasWebsite
-      ? "Website suggests a service business that benefits from photo-based estimating."
-      : "No website provided; we’ll confirm details via your response.",
-    analyzedAt: new Date().toISOString(),
-    source: "mock_v2",
-    modelUsed,
-    meta: {
-      round,
-      status: "complete",
-      lastAction: "AI analysis complete.",
-      userCorrection: safeTrim(userCorrection) ? safeTrim(userCorrection) : null,
-      website: websiteDisp,
-      mode: hasCorrection ? "website_plus_user_confirmation" : "website_only",
-    },
+    businessGuess,
+    detectedServices,
+    questions,
+    tags: hits,
   };
 }
 
@@ -230,61 +201,111 @@ export async function POST(req: Request) {
   try {
     const { clerkUserId } = await requireAuthed();
 
-    const body = (await req.json().catch(() => null)) as AnalyzeReq | null;
+    const body = await req.json().catch(() => null);
     const tenantId = safeTrim(body?.tenantId);
     if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
 
     await requireMembership(clerkUserId, tenantId);
 
-    // Pull onboarding model from PCC LLM config (falls back to defaults if config missing)
+    // Pull onboarding model from PCC LLM config (for provenance; LLM wiring comes next)
     const cfg = await loadPlatformLlmConfig();
     const onboardingModel =
       String((cfg as any)?.models?.onboardingModel ?? "").trim() ||
       String((cfg as any)?.models?.estimatorModel ?? "").trim() ||
       "gpt-4o-mini";
 
-    const target = safeTarget(body?.confidenceTarget);
-    const userCorrection = safeTrim(body?.userCorrection);
-
-    // Read website + existing analysis meta (to auto-increment round if not provided)
-    const r0 = await db.execute(sql`
+    // Get saved website from tenant_onboarding
+    const r = await db.execute(sql`
       select website, ai_analysis
       from tenant_onboarding
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
-    const row0 = firstRow(r0);
-    const website = normalizeWebsiteForDisplay(String(row0?.website ?? "").trim());
 
-    const prev = row0?.ai_analysis ?? null;
-    const prevRound = Number(prev?.meta?.round ?? 0);
-    const nextRound = body?.round ? safeRound(body.round) : safeRound(prevRound + 1 || 1);
+    const row: any = (r as any)?.rows?.[0] ?? null;
+    const websiteRaw = safeTrim(row?.website);
+    const website = normalizeWebsiteUrl(websiteRaw);
 
-    // Mark status=running (so UI can show it if it refreshes mid-run)
-    const runningMeta = {
-      ...(typeof prev === "object" && prev ? prev : {}),
-      meta: {
-        ...(typeof prev?.meta === "object" && prev?.meta ? prev.meta : {}),
-        round: nextRound,
-        status: "running",
-        lastAction: "AI analysis running…",
-        userCorrection: userCorrection || null,
-        website,
-        mode: userCorrection ? "website_plus_user_confirmation" : "website_only",
-      },
+    // If no website, still return a helpful “needsConfirmation”
+    if (!website) {
+      const mockNoWebsite = {
+        fit: "unknown",
+        confidenceScore: 0.52,
+        needsConfirmation: true,
+        businessGuess:
+          "No website was provided, so I can’t auto-detect what you do yet. Tell me what you service (boats/cars/etc.) and what kind of work you perform.",
+        detectedServices: [],
+        suggestedIndustryKey: "service",
+        questions: ["What kind of work do you do (short description)?", "Who do you typically serve (boats/cars/homes/other)?"],
+        analyzedAt: new Date().toISOString(),
+        source: "website_fetch_v1",
+        modelUsed: onboardingModel,
+        website: null,
+        pagesSampled: [],
+        extractedTextPreview: "",
+      };
+
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
+        values (${tenantId}::uuid, ${JSON.stringify(mockNoWebsite)}::jsonb, 2, false, now(), now())
+        on conflict (tenant_id) do update
+        set ai_analysis = excluded.ai_analysis,
+            current_step = greatest(tenant_onboarding.current_step, 2),
+            updated_at = now()
+      `);
+
+      return NextResponse.json({ ok: true, tenantId, aiAnalysis: mockNoWebsite }, { status: 200 });
+    }
+
+    // Fetch a few pages and extract text
+    const pages = pickCandidatePages(website);
+    const fetched: { url: string; htmlLen: number; textLen: number }[] = [];
+    let combinedText = "";
+
+    for (const u of pages) {
+      const html = await fetchText(u);
+      const text = stripHtmlToText(html);
+
+      fetched.push({ url: u, htmlLen: html.length, textLen: text.length });
+
+      // only add meaningful text
+      if (text.length > 120) {
+        combinedText += "\n\n" + text;
+      }
+
+      // keep bounded
+      if (combinedText.length > 20000) break;
+    }
+
+    combinedText = clampText(combinedText, 20000);
+
+    const inferred = scoreAndInfer(combinedText);
+
+    const needsConfirmation = inferred.confidenceScore < 0.8;
+
+    const analysis = {
+      fit: inferred.tags.length > 0 ? true : "unknown",
+      confidenceScore: inferred.confidenceScore,
+      needsConfirmation,
+
+      // “What we think you do”
+      businessGuess: inferred.businessGuess,
+      detectedServices: inferred.detectedServices,
+
+      // Industry guess (Step 3 uses this)
+      suggestedIndustryKey: inferred.suggestedIndustryKey,
+
+      // Ask the user to confirm/correct
+      questions: inferred.questions,
+
+      analyzedAt: new Date().toISOString(),
+      source: "website_fetch_v1",
+      modelUsed: onboardingModel,
+
+      website,
+      pagesSampled: fetched.map((x) => x.url),
+      extractedTextPreview: clampText(combinedText, 1800),
     };
-
-    await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${JSON.stringify(runningMeta)}::jsonb, 2, false, now(), now())
-      on conflict (tenant_id) do update
-      set ai_analysis = excluded.ai_analysis,
-          current_step = greatest(tenant_onboarding.current_step, 2),
-          updated_at = now()
-    `);
-
-    // Build the new analysis (mock v2)
-    const analysis = mockInfer(website, userCorrection || null, target, nextRound, onboardingModel);
 
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
@@ -295,7 +316,7 @@ export async function POST(req: Request) {
           updated_at = now()
     `);
 
-    return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis, round: nextRound }, { status: 200 });
+    return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
