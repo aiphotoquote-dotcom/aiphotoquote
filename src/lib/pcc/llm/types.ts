@@ -7,12 +7,12 @@ export type PlatformLlmConfig = {
   version: number;
 
   models: {
+    // Used for onboarding website analysis (/api/onboarding/*)
+    onboardingModel?: string;
+
     // Used for estimate + QA in /api/quote/submit
     estimatorModel: string;
     qaModel: string;
-
-    // ✅ NEW: Used for onboarding website analysis (/api/onboarding/analyze-website, /confirm-website)
-    onboardingModel?: string;
 
     // Used for /api/quote/render (optional)
     renderModel?: string;
@@ -28,11 +28,15 @@ export type PlatformLlmConfig = {
     // Optional extra preamble prepended to BOTH system prompts
     extraSystemPreamble?: string;
 
-    // ✅ PCC-owned render prompt pieces
+    // used by /api/quote/render
     renderPromptPreamble?: string;
+
+    // template used by /api/quote/render
+    // Supports placeholders:
+    // {renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}
     renderPromptTemplate?: string;
 
-    // ✅ PCC-owned style preset text; tenant selects key via ai-policy
+    // PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
     renderStylePresets?: {
       photoreal?: string;
       clean_oem?: string;
@@ -45,7 +49,9 @@ export type PlatformLlmConfig = {
     piiHandling?: PiiHandling;
 
     blockedTopics: string[];
+
     maxQaQuestions: number;
+
     maxOutputTokens?: number;
   };
 
@@ -56,13 +62,12 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
   return {
     version: 1,
     models: {
+      // ✅ default onboarding model (can be overridden in PCC UI later)
+      onboardingModel: "gpt-4.1",
+
       estimatorModel: "gpt-4o-mini",
       qaModel: "gpt-4o-mini",
 
-      // ✅ default onboarding model (can be overridden in PCC UI)
-      onboardingModel: "gpt-4.1",
-
-      // NOTE: stored value; image generation is separate.
       renderModel: "gpt-image-1",
     },
     prompts: {
