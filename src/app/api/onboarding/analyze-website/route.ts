@@ -70,9 +70,82 @@ function stripHtmlToText(html: string) {
   return decoded.replace(/\s+/g, " ").trim();
 }
 
-async function fetchWebsiteText(url: string) {
+function buildCandidateUrls(raw: string): string[] {
+  const s = safeTrim(raw);
+  if (!s) return [];
+
+  // If they provided a full URL, also try a couple normalized variants.
+  // If they provided only a host, generate http/https and www/no-www.
+  let host = s;
+  let hadScheme = false;
+
+  if (/^https?:\/\//i.test(host)) {
+    hadScheme = true;
+    try {
+      const u = new URL(host);
+      host = u.host || host.replace(/^https?:\/\//i, "");
+    } catch {
+      host = host.replace(/^https?:\/\//i, "");
+    }
+  }
+
+  host = host.replace(/\/+$/g, "");
+  host = host.replace(/^www\./i, (m) => m.toLowerCase()); // normalize
+
+  const bareHost = host.replace(/^www\./i, "");
+  const wwwHost = bareHost.startsWith("www.") ? bareHost : `www.${bareHost}`;
+
+  // Prefer https first
+  const candidates = [
+    `https://${bareHost}`,
+    `https://${wwwHost}`,
+    `http://${bareHost}`,
+    `http://${wwwHost}`,
+  ];
+
+  // If original was a full URL, try it first (with path)
+  if (hadScheme) {
+    candidates.unshift(normalizeUrl(s));
+  }
+
+  // Dedup while preserving order
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    const key = c.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
+}
+
+type FetchDebug = {
+  attempted: Array<{
+    url: string;
+    ok: boolean;
+    status: number;
+    statusText?: string;
+    contentType: string;
+    finalUrl?: string;
+    bytes: number;
+    extractedChars: number;
+    note?: string;
+  }>;
+  chosenUrl?: string;
+  chosenFinalUrl?: string;
+  chosenStatus?: number;
+  chosenContentType?: string;
+  chosenExtractedChars?: number;
+};
+
+async function fetchOne(url: string) {
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 10_000);
+  const t = setTimeout(() => controller.abort(), 12_000);
+
+  // Realistic browser-ish headers (many sites will serve empty/blocked HTML to bot UAs)
+  const UA =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
   try {
     const res = await fetch(url, {
@@ -80,8 +153,12 @@ async function fetchWebsiteText(url: string) {
       redirect: "follow",
       signal: controller.signal,
       headers: {
-        "user-agent": "AIPhotoQuoteBot/1.0 (+https://aiphotoquote.com)",
-        accept: "text/html,application/xhtml+xml",
+        "user-agent": UA,
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+        "cache-control": "no-cache",
+        pragma: "no-cache",
+        // NOTE: Adding sec-fetch headers can help sometimes, but can also hurt.
       },
     });
 
@@ -89,42 +166,122 @@ async function fetchWebsiteText(url: string) {
     const isHtml = ct.includes("text/html") || ct.includes("application/xhtml+xml");
 
     const raw = await res.text().catch(() => "");
+    const bytes = Buffer.byteLength(raw || "", "utf8");
+
     const text = isHtml ? stripHtmlToText(raw) : raw;
-    // Keep a reasonable budget for the model
     const clipped = clamp(text, 12_000);
+
+    // If the site is JS-rendered, stripped text can be tiny.
+    // We still return it, but mark it for diagnostics.
+    const extractedChars = clipped.length;
+
+    const finalUrl = (res as any)?.url ? String((res as any).url) : undefined;
 
     return {
       ok: res.ok,
       status: res.status,
+      statusText: (res as any)?.statusText ? String((res as any).statusText) : undefined,
       contentType: ct,
+      finalUrl,
+      rawBytes: bytes,
       extractedText: clipped,
       extractedTextPreview: clamp(clipped, 900),
+      note:
+        !res.ok
+          ? "HTTP not ok"
+          : extractedChars < 200
+          ? "Very little extractable text (JS-rendered site or blocking likely)"
+          : undefined,
     };
   } finally {
     clearTimeout(t);
   }
 }
 
-const AnalysisSchema = z.object({
-  // Explain back to user what we think they do
-  businessGuess: z.string().min(1),
+async function fetchWebsiteTextSmart(rawUrl: string) {
+  const candidates = buildCandidateUrls(rawUrl);
+  const debug: FetchDebug = { attempted: [] };
 
-  // Whether AIPhotoQuote is a good fit and why
+  let best: any | null = null;
+
+  for (const url of candidates) {
+    try {
+      const r = await fetchOne(url);
+
+      debug.attempted.push({
+        url,
+        ok: Boolean(r.ok),
+        status: Number(r.status ?? 0),
+        statusText: r.statusText,
+        contentType: String(r.contentType ?? ""),
+        finalUrl: r.finalUrl,
+        bytes: Number(r.rawBytes ?? 0),
+        extractedChars: Number(r.extractedText?.length ?? 0),
+        note: r.note,
+      });
+
+      // Choose first successful response with meaningful text.
+      if (r.ok && (r.extractedText?.length ?? 0) >= 200) {
+        best = r;
+        break;
+      }
+
+      // Otherwise, keep the "best so far":
+      // - any OK response beats non-OK
+      // - higher extracted chars beats lower
+      if (!best) best = r;
+      else {
+        const bestOk = Boolean(best.ok);
+        const curOk = Boolean(r.ok);
+        const bestLen = Number(best.extractedText?.length ?? 0);
+        const curLen = Number(r.extractedText?.length ?? 0);
+
+        if (curOk && !bestOk) best = r;
+        else if (curOk === bestOk && curLen > bestLen) best = r;
+      }
+    } catch (e: any) {
+      debug.attempted.push({
+        url,
+        ok: false,
+        status: 0,
+        statusText: "",
+        contentType: "",
+        bytes: 0,
+        extractedChars: 0,
+        note: `Fetch error: ${e?.message ?? String(e)}`,
+      });
+    }
+  }
+
+  if (!best) {
+    return {
+      extractedText: "",
+      extractedTextPreview: "",
+      fetchDebug: debug,
+    };
+  }
+
+  debug.chosenUrl = candidates[0] || rawUrl;
+  debug.chosenFinalUrl = best.finalUrl;
+  debug.chosenStatus = best.status;
+  debug.chosenContentType = best.contentType;
+  debug.chosenExtractedChars = Number(best.extractedText?.length ?? 0);
+
+  return {
+    extractedText: String(best.extractedText ?? ""),
+    extractedTextPreview: String(best.extractedTextPreview ?? ""),
+    fetchDebug: debug,
+  };
+}
+
+const AnalysisSchema = z.object({
+  businessGuess: z.string().min(1),
   fit: z.enum(["good", "maybe", "poor"]),
   fitReason: z.string().min(1),
-
-  // Industry categorization guess
   suggestedIndustryKey: z.string().min(1),
-
-  // Short, human, actionable questions to confirm
   questions: z.array(z.string()).min(1).max(6),
-
-  // Confidence 0..1 (we show as %)
   confidenceScore: z.number().min(0).max(1),
-
-  // If low confidence, we keep asking
   needsConfirmation: z.boolean(),
-
   detectedServices: z.array(z.string()).default([]),
   billingSignals: z.array(z.string()).default([]),
 });
@@ -189,6 +346,14 @@ function pickModelFromPcc(cfg: any) {
   return m;
 }
 
+function safeJsonParse(s: string) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const { clerkUserId } = await requireAuthed();
@@ -199,7 +364,7 @@ export async function POST(req: Request) {
 
     await requireMembership(clerkUserId, tenantId);
 
-    // Read website from onboarding table
+    // Read website + prior ai_analysis from onboarding table
     const r = await db.execute(sql`
       select website, ai_analysis
       from tenant_onboarding
@@ -211,10 +376,14 @@ export async function POST(req: Request) {
     const websiteRaw = String(row?.website ?? "").trim();
     const website = normalizeUrl(websiteRaw);
 
-    // Extract text (or empty)
-    const extracted = website ? await fetchWebsiteText(website) : null;
-    const extractedText = extracted?.extractedText ?? "";
-    const extractedTextPreview = extracted?.extractedTextPreview ?? "";
+    // Extract text (or empty) with diagnostics
+    const extracted = website
+      ? await fetchWebsiteTextSmart(website)
+      : { extractedText: "", extractedTextPreview: "", fetchDebug: { attempted: [] as any[] } };
+
+    const extractedText = extracted.extractedText ?? "";
+    const extractedTextPreview = extracted.extractedTextPreview ?? "";
+    const fetchDebug = extracted.fetchDebug ?? { attempted: [] };
 
     const priorAnalysis = row?.ai_analysis ?? null;
 
@@ -246,28 +415,37 @@ export async function POST(req: Request) {
     });
 
     const content = resp.choices?.[0]?.message?.content ?? "";
-    const parsed = AnalysisSchema.safeParse(JSON.parse(content));
+    const json = safeJsonParse(content);
+    const parsed = json ? AnalysisSchema.safeParse(json) : null;
 
-    if (!parsed.success) {
-      // store something helpful for debugging
+    if (!parsed || !parsed.success) {
       const fallback = {
-        businessGuess: "We couldn’t parse the analysis result. Please retry.",
-        fit: "maybe",
-        fitReason: "Model output was not valid for our schema.",
+        businessGuess:
+          extractedTextPreview && extractedTextPreview.length > 50
+            ? "We fetched your website but the AI response was not usable. Please retry."
+            : "We couldn’t extract readable text from your website (it may be blocked or JS-rendered). Please describe your business in a sentence or two.",
+        fit: "maybe" as const,
+        fitReason:
+          extractedTextPreview && extractedTextPreview.length > 50
+            ? "Model output was not valid for our schema."
+            : "We didn’t get enough website text to confidently evaluate fit.",
         suggestedIndustryKey: "service",
         questions: [
           "What do you work on most (cars/trucks/boats/other)?",
           "What are your top 3 services?",
           "Do you mostly do upgrades, repairs, or both?",
         ],
-        confidenceScore: 0.3,
+        confidenceScore: 0.25,
         needsConfirmation: true,
         detectedServices: [],
         billingSignals: [],
         analyzedAt: new Date().toISOString(),
-        source: "llm_v1_parse_fail",
+        source: json ? "llm_v1_parse_fail" : "llm_v1_invalid_json",
         modelUsed: model,
-        extractedTextPreview,
+        extractedTextPreview: extractedTextPreview || "",
+        website: website || null,
+        fetchDebug,
+        rawModelOutputPreview: clamp(content || "", 1200),
       };
 
       await db.execute(sql`
@@ -287,8 +465,9 @@ export async function POST(req: Request) {
       analyzedAt: new Date().toISOString(),
       source: "llm_v1",
       modelUsed: model,
-      extractedTextPreview,
+      extractedTextPreview: extractedTextPreview || "",
       website: website || null,
+      fetchDebug,
     };
 
     await db.execute(sql`

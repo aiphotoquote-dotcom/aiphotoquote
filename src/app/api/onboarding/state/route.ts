@@ -90,6 +90,64 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   return { appUserId };
 }
 
+function getConfidence(ai: any): number {
+  const n = Number(ai?.confidenceScore ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function getNeedsConfirmation(ai: any): boolean {
+  const v = ai?.needsConfirmation;
+  if (typeof v === "boolean") return v;
+  return getConfidence(ai) < 0.8;
+}
+
+function getLastCorrection(ai: any): any | null {
+  const hist = Array.isArray(ai?.confirmationHistory) ? ai.confirmationHistory : [];
+  // find the most recent "no" (correction) entry
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const h = hist[i];
+    if (h && h.answer === "no") return h;
+  }
+  return null;
+}
+
+function deriveAiMeta(aiAnalysis: any | null) {
+  const target = 0.8;
+
+  if (!aiAnalysis) {
+    return {
+      aiAnalysisStatus: "idle",
+      aiAnalysisRound: 0,
+      aiAnalysisLastAction: "",
+      aiAnalysisError: null as string | null,
+      aiAnalysisConfidenceTarget: target,
+      aiAnalysisUserCorrection: null as any | null,
+    };
+  }
+
+  const conf = getConfidence(aiAnalysis);
+  const needs = getNeedsConfirmation(aiAnalysis);
+  const hist = Array.isArray(aiAnalysis?.confirmationHistory) ? aiAnalysis.confirmationHistory : [];
+  const lastCorr = getLastCorrection(aiAnalysis);
+  const confirmed = Boolean(aiAnalysis?.confirmedByUser) || (!needs && conf >= target);
+
+  const round = Math.max(1, hist.length ? hist.length : 1);
+
+  let lastAction = "";
+  if (confirmed) lastAction = "AI analysis complete.";
+  else if (needs) lastAction = "Waiting for your confirmation/correction.";
+  else lastAction = "AI analysis complete.";
+
+  return {
+    aiAnalysisStatus: "complete",
+    aiAnalysisRound: round,
+    aiAnalysisLastAction: lastAction,
+    aiAnalysisError: null as string | null,
+    aiAnalysisConfidenceTarget: target,
+    aiAnalysisUserCorrection: lastCorr,
+  };
+}
+
 async function readTenantOnboarding(tenantId: string) {
   const r = await db.execute(sql`
     select
@@ -107,14 +165,7 @@ async function readTenantOnboarding(tenantId: string) {
   const row = firstRow(r);
 
   const aiAnalysis = row?.ai_analysis ?? null;
-  const meta = aiAnalysis?.meta ?? null;
-
-  const aiAnalysisStatus = String(meta?.status ?? "").trim() || (aiAnalysis ? "complete" : "idle");
-  const aiAnalysisRound = Number(meta?.round ?? 0) || (aiAnalysis ? 1 : 0);
-  const aiAnalysisLastAction = String(meta?.lastAction ?? "").trim() || (aiAnalysis ? "AI analysis complete." : "");
-  const aiAnalysisError = String(meta?.error ?? "").trim() || null;
-  const aiAnalysisConfidenceTarget = Number(aiAnalysis?.confidence?.target ?? 0.8) || 0.8;
-  const aiAnalysisUserCorrection = meta?.userCorrection ?? null;
+  const derived = deriveAiMeta(aiAnalysis);
 
   return {
     tenantName: row?.tenant_name ?? null,
@@ -122,14 +173,7 @@ async function readTenantOnboarding(tenantId: string) {
     completed: row?.completed ?? false,
     website: row?.website ?? null,
     aiAnalysis: aiAnalysis ?? null,
-
-    // derived for UI convenience
-    aiAnalysisStatus,
-    aiAnalysisRound,
-    aiAnalysisLastAction,
-    aiAnalysisError,
-    aiAnalysisConfidenceTarget,
-    aiAnalysisUserCorrection,
+    ...derived,
   };
 }
 
@@ -150,7 +194,6 @@ export async function GET(req: Request) {
           completed: false,
           website: null,
           aiAnalysis: null,
-
           aiAnalysisStatus: "idle",
           aiAnalysisRound: 0,
           aiAnalysisLastAction: "",
