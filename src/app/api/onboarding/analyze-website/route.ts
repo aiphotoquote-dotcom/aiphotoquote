@@ -1,4 +1,5 @@
 // src/app/api/onboarding/analyze-website/route.ts
+
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
@@ -18,6 +19,13 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function firstRow(r: any): any | null {
+  if (!r) return null;
+  if (Array.isArray(r)) return r[0] ?? null;
+  if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
+  return null;
+}
+
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -33,11 +41,7 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
     limit 1
   `);
 
-  const row =
-    Array.isArray(r) ? r[0] :
-    Array.isArray((r as any)?.rows) ? (r as any).rows[0] :
-    null;
-
+  const row = firstRow(r);
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
@@ -129,8 +133,10 @@ export async function POST(req: Request) {
       limit 1
     `);
 
-    const websiteRaw = String(r?.rows?.[0]?.website ?? "").trim();
+    const row = firstRow(r);
+    const websiteRaw = String(row?.website ?? "").trim();
     const website = normalizeUrl(websiteRaw);
+
     if (!website) {
       return NextResponse.json(
         { ok: false, error: "NO_WEBSITE", message: "No website on file." },
@@ -154,14 +160,8 @@ export async function POST(req: Request) {
       temperature: 0.2,
       response_format: { type: "json_object" },
       input: [
-        {
-          role: "system",
-          content: buildSystemPrompt(),
-        },
-        {
-          role: "user",
-          content: buildUserPrompt(website),
-        },
+        { role: "system", content: buildSystemPrompt() },
+        { role: "user", content: buildUserPrompt(website) },
       ],
     });
 
