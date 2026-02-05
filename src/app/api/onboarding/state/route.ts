@@ -22,11 +22,16 @@ function safeMode(v: unknown): Mode {
   return "new";
 }
 
+// Drizzle RowList can be array-like; avoid `.rows`
 function firstRow(r: any): any | null {
-  if (!r) return null;
-  if (Array.isArray(r)) return r[0] ?? null;
-  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
-  return null;
+  try {
+    if (!r) return null;
+    if (Array.isArray(r)) return r[0] ?? null;
+    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function slugify(name: string) {
@@ -90,38 +95,91 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   return { appUserId };
 }
 
-/**
- * ✅ Derive UI-friendly analysis fields from the persisted ai_analysis.meta
- * We DO NOT infer anything from confidenceScore/needsConfirmation anymore —
- * analyze-website + confirm-website now own the lifecycle state via meta.status.
- */
+/* --------------------- AI meta derivation --------------------- */
+
+function getConfidence(ai: any): number {
+  const n = Number(ai?.confidenceScore ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function getNeedsConfirmation(ai: any): boolean {
+  const v = ai?.needsConfirmation;
+  if (typeof v === "boolean") return v;
+  return getConfidence(ai) < 0.8;
+}
+
+function getLastCorrectionFallback(ai: any): any | null {
+  const hist = Array.isArray(ai?.confirmationHistory) ? ai.confirmationHistory : [];
+  for (let i = hist.length - 1; i >= 0; i--) {
+    const h = hist[i];
+    if (h && h.answer === "no") return h;
+  }
+  return null;
+}
+
 function deriveAiMeta(aiAnalysis: any | null) {
   const target = 0.8;
 
+  if (!aiAnalysis) {
+    return {
+      aiAnalysisStatus: "idle",
+      aiAnalysisRound: 0,
+      aiAnalysisLastAction: "",
+      aiAnalysisError: null as string | null,
+      aiAnalysisConfidenceTarget: target,
+      aiAnalysisUserCorrection: null as any | null,
+    };
+  }
+
   const meta = aiAnalysis?.meta && typeof aiAnalysis.meta === "object" ? aiAnalysis.meta : {};
-  const statusRaw = String(meta?.status ?? "").trim().toLowerCase();
 
+  // ✅ Prefer meta.* from our new analyze/confirm handlers
+  const metaStatus = String(meta?.status ?? "").trim().toLowerCase(); // running | complete | error
   const status =
-    statusRaw === "running" || statusRaw === "complete" || statusRaw === "error"
-      ? statusRaw
-      : aiAnalysis
-      ? "complete"
-      : "idle";
+    metaStatus === "running" || metaStatus === "complete" || metaStatus === "error"
+      ? metaStatus
+      : "complete";
 
-  const round = Number(meta?.round ?? 0) || (aiAnalysis ? 1 : 0);
+  const roundRaw = Number(meta?.round ?? NaN);
+  const round =
+    Number.isFinite(roundRaw) && roundRaw > 0
+      ? roundRaw
+      : (() => {
+          const hist = Array.isArray(aiAnalysis?.confirmationHistory) ? aiAnalysis.confirmationHistory : [];
+          return Math.max(1, hist.length ? hist.length : 1);
+        })();
 
   const lastAction = String(meta?.lastAction ?? "").trim();
-  const err = safeTrim(meta?.error);
+  const error = String(meta?.error ?? "").trim();
+
+  // keep backwards compat for "needsConfirmation"
+  const conf = getConfidence(aiAnalysis);
+  const needs = getNeedsConfirmation(aiAnalysis);
+
+  const userCorrection = meta?.userCorrection ?? getLastCorrectionFallback(aiAnalysis);
+
+  // If meta doesn't have lastAction, derive something sane
+  const derivedLastAction =
+    lastAction ||
+    (status === "running"
+      ? "Analyzing website…"
+      : status === "error"
+      ? "AI analysis failed."
+      : needs
+      ? "Waiting for your confirmation/correction."
+      : "AI analysis complete.");
 
   return {
     aiAnalysisStatus: status,
     aiAnalysisRound: round,
-    aiAnalysisLastAction: lastAction,
-    aiAnalysisError: err || null,
+    aiAnalysisLastAction: derivedLastAction,
+    aiAnalysisError: error || (status === "error" ? "Unknown error" : null),
     aiAnalysisConfidenceTarget: target,
-    aiAnalysisUserCorrection: meta?.userCorrection ?? null,
+    aiAnalysisUserCorrection: userCorrection ?? null,
   };
 }
+
+/* --------------------- db read --------------------- */
 
 async function readTenantOnboarding(tenantId: string) {
   const r = await db.execute(sql`
@@ -144,20 +202,22 @@ async function readTenantOnboarding(tenantId: string) {
 
   return {
     tenantName: row?.tenant_name ?? null,
-    currentStep: Number(row?.current_step ?? 1) || 1,
-    completed: Boolean(row?.completed ?? false),
+    currentStep: row?.current_step ?? 1,
+    completed: row?.completed ?? false,
     website: row?.website ?? null,
     aiAnalysis: aiAnalysis ?? null,
     ...derived,
   };
 }
 
+/* --------------------- handlers --------------------- */
+
 export async function GET(req: Request) {
   try {
     const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
-    // ✅ mode=new with NO tenantId -> start a fresh onboarding session (no tenant created yet)
+    // ✅ mode=new with NO tenantId -> start fresh onboarding session
     if (mode === "new" && !tenantId) {
       return NextResponse.json(
         {
@@ -298,7 +358,6 @@ export async function POST(req: Request) {
       `);
     }
 
-    // Ensure onboarding row exists and advances to step 2
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
