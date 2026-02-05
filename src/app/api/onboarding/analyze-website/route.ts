@@ -11,16 +11,11 @@ import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/* --------------------- utils --------------------- */
+
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
-}
-
-function firstRow(r: any): any | null {
-  if (!r) return null;
-  if (Array.isArray(r)) return r[0] ?? null;
-  if (Array.isArray(r.rows)) return r.rows[0] ?? null;
-  return null;
 }
 
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
@@ -37,14 +32,7 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
       and clerk_user_id = ${clerkUserId}
     limit 1
   `);
-  const row = firstRow(r);
-  if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
-}
-
-function clamp(s: string, max: number) {
-  const t = String(s ?? "");
-  if (t.length <= max) return t;
-  return t.slice(0, max);
+  if (!r?.rows?.[0]?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
 function normalizeUrl(raw: string) {
@@ -52,57 +40,6 @@ function normalizeUrl(raw: string) {
   if (!s) return "";
   if (!/^https?:\/\//i.test(s)) return `https://${s}`;
   return s;
-}
-
-function stripHtmlToText(html: string) {
-  const withoutScripts = html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ");
-  const noTags = withoutScripts.replace(/<[^>]+>/g, " ");
-  const decoded = noTags
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
-  return decoded.replace(/\s+/g, " ").trim();
-}
-
-function buildCandidateBaseUrls(raw: string): string[] {
-  const s = safeTrim(raw);
-  if (!s) return [];
-
-  let host = s;
-  let hadScheme = false;
-
-  if (/^https?:\/\//i.test(host)) {
-    hadScheme = true;
-    try {
-      const u = new URL(host);
-      host = u.host || host.replace(/^https?:\/\//i, "");
-    } catch {
-      host = host.replace(/^https?:\/\//i, "");
-    }
-  }
-
-  host = host.replace(/\/+$/g, "");
-  const bareHost = host.replace(/^www\./i, "");
-  const wwwHost = `www.${bareHost}`;
-
-  const candidates = [`https://${bareHost}`, `https://${wwwHost}`, `http://${bareHost}`, `http://${wwwHost}`];
-
-  if (hadScheme) candidates.unshift(normalizeUrl(s));
-
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const c of candidates) {
-    const key = c.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(c);
-  }
-  return out;
 }
 
 function safeJsonParse(s: string) {
@@ -113,292 +50,7 @@ function safeJsonParse(s: string) {
   }
 }
 
-type Attempt = {
-  url: string;
-  ok: boolean;
-  status: number;
-  statusText?: string;
-  contentType: string;
-  finalUrl?: string;
-  bytes: number;
-  extractedChars: number;
-  note?: string;
-};
-
-type FetchDebug = {
-  attempted: Attempt[];
-  pagesAttempted: Attempt[];
-  pagesUsed: string[];
-  chosenFinalUrl?: string;
-  chosenContentType?: string;
-  chosenStatus?: number;
-  aggregateChars: number;
-};
-
-async function fetchText(url: string, timeoutMs = 12_000) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-
-  const UA =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      signal: controller.signal,
-      headers: {
-        "user-agent": UA,
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
-        "cache-control": "no-cache",
-        pragma: "no-cache",
-      },
-    });
-
-    const ct = String(res.headers.get("content-type") ?? "");
-    const isHtml =
-      ct.includes("text/html") ||
-      ct.includes("application/xhtml+xml") ||
-      ct.includes("application/xml") ||
-      ct.includes("text/xml");
-
-    const raw = await res.text().catch(() => "");
-    const bytes = Buffer.byteLength(raw || "", "utf8");
-
-    const text = isHtml ? stripHtmlToText(raw) : raw;
-    const clipped = clamp(text, 12_000);
-
-    const extractedChars = clipped.length;
-    const finalUrl = (res as any)?.url ? String((res as any).url) : undefined;
-
-    return {
-      ok: res.ok,
-      status: res.status,
-      statusText: (res as any)?.statusText ? String((res as any).statusText) : undefined,
-      contentType: ct,
-      finalUrl,
-      rawBytes: bytes,
-      extractedText: clipped,
-      note: !res.ok
-        ? "HTTP not ok"
-        : extractedChars < 200
-        ? "Very little extractable text (JS-rendered site or blocking likely)"
-        : undefined,
-    };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-function sameHost(a: string, b: string) {
-  try {
-    const A = new URL(a);
-    const B = new URL(b);
-    return A.host === B.host;
-  } catch {
-    return false;
-  }
-}
-
-function joinUrl(base: string, path: string) {
-  try {
-    const u = new URL(base);
-    u.pathname = "/";
-    const out = new URL(path, u.toString());
-    return out.toString().replace(/\/+$/g, "");
-  } catch {
-    return "";
-  }
-}
-
-function extractSitemapLocs(xmlText: string, max = 8): string[] {
-  const out: string[] = [];
-  const re = /<loc>\s*([^<\s]+)\s*<\/loc>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(xmlText)) && out.length < max) {
-    out.push(String(m[1]));
-  }
-  return out;
-}
-
-async function fetchWebsiteTextSmart(rawWebsiteUrl: string) {
-  const debug: FetchDebug = {
-    attempted: [],
-    pagesAttempted: [],
-    pagesUsed: [],
-    aggregateChars: 0,
-  };
-
-  const baseCandidates = buildCandidateBaseUrls(rawWebsiteUrl);
-  if (!baseCandidates.length) {
-    return { extractedText: "", extractedTextPreview: "", fetchDebug: debug };
-  }
-
-  let basePick: any | null = null;
-
-  for (const base of baseCandidates) {
-    try {
-      const r = await fetchText(base);
-      debug.attempted.push({
-        url: base,
-        ok: Boolean(r.ok),
-        status: Number(r.status ?? 0),
-        statusText: r.statusText,
-        contentType: String(r.contentType ?? ""),
-        finalUrl: r.finalUrl,
-        bytes: Number(r.rawBytes ?? 0),
-        extractedChars: Number(r.extractedText?.length ?? 0),
-        note: r.note,
-      });
-
-      if (!basePick) basePick = r;
-
-      if (r.ok && (r.extractedText?.length ?? 0) >= 400) {
-        basePick = r;
-        break;
-      }
-
-      const bestOk = Boolean(basePick?.ok);
-      const curOk = Boolean(r.ok);
-      const bestLen = Number(basePick?.extractedText?.length ?? 0);
-      const curLen = Number(r.extractedText?.length ?? 0);
-
-      if (curOk && !bestOk) basePick = r;
-      else if (curOk === bestOk && curLen > bestLen) basePick = r;
-    } catch (e: any) {
-      debug.attempted.push({
-        url: base,
-        ok: false,
-        status: 0,
-        contentType: "",
-        bytes: 0,
-        extractedChars: 0,
-        note: `Fetch error: ${e?.message ?? String(e)}`,
-      });
-    }
-  }
-
-  const chosenFinalUrl = String(basePick?.finalUrl ?? baseCandidates[0]);
-  debug.chosenFinalUrl = chosenFinalUrl;
-  debug.chosenContentType = String(basePick?.contentType ?? "");
-  debug.chosenStatus = Number(basePick?.status ?? 0);
-
-  const baseUrl = chosenFinalUrl;
-
-  const pages: string[] = [];
-  const homeText = String(basePick?.extractedText ?? "");
-  const homeLen = homeText.length;
-
-  pages.push(baseUrl);
-
-  const commonPaths = ["/about", "/about-us", "/services", "/service", "/contact", "/portfolio", "/gallery", "/work"];
-  for (const p of commonPaths) {
-    const u = joinUrl(baseUrl, p);
-    if (u) pages.push(u);
-  }
-
-  if (homeLen < 400) {
-    const sitemapUrls = [joinUrl(baseUrl, "/sitemap.xml"), joinUrl(baseUrl, "/sitemap_index.xml")].filter(Boolean);
-    for (const sm of sitemapUrls) {
-      try {
-        const smRes = await fetchText(sm, 10_000);
-        debug.pagesAttempted.push({
-          url: sm,
-          ok: Boolean(smRes.ok),
-          status: Number(smRes.status ?? 0),
-          statusText: smRes.statusText,
-          contentType: String(smRes.contentType ?? ""),
-          finalUrl: smRes.finalUrl,
-          bytes: Number(smRes.rawBytes ?? 0),
-          extractedChars: Number(smRes.extractedText?.length ?? 0),
-          note: smRes.note,
-        });
-
-        if (smRes.ok) {
-          const locs = extractSitemapLocs(String(smRes.extractedText ?? ""), 8);
-          for (const loc of locs) {
-            if (!sameHost(baseUrl, loc)) continue;
-            pages.push(loc);
-          }
-          if (locs.length) break;
-        }
-      } catch (e: any) {
-        debug.pagesAttempted.push({
-          url: sm,
-          ok: false,
-          status: 0,
-          contentType: "",
-          bytes: 0,
-          extractedChars: 0,
-          note: `Sitemap fetch error: ${e?.message ?? String(e)}`,
-        });
-      }
-    }
-  }
-
-  const pageList: string[] = [];
-  const seen = new Set<string>();
-  for (const p of pages) {
-    const key = p.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    pageList.push(p);
-    if (pageList.length >= 6) break;
-  }
-
-  let aggregate = "";
-  const pagesUsed: string[] = [];
-
-  for (const pageUrl of pageList) {
-    try {
-      const r = await fetchText(pageUrl);
-      const text = String(r.extractedText ?? "");
-      const len = text.length;
-
-      debug.pagesAttempted.push({
-        url: pageUrl,
-        ok: Boolean(r.ok),
-        status: Number(r.status ?? 0),
-        statusText: r.statusText,
-        contentType: String(r.contentType ?? ""),
-        finalUrl: r.finalUrl,
-        bytes: Number(r.rawBytes ?? 0),
-        extractedChars: len,
-        note: r.note,
-      });
-
-      if (r.ok && len >= 150) {
-        pagesUsed.push(pageUrl);
-        aggregate += `\n\n=== PAGE: ${pageUrl} ===\n${text}`;
-      }
-
-      if (aggregate.length >= 12_000) break;
-    } catch (e: any) {
-      debug.pagesAttempted.push({
-        url: pageUrl,
-        ok: false,
-        status: 0,
-        contentType: "",
-        bytes: 0,
-        extractedChars: 0,
-        note: `Page fetch error: ${e?.message ?? String(e)}`,
-      });
-    }
-  }
-
-  aggregate = clamp(aggregate.trim(), 12_000);
-  debug.pagesUsed = pagesUsed;
-  debug.aggregateChars = aggregate.length;
-
-  const preview = clamp(aggregate, 900);
-
-  return {
-    extractedText: aggregate,
-    extractedTextPreview: preview,
-    fetchDebug: debug,
-  };
-}
+/* --------------------- schema --------------------- */
 
 const AnalysisSchema = z.object({
   businessGuess: z.string().min(1),
@@ -412,300 +64,154 @@ const AnalysisSchema = z.object({
   billingSignals: z.array(z.string()).default([]),
 });
 
+/* --------------------- prompts --------------------- */
+
 function buildSystemPrompt() {
-  return [
-    "You are onboarding intelligence for AIPhotoQuote.",
-    "Your job: read a business website text and produce an explain-back summary and fit assessment.",
-    "",
-    "Rules:",
-    "- Be specific about what the business does (what they service + top services).",
-    "- If uncertain, say so and ask clarifying questions.",
-    "- Keep it customer-friendly and non-salesy.",
-    "- Output MUST be valid JSON matching the schema requested.",
-    "- confidenceScore is 0..1 and should reflect how certain you are.",
-    "- needsConfirmation should be true when confidenceScore < 0.8.",
-  ].join("\n");
+  return `
+You are onboarding intelligence for AIPhotoQuote.
+
+You are allowed to browse and read websites using built-in web tools.
+
+Rules:
+- Read the business website directly.
+- If the site is sparse or unclear, infer cautiously.
+- Be specific about what the business services (boats, cars, homes, etc).
+- Output MUST be valid JSON matching the requested schema.
+- confidenceScore must reflect certainty (0–1).
+- needsConfirmation must be true if confidenceScore < 0.8.
+`.trim();
 }
 
-function buildUserPrompt(args: {
-  url: string;
-  extractedText: string;
-  prior?: any | null;
-  correction?: { answer: "yes" | "no"; feedback?: string } | null;
-}) {
-  const { url, extractedText, prior, correction } = args;
+function buildUserPrompt(url: string) {
+  return `
+Analyze this business website and summarize what the company does:
 
-  const priorBlock = prior
-    ? `PRIOR_ANALYSIS_JSON:\n${JSON.stringify(prior, null, 2)}\n`
-    : `PRIOR_ANALYSIS_JSON:\n(null)\n`;
+WEBSITE_URL:
+${url}
 
-  const correctionBlock = correction
-    ? `USER_CONFIRMATION:\n${JSON.stringify(correction, null, 2)}\n`
-    : `USER_CONFIRMATION:\n(null)\n`;
+TASK:
+1) Write businessGuess (2–5 sentences).
+2) Decide fit: good / maybe / poor for photo-based quoting.
+3) Explain fitReason.
+4) Pick suggestedIndustryKey (snake/kebab-case).
+5) Provide 3–6 confirmation questions.
+6) List detectedServices and billingSignals.
+7) Provide confidenceScore (0–1) and needsConfirmation.
 
-  return [
-    `WEBSITE_URL: ${url}`,
-    "",
-    priorBlock,
-    correctionBlock,
-    "WEBSITE_TEXT (clipped, may include multiple pages):",
-    extractedText || "(no text extracted)",
-    "",
-    "TASK:",
-    "1) Write businessGuess: 2-5 sentences describing what the business likely does (what they service + top services).",
-    "2) Decide fit: good/maybe/poor for using photo-based quoting.",
-    "3) Provide fitReason: 1-3 sentences.",
-    "4) Pick suggestedIndustryKey (short snake-case or kebab-case; examples: marine, auto, upholstery, auto-restyling, boat-paint, general-contractor).",
-    "5) Provide 3-6 short questions to confirm.",
-    "6) Provide detectedServices and billingSignals (best-effort).",
-    "7) Provide confidenceScore 0..1 and needsConfirmation boolean.",
-    "",
-    "Output ONLY JSON.",
-  ].join("\n");
+Return ONLY valid JSON.
+`.trim();
 }
 
-function pickModelFromPcc(cfg: any) {
-  return (
-    String(cfg?.models?.onboardingModel ?? "").trim() ||
-    String(cfg?.models?.estimatorModel ?? "").trim() ||
-    "gpt-4o-mini"
-  );
-}
-
-function withMeta(base: any, meta: any) {
-  // Preserve existing meta if present, but allow override fields in meta param.
-  const prevMeta = base?.meta && typeof base.meta === "object" ? base.meta : {};
-  return { ...(base || {}), meta: { ...prevMeta, ...(meta || {}) } };
-}
+/* --------------------- handler --------------------- */
 
 export async function POST(req: Request) {
-  let tenantId = "";
   try {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-    tenantId = safeTrim(body?.tenantId);
-    if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+    const tenantId = safeTrim(body?.tenantId);
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+    }
 
     await requireMembership(clerkUserId, tenantId);
 
-    // Read onboarding row (website + any prior analysis/meta)
     const r = await db.execute(sql`
-      select website, ai_analysis
+      select website
       from tenant_onboarding
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
 
-    const row: any = (r as any)?.rows?.[0] ?? null;
-    const websiteRaw = String(row?.website ?? "").trim();
+    const websiteRaw = String(r?.rows?.[0]?.website ?? "").trim();
     const website = normalizeUrl(websiteRaw);
-
-    const priorAnalysis = row?.ai_analysis ?? null;
-    const prevRound = Number(priorAnalysis?.meta?.round ?? 0) || 0;
-    const nextRound = prevRound + 1;
-
-    // ✅ Immediately store "running" so UI has something real to show
-    const runningStub = withMeta(
-      {
-        ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
-        website: website || null,
-      },
-      {
-        status: "running",
-        round: nextRound,
-        lastAction: "Fetching website text…",
-        error: null,
-        startedAt: new Date().toISOString(),
-      }
-    );
-
-    await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${JSON.stringify(runningStub)}::jsonb, 2, false, now(), now())
-      on conflict (tenant_id) do update
-      set ai_analysis = excluded.ai_analysis,
-          current_step = greatest(tenant_onboarding.current_step, 2),
-          updated_at = now()
-    `);
-
-    // Extract website text
-    const extracted = website
-      ? await fetchWebsiteTextSmart(website)
-      : {
-          extractedText: "",
-          extractedTextPreview: "",
-          fetchDebug: { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 } as FetchDebug,
-        };
-
-    const extractedText = extracted.extractedText ?? "";
-    const extractedTextPreview = extracted.extractedTextPreview ?? "";
-    const fetchDebug = extracted.fetchDebug ?? { attempted: [], pagesAttempted: [], pagesUsed: [], aggregateChars: 0 };
-
-    // Update lastAction after extraction
-    const afterFetchStub = withMeta(
-      {
-        ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
-        website: website || null,
-        extractedTextPreview: extractedTextPreview || "",
-        fetchDebug,
-      },
-      {
-        status: "running",
-        round: nextRound,
-        lastAction: extractedTextPreview
-          ? "Website text extracted. Asking AI to summarize…"
-          : "Could not extract much website text. Asking AI to best-effort summarize…",
-        error: null,
-      }
-    );
-
-    await db.execute(sql`
-      update tenant_onboarding
-      set ai_analysis = ${JSON.stringify(afterFetchStub)}::jsonb,
-          updated_at = now()
-      where tenant_id = ${tenantId}::uuid
-    `);
+    if (!website) {
+      return NextResponse.json(
+        { ok: false, error: "NO_WEBSITE", message: "No website on file." },
+        { status: 400 }
+      );
+    }
 
     const cfg = await loadPlatformLlmConfig();
-    const model = pickModelFromPcc(cfg);
+    const model =
+      String(cfg?.models?.onboardingModel ?? "").trim() ||
+      "gpt-4.1";
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error("MISSING_OPENAI_API_KEY");
 
-    // If we extracted almost nothing, still try the model — but expect low confidence
     const client = new OpenAI({ apiKey });
 
-    const resp = await client.chat.completions.create({
+    const response = await client.responses.create({
       model,
+      tools: [{ type: "web_search" }],
       temperature: 0.2,
       response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: buildSystemPrompt() },
+      input: [
+        {
+          role: "system",
+          content: buildSystemPrompt(),
+        },
         {
           role: "user",
-          content: buildUserPrompt({
-            url: website || "(none provided)",
-            extractedText,
-            prior: priorAnalysis,
-            correction: null,
-          }),
+          content: buildUserPrompt(website),
         },
       ],
     });
 
-    const content = resp.choices?.[0]?.message?.content ?? "";
-    const json = safeJsonParse(content);
+    const text = response.output_text ?? "";
+    const json = safeJsonParse(text);
     const parsed = json ? AnalysisSchema.safeParse(json) : null;
 
-    // Helper to finalize and persist
-    async function persistFinal(aiAnalysis: any) {
-      const final = withMeta(aiAnalysis, {
-        status: "complete",
-        round: nextRound,
-        lastAction: "AI analysis complete.",
-        error: null,
-        finishedAt: new Date().toISOString(),
-      });
-
-      await db.execute(sql`
-        insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-        values (${tenantId}::uuid, ${JSON.stringify(final)}::jsonb, 2, false, now(), now())
-        on conflict (tenant_id) do update
-        set ai_analysis = excluded.ai_analysis,
-            current_step = greatest(tenant_onboarding.current_step, 2),
-            updated_at = now()
-      `);
-
-      return final;
-    }
-
-    if (!parsed || !parsed.success) {
-      const siteWasThin = (extractedTextPreview || "").length < 50;
-
-      const fallback = {
-        businessGuess: siteWasThin
-          ? "We couldn’t extract readable text from your website (it may be blocked or JS-rendered)."
-          : "We fetched your website, but the AI response wasn’t usable. Please retry.",
-        fit: "maybe" as const,
-        fitReason: siteWasThin
-          ? "We didn’t get enough website text to confidently evaluate fit."
-          : "Model output was not valid for our schema.",
-        suggestedIndustryKey: "service",
-        questions: [
-          "What do you work on most (cars/trucks/boats/other)?",
-          "What are your top 3 services?",
-          "Do you mostly do upgrades, repairs, or both?",
-        ],
-        confidenceScore: siteWasThin ? 0.2 : 0.3,
-        needsConfirmation: true,
-        detectedServices: [],
-        billingSignals: [],
-        analyzedAt: new Date().toISOString(),
-        source: json ? "llm_v1_parse_fail" : "llm_v1_invalid_json",
-        modelUsed: model,
-        extractedTextPreview: extractedTextPreview || "",
-        website: website || null,
-        fetchDebug,
-        rawModelOutputPreview: clamp(content || "", 1200),
-      };
-
-      const final = await persistFinal(fallback);
-      return NextResponse.json({ ok: true, tenantId, aiAnalysis: final }, { status: 200 });
+    if (!parsed?.success) {
+      return NextResponse.json(
+        {
+          ok: true,
+          tenantId,
+          aiAnalysis: {
+            businessGuess:
+              "We attempted to analyze your website, but the response was unclear. Please confirm what services you provide.",
+            fit: "maybe",
+            fitReason: "Website content could not be confidently classified.",
+            suggestedIndustryKey: "service",
+            questions: [
+              "What do you primarily work on?",
+              "What are your top services?",
+              "Do customers usually send photos?",
+            ],
+            confidenceScore: 0.25,
+            needsConfirmation: true,
+            detectedServices: [],
+            billingSignals: [],
+            source: "web_tools_parse_fail",
+            website,
+          },
+        },
+        { status: 200 }
+      );
     }
 
     const analysis = {
       ...parsed.data,
       analyzedAt: new Date().toISOString(),
-      source: "llm_v1",
-      modelUsed: model,
-      extractedTextPreview: extractedTextPreview || "",
-      website: website || null,
-      fetchDebug,
+      source: "openai_web_tools",
+      website,
     };
 
-    const final = await persistFinal(analysis);
-    return NextResponse.json({ ok: true, tenantId, aiAnalysis: final }, { status: 200 });
+    await db.execute(sql`
+      update tenant_onboarding
+      set ai_analysis = ${JSON.stringify(analysis)}::jsonb,
+          current_step = greatest(current_step, 2),
+          updated_at = now()
+      where tenant_id = ${tenantId}::uuid
+    `);
+
+    return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
-
-    // Best-effort: write meta error so UI shows something meaningful
-    try {
-      if (tenantId) {
-        const r = await db.execute(sql`
-          select ai_analysis
-          from tenant_onboarding
-          where tenant_id = ${tenantId}::uuid
-          limit 1
-        `);
-        const row: any = (r as any)?.rows?.[0] ?? null;
-        const prior = row?.ai_analysis ?? null;
-        const prevRound = Number(prior?.meta?.round ?? 0) || 0;
-
-        const errored = withMeta(
-          {
-            ...(typeof prior === "object" && prior ? prior : {}),
-          },
-          {
-            status: "error",
-            round: prevRound || 1,
-            lastAction: "AI analysis failed.",
-            error: msg,
-            failedAt: new Date().toISOString(),
-          }
-        );
-
-        await db.execute(sql`
-          update tenant_onboarding
-          set ai_analysis = ${JSON.stringify(errored)}::jsonb,
-              updated_at = now()
-          where tenant_id = ${tenantId}::uuid
-        `);
-      }
-    } catch {
-      // swallow
-    }
+    const status =
+      msg === "UNAUTHENTICATED" ? 401 :
+      msg === "FORBIDDEN_TENANT" ? 403 : 500;
 
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
