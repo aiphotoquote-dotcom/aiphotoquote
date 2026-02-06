@@ -1,8 +1,17 @@
+// src/app/onboarding/wizard/steps/Step6Plan.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
 
 type PlanTier = "tier0" | "tier1" | "tier2";
+
+function safePlan(v: any): PlanTier | null {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "tier0" || s === "free") return "tier0";
+  if (s === "tier1") return "tier1";
+  if (s === "tier2") return "tier2";
+  return null;
+}
 
 function tierLabel(t: PlanTier) {
   if (t === "tier0") return "Tier 0";
@@ -18,12 +27,7 @@ function tierSubtitle(t: PlanTier) {
 
 function tierDetails(t: PlanTier) {
   if (t === "tier0") {
-    return [
-      "5 quotes / month",
-      "Uses platform AI keys",
-      "Single user (owner)",
-      "Upgrade anytime",
-    ];
+    return ["5 quotes / month", "Uses platform AI keys", "Single user (owner)", "Upgrade anytime"];
   }
   if (t === "tier1") {
     return [
@@ -54,9 +58,7 @@ export function Step6Plan(props: {
   const [err, setErr] = useState<string | null>(null);
 
   const tid = String(props.tenantId ?? "").trim();
-
   const canSave = Boolean(tid) && !saving;
-
   const cards: PlanTier[] = useMemo(() => ["tier0", "tier1", "tier2"], []);
 
   async function savePlan() {
@@ -86,8 +88,10 @@ export function Step6Plan(props: {
         throw new Error(msg || `Request failed (HTTP ${res.status})`);
       }
 
-      setSavedPlan(selected);
-      props.onSaved(selected);
+      const serverPlan = safePlan(j?.planTier) ?? selected;
+
+      setSavedPlan(serverPlan);
+      props.onSaved(serverPlan);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -96,13 +100,12 @@ export function Step6Plan(props: {
   }
 
   const done = Boolean(savedPlan);
+  const needsKey = savedPlan === "tier1" || savedPlan === "tier2";
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Choose your plan</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        Pick what fits today. You can change this later.
-      </div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Pick what fits today. You can change this later.</div>
 
       {err ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
@@ -112,10 +115,17 @@ export function Step6Plan(props: {
 
       {done ? (
         <div className="mt-6 rounded-3xl border border-emerald-200 bg-emerald-50 p-5 dark:border-emerald-900/40 dark:bg-emerald-950/30">
-          <div className="text-sm font-semibold text-emerald-950 dark:text-emerald-100">You’re live ✅</div>
+          <div className="text-sm font-semibold text-emerald-950 dark:text-emerald-100">Plan saved ✅</div>
           <div className="mt-1 text-sm text-emerald-900/90 dark:text-emerald-100/90">
-            Plan saved: <span className="font-mono">{savedPlan}</span>. Next: set up your widget so customers can submit
-            photos from your website.
+            Selected: <span className="font-mono">{savedPlan}</span>.
+            {needsKey ? (
+              <>
+                {" "}
+                Next: add your OpenAI key to activate Tier 1–2, then set up your widget.
+              </>
+            ) : (
+              <> Next: set up your widget so customers can submit photos from your website.</>
+            )}
           </div>
 
           <div className="mt-4 grid gap-3">
@@ -200,7 +210,7 @@ export function Step6Plan(props: {
           </div>
 
           <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Note: Tier 1–2 will prompt you to add your OpenAI key during setup (we’ll handle that next).
+            Note: Tier 1–2 require your OpenAI key before they’re fully active (we’ll wire that next).
           </div>
         </>
       )}
