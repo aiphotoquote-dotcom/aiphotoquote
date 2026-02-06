@@ -54,7 +54,7 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(),
+      category: z.string().optional(), // NOTE: accepted for back-compat, but server will prefer tenant industry snapshot
     })
     .optional(),
 
@@ -136,6 +136,16 @@ function sleepMs(ms: number) {
 function sha256Hex(s: string) {
   const v = String(s ?? "");
   return crypto.createHash("sha256").update(v).digest("hex");
+}
+
+function pickIndustrySnapshotFromInput(inputAny: any): string {
+  const a = safeTrim(inputAny?.industryKeySnapshot);
+  if (a) return a;
+  const b = safeTrim(inputAny?.industry_key_snapshot);
+  if (b) return b;
+  const c = safeTrim(inputAny?.customer_context?.category);
+  if (c) return c;
+  return "";
 }
 
 /**
@@ -550,7 +560,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    // Settings (optional) — still used for non-LLM defaults like industryKey & branding
+    // Settings (optional) — used for non-LLM defaults like branding + industry selection
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -563,9 +573,36 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    const industryKey = safeTrim(settings?.industryKey) || "service";
+    const tenantIndustryKey = safeTrim(settings?.industryKey) || "service";
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
+
+    // Determine phase early (so we can pick industry snapshot BEFORE resolving prompts)
+    const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
+
+    // Pre-load quote log if phase2 (needed for immutable industry + category + notes)
+    let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
+    let industryKeyForQuote = tenantIndustryKey;
+
+    if (isPhase2) {
+      const quoteLogId = parsed.data.quoteLogId!;
+      phase2Existing = await db
+        .select({ id: quoteLogs.id, input: quoteLogs.input, qa: quoteLogs.qa, output: quoteLogs.output })
+        .from(quoteLogs)
+        .where(eq(quoteLogs.id, quoteLogId))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      if (!phase2Existing) {
+        return NextResponse.json({ ok: false, error: "QUOTE_NOT_FOUND" }, { status: 404 });
+      }
+
+      const inputAny: any = phase2Existing.input ?? {};
+      industryKeyForQuote = pickIndustrySnapshotFromInput(inputAny) || tenantIndustryKey;
+    } else {
+      // Phase 1: server-authoritative industry is tenant settings at the time of submission
+      industryKeyForQuote = tenantIndustryKey;
+    }
 
     // ✅ Resolve tenant + PCC AI settings ONCE (request-scoped)
     const resolvedBase = await resolveTenantLlm(tenant.id);
@@ -575,7 +612,7 @@ export async function POST(req: Request) {
      * Precedence target: tenant override > industry pack > platform base
      */
     const pccCfg = await loadPlatformLlmConfig();
-    const industryResolved = resolvePromptsForIndustry(pccCfg, industryKey);
+    const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
 
     const baseEstimator = String(pccCfg?.prompts?.quoteEstimatorSystem ?? "");
     const baseQa = String(pccCfg?.prompts?.qaQuestionGeneratorSystem ?? "");
@@ -587,12 +624,10 @@ export async function POST(req: Request) {
     const isUsingBaseQa = resolvedQa.trim() === baseQa.trim();
 
     const effectivePrompts = {
-      quoteEstimatorSystem: isUsingBaseEstimator && industryResolved.quoteEstimatorSystem
-        ? industryResolved.quoteEstimatorSystem
-        : resolvedEstimator,
-      qaQuestionGeneratorSystem: isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem
-        ? industryResolved.qaQuestionGeneratorSystem
-        : resolvedQa,
+      quoteEstimatorSystem:
+        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem ? industryResolved.quoteEstimatorSystem : resolvedEstimator,
+      qaQuestionGeneratorSystem:
+        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
     };
 
     const resolved = {
@@ -605,7 +640,7 @@ export async function POST(req: Request) {
       meta: {
         ...(resolvedBase as any)?.meta,
         industryPromptPackApplied: {
-          industryKey,
+          industryKey: industryKeyForQuote,
           estimatorApplied: Boolean(isUsingBaseEstimator && industryResolved.quoteEstimatorSystem),
           qaApplied: Boolean(isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem),
         },
@@ -626,34 +661,25 @@ export async function POST(req: Request) {
       renderOptIn: undefined as boolean | undefined, // per-request
       tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
-      industryKey,
+      industryKey: industryKeyForQuote,
       industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
     };
 
     // -------------------------
     // Phase 2: finalize after QA
     // -------------------------
-    if (parsed.data.quoteLogId && parsed.data.qaAnswers?.length) {
-      const quoteLogId = parsed.data.quoteLogId;
-
-      const existing = await db
-        .select({ id: quoteLogs.id, input: quoteLogs.input, qa: quoteLogs.qa, output: quoteLogs.output })
-        .from(quoteLogs)
-        .where(eq(quoteLogs.id, quoteLogId))
-        .limit(1)
-        .then((r) => r[0] ?? null);
-
-      if (!existing) {
-        return NextResponse.json({ ok: false, error: "QUOTE_NOT_FOUND" }, { status: 404 });
-      }
-
+    if (isPhase2) {
+      const quoteLogId = parsed.data.quoteLogId!;
+      const existing = phase2Existing!;
       const inputAny: any = existing.input ?? {};
+
       const images = Array.isArray(inputAny.images) ? inputAny.images : [];
       const customer = inputAny.customer ?? null;
+
       const customer_context = inputAny.customer_context ?? {};
-      const category = customer_context.category ?? industryKey ?? "service";
-      const service_type = customer_context.service_type ?? "upholstery";
-      const notes = customer_context.notes ?? "";
+      const category = safeTrim(customer_context.category) || industryKeyForQuote || "service";
+      const service_type = safeTrim(customer_context.service_type) || "upholstery";
+      const notes = safeTrim(customer_context.notes) || "";
 
       if (!customer?.name || !customer?.email || !customer?.phone) {
         return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG" }, { status: 400 });
@@ -662,7 +688,7 @@ export async function POST(req: Request) {
       // Normalize incoming QA answers:
       const qaStored: any = existing.qa ?? {};
       const storedQuestions: string[] = Array.isArray(qaStored?.questions)
-        ? qaStored.questions.map((x: any) => String(x)).filter(Boolean)
+        ? qaStored.questions.map((x: unknown) => String(x)).filter(Boolean)
         : [];
 
       let normalizedAnswers: Array<{ question: string; answer: string }> = [];
@@ -729,13 +755,13 @@ export async function POST(req: Request) {
         tenantSlug,
         renderOptIn,
         resolved,
-        industryKey,
+        industryKey: industryKeyForQuote,
       });
 
       // ✅ system prompt + model from resolved tenant+PCC (+ industry pack if applied)
       const systemEstimate = resolved.prompts.quoteEstimatorSystem;
 
-      let output = await generateEstimate({
+      const output = await generateEstimate({
         openai,
         model: resolved.models.estimatorModel,
         system: systemEstimate,
@@ -819,9 +845,11 @@ export async function POST(req: Request) {
     }
 
     const customer_context = parsed.data.customer_context ?? {};
-    const category = customer_context.category ?? industryKey ?? "service";
-    const service_type = customer_context.service_type ?? "upholstery";
-    const notes = customer_context.notes ?? "";
+
+    // ✅ category is server-authoritative: tenant industry at submission time (immutable snapshot)
+    const category = industryKeyForQuote || "service";
+    const service_type = safeTrim(customer_context.service_type) || "upholstery";
+    const notes = safeTrim(customer_context.notes) || "";
 
     // ✅ denylist guardrail on notes
     if (denylist.length && containsDenylistedText(notes, denylist)) {
@@ -839,12 +867,17 @@ export async function POST(req: Request) {
     const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
     aiEnvelope.renderOptIn = renderOptIn;
 
-    // Store input
+    // Store input (✅ includes immutable industry snapshot)
     const inputToStore = {
       tenantSlug,
       images,
       render_opt_in: renderOptIn,
       customer,
+
+      // ✅ immutable industry snapshot (do NOT rely on tenant_settings later)
+      industryKeySnapshot: industryKeyForQuote,
+      industrySource: "tenant_settings" as const,
+
       customer_context: { category, service_type, notes },
       createdAt: nowIso(),
     };
@@ -856,7 +889,7 @@ export async function POST(req: Request) {
       tenantSlug,
       renderOptIn,
       resolved,
-      industryKey,
+      industryKey: industryKeyForQuote,
     });
 
     // Create quote log now
@@ -899,7 +932,7 @@ export async function POST(req: Request) {
         tenantSlug,
         renderOptIn,
         resolved,
-        industryKey,
+        industryKey: industryKeyForQuote,
       });
 
       await db
@@ -916,7 +949,7 @@ export async function POST(req: Request) {
     }
 
     // Otherwise, estimate immediately
-    let output = await generateEstimate({
+    const output = await generateEstimate({
       openai,
       model: resolved.models.estimatorModel,
       system: resolved.prompts.quoteEstimatorSystem,
@@ -932,7 +965,7 @@ export async function POST(req: Request) {
       tenantSlug,
       renderOptIn,
       resolved,
-      industryKey,
+      industryKey: industryKeyForQuote,
     });
 
     let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshotEstimated };
