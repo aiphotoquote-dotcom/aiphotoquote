@@ -3,16 +3,30 @@
 export type GuardrailsMode = "strict" | "balanced" | "permissive";
 export type PiiHandling = "redact" | "allow" | "deny";
 
+export type IndustryPromptPack = {
+  /**
+   * Optional override preamble for this industry.
+   * If omitted, platform prompts.extraSystemPreamble is used.
+   */
+  extraSystemPreamble?: string;
+
+  /** Optional: estimator system prompt override (industry-specific tone + assumptions). */
+  quoteEstimatorSystem?: string;
+
+  /** Optional: QA generator system prompt override (industry-specific questions). */
+  qaQuestionGeneratorSystem?: string;
+};
+
 export type PlatformLlmConfig = {
   version: number;
 
   models: {
-    // Used for onboarding website analysis (/api/onboarding/*)
-    onboardingModel?: string;
-
     // Used for estimate + QA in /api/quote/submit
     estimatorModel: string;
     qaModel: string;
+
+    // ✅ NEW: used for onboarding analysis (/api/onboarding/analyze-website)
+    onboardingModel?: string;
 
     // Used for /api/quote/render (optional)
     renderModel?: string;
@@ -28,30 +42,41 @@ export type PlatformLlmConfig = {
     // Optional extra preamble prepended to BOTH system prompts
     extraSystemPreamble?: string;
 
-    // used by /api/quote/render
+    // ✅ NEW: used by /api/quote/render
     renderPromptPreamble?: string;
 
-    // template used by /api/quote/render
+    // ✅ NEW: template used by /api/quote/render
     // Supports placeholders:
     // {renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}
     renderPromptTemplate?: string;
 
-    // PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
+    // ✅ NEW: PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
     renderStylePresets?: {
       photoreal?: string;
       clean_oem?: string;
       custom?: string;
     };
+
+    /**
+     * ✅ NEW: Industry prompt packs (platform-owned).
+     * Keyed by industry_key (tenant_settings.industry_key), e.g.:
+     * "marine_repair", "auto_upholstery", "general_contractor"
+     */
+    industryPromptPacks?: Record<string, IndustryPromptPack>;
   };
 
   guardrails: {
+    // UI/API expects these (safe to default)
     mode?: GuardrailsMode;
     piiHandling?: PiiHandling;
 
+    // Simple keyword/topic blocks (V1). We'll evolve this later.
     blockedTopics: string[];
 
+    // Platform cap (tenant setting can be lower, not higher)
     maxQaQuestions: number;
 
+    // Optional: keep around for future response_format/token tuning
     maxOutputTokens?: number;
   };
 
@@ -62,12 +87,13 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
   return {
     version: 1,
     models: {
-      // ✅ default onboarding model (can be overridden in PCC UI later)
-      onboardingModel: "gpt-4.1",
-
       estimatorModel: "gpt-4o-mini",
       qaModel: "gpt-4o-mini",
 
+      // ✅ default onboarding model (safe)
+      onboardingModel: "gpt-4.1",
+
+      // NOTE: this is just a stored value; image generation is separate.
       renderModel: "gpt-image-1",
     },
     prompts: {
@@ -95,6 +121,7 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "Return ONLY valid JSON matching the provided schema.",
       ].join("\n"),
 
+      // ✅ NEW defaults for render prompting
       renderPromptPreamble: [
         "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
         "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
@@ -119,6 +146,28 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "{customerNotesLine}",
         "{tenantRenderNotesLine}",
       ].join("\n"),
+
+      /**
+       * ✅ Industry prompt packs start empty.
+       * We'll add entries over time (PCC-managed).
+       */
+      industryPromptPacks: {
+        // Example starter pack (optional):
+        marine_repair: {
+          quoteEstimatorSystem: [
+            "You are an expert estimator for MARINE boat repair and restoration work.",
+            "Be realistic about marine labor complexity and access constraints (marinas, lifts, haul-out).",
+            "Assume corrosion, hidden damage, and prep time can be significant; reflect in range and assumptions.",
+            "If the job involves fiberglass/gelcoat/paint: be explicit about prep steps and cure time.",
+            "Return ONLY valid JSON matching the provided schema.",
+          ].join("\n"),
+          qaQuestionGeneratorSystem: [
+            "You generate short clarification questions for a MARINE service quote based on photos and notes.",
+            "Ask about boat length, location (in-water vs trailer), access to power, prior repairs, and finish expectations.",
+            "Keep each question one sentence. Return ONLY valid JSON: { questions: string[] }",
+          ].join("\n"),
+        },
+      },
     },
     guardrails: {
       mode: "balanced",
