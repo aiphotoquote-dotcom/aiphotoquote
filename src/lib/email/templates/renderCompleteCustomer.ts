@@ -15,6 +15,34 @@ function money(n: unknown) {
   return `$${Math.round(v).toLocaleString()}`;
 }
 
+type BrandLogoVariant = "light" | "dark" | null | undefined;
+
+function renderTopLogo(args: {
+  businessName: string;
+  brandLogoUrl?: string | null;
+  brandLogoVariant?: BrandLogoVariant;
+}) {
+  const { businessName, brandLogoUrl, brandLogoVariant } = args;
+
+  if (!brandLogoUrl) {
+    return `<div style="font-weight:800;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+  }
+
+  const isLight = String(brandLogoVariant ?? "").toLowerCase().trim() === "light";
+
+  const img = `<img src="${esc(brandLogoUrl)}" alt="${esc(
+    businessName
+  )}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />`;
+
+  if (!isLight) return img;
+
+  return `
+    <div style="display:inline-block;background:#0b0b0b;border-radius:12px;padding:8px 10px;">
+      ${img}
+    </div>
+  `;
+}
+
 export function renderCustomerRenderCompleteEmailHTML(args: {
   businessName: string;
 
@@ -35,28 +63,26 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
   publicQuoteUrl?: string | null; // kept for compatibility (not used)
   replyToEmail?: string | null;
 }) {
-  const { businessName, brandLogoUrl, brandLogoVariant, customerName, renderImageUrl, estimateLow, estimateHigh, summary, replyToEmail } =
-    args;
+  const {
+    businessName,
+    brandLogoUrl,
+    brandLogoVariant,
+    customerName,
+    renderImageUrl,
+    estimateLow,
+    estimateHigh,
+    summary,
+    replyToEmail,
+  } = args;
 
   const hasRange = typeof estimateLow === "number" && typeof estimateHigh === "number";
   const rangeText = hasRange ? `${money(estimateLow)} – ${money(estimateHigh)}` : "";
 
   const safeSummary = String(summary ?? "").trim();
 
-  const logoVariant = brandLogoVariant ?? "dark";
+  const topLogo = renderTopLogo({ businessName, brandLogoUrl, brandLogoVariant });
 
-  const topLogo = brandLogoUrl
-    ? logoVariant === "light"
-      ? `<div style="background:#0b0b0b;padding:10px 12px;border-radius:10px;display:inline-block;">
-           <img src="${esc(brandLogoUrl)}" alt="${esc(
-             businessName
-           )}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />
-         </div>`
-      : `<img src="${esc(brandLogoUrl)}" alt="${esc(
-          businessName
-        )}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />`
-    : `<div style="font-weight:800;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
-
+  // preheader (hidden in body)
   const preheader = `Your concept rendering is ready — a vision for what’s possible.`;
 
   const replyLine = replyToEmail
@@ -154,7 +180,7 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
               </td>
             </tr>
 
-            <!-- Contact line (optional) -->
+            <!-- Contact line -->
             <tr>
               <td style="padding:16px 20px 22px;">
                 ${replyLine}

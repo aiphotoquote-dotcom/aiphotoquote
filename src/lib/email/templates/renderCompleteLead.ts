@@ -15,6 +15,35 @@ function money(n: unknown) {
   return `$${Math.round(v).toLocaleString()}`;
 }
 
+type BrandLogoVariant = "light" | "dark" | null | undefined;
+
+function renderTopLogo(args: {
+  businessName: string;
+  brandLogoUrl?: string | null;
+  brandLogoVariant?: BrandLogoVariant;
+}) {
+  const { businessName, brandLogoUrl, brandLogoVariant } = args;
+
+  if (!brandLogoUrl) {
+    return `<div style="font-weight:900;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+  }
+
+  // If logo is "light", put it on a dark chip so it is visible in light-mode layouts.
+  const isLight = String(brandLogoVariant ?? "").toLowerCase().trim() === "light";
+
+  const img = `<img src="${esc(brandLogoUrl)}" alt="${esc(
+    businessName
+  )}" style="height:26px;max-width:180px;object-fit:contain;display:block;" />`;
+
+  if (!isLight) return img;
+
+  return `
+    <div style="display:inline-block;background:#0b0b0b;border-radius:12px;padding:8px 10px;">
+      ${img}
+    </div>
+  `;
+}
+
 export function renderLeadRenderCompleteEmailHTML(args: {
   businessName: string;
 
@@ -56,19 +85,7 @@ export function renderLeadRenderCompleteEmailHTML(args: {
   const hasRange = typeof estimateLow === "number" && typeof estimateHigh === "number";
   const rangeText = hasRange ? `${money(estimateLow)} – ${money(estimateHigh)}` : "Pending inspection";
 
-  const logoVariant = brandLogoVariant ?? "dark";
-
-  const topLogo = brandLogoUrl
-    ? logoVariant === "light"
-      ? `<div style="background:#0b0b0b;padding:10px 12px;border-radius:10px;display:inline-block;">
-           <img src="${esc(brandLogoUrl)}" alt="${esc(
-             businessName
-           )}" style="height:26px;max-width:180px;object-fit:contain;display:block;" />
-         </div>`
-      : `<img src="${esc(brandLogoUrl)}" alt="${esc(
-          businessName
-        )}" style="height:26px;max-width:180px;object-fit:contain;display:block;" />`
-    : `<div style="font-weight:900;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+  const topLogo = renderTopLogo({ businessName, brandLogoUrl, brandLogoVariant });
 
   const safeSummary = String(summary ?? "").trim();
 

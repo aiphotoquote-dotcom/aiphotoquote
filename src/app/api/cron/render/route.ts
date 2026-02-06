@@ -202,6 +202,7 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
 
       ts.business_name,
       ts.brand_logo_url,
+      ts.brand_logo_variant,
       ts.lead_to_email,
 
       -- legacy + new (we'll reconcile below)
@@ -496,6 +497,10 @@ async function handleCron(req: Request) {
         const businessName = (cfg.businessName || ctx.business_name || tenantName || "Your Business").trim();
         const brandLogoUrl = ctx.brand_logo_url ?? null;
 
+        const brandLogoVariantRaw = String((ctx as any)?.brand_logo_variant ?? "").trim().toLowerCase();
+        const brandLogoVariant =
+          brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
+
         const customer = inputAny?.customer ?? inputAny?.contact ?? null;
         const customerName = String(customer?.name ?? "Customer").trim();
         const customerEmail = String(customer?.email ?? "").trim().toLowerCase();
@@ -520,6 +525,7 @@ async function handleCron(req: Request) {
             const htmlLead = renderLeadRenderCompleteEmailHTML({
               businessName,
               brandLogoUrl,
+              brandLogoVariant,
               quoteLogId: job.quoteLogId,
               tenantSlug,
               customerName,
@@ -559,6 +565,7 @@ async function handleCron(req: Request) {
             const htmlCust = renderCustomerRenderCompleteEmailHTML({
               businessName,
               brandLogoUrl,
+              brandLogoVariant,
               customerName,
               quoteLogId: job.quoteLogId,
               renderImageUrl: imageUrl,
