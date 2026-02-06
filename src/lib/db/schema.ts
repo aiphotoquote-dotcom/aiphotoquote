@@ -33,14 +33,6 @@ export const appUsers = pgTable(
 
 /**
  * Platform users / RBAC
- * This is separate from tenant_members (tenant-scoped RBAC).
- *
- * platform_role values:
- * - platform_owner
- * - platform_admin
- * - platform_support
- * - platform_billing
- * - readonly
  */
 export const platformUsers = pgTable(
   "platform_users",
@@ -64,7 +56,6 @@ export const platformUsers = pgTable(
 
 /**
  * Platform config (single-row feature gates)
- * PCC v1 reads this; if you never insert a row, code will fall back to defaults.
  */
 export const platformConfig = pgTable("platform_config", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -80,8 +71,6 @@ export const platformConfig = pgTable("platform_config", {
 
 /**
  * Tenants
- * Back-compat: ownerClerkUserId stays while we transition.
- * New: ownerUserId points to app_users.id (portable).
  */
 export const tenants = pgTable(
   "tenants",
@@ -90,10 +79,10 @@ export const tenants = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull(),
 
-    // NEW portable owner pointer
+    // portable owner pointer
     ownerUserId: uuid("owner_user_id").references(() => appUsers.id),
 
-    // BACK-COMPAT (will remove later)
+    // BACK-COMPAT
     ownerClerkUserId: text("owner_clerk_user_id"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -113,13 +102,12 @@ export const tenantSubIndustries = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
 
-    key: text("key").notNull(), // normalized key, e.g. "marine", "commercial"
-    label: text("label").notNull(), // display label
+    key: text("key").notNull(),
+    label: text("label").notNull(),
 
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // ensures one key per tenant (and enables our onConflictDoUpdate target)
     tenantKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_key_uq").on(t.tenantId, t.key),
     tenantIdx: index("tenant_sub_industries_tenant_id_idx").on(t.tenantId),
   })
@@ -127,26 +115,33 @@ export const tenantSubIndustries = pgTable(
 
 /**
  * Tenant members / RBAC
+ *
+ * ✅ Matches your real DB:
+ * tenant_members(tenant_id uuid, clerk_user_id text, role text, status text, created_at timestamptz, updated_at timestamptz)
+ *
+ * IMPORTANT: table has NO id column in your DB export.
  */
 export const tenantMembers = pgTable(
   "tenant_members",
   {
-    id: uuid("id").defaultRandom().primaryKey(),
-
     tenantId: uuid("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
 
-    userId: uuid("user_id").references(() => appUsers.id, { onDelete: "cascade" }),
+    clerkUserId: text("clerk_user_id").notNull(),
 
-    // "owner" | "admin" | "member"
-    role: text("role").notNull().default("member"),
+    role: text("role").notNull().default("member"), // owner | admin | member
+    status: text("status").notNull().default("active"), // active | invited | disabled
 
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    tenantUserUq: uniqueIndex("tenant_members_tenant_user_uq").on(t.tenantId, t.userId),
+    tenantClerkUserUq: uniqueIndex("tenant_members_tenant_clerk_user_uq").on(t.tenantId, t.clerkUserId),
     tenantIdx: index("tenant_members_tenant_id_idx").on(t.tenantId),
+    clerkIdx: index("tenant_members_clerk_user_id_idx").on(t.clerkUserId),
+    roleIdx: index("tenant_members_role_idx").on(t.role),
+    statusIdx: index("tenant_members_status_idx").on(t.status),
   })
 );
 
@@ -168,10 +163,8 @@ export const tenantSettings = pgTable("tenant_settings", {
   leadToEmail: text("lead_to_email"),
   resendFromEmail: text("resend_from_email"),
 
-  // tenant branding (logo URL stored as canonical string)
   brandLogoUrl: text("brand_logo_url"),
 
-  // email sending mode + identity pointer (OAuth identity record)
   emailSendMode: text("email_send_mode"),
   emailIdentityId: uuid("email_identity_id"),
 
@@ -184,7 +177,6 @@ export const tenantSettings = pgTable("tenant_settings", {
   renderingCustomerOptInRequired: boolean("rendering_customer_opt_in_required"),
   aiRenderingEnabled: boolean("ai_rendering_enabled"),
 
-  // Live Q&A (tenant-tunable)
   liveQaEnabled: boolean("live_qa_enabled").notNull().default(false),
   liveQaMaxQuestions: integer("live_qa_max_questions").notNull().default(3),
 
@@ -206,10 +198,7 @@ export const tenantEmailIdentities = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
 
-    // "gmail_oauth" | "microsoft_oauth"
-    provider: text("provider").notNull(),
-
-    // mailbox email (your DB uses column name "email")
+    provider: text("provider").notNull(), // gmail_oauth | microsoft_oauth
     email: text("email").notNull(),
 
     displayName: text("display_name"),
@@ -218,7 +207,6 @@ export const tenantEmailIdentities = pgTable(
 
     lastError: text("last_error"),
 
-    // Optional if your DB migration adds these columns (keep ONCE each)
     fromEmail: text("from_email"),
     refreshTokenEnc: text("refresh_token_enc").notNull().default(""),
 
@@ -278,9 +266,8 @@ export const quoteLogs = pgTable("quote_logs", {
   input: jsonb("input").$type<any>().notNull(),
   output: jsonb("output").$type<any>().notNull(),
 
-  // Live Q&A capture
-  qa: jsonb("qa").$type<any>(), // { questions:[], answers:[], ... }
-  qaStatus: text("qa_status").notNull().default("none"), // none | asking | answered
+  qa: jsonb("qa").$type<any>(),
+  qaStatus: text("qa_status").notNull().default("none"),
   qaAskedAt: timestamp("qa_asked_at", { withTimezone: true }),
   qaAnsweredAt: timestamp("qa_answered_at", { withTimezone: true }),
 

@@ -10,6 +10,8 @@ export const dynamic = "force-dynamic";
 
 type Mode = "new" | "update" | "existing";
 
+/* --------------------- helpers --------------------- */
+
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -64,8 +66,7 @@ async function requireAuthed(): Promise<{ clerkUserId: string }> {
 
 /**
  * ✅ IMPORTANT:
- * Your DB (and previously-working code) appears to key tenant membership by clerk_user_id.
- * So we enforce membership by clerk_user_id here.
+ * Your DB keys tenant membership by clerk_user_id (TEXT) + tenant_id (UUID).
  */
 async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
   const r = await db.execute(sql`
@@ -73,6 +74,7 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
     from tenant_members
     where tenant_id = ${tenantId}::uuid
       and clerk_user_id = ${clerkUserId}
+      and status = 'active'
     limit 1
   `);
   const row = firstRow(r);
@@ -88,9 +90,9 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
     insert into app_users (id, auth_provider, auth_subject, email, name, created_at, updated_at)
     values (gen_random_uuid(), 'clerk', ${clerkUserId}, ${email}, ${name}, now(), now())
     on conflict (auth_provider, auth_subject) do update
-    set email = coalesce(excluded.email, app_users.email),
-        name = coalesce(excluded.name, app_users.name),
-        updated_at = now()
+      set email = coalesce(excluded.email, app_users.email),
+          name  = coalesce(excluded.name,  app_users.name),
+          updated_at = now()
     returning id
   `);
 
@@ -140,9 +142,7 @@ function deriveAiMeta(aiAnalysis: any | null) {
 
   const metaStatus = String(meta?.status ?? "").trim().toLowerCase(); // running | complete | error
   const status =
-    metaStatus === "running" || metaStatus === "complete" || metaStatus === "error"
-      ? metaStatus
-      : "complete";
+    metaStatus === "running" || metaStatus === "complete" || metaStatus === "error" ? metaStatus : "complete";
 
   const roundRaw = Number(meta?.round ?? NaN);
   const round =
@@ -156,9 +156,7 @@ function deriveAiMeta(aiAnalysis: any | null) {
   const lastAction = String(meta?.lastAction ?? "").trim();
   const error = String(meta?.error ?? "").trim();
 
-  const conf = getConfidence(aiAnalysis);
   const needs = getNeedsConfirmation(aiAnalysis);
-
   const userCorrection = meta?.userCorrection ?? getLastCorrectionFallback(aiAnalysis);
 
   const derivedLastAction =
@@ -219,7 +217,6 @@ export async function GET(req: Request) {
     const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
-    // ✅ mode=new with NO tenantId -> start fresh onboarding session
     if (mode === "new" && !tenantId) {
       return NextResponse.json(
         {
@@ -287,7 +284,7 @@ export async function POST(req: Request) {
 
     const { appUserId } = await ensureAppUser(clerkUserId);
 
-    // derive owner fields if omitted
+    // derive owner fields if omitted (used only for validation / future use)
     let ownerName = safeTrim(body?.ownerName);
     let ownerEmail = safeTrim(body?.ownerEmail);
 
@@ -331,7 +328,7 @@ export async function POST(req: Request) {
       if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
       tenantId = String(trow.id);
 
-      // ✅ FIX: insert membership using clerk_user_id (DB expects this)
+      // ✅ membership row uses clerk_user_id (TEXT), plus status/updated_at
       await db.execute(sql`
         insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
         values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
@@ -342,22 +339,22 @@ export async function POST(req: Request) {
         insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
         values (${tenantId}::uuid, 'service', ${businessName}, now())
         on conflict (tenant_id) do update
-        set business_name = excluded.business_name,
-            updated_at = now()
+          set business_name = excluded.business_name,
+              updated_at = now()
       `);
     } else {
       await db.execute(sql`
         update tenants
-        set name = ${businessName}
+          set name = ${businessName}
         where id = ${tenantId}::uuid
       `);
 
       await db.execute(sql`
-        insert into tenant_settings (tenant_id, business_name, updated_at, industry_key)
-        values (${tenantId}::uuid, ${businessName}, now(), 'service')
+        insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
+        values (${tenantId}::uuid, 'service', ${businessName}, now())
         on conflict (tenant_id) do update
-        set business_name = excluded.business_name,
-            updated_at = now()
+          set business_name = excluded.business_name,
+              updated_at = now()
       `);
     }
 
@@ -365,20 +362,17 @@ export async function POST(req: Request) {
       insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
       values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
       on conflict (tenant_id) do update
-      set website = excluded.website,
-          current_step = greatest(tenant_onboarding.current_step, 2),
-          updated_at = now()
+        set website = excluded.website,
+            current_step = greatest(tenant_onboarding.current_step, 2),
+            updated_at = now()
     `);
 
     return NextResponse.json({ ok: true, tenantId }, { status: 200 });
   } catch (e: any) {
-    // ✅ surface deeper db error info if available
+    // surface deeper db error info if available
     const base = e?.message ?? String(e);
     const detail =
-      (e?.cause?.message && String(e.cause.message)) ||
-      (e?.detail && String(e.detail)) ||
-      (e?.hint && String(e.hint)) ||
-      "";
+      (e?.cause?.message && String(e.cause.message)) || (e?.detail && String(e.detail)) || (e?.hint && String(e.hint)) || "";
     const msg = detail ? `${base} :: ${detail}` : base;
 
     const status = msg.includes("UNAUTHENTICATED") ? 401 : msg.includes("FORBIDDEN_TENANT") ? 403 : 500;
