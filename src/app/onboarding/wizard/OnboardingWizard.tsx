@@ -14,7 +14,6 @@ type OnboardingState = {
   website: string | null;
   aiAnalysis: any | null;
 
-  // NOTE: state API may also return convenience fields; we ignore if missing
   aiAnalysisStatus?: string | null;
   aiAnalysisRound?: number | null;
   aiAnalysisLastAction?: string | null;
@@ -125,15 +124,10 @@ function getMetaLastAction(aiAnalysis: any | null | undefined) {
 }
 
 function getPreviewText(aiAnalysis: any | null | undefined) {
-  // Primary
   const p = String(aiAnalysis?.extractedTextPreview ?? "").trim();
   if (p) return p;
-
-  // Secondary: sometimes people store it nested
   const p2 = String(aiAnalysis?.debug?.extractedTextPreview ?? "").trim();
   if (p2) return p2;
-
-  // Otherwise empty
   return "";
 }
 
@@ -146,10 +140,8 @@ function summarizeFetchDebug(aiAnalysis: any | null | undefined) {
   const attempted: any[] = Array.isArray(fd?.attempted) ? fd.attempted : [];
   const pagesAttempted: any[] = Array.isArray(fd?.pagesAttempted) ? fd.pagesAttempted : [];
 
-  // Simple “why” heuristics for UI
   let hint: string | null = null;
   if (aggregateChars < 200) {
-    // look for notes
     const notes: string[] = [];
     for (const a of attempted) {
       const n = String(a?.note ?? "").trim();
@@ -175,7 +167,6 @@ export default function OnboardingWizard() {
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // keep local UX action (button clicks)
   const [lastAction, setLastAction] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
@@ -205,7 +196,6 @@ export default function OnboardingWizard() {
   }, [state?.tenantName]);
 
   const serverLastAction = useMemo(() => {
-    // Prefer derived state fields if present, else aiAnalysis.meta.lastAction
     const a = String(state?.aiAnalysisLastAction ?? "").trim();
     if (a) return a;
     const b = getMetaLastAction(state?.aiAnalysis);
@@ -278,10 +268,7 @@ export default function OnboardingWizard() {
     while (mountedRef.current && Date.now() - start < maxMs) {
       const j = await refresh({ tenantId: tid });
 
-      const status =
-        String(j?.aiAnalysisStatus ?? "").trim() ||
-        String(j?.aiAnalysis?.meta?.status ?? "").trim();
-
+      const status = String(j?.aiAnalysisStatus ?? "").trim() || String(j?.aiAnalysis?.meta?.status ?? "").trim();
       if (status && status.toLowerCase() !== "running") return;
 
       await sleep(650);
@@ -320,14 +307,12 @@ export default function OnboardingWizard() {
     const tid = String(state?.tenantId ?? tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
-    // Kick off request (do not await yet)
     const req = fetch("/api/onboarding/analyze-website", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tenantId: tid }),
     });
 
-    // Immediately poll so UI reflects DB "running" meta updates while POST is still in-flight
     const poll = pollAnalysisUntilSettled(tid).catch(() => null);
 
     const res = await req;
@@ -352,7 +337,6 @@ export default function OnboardingWizard() {
       body: JSON.stringify({ tenantId: tid, ...args }),
     });
 
-    // Only poll if the "no" path triggers a re-run
     const poll = args.answer === "no" ? pollAnalysisUntilSettled(tid).catch(() => null) : Promise.resolve();
 
     const res = await req;
@@ -385,6 +369,19 @@ export default function OnboardingWizard() {
     go(4);
   }
 
+  function openSetup(path: string) {
+    // keep tenantId in URL for continuity, but don’t rely on it server-side
+    const tid = String(state?.tenantId ?? tenantId ?? "").trim();
+    const url = new URL(window.location.origin + path);
+    if (tid) url.searchParams.set("tenantId", tid);
+
+    // returnTo makes it easy to add later (optional)
+    const returnTo = new URL(window.location.href);
+    url.searchParams.set("returnTo", returnTo.pathname + returnTo.search);
+
+    window.location.href = url.pathname + url.search;
+  }
+
   if (loading) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-10">
@@ -413,7 +410,6 @@ export default function OnboardingWizard() {
               Tenant: <span className="font-mono">{displayTenantId}</span>
             </div>
 
-            {/* prefer server last action, fall back to local click-based action */}
             {serverLastAction ? (
               <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Last action: {serverLastAction}</div>
             ) : lastAction ? (
@@ -459,8 +455,41 @@ export default function OnboardingWizard() {
               onBack={() => go(2)}
               onSubmit={saveIndustrySelection}
             />
+          ) : step === 4 ? (
+            <HandoffStep
+              title="AI & Pricing Policy"
+              desc="Reuse the full admin setup screen to configure AI mode, Live Q&A, and render policy."
+              primaryLabel="Open AI Policy setup"
+              onPrimary={() => openSetup("/admin/setup/ai-policy")}
+              onBack={() => go(3)}
+              onContinue={() => go(5)}
+              note="Tip: click Save Policy on that page, then come back here and continue."
+            />
+          ) : step === 5 ? (
+            <HandoffStep
+              title="Branding & Email"
+              desc="Upload your logo, set your From address, lead routing, and run a test email."
+              primaryLabel="Open Tenant Settings"
+              onPrimary={() => openSetup("/admin/settings")}
+              onBack={() => go(4)}
+              onContinue={() => go(6)}
+              note="Tip: upload a logo and send a test email. Save Settings, then continue."
+            />
           ) : (
-            <ComingSoon step={step} onBack={() => go(step - 1)} />
+            <HandoffStep
+              title="Widget Setup"
+              desc="Finalize your embed widget so customers can submit photos from your website."
+              primaryLabel="Open Widget setup"
+              onPrimary={() => openSetup("/admin/setup/widget")}
+              onBack={() => go(5)}
+              onContinue={() => {
+                setLastAction("Onboarding complete.");
+                // if your backend tracks completion, it will reflect on next refresh
+                refresh({ tenantId: String(state?.tenantId ?? tenantId ?? "").trim() }).catch(() => null);
+              }}
+              continueLabel="Finish"
+              note="After widget setup, you’re ready to run a real test quote."
+            />
           )}
         </div>
       </div>
@@ -597,7 +626,6 @@ function Step2({
   const preview = getPreviewText(aiAnalysis);
   const fetchSummary = summarizeFetchDebug(aiAnalysis);
 
-  // Prefer server status if present (avoid “stuck analyzing” UX)
   const serverSaysAnalyzing = String(aiAnalysisStatus ?? "").toLowerCase() === "running";
   const showAnalyzing = running || serverSaysAnalyzing;
 
@@ -990,21 +1018,53 @@ function Step3({
   );
 }
 
-function ComingSoon({ step, onBack }: { step: number; onBack: () => void }) {
+function HandoffStep(props: {
+  title: string;
+  desc: string;
+  primaryLabel: string;
+  onPrimary: () => void;
+  onBack: () => void;
+  onContinue: () => void;
+  note?: string;
+  continueLabel?: string;
+}) {
   return (
     <div>
-      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Step {step} coming next</div>
-      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        Wizard shell is in place. Next we’ll implement pricing model setup + plan selection.
-      </div>
+      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">{props.title}</div>
+      <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{props.desc}</div>
 
-      <button
-        type="button"
-        className="mt-6 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-        onClick={onBack}
-      >
-        Back
-      </button>
+      {props.note ? (
+        <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+          {props.note}
+        </div>
+      ) : null}
+
+      <div className="mt-6 grid gap-3">
+        <button
+          type="button"
+          className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white"
+          onClick={props.onPrimary}
+        >
+          {props.primaryLabel}
+        </button>
+
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            onClick={props.onBack}
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            className="rounded-2xl bg-black py-3 text-sm font-semibold text-white dark:bg-white dark:text-black"
+            onClick={props.onContinue}
+          >
+            {props.continueLabel ?? "Continue"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
