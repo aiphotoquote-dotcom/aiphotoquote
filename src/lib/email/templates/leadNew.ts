@@ -89,6 +89,48 @@ function buildPhotoGrid(imageUrls: string[]) {
   `;
 }
 
+type BrandLogoVariant = "light" | "dark" | "auto" | string | null;
+
+function normalizeLogoVariant(v: unknown): BrandLogoVariant {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (s === "light" || s === "dark" || s === "auto") return s;
+  return s;
+}
+
+function renderTopBrand(args: {
+  businessName: string;
+  brandLogoUrl?: string | null;
+  brandLogoVariant?: BrandLogoVariant;
+}) {
+  const { businessName, brandLogoUrl } = args;
+  const variant = normalizeLogoVariant(args.brandLogoVariant);
+
+  if (!brandLogoUrl) {
+    return `<div style="font-weight:900;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+  }
+
+  // “Chip” behind the logo for contrast (helps white/transparent PNGs)
+  const chip =
+    variant === "dark"
+      ? { bg: "#0b0b0b", border: "#111827" }
+      : variant === "light"
+      ? { bg: "#ffffff", border: "#e5e7eb" }
+      : null;
+
+  if (!chip) {
+    return `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}"
+      style="height:28px;max-width:180px;object-fit:contain;display:block;" />`;
+  }
+
+  return `
+    <div style="display:inline-block;padding:8px 10px;border-radius:12px;background:${chip.bg};border:1px solid ${chip.border};">
+      <img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}"
+        style="height:28px;max-width:180px;object-fit:contain;display:block;" />
+    </div>
+  `;
+}
+
 export function renderLeadNewEmailHTML(args: {
   businessName: string;
   tenantSlug: string;
@@ -100,6 +142,7 @@ export function renderLeadNewEmailHTML(args: {
 
   // branding
   brandLogoUrl?: string | null;
+  brandLogoVariant?: BrandLogoVariant;
 
   // deep links
   adminQuoteUrl?: string | null;
@@ -139,6 +182,7 @@ export function renderLeadNewEmailHTML(args: {
     notes,
     imageUrls,
     brandLogoUrl,
+    brandLogoVariant,
     adminQuoteUrl,
     confidence,
     inspectionRequired,
@@ -154,12 +198,7 @@ export function renderLeadNewEmailHTML(args: {
     sections,
   } = args;
 
-  const topLogo = brandLogoUrl
-    ? `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}"
-         style="height:28px;max-width:180px;object-fit:contain;display:block;" />`
-    : `<div style="font-weight:900;font-size:14px;letter-spacing:.2px;color:#111;">${esc(
-        businessName
-      )}</div>`;
+  const topLogo = renderTopBrand({ businessName, brandLogoUrl, brandLogoVariant });
 
   const conf = String(confidence ?? "").toLowerCase().trim();
   const confBadge =
@@ -213,12 +252,7 @@ export function renderLeadNewEmailHTML(args: {
 
   // Plan (Phase 1 foundation)
   const whatList = listItems((planWhat || visibleScope || []) as string[], 10);
-  const howDefault = [
-    "Review photos & notes",
-    "Reply with questions if needed",
-    "Confirm materials/scope",
-    "Schedule / inspect (if recommended)",
-  ];
+  const howDefault = ["Review photos & notes", "Reply with questions if needed", "Confirm materials/scope", "Schedule / inspect (if recommended)"];
   const howList = listItems((planHow || howDefault) as string[], 10);
 
   const planBlock =
@@ -241,9 +275,7 @@ export function renderLeadNewEmailHTML(args: {
     .slice(0, 6)
     .map((s) => {
       const items = listItems(s.items || [], 10);
-      const note = s.note
-        ? `<div style="margin-top:8px;color:#6b7280;font-size:12px;">${esc(s.note)}</div>`
-        : "";
+      const note = s.note ? `<div style="margin-top:8px;color:#6b7280;font-size:12px;">${esc(s.note)}</div>` : "";
       const body = `${items || ""}${note || ""}` || `<div style="color:#6b7280;">(No details)</div>`;
       return sectionCard({ title: s.title, body, subtle: s.subtle });
     })
@@ -309,24 +341,16 @@ export function renderLeadNewEmailHTML(args: {
                     <table role="presentation" width="100%">
                       <tr>
                         <td style="vertical-align:top;">
-                          <div style="margin-top:2px;font-size:16px;font-weight:900;color:#111;">${esc(
-                            customer?.name
-                          )}</div>
+                          <div style="margin-top:2px;font-size:16px;font-weight:900;color:#111;">${esc(customer?.name)}</div>
                           <div style="margin-top:8px;font-size:13px;color:#111;">
-                            <div><span style="color:#6b7280;font-weight:900;">Email:</span> ${esc(
-                              customer?.email
-                            )}</div>
-                            <div style="margin-top:2px;"><span style="color:#6b7280;font-weight:900;">Phone:</span> ${esc(
-                              customer?.phone
-                            )}</div>
+                            <div><span style="color:#6b7280;font-weight:900;">Email:</span> ${esc(customer?.email)}</div>
+                            <div style="margin-top:2px;"><span style="color:#6b7280;font-weight:900;">Phone:</span> ${esc(customer?.phone)}</div>
                           </div>
                         </td>
 
                         <td align="right" style="vertical-align:top;">
                           <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Tenant</div>
-                          <div style="margin-top:4px;font-size:13px;font-weight:900;color:#111;">${esc(
-                            tenantSlug
-                          )}</div>
+                          <div style="margin-top:4px;font-size:13px;font-weight:900;color:#111;">${esc(tenantSlug)}</div>
 
                           <div style="margin-top:10px;font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Internal ID</div>
                           <div style="margin-top:4px;font-size:12px;font-weight:900;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;color:#111;">
@@ -340,9 +364,7 @@ export function renderLeadNewEmailHTML(args: {
                       rangeText
                         ? `<div style="margin-top:12px;padding-top:12px;border-top:1px solid #eef0f4;">
                              <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">AI estimate range</div>
-                             <div style="margin-top:4px;font-size:18px;font-weight:900;color:#111;">${esc(
-                               rangeText
-                             )}</div>
+                             <div style="margin-top:4px;font-size:18px;font-weight:900;color:#111;">${esc(rangeText)}</div>
                            </div>`
                         : ""
                     }
@@ -353,9 +375,7 @@ export function renderLeadNewEmailHTML(args: {
                       safeSummary
                         ? `<div style="margin-top:12px;">
                              <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">AI summary</div>
-                             <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(
-                               safeSummary
-                             )}</div>
+                             <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(safeSummary)}</div>
                            </div>`
                         : ""
                     }
@@ -364,9 +384,7 @@ export function renderLeadNewEmailHTML(args: {
                       safeNotes
                         ? `<div style="margin-top:12px;">
                              <div style="font-size:12px;color:#6b7280;font-weight:900;letter-spacing:.2px;">Customer notes</div>
-                             <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(
-                               safeNotes
-                             )}</div>
+                             <div style="margin-top:6px;font-size:14px;line-height:1.55;color:#111;white-space:pre-wrap;">${esc(safeNotes)}</div>
                            </div>`
                         : ""
                     }
@@ -390,11 +408,7 @@ export function renderLeadNewEmailHTML(args: {
             ${
               scopeHtml
                 ? `<tr><td style="padding:16px 20px 0;">
-                     ${sectionCard({
-                       title: "Visible scope",
-                       body: scopeHtml,
-                       subtle: true,
-                     })}
+                     ${sectionCard({ title: "Visible scope", body: scopeHtml, subtle: true })}
                    </td></tr>`
                 : ""
             }
@@ -402,10 +416,7 @@ export function renderLeadNewEmailHTML(args: {
             ${
               assumptionsHtml
                 ? `<tr><td style="padding:16px 20px 0;">
-                     ${sectionCard({
-                       title: "Assumptions",
-                       body: assumptionsHtml,
-                     })}
+                     ${sectionCard({ title: "Assumptions", body: assumptionsHtml })}
                    </td></tr>`
                 : ""
             }
@@ -413,11 +424,7 @@ export function renderLeadNewEmailHTML(args: {
             ${
               questionsHtml
                 ? `<tr><td style="padding:16px 20px 0;">
-                     ${sectionCard({
-                       title: "Questions to confirm",
-                       body: questionsHtml,
-                       subtle: true,
-                     })}
+                     ${sectionCard({ title: "Questions to confirm", body: questionsHtml, subtle: true })}
                    </td></tr>`
                 : ""
             }

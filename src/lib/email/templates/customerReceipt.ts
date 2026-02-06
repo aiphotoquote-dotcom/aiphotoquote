@@ -61,6 +61,47 @@ function twoColBullets(args: { leftTitle: string; left: string; rightTitle: stri
   `;
 }
 
+type BrandLogoVariant = "auto" | "light" | "dark";
+
+function normalizeVariant(v: unknown): BrandLogoVariant {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "light") return "light";
+  if (s === "dark") return "dark";
+  return "auto";
+}
+
+/**
+ * Renders a logo that stays visible even if the uploaded asset is white/low-contrast.
+ *
+ * - auto/light: render directly (current behavior)
+ * - dark: render the logo on a dark “pill” background so white logos show up on the top bar
+ *
+ * NOTE: We only have one logo URL today; variant is a rendering hint only.
+ */
+function renderTopLogo(args: { brandLogoUrl?: string | null; businessName: string; brandLogoVariant?: BrandLogoVariant | null }) {
+  const { brandLogoUrl, businessName } = args;
+  const variant = normalizeVariant(args.brandLogoVariant);
+
+  if (!brandLogoUrl) {
+    return `<div style="font-weight:900;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+  }
+
+  const img = `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}"
+      style="height:28px;max-width:180px;object-fit:contain;display:block;" />`;
+
+  // If the logo is intended for dark backgrounds (often white logo), ensure contrast.
+  if (variant === "dark") {
+    return `
+      <div style="display:inline-block;padding:8px 10px;border-radius:12px;background:#0b0b0b;border:1px solid #111827;">
+        ${img}
+      </div>
+    `;
+  }
+
+  // auto / light
+  return img;
+}
+
 export function renderCustomerReceiptEmailHTML(args: {
   businessName: string;
   customerName: string;
@@ -82,6 +123,9 @@ export function renderCustomerReceiptEmailHTML(args: {
 
   // Optional branding
   brandLogoUrl?: string | null;
+
+  // ✅ NEW: rendering hint to avoid contrast issues
+  brandLogoVariant?: BrandLogoVariant | null;
 
   // Optional support hint
   replyToEmail?: string | null;
@@ -116,6 +160,7 @@ export function renderCustomerReceiptEmailHTML(args: {
     questions,
     imageUrls,
     brandLogoUrl,
+    brandLogoVariant,
     replyToEmail,
     sections,
     planWhat,
@@ -124,12 +169,11 @@ export function renderCustomerReceiptEmailHTML(args: {
 
   const preheader = "We received your photos — your estimate range is ready.";
 
-  const topLogo = brandLogoUrl
-    ? `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}"
-         style="height:28px;max-width:180px;object-fit:contain;display:block;" />`
-    : `<div style="font-weight:900;font-size:14px;letter-spacing:.2px;color:#111;">${esc(
-        businessName
-      )}</div>`;
+  const topLogo = renderTopLogo({
+    brandLogoUrl,
+    businessName,
+    brandLogoVariant,
+  });
 
   const rangeText = `${money(estimateLow)} – ${money(estimateHigh)}`;
   const safeSummary = String(summary ?? "").trim();

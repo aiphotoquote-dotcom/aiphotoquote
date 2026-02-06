@@ -1,3 +1,5 @@
+// src/lib/email/templates/renderCompleteCustomer.ts
+
 function esc(s: unknown) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -13,9 +15,58 @@ function money(n: unknown) {
   return `$${Math.round(v).toLocaleString()}`;
 }
 
+type BrandLogoVariant = "light" | "dark";
+
+function normalizeVariant(v: unknown): BrandLogoVariant | null {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "light") return "light";
+  if (s === "dark") return "dark";
+  return null;
+}
+
+/**
+ * Renders the tenant logo in a way that stays readable.
+ * - variant="light" => logo is light/white-ish, so we place it on a dark pill when the header is light.
+ * - variant="dark"  => normal logo for light backgrounds; render directly.
+ */
+function renderHeaderLogo(args: { brandLogoUrl?: string | null; businessName: string; brandLogoVariant?: BrandLogoVariant | null }) {
+  const { brandLogoUrl, businessName, brandLogoVariant } = args;
+
+  if (!brandLogoUrl) {
+    return `<div style="font-weight:800;font-size:14px;letter-spacing:.2px;color:#111;">${esc(businessName)}</div>`;
+  }
+
+  const v = normalizeVariant(brandLogoVariant);
+
+  // Light logo on light header => add contrast pill
+  if (v === "light") {
+    return `
+      <div style="display:inline-block;padding:8px 10px;border-radius:14px;background:#0b0b0b;border:1px solid #111;">
+        <img
+          src="${esc(brandLogoUrl)}"
+          alt="${esc(businessName)}"
+          style="height:28px;max-width:180px;object-fit:contain;display:block;"
+        />
+      </div>
+    `.trim();
+  }
+
+  // Default: dark logo on light header
+  return `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />`;
+}
+
 export function renderCustomerRenderCompleteEmailHTML(args: {
   businessName: string;
+
+  // branding
   brandLogoUrl?: string | null;
+
+  /**
+   * NEW (optional/back-compat safe):
+   * - "dark"  => logo intended for light backgrounds (default)
+   * - "light" => logo intended for dark backgrounds (we'll add a dark pill in the header)
+   */
+  brandLogoVariant?: "light" | "dark" | null;
 
   customerName: string;
   quoteLogId: string; // kept for API compatibility (not shown to customer)
@@ -33,6 +84,7 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
   const {
     businessName,
     brandLogoUrl,
+    brandLogoVariant,
     customerName,
     renderImageUrl,
     estimateLow,
@@ -46,13 +98,11 @@ export function renderCustomerRenderCompleteEmailHTML(args: {
 
   const safeSummary = String(summary ?? "").trim();
 
-  const topLogo = brandLogoUrl
-    ? `<img src="${esc(brandLogoUrl)}" alt="${esc(
-        businessName
-      )}" style="height:28px;max-width:180px;object-fit:contain;display:block;" />`
-    : `<div style="font-weight:800;font-size:14px;letter-spacing:.2px;color:#111;">${esc(
-        businessName
-      )}</div>`;
+  const topLogo = renderHeaderLogo({
+    brandLogoUrl,
+    businessName,
+    brandLogoVariant: normalizeVariant(brandLogoVariant),
+  });
 
   // preheader (hidden in body)
   const preheader = `Your concept rendering is ready — a vision for what’s possible.`;
