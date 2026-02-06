@@ -19,6 +19,7 @@ import { Step2 } from "./steps/Step2";
 import { Step3 } from "./steps/Step3";
 import { Step5Branding } from "./steps/Step5Branding";
 import { HandoffStep } from "./steps/HandoffStep";
+import { Step6Plan } from "./steps/Step6Plan";
 
 export default function OnboardingWizard() {
   const [{ step, mode, tenantId }, setNav] = useState(() => getUrlParams());
@@ -329,9 +330,7 @@ export default function OnboardingWizard() {
           </div>
 
           <div className="shrink-0 text-right">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-              Step {step} / 6
-            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
             <div className="text-xs text-gray-600 dark:text-gray-300">{displayTenantName}</div>
           </div>
         </div>
@@ -387,18 +386,15 @@ export default function OnboardingWizard() {
               onSubmit={saveBrandingStep}
             />
           ) : (
-            <HandoffStep
-              title="Widget Setup"
-              desc="Finalize your embed widget so customers can submit photos from your website."
-              primaryLabel="Open Widget setup"
-              onPrimary={() => openSetup("/admin/setup/widget").catch((e: any) => setErr(e?.message ?? String(e)))}
+            <Step6Plan
+              tenantId={String(state?.tenantId ?? tenantId ?? "").trim() || null}
+              currentPlan={(state?.planTier as any) ?? null}
               onBack={() => go(5)}
-              onContinue={() => {
-                setLastAction("Onboarding complete.");
+              onSaved={(p) => {
+                setLastAction(`Plan saved: ${p}`);
                 refresh({ tenantId: String(state?.tenantId ?? tenantId ?? "").trim() }).catch(() => null);
               }}
-              continueLabel="Finish"
-              note="After widget setup, you’re ready to run a real test quote."
+              openWidgetSetup={() => openSetup("/admin/setup/widget").catch((e: any) => setErr(e?.message ?? String(e)))}
             />
           )}
         </div>

@@ -1,3 +1,5 @@
+// src/app/onboarding/wizard/steps/HandoffStep.tsx
+
 "use client";
 
 import React from "react";

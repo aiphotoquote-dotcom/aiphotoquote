@@ -9,6 +9,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Mode = "new" | "update" | "existing";
+type PlanTier = "tier0" | "tier1" | "tier2";
 
 /* --------------------- helpers --------------------- */
 
@@ -22,6 +23,24 @@ function safeMode(v: unknown): Mode {
   if (s === "update") return "update";
   if (s === "existing") return "existing";
   return "new";
+}
+
+/**
+ * Accept both new tier names + legacy DB default "free"
+ * - "free" => tier0
+ */
+function safePlan(v: unknown): PlanTier | null {
+  const s = safeTrim(v).toLowerCase();
+  if (s === "tier0" || s === "free") return "tier0";
+  if (s === "tier1") return "tier1";
+  if (s === "tier2") return "tier2";
+  return null;
+}
+
+function planToDbValue(p: PlanTier): string {
+  // Keep writing tier0/tier1/tier2 going forward.
+  // Existing rows may still be "free" — we map that in safePlan().
+  return p;
 }
 
 // Drizzle RowList can be array-like; avoid `.rows`
@@ -164,10 +183,10 @@ function deriveAiMeta(aiAnalysis: any | null) {
     (status === "running"
       ? "Analyzing website…"
       : status === "error"
-      ? "AI analysis failed."
-      : needs
-      ? "Waiting for your confirmation/correction."
-      : "AI analysis complete.");
+        ? "AI analysis failed."
+        : needs
+          ? "Waiting for your confirmation/correction."
+          : "AI analysis complete.");
 
   return {
     aiAnalysisStatus: status,
@@ -188,9 +207,11 @@ async function readTenantOnboarding(tenantId: string) {
       o.current_step,
       o.completed,
       o.website,
-      o.ai_analysis
+      o.ai_analysis,
+      ts.plan_tier
     from tenants t
     left join tenant_onboarding o on o.tenant_id = t.id
+    left join tenant_settings ts on ts.tenant_id = t.id
     where t.id = ${tenantId}::uuid
     limit 1
   `);
@@ -200,12 +221,16 @@ async function readTenantOnboarding(tenantId: string) {
   const aiAnalysis = row?.ai_analysis ?? null;
   const derived = deriveAiMeta(aiAnalysis);
 
+  const planTierRaw = safeTrim(row?.plan_tier);
+  const planTier = safePlan(planTierRaw);
+
   return {
     tenantName: row?.tenant_name ?? null,
     currentStep: row?.current_step ?? 1,
     completed: row?.completed ?? false,
     website: row?.website ?? null,
     aiAnalysis: aiAnalysis ?? null,
+    planTier: planTier ?? null,
     ...derived,
   };
 }
@@ -228,6 +253,7 @@ export async function GET(req: Request) {
           completed: false,
           website: null,
           aiAnalysis: null,
+          planTier: null,
           aiAnalysisStatus: "idle",
           aiAnalysisRound: 0,
           aiAnalysisLastAction: "",
@@ -271,108 +297,194 @@ export async function POST(req: Request) {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-    if (Number(body?.step) !== 1) {
-      return NextResponse.json({ ok: false, error: "UNSUPPORTED_STEP" }, { status: 400 });
-    }
+    const step = Number(body?.step);
 
-    const businessName = safeTrim(body?.businessName);
-    const website = safeTrim(body?.website);
+    // ---------------- STEP 1 (unchanged) ----------------
+    if (step === 1) {
+      const businessName = safeTrim(body?.businessName);
+      const website = safeTrim(body?.website);
 
-    if (businessName.length < 2) {
-      return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
-    }
+      if (businessName.length < 2) {
+        return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
+      }
 
-    const { appUserId } = await ensureAppUser(clerkUserId);
+      const { appUserId } = await ensureAppUser(clerkUserId);
 
-    // derive owner fields if omitted (used only for validation / future use)
-    let ownerName = safeTrim(body?.ownerName);
-    let ownerEmail = safeTrim(body?.ownerEmail);
+      let ownerName = safeTrim(body?.ownerName);
+      let ownerEmail = safeTrim(body?.ownerEmail);
 
-    if (!ownerName || !ownerEmail) {
-      const u = await currentUser();
-      ownerEmail = ownerEmail || (u?.emailAddresses?.[0]?.emailAddress ?? "");
-      ownerName = ownerName || (u?.fullName ?? u?.firstName ?? "");
-      ownerName = safeTrim(ownerName);
-      ownerEmail = safeTrim(ownerEmail);
-    }
+      if (!ownerName || !ownerEmail) {
+        const u = await currentUser();
+        ownerEmail = ownerEmail || (u?.emailAddresses?.[0]?.emailAddress ?? "");
+        ownerName = ownerName || (u?.fullName ?? u?.firstName ?? "");
+        ownerName = safeTrim(ownerName);
+        ownerEmail = safeTrim(ownerEmail);
+      }
 
-    if (ownerName.length < 2) {
-      return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
-    }
-    if (!ownerEmail.includes("@")) {
-      return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
-    }
+      if (ownerName.length < 2) {
+        return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
+      }
+      if (!ownerEmail.includes("@")) {
+        return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+      }
 
-    let tenantId: string | null = null;
+      let tenantId: string | null = null;
 
-    // update/existing targets a specific tenant
-    if (mode === "update" || mode === "existing") {
-      const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-      if (!t) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
-      await requireMembership(clerkUserId, t);
-      tenantId = t;
-    }
+      if (mode === "update" || mode === "existing") {
+        const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
+        if (!t) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+        await requireMembership(clerkUserId, t);
+        tenantId = t;
+      }
 
-    // mode=new always creates a new tenant
-    if (!tenantId) {
-      const baseSlug = slugify(businessName);
-      const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
+      if (!tenantId) {
+        const baseSlug = slugify(businessName);
+        const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
 
-      const tIns = await db.execute(sql`
-        insert into tenants (id, name, slug, owner_user_id, owner_clerk_user_id, created_at)
-        values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, ${clerkUserId}, now())
-        returning id
-      `);
+        const tIns = await db.execute(sql`
+          insert into tenants (id, name, slug, owner_user_id, owner_clerk_user_id, created_at)
+          values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, ${clerkUserId}, now())
+          returning id
+        `);
 
-      const trow = firstRow(tIns);
-      if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
-      tenantId = String(trow.id);
+        const trow = firstRow(tIns);
+        if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
+        tenantId = String(trow.id);
 
-      // ✅ membership row uses clerk_user_id (TEXT), plus status/updated_at
+        await db.execute(sql`
+          insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
+          values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
+          on conflict do nothing
+        `);
+
+        await db.execute(sql`
+          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
+          values (${tenantId}::uuid, 'service', ${businessName}, now())
+          on conflict (tenant_id) do update
+            set business_name = excluded.business_name,
+                updated_at = now()
+        `);
+      } else {
+        await db.execute(sql`
+          update tenants
+            set name = ${businessName}
+          where id = ${tenantId}::uuid
+        `);
+
+        await db.execute(sql`
+          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
+          values (${tenantId}::uuid, 'service', ${businessName}, now())
+          on conflict (tenant_id) do update
+            set business_name = excluded.business_name,
+                updated_at = now()
+        `);
+      }
+
       await db.execute(sql`
-        insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
-        values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
-        on conflict do nothing
-      `);
-
-      await db.execute(sql`
-        insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
-        values (${tenantId}::uuid, 'service', ${businessName}, now())
+        insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
+        values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
         on conflict (tenant_id) do update
-          set business_name = excluded.business_name,
+          set website = excluded.website,
+              current_step = greatest(tenant_onboarding.current_step, 2),
               updated_at = now()
       `);
-    } else {
-      await db.execute(sql`
-        update tenants
-          set name = ${businessName}
-        where id = ${tenantId}::uuid
-      `);
 
-      await db.execute(sql`
-        insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
-        values (${tenantId}::uuid, 'service', ${businessName}, now())
-        on conflict (tenant_id) do update
-          set business_name = excluded.business_name,
-              updated_at = now()
-      `);
+      return NextResponse.json({ ok: true, tenantId }, { status: 200 });
     }
 
-    await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
-      on conflict (tenant_id) do update
-        set website = excluded.website,
-            current_step = greatest(tenant_onboarding.current_step, 2),
-            updated_at = now()
-    `);
+    // ---------------- STEP 5: branding save ----------------
+    if (step === 5) {
+      const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
+      if (!tid) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
 
-    return NextResponse.json({ ok: true, tenantId }, { status: 200 });
+      await requireMembership(clerkUserId, tid);
+
+      const leadToEmail = safeTrim(body?.lead_to_email);
+      const brandLogoUrlRaw = safeTrim(body?.brand_logo_url);
+
+      if (!leadToEmail.includes("@")) {
+        return NextResponse.json(
+          { ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." },
+          { status: 400 }
+        );
+      }
+
+      const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
+
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, industry_key, lead_to_email, brand_logo_url, updated_at)
+        values (${tid}::uuid, 'service', ${leadToEmail}, ${brandLogoUrl}, now())
+        on conflict (tenant_id) do update
+          set lead_to_email = excluded.lead_to_email,
+              brand_logo_url = excluded.brand_logo_url,
+              updated_at = now()
+      `);
+
+      // advance onboarding to step 6 (not completed yet)
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
+        values (${tid}::uuid, 6, false, now(), now())
+        on conflict (tenant_id) do update
+          set current_step = greatest(tenant_onboarding.current_step, 6),
+              updated_at = now()
+      `);
+
+      return NextResponse.json({ ok: true, tenantId: tid }, { status: 200 });
+    }
+
+    // ---------------- STEP 6: plan selection ----------------
+    if (step === 6) {
+      const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
+      if (!tid) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+
+      await requireMembership(clerkUserId, tid);
+
+      const plan = safePlan(body?.plan);
+      if (!plan) {
+        return NextResponse.json({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, { status: 400 });
+      }
+
+      // ✅ business rules (per your latest decision)
+      // tier0: 5 quotes/mo, platform keys allowed (handled later)
+      // tier1: 50 quotes/mo
+      // tier2: unlimited (NULL)
+      const monthlyLimit = plan === "tier0" ? 5 : plan === "tier1" ? 50 : null;
+
+      // Optional: small grace bucket for paid tiers (until they set tenant key) — we’ll enforce later.
+      const graceCredits = plan === "tier0" ? 0 : 30;
+
+      await db.execute(sql`
+        update tenant_settings
+        set
+          plan_tier = ${planToDbValue(plan)},
+          monthly_quote_limit = ${monthlyLimit},
+          activation_grace_credits = ${graceCredits},
+          activation_grace_used = 0,
+          plan_selected_at = now(),
+          updated_at = now()
+        where tenant_id = ${tid}::uuid
+      `);
+
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
+        values (${tid}::uuid, 6, true, now(), now())
+        on conflict (tenant_id) do update
+          set current_step = greatest(tenant_onboarding.current_step, 6),
+              completed = true,
+              updated_at = now()
+      `);
+
+      return NextResponse.json({ ok: true, tenantId: tid, planTier: plan }, { status: 200 });
+    }
+
+    return NextResponse.json({ ok: false, error: "UNSUPPORTED_STEP" }, { status: 400 });
   } catch (e: any) {
-    // surface deeper db error info if available
     const base = e?.message ?? String(e);
     const detail =
-      (e?.cause?.message && String(e.cause.message)) || (e?.detail && String(e.detail)) || (e?.hint && String(e.hint)) || "";
+      (e?.cause?.message && String(e.cause.message)) ||
+      (e?.detail && String(e.detail)) ||
+      (e?.hint && String(e.hint)) ||
+      "";
     const msg = detail ? `${base} :: ${detail}` : base;
 
     const status = msg.includes("UNAUTHENTICATED") ? 401 : msg.includes("FORBIDDEN_TENANT") ? 403 : 500;

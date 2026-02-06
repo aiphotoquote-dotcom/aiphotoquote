@@ -116,10 +116,7 @@ export const tenantSubIndustries = pgTable(
 /**
  * Tenant members / RBAC
  *
- * ✅ Matches your real DB:
- * tenant_members(tenant_id uuid, clerk_user_id text, role text, status text, created_at timestamptz, updated_at timestamptz)
- *
- * IMPORTANT: table has NO id column in your DB export.
+ * IMPORTANT: table has NO id column in your DB.
  */
 export const tenantMembers = pgTable(
   "tenant_members",
@@ -164,7 +161,7 @@ export const tenantSettings = pgTable("tenant_settings", {
   resendFromEmail: text("resend_from_email"),
 
   brandLogoUrl: text("brand_logo_url"),
-  // ✅ NEW: logo rendering hint for email/UI: auto | light | dark
+  // logo rendering hint for email/UI: auto | light | dark
   brandLogoVariant: text("brand_logo_variant"),
 
   emailSendMode: text("email_send_mode"),
@@ -172,6 +169,8 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
+
+  // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),
   renderingStyle: text("rendering_style"),
   renderingNotes: text("rendering_notes"),
@@ -184,6 +183,13 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
+
+  // ✅ PLAN (matches your real DB)
+  planTier: text("plan_tier").notNull().default("free"),
+  monthlyQuoteLimit: integer("monthly_quote_limit"), // null => unlimited
+  activationGraceCredits: integer("activation_grace_credits").notNull().default(0),
+  activationGraceUsed: integer("activation_grace_used").notNull().default(0),
+  planSelectedAt: timestamp("plan_selected_at", { withTimezone: true }),
 
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

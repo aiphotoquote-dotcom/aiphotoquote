@@ -1,4 +1,9 @@
+// src/app/onboarding/wizard/types.ts
+
 export type Mode = "new" | "update" | "existing";
+
+// UI plan tiers
+export type PlanTier = "tier0" | "tier1" | "tier2";
 
 export type OnboardingState = {
   ok: boolean;
@@ -9,6 +14,9 @@ export type OnboardingState = {
   completed: boolean;
   website: string | null;
   aiAnalysis: any | null;
+
+  // ✅ added
+  planTier?: PlanTier | null;
 
   aiAnalysisStatus?: string | null;
   aiAnalysisRound?: number | null;

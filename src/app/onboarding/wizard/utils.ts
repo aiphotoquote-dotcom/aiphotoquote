@@ -1,3 +1,5 @@
+// src/app/onboarding/wizard/utils.ts
+
 import type { Mode } from "./types";
 
 export function safeStep(v: any) {
