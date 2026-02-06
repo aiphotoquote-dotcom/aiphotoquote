@@ -55,15 +55,33 @@ function toAbs(baseUrl: string, maybeRel: string) {
   }
 }
 
+async function fetchHtml(url: string) {
+  const res = await fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    cache: "no-store",
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+    },
+  });
+
+  const ct = res.headers.get("content-type") || "";
+  const text = await res.text();
+
+  return { ok: res.ok, status: res.status, contentType: ct, text };
+}
+
+/* --------------------- email extraction --------------------- */
+
 function extractEmails(html: string) {
   const found = new Set<string>();
 
-  // mailto:
   const mailtoRe = /mailto:([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/gi;
   let m: RegExpExecArray | null;
   while ((m = mailtoRe.exec(html))) found.add(String(m[1]).toLowerCase());
 
-  // plain emails:
   const emailRe = /\b([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})\b/gi;
   while ((m = emailRe.exec(html))) found.add(String(m[1]).toLowerCase());
 
@@ -74,16 +92,12 @@ function scoreEmail(email: string, websiteUrl: string) {
   const e = email.toLowerCase();
   let score = 0;
 
-  // prefer non-noreply
   if (!e.includes("noreply") && !e.includes("no-reply")) score += 3;
-
-  // prefer common business inboxes
   if (e.startsWith("info@")) score += 3;
   if (e.startsWith("sales@")) score += 2;
   if (e.startsWith("quotes@")) score += 2;
   if (e.startsWith("contact@")) score += 2;
 
-  // prefer matching domain
   try {
     const host = new URL(websiteUrl).hostname.replace(/^www\./, "");
     const domain = e.split("@")[1] ?? "";
@@ -91,7 +105,6 @@ function scoreEmail(email: string, websiteUrl: string) {
     if (domain.endsWith(host)) score += 3;
   } catch {}
 
-  // mild penalty for personal providers
   if (/(gmail|yahoo|outlook|hotmail|icloud)\.com$/i.test(e.split("@")[1] ?? "")) score -= 1;
 
   return score;
@@ -103,11 +116,133 @@ function pickBestEmail(emails: string[], websiteUrl: string) {
   return sorted[0] ?? "";
 }
 
+/* --------------------- better logo detection --------------------- */
+
+type LogoCandidate = {
+  kind:
+    | "jsonld_org_logo"
+    | "link_rel_logo"
+    | "img_logoish"
+    | "icon_apple"
+    | "icon"
+    | "meta_twitter"
+    | "meta_og";
+  url: string;
+  hint?: string;
+  score: number;
+};
+
+function extScore(url: string) {
+  const u = url.toLowerCase();
+  if (u.endsWith(".svg")) return 20;
+  if (u.endsWith(".png")) return 12;
+  if (u.endsWith(".webp")) return 8;
+  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return 2;
+  return 0;
+}
+
+function penaltyWords(urlOrHint: string) {
+  const s = (urlOrHint || "").toLowerCase();
+
+  const bad = [
+    "hero",
+    "banner",
+    "slider",
+    "carousel",
+    "featured",
+    "gallery",
+    "background",
+    "bg-",
+    "stock",
+    "shutterstock",
+    "getty",
+    "unsplash",
+    "pexels",
+    "homepage",
+    "header-image",
+    "blog",
+    "post",
+    "article",
+  ];
+
+  const contenty = ["brick", "painting", "house", "kitchen", "bath", "deck", "fence", "interior", "exterior"];
+
+  let p = 0;
+  for (const w of bad) if (s.includes(w)) p += 12;
+  for (const w of contenty) if (s.includes(w)) p += 6;
+
+  // wordpress uploads are common for both logos and content, no penalty by itself
+  return p;
+}
+
+function logoWordsBonus(urlOrHint: string) {
+  const s = (urlOrHint || "").toLowerCase();
+  const good = ["logo", "brand", "wordmark", "logomark", "mark", "site-logo", "custom-logo"];
+  let b = 0;
+  for (const w of good) if (s.includes(w)) b += 10;
+  return b;
+}
+
+function baseKindScore(kind: LogoCandidate["kind"]) {
+  switch (kind) {
+    case "jsonld_org_logo":
+      return 100;
+    case "link_rel_logo":
+      return 85;
+    case "img_logoish":
+      return 70;
+    case "icon_apple":
+      return 55;
+    case "icon":
+      return 45;
+    case "meta_twitter":
+      return 25;
+    case "meta_og":
+      return 20;
+    default:
+      return 0;
+  }
+}
+
+function uniqueByUrl(cands: LogoCandidate[]) {
+  const seen = new Set<string>();
+  const out: LogoCandidate[] = [];
+  for (const c of cands) {
+    const k = c.url.trim();
+    if (!k) continue;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(c);
+  }
+  return out;
+}
+
+function extractLinkHref(html: string, relToken: string) {
+  const token = relToken.toLowerCase();
+  const linkRe = /<link\b[^>]*>/gi;
+  const attrsRe = /([a-zA-Z:_-]+)\s*=\s*["']([^"']+)["']/g;
+
+  let m: RegExpExecArray | null;
+  while ((m = linkRe.exec(html))) {
+    const tag = m[0];
+    const attrs: Record<string, string> = {};
+    let a: RegExpExecArray | null;
+    while ((a = attrsRe.exec(tag))) attrs[a[1].toLowerCase()] = a[2];
+
+    const rel = (attrs["rel"] ?? "").toLowerCase();
+    if (!rel) continue;
+    if (!rel.includes(token)) continue;
+
+    const href = attrs["href"] ?? "";
+    if (href) return href;
+  }
+  return "";
+}
+
 function extractMetaContent(html: string, key: { property?: string; name?: string }) {
   const prop = key.property ? String(key.property).toLowerCase() : "";
   const name = key.name ? String(key.name).toLowerCase() : "";
 
-  // crude but effective meta matcher
   const metaRe = /<meta\b[^>]*>/gi;
   const attrsRe = /([a-zA-Z:_-]+)\s*=\s*["']([^"']+)["']/g;
 
@@ -121,39 +256,15 @@ function extractMetaContent(html: string, key: { property?: string; name?: strin
     if (prop && attrs["property"]?.toLowerCase() === prop) return attrs["content"] ?? "";
     if (name && attrs["name"]?.toLowerCase() === name) return attrs["content"] ?? "";
   }
-
   return "";
 }
 
-function extractLinkHref(html: string, relValue: string) {
-  const rel = relValue.toLowerCase();
-
-  const linkRe = /<link\b[^>]*>/gi;
-  const attrsRe = /([a-zA-Z:_-]+)\s*=\s*["']([^"']+)["']/g;
-
-  let m: RegExpExecArray | null;
-  while ((m = linkRe.exec(html))) {
-    const tag = m[0];
-    const attrs: Record<string, string> = {};
-    let a: RegExpExecArray | null;
-    while ((a = attrsRe.exec(tag))) attrs[a[1].toLowerCase()] = a[2];
-
-    const r = (attrs["rel"] ?? "").toLowerCase();
-    if (!r) continue;
-
-    // match if rel contains our relValue token
-    if (r.includes(rel)) {
-      return attrs["href"] ?? "";
-    }
-  }
-
-  return "";
-}
-
-function extractLikelyLogoImg(html: string) {
-  // Try to find <img ...> with class/id/alt containing "logo"
+function extractLogoishImgs(html: string) {
+  // Grab <img> tags; prefer those with logo-ish cues and those in header/nav-ish regions.
   const imgRe = /<img\b[^>]*>/gi;
   const attrsRe = /([a-zA-Z:_-]+)\s*=\s*["']([^"']+)["']/g;
+
+  const out: { src: string; hint: string }[] = [];
 
   let m: RegExpExecArray | null;
   while ((m = imgRe.exec(html))) {
@@ -162,21 +273,153 @@ function extractLikelyLogoImg(html: string) {
     let a: RegExpExecArray | null;
     while ((a = attrsRe.exec(tag))) attrs[a[1].toLowerCase()] = a[2];
 
+    const src = attrs["src"] ?? attrs["data-src"] ?? "";
+    if (!src) continue;
+
     const alt = (attrs["alt"] ?? "").toLowerCase();
     const cls = (attrs["class"] ?? "").toLowerCase();
     const id = (attrs["id"] ?? "").toLowerCase();
 
-    const looksLogo = alt.includes("logo") || cls.includes("logo") || id.includes("logo");
-    if (!looksLogo) continue;
+    const hint = [alt, cls, id, src].filter(Boolean).join(" ");
+    const logoish = hint.includes("logo") || hint.includes("brand") || hint.includes("site-logo") || hint.includes("custom-logo");
 
-    const src = attrs["src"] ?? attrs["data-src"] ?? "";
-    if (src) return src;
+    // Only include “logoish” images; don’t dump the whole page’s image list.
+    if (!logoish) continue;
+
+    out.push({ src, hint });
   }
+
+  return out;
+}
+
+function extractJsonLdOrgLogo(html: string) {
+  // Parse <script type="application/ld+json"> blocks, look for Organization.logo
+  const scripts: string[] = [];
+  const scriptRe = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+
+  let m: RegExpExecArray | null;
+  while ((m = scriptRe.exec(html))) {
+    scripts.push(m[1] ?? "");
+  }
+
+  for (const raw of scripts) {
+    const txt = (raw || "").trim();
+    if (!txt) continue;
+
+    let data: any;
+    try {
+      data = JSON.parse(txt);
+    } catch {
+      // some sites put multiple JSON objects without valid JSON; skip
+      continue;
+    }
+
+    const nodes = Array.isArray(data) ? data : [data];
+    for (const n of nodes) {
+      if (!n || typeof n !== "object") continue;
+
+      const type = String(n["@type"] ?? "").toLowerCase();
+      const isOrg = type.includes("organization") || type.includes("localbusiness") || type.includes("professionalservice");
+      if (!isOrg) continue;
+
+      const logo = n.logo;
+      if (typeof logo === "string") return logo;
+      if (logo && typeof logo === "object") {
+        const u = logo.url || logo["@id"];
+        if (typeof u === "string") return u;
+      }
+    }
+  }
+
   return "";
 }
 
+function bestLogoCandidate(website: string, html: string) {
+  const cands: LogoCandidate[] = [];
+
+  const jsonld = safeTrim(extractJsonLdOrgLogo(html));
+  if (jsonld) {
+    const abs = toAbs(website, jsonld);
+    cands.push({
+      kind: "jsonld_org_logo",
+      url: abs,
+      hint: "jsonld Organization.logo",
+      score: baseKindScore("jsonld_org_logo") + extScore(abs) + logoWordsBonus(abs) - penaltyWords(abs),
+    });
+  }
+
+  const relLogo = safeTrim(extractLinkHref(html, "logo"));
+  if (relLogo) {
+    const abs = toAbs(website, relLogo);
+    cands.push({
+      kind: "link_rel_logo",
+      url: abs,
+      hint: "link[rel*=logo]",
+      score: baseKindScore("link_rel_logo") + extScore(abs) + logoWordsBonus(abs) - penaltyWords(abs),
+    });
+  }
+
+  const logoImgs = extractLogoishImgs(html);
+  for (const li of logoImgs) {
+    const abs = toAbs(website, li.src);
+    cands.push({
+      kind: "img_logoish",
+      url: abs,
+      hint: li.hint,
+      score: baseKindScore("img_logoish") + extScore(abs) + logoWordsBonus(li.hint) - penaltyWords(li.hint),
+    });
+  }
+
+  const apple = safeTrim(extractLinkHref(html, "apple-touch-icon"));
+  if (apple) {
+    const abs = toAbs(website, apple);
+    cands.push({
+      kind: "icon_apple",
+      url: abs,
+      hint: "apple-touch-icon",
+      score: baseKindScore("icon_apple") + extScore(abs) + logoWordsBonus(abs) - penaltyWords(abs),
+    });
+  }
+
+  const icon = safeTrim(extractLinkHref(html, "icon"));
+  if (icon) {
+    const abs = toAbs(website, icon);
+    cands.push({
+      kind: "icon",
+      url: abs,
+      hint: "icon",
+      score: baseKindScore("icon") + extScore(abs) + logoWordsBonus(abs) - penaltyWords(abs),
+    });
+  }
+
+  // Keep these as “last resorts”
+  const tw = safeTrim(extractMetaContent(html, { name: "twitter:image" }));
+  if (tw) {
+    const abs = toAbs(website, tw);
+    cands.push({
+      kind: "meta_twitter",
+      url: abs,
+      hint: "twitter:image",
+      score: baseKindScore("meta_twitter") + extScore(abs) + logoWordsBonus(abs) - penaltyWords(abs),
+    });
+  }
+
+  const og = safeTrim(extractMetaContent(html, { property: "og:image" }));
+  if (og) {
+    const abs = toAbs(website, og);
+    cands.push({
+      kind: "meta_og",
+      url: abs,
+      hint: "og:image",
+      score: baseKindScore("meta_og") + extScore(abs) + logoWordsBonus(abs) - penaltyWords(abs),
+    });
+  }
+
+  const unique = uniqueByUrl(cands).sort((a, b) => b.score - a.score);
+  return { best: unique[0] ?? null, ranked: unique.slice(0, 8) };
+}
+
 function guessLogoFromAi(ai: any | null) {
-  // flexible: try common shapes we’ve used
   const candidates = [
     ai?.brand?.logoUrl,
     ai?.brandLogoUrl,
@@ -191,24 +434,7 @@ function guessLogoFromAi(ai: any | null) {
   return candidates[0] ?? "";
 }
 
-async function fetchHtml(url: string) {
-  const res = await fetch(url, {
-    method: "GET",
-    redirect: "follow",
-    cache: "no-store",
-    headers: {
-      // helps some sites return real HTML instead of bot-block minimal pages
-      "user-agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
-      accept: "text/html,application/xhtml+xml",
-    },
-  });
-
-  const ct = res.headers.get("content-type") || "";
-  const text = await res.text();
-
-  return { ok: res.ok, status: res.status, contentType: ct, text };
-}
+/* --------------------- handler --------------------- */
 
 export async function GET(req: Request) {
   try {
@@ -222,7 +448,6 @@ export async function GET(req: Request) {
 
     await requireMembership(clerkUserId, tenantId);
 
-    // Pull: website + ai_analysis + current settings
     const r = await db.execute(sql`
       select
         o.website as website,
@@ -242,7 +467,7 @@ export async function GET(req: Request) {
     const currentBrandLogoUrl = safeTrim(row?.brand_logo_url);
     const currentLeadToEmail = safeTrim(row?.lead_to_email);
 
-    // If both are already set, no need to scrape.
+    // If either is already set, return them as “suggested” too (don’t overwrite).
     if (currentBrandLogoUrl || currentLeadToEmail) {
       return NextResponse.json(
         {
@@ -257,9 +482,7 @@ export async function GET(req: Request) {
             brandLogoUrl: currentBrandLogoUrl || null,
             leadToEmail: currentLeadToEmail || null,
           },
-          debug: {
-            used: "tenant_settings",
-          },
+          debug: { used: "tenant_settings" },
         },
         { status: 200 }
       );
@@ -279,31 +502,19 @@ export async function GET(req: Request) {
       );
     }
 
-    // 1) Prefer AI-provided logo if present
-    const aiLogo = guessLogoFromAi(aiAnalysis);
-    // 2) Otherwise scrape
-    const htmlRes = await fetchHtml(website);
+    // AI suggestion is allowed, but we still run scrape scoring because AI may be noisy.
+    const aiLogo = safeTrim(guessLogoFromAi(aiAnalysis));
 
+    const htmlRes = await fetchHtml(website);
     const html = htmlRes.text || "";
 
-    // Try: og:image, twitter:image, img heuristics, icons
-    const ogImage = extractMetaContent(html, { property: "og:image" });
-    const twImage = extractMetaContent(html, { name: "twitter:image" });
-    const appleIcon = extractLinkHref(html, "apple-touch-icon");
-    const icon = extractLinkHref(html, "icon");
-    const logoImg = extractLikelyLogoImg(html);
+    const scored = bestLogoCandidate(website, html);
+    const bestScraped = scored.best?.url ? String(scored.best.url) : "";
 
-    const logoCandidate =
-      safeTrim(aiLogo) ||
-      safeTrim(ogImage) ||
-      safeTrim(twImage) ||
-      safeTrim(logoImg) ||
-      safeTrim(appleIcon) ||
-      safeTrim(icon);
+    // Choose: best scrape first, then AI, then nothing.
+    // (Reason: scrape now strongly prefers Organization.logo / logoish imgs / icons over og:image)
+    const suggestedLogoUrl = bestScraped || (aiLogo ? toAbs(website, aiLogo) : "");
 
-    const suggestedLogoUrl = logoCandidate ? toAbs(website, logoCandidate) : "";
-
-    // Emails
     const emails = extractEmails(html);
     const suggestedEmail = pickBestEmail(emails, website);
 
@@ -312,26 +523,20 @@ export async function GET(req: Request) {
         ok: true,
         tenantId,
         website,
-        current: {
-          brandLogoUrl: null,
-          leadToEmail: null,
-        },
+        current: { brandLogoUrl: null, leadToEmail: null },
         suggested: {
           brandLogoUrl: suggestedLogoUrl || null,
           leadToEmail: suggestedEmail || null,
         },
         debug: {
-          used: htmlRes.ok ? "scrape" : "scrape_failed",
+          used: htmlRes.ok ? "scrape_scored" : "scrape_failed",
           httpStatus: htmlRes.status,
           contentType: htmlRes.contentType,
-          candidates: {
-            aiLogo: aiLogo || null,
-            ogImage: ogImage ? toAbs(website, ogImage) : null,
-            twitterImage: twImage ? toAbs(website, twImage) : null,
-            logoImg: logoImg ? toAbs(website, logoImg) : null,
-            appleIcon: appleIcon ? toAbs(website, appleIcon) : null,
-            icon: icon ? toAbs(website, icon) : null,
-          },
+          logoPick: scored.best
+            ? { kind: scored.best.kind, score: scored.best.score, url: scored.best.url, hint: scored.best.hint }
+            : null,
+          logoTop: scored.ranked.map((x) => ({ kind: x.kind, score: x.score, url: x.url })),
+          aiLogo: aiLogo || null,
           emailCount: emails.length,
         },
       },
