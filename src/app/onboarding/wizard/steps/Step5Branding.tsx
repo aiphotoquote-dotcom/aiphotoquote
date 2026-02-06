@@ -5,57 +5,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { guessLogoUrl } from "../utils";
 import { Field } from "./Field";
 
-function isEmail(v: string) {
-  const s = String(v ?? "").trim();
-  if (!s.includes("@")) return false;
-  // simple “good enough” check for onboarding (don’t over-reject)
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
-}
-
-function pickBestEmailFromAnalysis(aiAnalysis: any | null | undefined): string {
-  const emails: string[] = [];
-
-  // common places we might have put it in analysis
-  const direct = [
-    aiAnalysis?.contactEmail,
-    aiAnalysis?.ownerEmail,
-    aiAnalysis?.email,
-    aiAnalysis?.debug?.contactEmail,
-    aiAnalysis?.debug?.email,
-  ];
-  for (const v of direct) {
-    const s = String(v ?? "").trim();
-    if (s && isEmail(s)) emails.push(s);
-  }
-
-  // scan “extractedTextPreview” if present
-  const blob = String(aiAnalysis?.extractedTextPreview ?? aiAnalysis?.debug?.extractedTextPreview ?? "").trim();
-  if (blob) {
-    const matches = blob.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
-    for (const m of matches) {
-      const s = String(m ?? "").trim();
-      if (s && isEmail(s)) emails.push(s);
-    }
-  }
-
-  // try structured fields if you stored them
-  const maybeList: any[] = Array.isArray(aiAnalysis?.contactEmails) ? aiAnalysis.contactEmails : [];
-  for (const v of maybeList) {
-    const s = String(v ?? "").trim();
-    if (s && isEmail(s)) emails.push(s);
-  }
-
-  // prefer “info@ / quotes@ / sales@ / support@ / contact@” over random
-  const uniq = Array.from(new Set(emails));
-  const preferredPrefixes = ["leads@", "quotes@", "info@", "sales@", "support@", "contact@"];
-
-  for (const p of preferredPrefixes) {
-    const hit = uniq.find((e) => e.toLowerCase().startsWith(p));
-    if (hit) return hit;
-  }
-
-  return uniq[0] ?? "";
-}
+type BrandGuessResponse = {
+  ok: boolean;
+  tenantId: string;
+  website: string | null;
+  current?: { brandLogoUrl: string | null; leadToEmail: string | null };
+  suggested?: { brandLogoUrl: string | null; leadToEmail: string | null };
+  error?: string;
+  message?: string;
+};
 
 export function Step5Branding(props: {
   tenantId: string | null;
@@ -68,22 +26,68 @@ export function Step5Branding(props: {
   const [brandLogoUrl, setBrandLogoUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [loadingGuess, setLoadingGuess] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  const suggestedLogo = useMemo(() => guessLogoUrl(props.aiAnalysis), [props.aiAnalysis]);
-  const suggestedLeadEmail = useMemo(() => pickBestEmailFromAnalysis(props.aiAnalysis), [props.aiAnalysis]);
+  const suggestedLogoFromAi = useMemo(() => guessLogoUrl(props.aiAnalysis), [props.aiAnalysis]);
 
+  // ✅ If we already have AI analysis guess and logo field is empty, prime it immediately
   useEffect(() => {
-    // one-time gentle autofill
-    if (!brandLogoUrl.trim() && suggestedLogo) setBrandLogoUrl(String(suggestedLogo).trim());
+    if (!brandLogoUrl.trim() && suggestedLogoFromAi) setBrandLogoUrl(String(suggestedLogoFromAi).trim());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestedLogo]);
+  }, [suggestedLogoFromAi]);
 
+  // ✅ Server-side “brand guess” autofill (scrape + saved tenant_settings)
   useEffect(() => {
-    if (!leadToEmail.trim() && suggestedLeadEmail) setLeadToEmail(String(suggestedLeadEmail).trim());
+    const tid = String(props.tenantId ?? "").trim();
+    if (!tid) return;
+
+    // Only fetch guesses if fields are still empty (don’t clobber user edits)
+    if (leadToEmail.trim() || brandLogoUrl.trim()) return;
+
+    let alive = true;
+
+    (async () => {
+      setLoadingGuess(true);
+      setErr(null);
+      try {
+        // Not strictly required for this route, but safe: keeps tenant context consistent across flows
+        await props.ensureActiveTenant(tid).catch(() => null);
+
+        const res = await fetch(`/api/onboarding/brand-guess?tenantId=${encodeURIComponent(tid)}`, {
+          method: "GET",
+          cache: "no-store",
+          credentials: "include",
+        });
+
+        const j = (await res.json().catch(() => null)) as BrandGuessResponse | null;
+        if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Failed to fetch brand guess (HTTP ${res.status})`);
+
+        if (!alive) return;
+
+        const currentLogo = String(j?.current?.brandLogoUrl ?? "").trim();
+        const currentEmail = String(j?.current?.leadToEmail ?? "").trim();
+
+        const suggLogo = String(j?.suggested?.brandLogoUrl ?? "").trim();
+        const suggEmail = String(j?.suggested?.leadToEmail ?? "").trim();
+
+        // prefer current (saved), else suggested
+        if (!brandLogoUrl.trim() && (currentLogo || suggLogo)) setBrandLogoUrl((currentLogo || suggLogo).trim());
+        if (!leadToEmail.trim() && (currentEmail || suggEmail)) setLeadToEmail((currentEmail || suggEmail).trim());
+      } catch (ex: any) {
+        if (!alive) return;
+        setErr(ex?.message ?? String(ex));
+      } finally {
+        if (alive) setLoadingGuess(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestedLeadEmail]);
+  }, [props.tenantId]);
 
   async function uploadLogo(file: File) {
     const tid = String(props.tenantId ?? "").trim();
@@ -95,13 +99,7 @@ export function Step5Branding(props: {
     const fd = new FormData();
     fd.append("file", file);
 
-    const res = await fetch("/api/admin/tenant-logo/upload", {
-      method: "POST",
-      body: fd,
-      credentials: "include", // ✅ important on iOS/Safari + cookie-based tenant scope
-      cache: "no-store",
-    });
-
+    const res = await fetch("/api/admin/tenant-logo/upload", { method: "POST", body: fd });
     const ct = res.headers.get("content-type") || "";
     const data = ct.includes("application/json") ? await res.json() : { ok: false, error: await res.text() };
 
@@ -109,17 +107,21 @@ export function Step5Branding(props: {
     return String(data.url || "").trim();
   }
 
-  const canSave = isEmail(leadToEmail);
+  const canSave = leadToEmail.trim().includes("@");
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Branding & lead routing</div>
-
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        We’ll send emails using{" "}
-        <span className="font-mono">AI Photo Quote &lt;no-reply@aiphotoquote.com&gt;</span> on our Resend platform by
-        default. You can personalize sender/branding later in tenant settings.
+        Default sender will be <span className="font-mono">AI Photo Quote &lt;no-reply@aiphotoquote.com&gt;</span>. You can
+        personalize later in tenant settings.
       </div>
+
+      {loadingGuess ? (
+        <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+          Pulling your logo + lead email from your website…
+        </div>
+      ) : null}
 
       {err ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
@@ -133,7 +135,7 @@ export function Step5Branding(props: {
             <div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Logo</div>
               <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                We try to auto-detect a logo from your website. You can upload a different one anytime.
+                We try to auto-detect a logo from your website. Upload a different one anytime.
               </div>
             </div>
 
@@ -199,9 +201,7 @@ export function Step5Branding(props: {
 
         <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Where should leads be sent?</div>
-          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            We’ll email new quote requests to this address.
-          </div>
+          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll email new quote requests to this address.</div>
 
           <div className="mt-4">
             <Field
@@ -213,13 +213,9 @@ export function Step5Branding(props: {
             />
           </div>
 
-          {!leadToEmail.trim() ? (
-            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-              Tip: use the inbox you already watch (info@, quotes@, or your personal email).
-            </div>
-          ) : !canSave ? (
-            <div className="mt-2 text-xs text-red-600 dark:text-red-300">Please enter a valid email address.</div>
-          ) : null}
+          <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            Tip: use the inbox you already watch (info@, quotes@, or your personal email).
+          </div>
         </div>
       </div>
 
