@@ -11,13 +11,6 @@ export const dynamic = "force-dynamic";
 
 /* --------------------- types --------------------- */
 
-type IndustryRow = {
-  id: string;
-  key: string;
-  label: string;
-  description: string | null;
-};
-
 type ApiIndustryItem = {
   id: string;
   key: string;
@@ -75,6 +68,21 @@ function titleFromKey(key: string) {
     .join(" ");
 }
 
+// Normalize keys from AI or user into a stable snake_case key.
+// NOTE: do NOT require it to start with a letter; keep permissive but safe.
+function normalizeIndustryKey(raw: string) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  const key = s
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+  return key;
+}
+
+/* --------------------- db helpers --------------------- */
+
 async function getSuggestedIndustryKey(tenantId: string): Promise<string> {
   const r = await db.execute(sql`
     select ai_analysis
@@ -84,7 +92,7 @@ async function getSuggestedIndustryKey(tenantId: string): Promise<string> {
   `);
   const row = firstRow(r);
   const ai = row?.ai_analysis ?? null;
-  return safeTrim(ai?.suggestedIndustryKey ?? "");
+  return normalizeIndustryKey(ai?.suggestedIndustryKey ?? "");
 }
 
 async function listIndustries(): Promise<ApiIndustryItem[]> {
@@ -105,17 +113,35 @@ async function listIndustries(): Promise<ApiIndustryItem[]> {
   }));
 }
 
-async function ensureIndustryExists(industryKey: string): Promise<void> {
-  const key = safeTrim(industryKey);
-  if (!key) return;
+async function ensureIndustryExists(industryKeyRaw: string): Promise<string> {
+  const key = normalizeIndustryKey(industryKeyRaw);
+  if (!key) return "";
 
   const label = titleFromKey(key);
 
   await db.execute(sql`
     insert into industries (key, label, description)
     values (${key}, ${label}, null)
-    on conflict (key) do nothing
+    on conflict (key) do update
+    set label = excluded.label
   `);
+
+  return key;
+}
+
+async function upsertTenantIndustryKey(tenantId: string, industryKeyRaw: string): Promise<string> {
+  const key = normalizeIndustryKey(industryKeyRaw);
+  if (!key) return "";
+
+  await db.execute(sql`
+    insert into tenant_settings (tenant_id, industry_key, updated_at)
+    values (${tenantId}::uuid, ${key}, now())
+    on conflict (tenant_id) do update
+    set industry_key = excluded.industry_key,
+        updated_at = now()
+  `);
+
+  return key;
 }
 
 /* --------------------- schema --------------------- */
@@ -145,21 +171,27 @@ export async function GET(req: Request) {
     const tenantId = parsed.data.tenantId;
     await requireMembership(clerkUserId, tenantId);
 
-    // 1) Get AI suggestion
+    // 1) Read suggested key from ai_analysis
     const suggestedKey = await getSuggestedIndustryKey(tenantId);
 
-    // 2) Auto-create if missing (this is your desired UX)
+    // 2) Ensure it exists globally (your desired UX)
+    let ensuredSuggestedKey = "";
     if (suggestedKey) {
-      await ensureIndustryExists(suggestedKey);
+      ensuredSuggestedKey = await ensureIndustryExists(suggestedKey);
     }
 
-    // 3) Return list
+    // 3) Load list after ensure
     const industries = await listIndustries();
 
     // 4) Pick default selected key
     const selectedKey =
-      (suggestedKey && industries.some((x) => x.key === suggestedKey) ? suggestedKey : null) ??
+      (ensuredSuggestedKey && industries.some((x) => x.key === ensuredSuggestedKey) ? ensuredSuggestedKey : null) ??
       (industries[0]?.key ?? null);
+
+    // 5) ✅ Persist selection into tenant_settings automatically (so UX can continue without extra click)
+    if (selectedKey) {
+      await upsertTenantIndustryKey(tenantId, selectedKey);
+    }
 
     return NextResponse.json({ ok: true, tenantId, selectedKey, industries }, { status: 200 });
   } catch (e: any) {
@@ -182,51 +214,45 @@ export async function POST(req: Request) {
     const tenantId = safeTrim(parsed.data.tenantId);
     await requireMembership(clerkUserId, tenantId);
 
-    const industryKey = safeTrim(parsed.data.industryKey);
-    const industryLabel = safeTrim(parsed.data.industryLabel);
+    const industryKeyRaw = safeTrim(parsed.data.industryKey);
+    const industryLabelRaw = safeTrim(parsed.data.industryLabel);
 
     // Create-new path (tenant typed label)
-    if (industryLabel && !industryKey) {
-      const key = industryLabel
-        .toLowerCase()
-        .replace(/&/g, "and")
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "")
-        .slice(0, 64);
+    if (industryLabelRaw && !industryKeyRaw) {
+      const key = normalizeIndustryKey(industryLabelRaw);
+      if (!key) {
+        return NextResponse.json(
+          { ok: false, error: "BAD_REQUEST", message: "Industry label is invalid." },
+          { status: 400 }
+        );
+      }
 
       await db.execute(sql`
         insert into industries (key, label, description)
-        values (${key}, ${industryLabel}, null)
+        values (${key}, ${industryLabelRaw}, null)
         on conflict (key) do update
         set label = excluded.label
       `);
 
-      await db.execute(sql`
-        update tenant_settings
-        set industry_key = ${key},
-            updated_at = now()
-        where tenant_id = ${tenantId}::uuid
-      `);
+      const savedKey = await upsertTenantIndustryKey(tenantId, key);
 
-      return NextResponse.json({ ok: true, tenantId, selectedKey: key }, { status: 200 });
+      return NextResponse.json({ ok: true, tenantId, selectedKey: savedKey }, { status: 200 });
     }
 
     // Select-existing path
-    if (!industryKey) {
+    if (!industryKeyRaw) {
       return NextResponse.json({ ok: false, error: "INDUSTRY_REQUIRED", message: "Choose an industry." }, { status: 400 });
     }
 
-    // Ensure key exists (safety)
-    await ensureIndustryExists(industryKey);
+    // Ensure key exists (safety) + normalize it
+    const ensuredKey = await ensureIndustryExists(industryKeyRaw);
+    if (!ensuredKey) {
+      return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "Industry key is invalid." }, { status: 400 });
+    }
 
-    await db.execute(sql`
-      update tenant_settings
-      set industry_key = ${industryKey},
-          updated_at = now()
-      where tenant_id = ${tenantId}::uuid
-    `);
+    const savedKey = await upsertTenantIndustryKey(tenantId, ensuredKey);
 
-    return NextResponse.json({ ok: true, tenantId, selectedKey: industryKey }, { status: 200 });
+    return NextResponse.json({ ok: true, tenantId, selectedKey: savedKey }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
