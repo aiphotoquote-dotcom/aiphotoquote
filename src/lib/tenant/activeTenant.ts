@@ -44,24 +44,30 @@ export async function readActiveTenantIdFromCookies(): Promise<string | null> {
 }
 
 /**
- * Writes ONLY the canonical cookie key (apq_tenant).
+ * Writes ONLY the canonical cookie key (apq_tenant),
+ * and aggressively clears legacy keys to prevent “wrong tenant” bugs.
  */
 export function setActiveTenantCookie(res: NextResponse, tenantId: string): NextResponse {
+  const path = "/";
+
+  // Clear legacy keys (and canonical) first to remove collisions
+  res.cookies.delete({ name: ACTIVE_TENANT_COOKIE, path });
+  for (const k of ACTIVE_TENANT_LEGACY_KEYS) {
+    res.cookies.delete({ name: k, path });
+  }
+
+  // Write canonical only
   res.cookies.set(ACTIVE_TENANT_COOKIE, tenantId, cookieOpts());
   return res;
 }
 
 /**
  * Clears canonical + legacy keys.
- * Important for cleaning up stale cookies that cause “flashing then NO_ACTIVE_TENANT”.
  */
 export function clearActiveTenantCookies(res: NextResponse): NextResponse {
   const path = "/";
 
-  // Canonical
   res.cookies.delete({ name: ACTIVE_TENANT_COOKIE, path });
-
-  // Legacy keys (cleanup only)
   for (const k of ACTIVE_TENANT_LEGACY_KEYS) {
     res.cookies.delete({ name: k, path });
   }

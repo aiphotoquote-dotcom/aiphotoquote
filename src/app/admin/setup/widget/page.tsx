@@ -1,6 +1,6 @@
 // src/app/admin/setup/widget/page.tsx
 import Link from "next/link";
-import { cookies, headers } from "next/headers";
+import { headers } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
 import { eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
@@ -8,28 +8,10 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
 import CopyButtonClient from "@/components/admin/CopyButtonClient";
-import ActiveTenantSync from "./ActiveTenantSync";
+import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-}
-
-function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  const candidates = [
-    jar.get("activeTenantId")?.value,
-    jar.get("active_tenant_id")?.value,
-    jar.get("tenantId")?.value,
-    jar.get("tenant_id")?.value,
-  ].filter(Boolean) as string[];
-  return candidates[0] || null;
-}
 
 async function getBaseUrl() {
   const h = await headers();
@@ -48,7 +30,7 @@ function SectionHeader({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between min-w-0">
+    <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0">
         <h1 className="text-2xl font-semibold">{title}</h1>
         {subtitle ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{subtitle}</p> : null}
@@ -70,8 +52,8 @@ function CodeBlock({
   preview?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950 max-w-full overflow-hidden">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between min-w-0">
+    <div className="max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <div className="text-lg font-semibold">{title}</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{description}</div>
@@ -90,7 +72,7 @@ function CodeBlock({
       ) : null}
 
       <div className="mt-4 max-w-full overflow-x-auto rounded-xl border border-gray-200 bg-black dark:border-gray-800">
-        <pre className="block w-max max-w-full p-4 text-xs text-white whitespace-pre">{code}</pre>
+        <pre className="block w-max max-w-full whitespace-pre p-4 text-xs text-white">{code}</pre>
       </div>
 
       <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
@@ -179,7 +161,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
   );
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950 max-w-full overflow-hidden">
+    <div className="max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
       <div className="text-lg font-semibold">Button options</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
         Pick a style below — the code is plain HTML + inline CSS and works almost everywhere.
@@ -199,30 +181,16 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
   );
 }
 
-export default async function WidgetSetupPage({
-  searchParams,
-}: {
-  searchParams: { tenantId?: string; returnTo?: string };
-}) {
+export default async function WidgetSetupPage() {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
 
-  const jar = await cookies();
   const baseUrl = await getBaseUrl();
 
-  const tenantIdFromQueryRaw = String(searchParams?.tenantId ?? "").trim();
-  const tenantIdFromQuery = tenantIdFromQueryRaw && isUuid(tenantIdFromQueryRaw) ? tenantIdFromQueryRaw : null;
+  // ✅ single source of truth: canonical cookie (with legacy read fallback inside helper)
+  let tenantId = await readActiveTenantIdFromCookies();
 
-  const cookieTenantId = getCookieTenantId(jar);
-
-  // ✅ SOURCE OF TRUTH:
-  // If URL passes tenantId, ALWAYS use it (prevents stale cookie overriding the page).
-  let tenantId: string | null = tenantIdFromQuery;
-
-  // fallback: cookie
-  if (!tenantId) tenantId = cookieTenantId;
-
-  // fallback: first tenant owned by user
+  // If still missing, fall back to first owned tenant (only as last resort)
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -339,18 +307,7 @@ ${iframeHtml}
 ${iframeHtml}`;
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10 space-y-6 max-w-full overflow-x-hidden">
-      {/* ✅ sync cookie to query tenant (client-side), but render is already correct server-side */}
-      <ActiveTenantSync tenantId={tenantIdFromQuery} />
-
-      {/* ✅ DEBUG STRIP (remove later) */}
-      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-        <div className="font-semibold">Widget tenant debug</div>
-        <div className="mt-1 font-mono break-all">
-          queryTenantId={tenantIdFromQuery ?? "(none)"} • cookieTenantId={cookieTenantId ?? "(none)"} • finalTenantId={tenantId} • slug={tenantSlug}
-        </div>
-      </div>
-
+    <div className="mx-auto max-w-6xl space-y-6 overflow-x-hidden px-6 py-10 max-w-full">
       <SectionHeader
         title="Widgets"
         subtitle={`Embed your Photo Quote form anywhere. Tenant: ${tenantName}`}
@@ -364,8 +321,8 @@ ${iframeHtml}`;
         }
       />
 
-      <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black max-w-full overflow-hidden">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between min-w-0">
+      <div className="max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <div className="text-sm font-semibold">Your public quote URL</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">This is the page your embeds point to.</div>
@@ -380,7 +337,7 @@ ${iframeHtml}`;
           </Link>
         </div>
 
-        <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950 min-w-0">
+        <div className="mt-4 flex min-w-0 items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
           <div className="min-w-0 truncate font-mono text-xs text-gray-700 dark:text-gray-200">{quoteUrl}</div>
           <div className="shrink-0">
             <CopyButtonClient text={quoteUrl} />
