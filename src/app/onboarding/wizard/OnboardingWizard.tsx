@@ -1,3 +1,4 @@
+// src/app/onboarding/wizard/OnboardingWizard.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -369,13 +370,39 @@ export default function OnboardingWizard() {
     go(4);
   }
 
-  function openSetup(path: string) {
-    // keep tenantId in URL for continuity, but don’t rely on it server-side
-    const tid = String(state?.tenantId ?? tenantId ?? "").trim();
-    const url = new URL(window.location.origin + path);
-    if (tid) url.searchParams.set("tenantId", tid);
+  // ✅ ensure admin pages land on the correct tenant (active-tenant cookie)
+  async function ensureActiveTenant(tid: string) {
+    const tenantIdClean = String(tid ?? "").trim();
+    if (!tenantIdClean) return;
 
-    // returnTo makes it easy to add later (optional)
+    const res = await fetch("/api/tenant/context", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: tenantIdClean }),
+      credentials: "include", // ✅ critical on iOS Safari
+      cache: "no-store",
+    });
+
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Failed to switch active tenant (HTTP ${res.status})`);
+    }
+  }
+
+  async function openSetup(path: string) {
+    setErr(null);
+
+    const tid = String(state?.tenantId ?? tenantId ?? "").trim();
+    if (!tid) throw new Error("NO_TENANT: missing tenantId for setup handoff.");
+
+    // ✅ set server cookie first so /admin pages load the correct tenant
+    await ensureActiveTenant(tid);
+
+    const url = new URL(window.location.origin + path);
+
+    // keep tenantId in URL for debugging/continuity only (not relied on)
+    url.searchParams.set("tenantId", tid);
+
     const returnTo = new URL(window.location.href);
     url.searchParams.set("returnTo", returnTo.pathname + returnTo.search);
 
@@ -460,7 +487,9 @@ export default function OnboardingWizard() {
               title="AI & Pricing Policy"
               desc="Reuse the full admin setup screen to configure AI mode, Live Q&A, and render policy."
               primaryLabel="Open AI Policy setup"
-              onPrimary={() => openSetup("/admin/setup/ai-policy")}
+              onPrimary={() => {
+                openSetup("/admin/setup/ai-policy").catch((e: any) => setErr(e?.message ?? String(e)));
+              }}
               onBack={() => go(3)}
               onContinue={() => go(5)}
               note="Tip: click Save Policy on that page, then come back here and continue."
@@ -470,7 +499,9 @@ export default function OnboardingWizard() {
               title="Branding & Email"
               desc="Upload your logo, set your From address, lead routing, and run a test email."
               primaryLabel="Open Tenant Settings"
-              onPrimary={() => openSetup("/admin/settings")}
+              onPrimary={() => {
+                openSetup("/admin/settings").catch((e: any) => setErr(e?.message ?? String(e)));
+              }}
               onBack={() => go(4)}
               onContinue={() => go(6)}
               note="Tip: upload a logo and send a test email. Save Settings, then continue."
@@ -480,11 +511,12 @@ export default function OnboardingWizard() {
               title="Widget Setup"
               desc="Finalize your embed widget so customers can submit photos from your website."
               primaryLabel="Open Widget setup"
-              onPrimary={() => openSetup("/admin/setup/widget")}
+              onPrimary={() => {
+                openSetup("/admin/setup/widget").catch((e: any) => setErr(e?.message ?? String(e)));
+              }}
               onBack={() => go(5)}
               onContinue={() => {
                 setLastAction("Onboarding complete.");
-                // if your backend tracks completion, it will reflect on next refresh
                 refresh({ tenantId: String(state?.tenantId ?? tenantId ?? "").trim() }).catch(() => null);
               }}
               continueLabel="Finish"
