@@ -2,14 +2,13 @@
 import Link from "next/link";
 import { cookies, headers } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
 import { tenants } from "@/lib/db/schema";
 import CopyButtonClient from "@/components/admin/CopyButtonClient";
 import ActiveTenantSync from "./ActiveTenantSync";
-
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,14 +17,8 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
 function isUuid(v: string) {
-  const s = safeTrim(v);
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
@@ -43,26 +36,6 @@ async function getBaseUrl() {
   const proto = h.get("x-forwarded-proto") ?? "https";
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "";
   return host ? `${proto}://${host}` : "";
-}
-
-/**
- * ✅ IMPORTANT:
- * Membership is keyed by tenant_members(tenant_id uuid, clerk_user_id text)
- */
-async function hasActiveMembership(clerkUserId: string, tenantId: string) {
-  if (!isUuid(tenantId)) return false;
-
-  const r = await db.execute(sql`
-    select 1 as ok
-    from tenant_members
-    where tenant_id = ${tenantId}::uuid
-      and clerk_user_id = ${clerkUserId}
-      and status = 'active'
-    limit 1
-  `);
-
-  const row: any = Array.isArray(r) ? r[0] : (r as any)?.[0] ?? null;
-  return Boolean(row?.ok);
 }
 
 function SectionHeader({
@@ -154,15 +127,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{
-        display: "inline-block",
-        background: "#111",
-        color: "#fff",
-        padding: "12px 16px",
-        borderRadius: 12,
-        textDecoration: "none",
-        fontWeight: 700,
-      }}
+      style={{ display: "inline-block", background: "#111", color: "#fff", padding: "12px 16px", borderRadius: 12, textDecoration: "none", fontWeight: 700 }}
     >
       {label}
     </a>
@@ -173,16 +138,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{
-        display: "inline-block",
-        background: "transparent",
-        color: "#111",
-        padding: "12px 16px",
-        borderRadius: 12,
-        textDecoration: "none",
-        fontWeight: 700,
-        border: "2px solid #111",
-      }}
+      style={{ display: "inline-block", background: "transparent", color: "#111", padding: "12px 16px", borderRadius: 12, textDecoration: "none", fontWeight: 700, border: "2px solid #111" }}
     >
       {label}
     </a>
@@ -193,18 +149,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 10,
-        background: "#0b0b0b",
-        color: "#fff",
-        padding: "12px 18px",
-        borderRadius: 999,
-        textDecoration: "none",
-        fontWeight: 800,
-        letterSpacing: ".2px",
-      }}
+      style={{ display: "inline-flex", alignItems: "center", gap: 10, background: "#0b0b0b", color: "#fff", padding: "12px 18px", borderRadius: 999, textDecoration: "none", fontWeight: 800, letterSpacing: ".2px" }}
     >
       <span style={{ width: 10, height: 10, borderRadius: 999, background: "#22c55e", display: "inline-block" }} />
       {label}
@@ -216,16 +161,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{
-        display: "inline-block",
-        background: "#f3f4f6",
-        color: "#111",
-        padding: "12px 16px",
-        borderRadius: 12,
-        textDecoration: "none",
-        fontWeight: 800,
-        border: "1px solid rgba(0,0,0,.12)",
-      }}
+      style={{ display: "inline-block", background: "#f3f4f6", color: "#111", padding: "12px 16px", borderRadius: 12, textDecoration: "none", fontWeight: 800, border: "1px solid rgba(0,0,0,.12)" }}
     >
       {label}
     </a>
@@ -236,16 +172,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{
-        display: "inline-block",
-        background: "#111",
-        color: "#fff",
-        padding: "10px 12px",
-        borderRadius: 10,
-        textDecoration: "none",
-        fontWeight: 800,
-        fontSize: 14,
-      }}
+      style={{ display: "inline-block", background: "#111", color: "#fff", padding: "10px 12px", borderRadius: 10, textDecoration: "none", fontWeight: 800, fontSize: 14 }}
     >
       {label}
     </a>
@@ -275,7 +202,7 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
 export default async function WidgetSetupPage({
   searchParams,
 }: {
-  searchParams?: Record<string, string | string[] | undefined>;
+  searchParams: { tenantId?: string; returnTo?: string };
 }) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
@@ -283,33 +210,19 @@ export default async function WidgetSetupPage({
   const jar = await cookies();
   const baseUrl = await getBaseUrl();
 
-  // ✅ 1) Prefer tenantId from URL (Onboarding passes this)
-  const tenantIdFromQueryRaw = searchParams?.tenantId;
-  const tenantIdFromQuery =
-    typeof tenantIdFromQueryRaw === "string"
-      ? tenantIdFromQueryRaw
-      : Array.isArray(tenantIdFromQueryRaw)
-      ? tenantIdFromQueryRaw[0]
-      : "";
+  const tenantIdFromQueryRaw = String(searchParams?.tenantId ?? "").trim();
+  const tenantIdFromQuery = tenantIdFromQueryRaw && isUuid(tenantIdFromQueryRaw) ? tenantIdFromQueryRaw : null;
 
-  // ✅ 2) Fall back to active-tenant cookie
-  const tenantIdFromCookie = getCookieTenantId(jar);
+  const cookieTenantId = getCookieTenantId(jar);
 
-  let tenantId: string | null = null;
+  // ✅ SOURCE OF TRUTH:
+  // If URL passes tenantId, ALWAYS use it (prevents stale cookie overriding the page).
+  let tenantId: string | null = tenantIdFromQuery;
 
-  // Try query param first (only if user is a member)
-  if (tenantIdFromQuery && isUuid(tenantIdFromQuery)) {
-    const ok = await hasActiveMembership(userId, tenantIdFromQuery);
-    if (ok) tenantId = tenantIdFromQuery;
-  }
+  // fallback: cookie
+  if (!tenantId) tenantId = cookieTenantId;
 
-  // Then cookie
-  if (!tenantId && tenantIdFromCookie && isUuid(tenantIdFromCookie)) {
-    const ok = await hasActiveMembership(userId, tenantIdFromCookie);
-    if (ok) tenantId = tenantIdFromCookie;
-  }
-
-  // Finally, fallback to "first owner tenant"
+  // fallback: first tenant owned by user
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -324,7 +237,6 @@ export default async function WidgetSetupPage({
   if (!tenantId) {
     return (
       <div className="mx-auto max-w-6xl px-6 py-10">
-<ActiveTenantSync tenantId={tenantIdFromQuery && isUuid(tenantIdFromQuery) ? tenantIdFromQuery : null} />
         <SectionHeader
           title="Widgets"
           subtitle="Copy/paste embed code for your website."
@@ -348,10 +260,6 @@ export default async function WidgetSetupPage({
       </div>
     );
   }
-
-  // Safety: if query param was provided but not allowed, show a hint (no hard fail)
-  const queryProvided = Boolean(tenantIdFromQuery && isUuid(tenantIdFromQuery));
-  const queryUsed = queryProvided && tenantId === tenantIdFromQuery;
 
   const tenant = await db
     .select({ id: tenants.id, name: tenants.name, slug: tenants.slug })
@@ -432,7 +340,17 @@ ${iframeHtml}`;
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6 max-w-full overflow-x-hidden">
-<ActiveTenantSync tenantId={tenantIdFromQuery && isUuid(tenantIdFromQuery) ? tenantIdFromQuery : null} />
+      {/* ✅ sync cookie to query tenant (client-side), but render is already correct server-side */}
+      <ActiveTenantSync tenantId={tenantIdFromQuery} />
+
+      {/* ✅ DEBUG STRIP (remove later) */}
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+        <div className="font-semibold">Widget tenant debug</div>
+        <div className="mt-1 font-mono break-all">
+          queryTenantId={tenantIdFromQuery ?? "(none)"} • cookieTenantId={cookieTenantId ?? "(none)"} • finalTenantId={tenantId} • slug={tenantSlug}
+        </div>
+      </div>
+
       <SectionHeader
         title="Widgets"
         subtitle={`Embed your Photo Quote form anywhere. Tenant: ${tenantName}`}
@@ -446,13 +364,6 @@ ${iframeHtml}`;
         }
       />
 
-      {queryProvided && !queryUsed ? (
-        <div className="rounded-2xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
-          Note: the tenantId in the URL wasn’t accessible for this user/session, so Widgets fell back to your active tenant.
-        </div>
-      ) : null}
-
-      {/* Public URL */}
       <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black max-w-full overflow-hidden">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between min-w-0">
           <div className="min-w-0">
