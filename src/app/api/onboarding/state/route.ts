@@ -55,15 +55,28 @@ function getQuery(req: Request) {
   }
 }
 
-function jsonError(message: string, status = 400, error = "INTERNAL") {
-  return NextResponse.json({ ok: false, error, message }, { status });
-}
-
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const a = await auth();
   const clerkUserId = a?.userId ?? null;
   if (!clerkUserId) throw new Error("UNAUTHENTICATED");
   return { clerkUserId };
+}
+
+/**
+ * ✅ IMPORTANT:
+ * Your DB (and previously-working code) appears to key tenant membership by clerk_user_id.
+ * So we enforce membership by clerk_user_id here.
+ */
+async function requireMembership(clerkUserId: string, tenantId: string): Promise<void> {
+  const r = await db.execute(sql`
+    select 1 as ok
+    from tenant_members
+    where tenant_id = ${tenantId}::uuid
+      and clerk_user_id = ${clerkUserId}
+    limit 1
+  `);
+  const row = firstRow(r);
+  if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
 async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }> {
@@ -87,19 +100,7 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   return { appUserId };
 }
 
-async function requireMembership(appUserId: string, tenantId: string): Promise<void> {
-  const r = await db.execute(sql`
-    select 1 as ok
-    from tenant_members
-    where tenant_id = ${tenantId}::uuid
-      and user_id = ${appUserId}::uuid
-    limit 1
-  `);
-  const row = firstRow(r);
-  if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
-}
-
-/* --------------------- AI meta derivation --------------------- */
+/* --------------------- AI meta derivation (kept as-is) --------------------- */
 
 function getConfidence(ai: any): number {
   const n = Number(ai?.confidenceScore ?? 0);
@@ -139,7 +140,9 @@ function deriveAiMeta(aiAnalysis: any | null) {
 
   const metaStatus = String(meta?.status ?? "").trim().toLowerCase(); // running | complete | error
   const status =
-    metaStatus === "running" || metaStatus === "complete" || metaStatus === "error" ? metaStatus : "complete";
+    metaStatus === "running" || metaStatus === "complete" || metaStatus === "error"
+      ? metaStatus
+      : "complete";
 
   const roundRaw = Number(meta?.round ?? NaN);
   const round =
@@ -153,7 +156,9 @@ function deriveAiMeta(aiAnalysis: any | null) {
   const lastAction = String(meta?.lastAction ?? "").trim();
   const error = String(meta?.error ?? "").trim();
 
+  const conf = getConfidence(aiAnalysis);
   const needs = getNeedsConfirmation(aiAnalysis);
+
   const userCorrection = meta?.userCorrection ?? getLastCorrectionFallback(aiAnalysis);
 
   const derivedLastAction =
@@ -207,20 +212,12 @@ async function readTenantOnboarding(tenantId: string) {
   };
 }
 
-/* --------------------- validation --------------------- */
-
-function isValidEmail(v: string) {
-  const s = safeTrim(v);
-  return s.includes("@") && s.length <= 320;
-}
-
 /* --------------------- handlers --------------------- */
 
 export async function GET(req: Request) {
   try {
     const { mode, tenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
-    const { appUserId } = await ensureAppUser(clerkUserId);
 
     // ✅ mode=new with NO tenantId -> start fresh onboarding session
     if (mode === "new" && !tenantId) {
@@ -246,10 +243,13 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return jsonError("tenantId is required for this request.", 400, "TENANT_ID_REQUIRED");
+      return NextResponse.json(
+        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
+        { status: 400 }
+      );
     }
 
-    await requireMembership(appUserId, tenantId);
+    await requireMembership(clerkUserId, tenantId);
     const data = await readTenantOnboarding(tenantId);
 
     return NextResponse.json(
@@ -272,172 +272,116 @@ export async function POST(req: Request) {
   try {
     const { mode, tenantId: queryTenantId } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
-    const { appUserId } = await ensureAppUser(clerkUserId);
 
     const body = await req.json().catch(() => null);
-    const step = Number(body?.step);
-
-    if (!Number.isFinite(step)) {
-      return jsonError("Missing onboarding step.", 400, "STEP_REQUIRED");
+    if (Number(body?.step) !== 1) {
+      return NextResponse.json({ ok: false, error: "UNSUPPORTED_STEP" }, { status: 400 });
     }
 
-    /* =====================
-       STEP 1 — create or update tenant basics
-       ===================== */
-    if (step === 1) {
-      const businessName = safeTrim(body?.businessName);
-      const website = safeTrim(body?.website);
+    const businessName = safeTrim(body?.businessName);
+    const website = safeTrim(body?.website);
 
-      if (businessName.length < 2) {
-        return jsonError("Business name is required.", 400, "BUSINESS_NAME_REQUIRED");
-      }
-
-      // derive owner fields if omitted (kept for future UX)
-      let ownerName = safeTrim(body?.ownerName);
-      let ownerEmail = safeTrim(body?.ownerEmail);
-
-      if (!ownerName || !ownerEmail) {
-        const u = await currentUser();
-        ownerEmail = ownerEmail || (u?.emailAddresses?.[0]?.emailAddress ?? "");
-        ownerName = ownerName || (u?.fullName ?? u?.firstName ?? "");
-        ownerName = safeTrim(ownerName);
-        ownerEmail = safeTrim(ownerEmail);
-      }
-
-      if (ownerName.length < 2) return jsonError("Owner name is required.", 400, "OWNER_NAME_REQUIRED");
-      if (!ownerEmail.includes("@")) return jsonError("Owner email is required.", 400, "OWNER_EMAIL_REQUIRED");
-
-      let tenantId: string | null = null;
-
-      // update/existing targets a specific tenant
-      if (mode === "update" || mode === "existing") {
-        const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-        if (!t) return jsonError("tenantId is required.", 400, "TENANT_ID_REQUIRED");
-        await requireMembership(appUserId, t);
-        tenantId = t;
-      }
-
-      // mode=new always creates a new tenant
-      if (!tenantId) {
-        const baseSlug = slugify(businessName);
-        const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
-
-        const tIns = await db.execute(sql`
-          insert into tenants (id, name, slug, owner_user_id, owner_clerk_user_id, created_at)
-          values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, ${clerkUserId}, now())
-          returning id
-        `);
-
-        const trow = firstRow(tIns);
-        if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
-        tenantId = String(trow.id);
-
-        // ✅ tenant_members uses user_id (uuid), not clerk_user_id
-        await db.execute(sql`
-          insert into tenant_members (tenant_id, user_id, role, created_at)
-          values (${tenantId}::uuid, ${appUserId}::uuid, 'owner', now())
-          on conflict do nothing
-        `);
-
-        await db.execute(sql`
-          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
-          values (${tenantId}::uuid, 'service', ${businessName}, now())
-          on conflict (tenant_id) do update
-          set business_name = excluded.business_name,
-              updated_at = now()
-        `);
-      } else {
-        await db.execute(sql`
-          update tenants
-          set name = ${businessName}
-          where id = ${tenantId}::uuid
-        `);
-
-        await db.execute(sql`
-          insert into tenant_settings (tenant_id, business_name, updated_at)
-          values (${tenantId}::uuid, ${businessName}, now())
-          on conflict (tenant_id) do update
-          set business_name = excluded.business_name,
-              updated_at = now()
-        `);
-      }
-
-      await db.execute(sql`
-        insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
-        values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
-        on conflict (tenant_id) do update
-        set website = excluded.website,
-            current_step = greatest(tenant_onboarding.current_step, 2),
-            updated_at = now()
-      `);
-
-      return NextResponse.json({ ok: true, tenantId }, { status: 200 });
+    if (businessName.length < 2) {
+      return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
     }
 
-    /* =====================
-       STEP 5 — branding + lead routing (simple onboarding version)
-       ===================== */
-    if (step === 5) {
+    const { appUserId } = await ensureAppUser(clerkUserId);
+
+    // derive owner fields if omitted
+    let ownerName = safeTrim(body?.ownerName);
+    let ownerEmail = safeTrim(body?.ownerEmail);
+
+    if (!ownerName || !ownerEmail) {
+      const u = await currentUser();
+      ownerEmail = ownerEmail || (u?.emailAddresses?.[0]?.emailAddress ?? "");
+      ownerName = ownerName || (u?.fullName ?? u?.firstName ?? "");
+      ownerName = safeTrim(ownerName);
+      ownerEmail = safeTrim(ownerEmail);
+    }
+
+    if (ownerName.length < 2) {
+      return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
+    }
+    if (!ownerEmail.includes("@")) {
+      return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+    }
+
+    let tenantId: string | null = null;
+
+    // update/existing targets a specific tenant
+    if (mode === "update" || mode === "existing") {
       const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-      if (!t) return jsonError("tenantId is required for branding step.", 400, "TENANT_ID_REQUIRED");
-
-      await requireMembership(appUserId, t);
-
-      const leadToEmail = safeTrim(body?.lead_to_email || body?.leadToEmail);
-      const brandLogoUrl = safeTrim(body?.brand_logo_url || body?.brandLogoUrl);
-
-      if (!isValidEmail(leadToEmail)) {
-        return jsonError("A valid lead_to_email is required.", 400, "LEAD_TO_EMAIL_REQUIRED");
-      }
-
-      // ✅ Standard onboarding defaults (platform sender)
-      const platformFrom = "AI Photo Quote <no-reply@aiphotoquote.com>";
-      const emailSendMode = "standard";
-
-      await db.execute(sql`
-        insert into tenant_settings (
-          tenant_id,
-          lead_to_email,
-          resend_from_email,
-          brand_logo_url,
-          email_send_mode,
-          email_identity_id,
-          updated_at
-        )
-        values (
-          ${t}::uuid,
-          ${leadToEmail},
-          ${platformFrom},
-          ${brandLogoUrl || null},
-          ${emailSendMode},
-          null,
-          now()
-        )
-        on conflict (tenant_id) do update
-        set lead_to_email = excluded.lead_to_email,
-            resend_from_email = excluded.resend_from_email,
-            brand_logo_url = excluded.brand_logo_url,
-            email_send_mode = excluded.email_send_mode,
-            email_identity_id = excluded.email_identity_id,
-            updated_at = now()
-      `);
-
-      // Advance onboarding step -> 6
-      await db.execute(sql`
-        insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
-        values (${t}::uuid, 6, false, now(), now())
-        on conflict (tenant_id) do update
-        set current_step = greatest(tenant_onboarding.current_step, 6),
-            updated_at = now()
-      `);
-
-      return NextResponse.json({ ok: true, tenantId: t }, { status: 200 });
+      if (!t) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+      await requireMembership(clerkUserId, t);
+      tenantId = t;
     }
 
-    return jsonError(`Unsupported step: ${step}`, 400, "UNSUPPORTED_STEP");
+    // mode=new always creates a new tenant
+    if (!tenantId) {
+      const baseSlug = slugify(businessName);
+      const slug = `${baseSlug}-${Math.random().toString(16).slice(2, 6)}`;
+
+      const tIns = await db.execute(sql`
+        insert into tenants (id, name, slug, owner_user_id, owner_clerk_user_id, created_at)
+        values (gen_random_uuid(), ${businessName}, ${slug}, ${appUserId}::uuid, ${clerkUserId}, now())
+        returning id
+      `);
+
+      const trow = firstRow(tIns);
+      if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
+      tenantId = String(trow.id);
+
+      // ✅ FIX: insert membership using clerk_user_id (DB expects this)
+      await db.execute(sql`
+        insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
+        values (${tenantId}::uuid, ${clerkUserId}, 'owner', 'active', now(), now())
+        on conflict do nothing
+      `);
+
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
+        values (${tenantId}::uuid, 'service', ${businessName}, now())
+        on conflict (tenant_id) do update
+        set business_name = excluded.business_name,
+            updated_at = now()
+      `);
+    } else {
+      await db.execute(sql`
+        update tenants
+        set name = ${businessName}
+        where id = ${tenantId}::uuid
+      `);
+
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, business_name, updated_at, industry_key)
+        values (${tenantId}::uuid, ${businessName}, now(), 'service')
+        on conflict (tenant_id) do update
+        set business_name = excluded.business_name,
+            updated_at = now()
+      `);
+    }
+
+    await db.execute(sql`
+      insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
+      values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
+      on conflict (tenant_id) do update
+      set website = excluded.website,
+          current_step = greatest(tenant_onboarding.current_step, 2),
+          updated_at = now()
+    `);
+
+    return NextResponse.json({ ok: true, tenantId }, { status: 200 });
   } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
+    // ✅ surface deeper db error info if available
+    const base = e?.message ?? String(e);
+    const detail =
+      (e?.cause?.message && String(e.cause.message)) ||
+      (e?.detail && String(e.detail)) ||
+      (e?.hint && String(e.hint)) ||
+      "";
+    const msg = detail ? `${base} :: ${detail}` : base;
+
+    const status = msg.includes("UNAUTHENTICATED") ? 401 : msg.includes("FORBIDDEN_TENANT") ? 403 : 500;
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
   }
 }
