@@ -1,211 +1,158 @@
 // src/app/pcc/tenants/[tenantId]/page.tsx
 import React from "react";
-import Link from "next/link";
-import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import {
-  tenants,
-  tenantMembers,
-  tenantSettings,
-} from "@/lib/db/schema";
-import { requirePlatformRole } from "@/lib/rbac/guards";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function fmt(d: any) {
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function firstRow(r: any): any | null {
   try {
-    const dt = d instanceof Date ? d : new Date(d);
-    if (!Number.isFinite(dt.getTime())) return "";
-    return dt.toLocaleString();
+    if (!r) return null;
+    if (Array.isArray(r)) return r[0] ?? null;
+    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    return null;
   } catch {
-    return "";
+    return null;
   }
 }
 
-export default async function PccTenantDetailPage({
-  params,
-}: {
-  params: { tenantId: string };
-}) {
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+type MemberRow = {
+  tenantId: string;
+  clerkUserId: string;
+  role: string;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
-  const tenantId = params.tenantId;
+async function loadTenant(tenantId: string) {
+  const r = await db.execute(sql`
+    select
+      id,
+      name,
+      slug,
+      owner_clerk_user_id,
+      created_at
+    from tenants
+    where id = ${tenantId}::uuid
+    limit 1
+  `);
 
-  const [tenant] = await db
-    .select()
-    .from(tenants)
-    .where(eq(tenants.id, tenantId))
-    .limit(1);
+  const row = firstRow(r);
+  return row
+    ? {
+        id: String(row.id),
+        name: String(row.name ?? ""),
+        slug: String(row.slug ?? ""),
+        ownerClerkUserId: row.owner_clerk_user_id ? String(row.owner_clerk_user_id) : null,
+        createdAt: row.created_at ? new Date(row.created_at) : null,
+      }
+    : null;
+}
 
-  if (!tenant) {
+async function loadMembers(tenantId: string): Promise<MemberRow[]> {
+  const r = await db.execute(sql`
+    select
+      tenant_id as "tenantId",
+      clerk_user_id as "clerkUserId",
+      role,
+      status,
+      created_at as "createdAt",
+      updated_at as "updatedAt"
+    from tenant_members
+    where tenant_id = ${tenantId}::uuid
+    order by created_at asc
+  `);
+
+  const rows = Array.isArray(r) ? r : [];
+  return rows.map((x: any) => ({
+    tenantId: String(x.tenantId ?? tenantId),
+    clerkUserId: String(x.clerkUserId ?? ""),
+    role: String(x.role ?? ""),
+    status: String(x.status ?? ""),
+    createdAt: x.createdAt ? new Date(x.createdAt) : new Date(0),
+    updatedAt: x.updatedAt ? new Date(x.updatedAt) : new Date(0),
+  }));
+}
+
+export default async function TenantDetailPage(props: { params: Promise<{ tenantId: string }> }) {
+  const { tenantId } = await props.params;
+  const tid = safeTrim(tenantId);
+
+  if (!tid) {
     return (
-      <div className="rounded-2xl border border-red-200 bg-red-50 p-5 text-sm text-red-700 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-        Tenant not found.
+      <div className="mx-auto max-w-4xl px-4 py-10">
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          Missing tenantId.
+        </div>
       </div>
     );
   }
 
-  const members = await db
-    .select()
-    .from(tenantMembers)
-    .where(eq(tenantMembers.tenantId, tenantId));
+  const [tenant, members] = await Promise.all([loadTenant(tid), loadMembers(tid)]);
 
-  const [settings] = await db
-    .select()
-    .from(tenantSettings)
-    .where(eq(tenantSettings.tenantId, tenantId))
-    .limit(1);
+  if (!tenant) {
+    return (
+      <div className="mx-auto max-w-4xl px-4 py-10">
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          Tenant not found.
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              {tenant.name}
-            </h1>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Tenant detail (read-only)
-            </p>
+    <div className="mx-auto max-w-4xl px-4 py-10">
+      <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-xs text-gray-600 dark:text-gray-300">Tenant</div>
+            <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">{tenant.name}</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              <span className="font-mono text-xs">{tenant.slug}</span>
+            </div>
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              ID: <span className="font-mono">{tenant.id}</span>
+            </div>
           </div>
 
-          <Link
-            href="/pcc/tenants"
-            className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold dark:border-gray-800"
-          >
-            Back to tenants
-          </Link>
+          <div className="shrink-0 text-right">
+            <div className="text-xs text-gray-600 dark:text-gray-300">Owner (Clerk)</div>
+            <div className="mt-1 font-mono text-xs text-gray-900 dark:text-gray-100">
+              {tenant.ownerClerkUserId ?? "(none)"}
+            </div>
+          </div>
         </div>
-      </div>
 
-      {/* Identity */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <h2 className="font-semibold text-gray-900 dark:text-gray-100">Identity</h2>
-
-        <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 text-sm">
-          <div>
-            <dt className="text-gray-500 dark:text-gray-400">Tenant ID</dt>
-            <dd className="font-mono text-gray-900 dark:text-gray-100">{tenant.id}</dd>
-          </div>
-
-          <div>
-            <dt className="text-gray-500 dark:text-gray-400">Slug</dt>
-            <dd className="text-gray-900 dark:text-gray-100">{tenant.slug}</dd>
-          </div>
-
-          <div>
-            <dt className="text-gray-500 dark:text-gray-400">Owner (portable)</dt>
-            <dd className="text-gray-900 dark:text-gray-100">
-              {tenant.ownerUserId ?? "—"}
-            </dd>
-          </div>
-
-          <div>
-            <dt className="text-gray-500 dark:text-gray-400">Owner (legacy Clerk)</dt>
-            <dd className="text-gray-900 dark:text-gray-100">
-              {tenant.ownerClerkUserId ?? "—"}
-            </dd>
-          </div>
-
-          <div>
-            <dt className="text-gray-500 dark:text-gray-400">Created</dt>
-            <dd className="text-gray-900 dark:text-gray-100">
-              {fmt(tenant.createdAt)}
-            </dd>
-          </div>
-        </dl>
-      </div>
-
-      {/* Members */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <h2 className="font-semibold text-gray-900 dark:text-gray-100">
-          Members ({members.length})
-        </h2>
-
-        <div className="mt-3 space-y-2">
-          {members.length ? (
-            members.map((m) => (
-              <div
-                key={m.id}
-                className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 text-sm dark:border-gray-800"
-              >
-                <div className="font-mono text-xs text-gray-700 dark:text-gray-200">
-                  {m.userId ?? "—"}
+        <div className="mt-8">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Members</div>
+          <div className="mt-3 grid gap-2">
+            {members.length ? (
+              members.map((m) => (
+                <div
+                  key={`${m.tenantId}:${m.clerkUserId}`} // ✅ tenant_members has no id; use composite key
+                  className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 text-sm dark:border-gray-800"
+                >
+                  <div className="font-mono text-xs text-gray-700 dark:text-gray-200">{m.clerkUserId}</div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="rounded-lg border border-gray-200 px-2 py-1 dark:border-gray-800">{m.role}</span>
+                    <span className="rounded-lg border border-gray-200 px-2 py-1 dark:border-gray-800">{m.status}</span>
+                  </div>
                 </div>
-                <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
-                  {m.role}
-                </div>
+              ))
+            ) : (
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+                No members found.
               </div>
-            ))
-          ) : (
-            <div className="text-sm text-gray-600 dark:text-gray-300">
-              No members found.
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Settings snapshot */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <h2 className="font-semibold text-gray-900 dark:text-gray-100">
-          Settings snapshot
-        </h2>
-
-        {settings ? (
-          <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 text-sm">
-            <div>
-              <dt className="text-gray-500 dark:text-gray-400">Industry</dt>
-              <dd className="text-gray-900 dark:text-gray-100">
-                {settings.industryKey}
-              </dd>
-            </div>
-
-            <div>
-              <dt className="text-gray-500 dark:text-gray-400">AI mode</dt>
-              <dd className="text-gray-900 dark:text-gray-100">
-                {settings.aiMode ?? "default"}
-              </dd>
-            </div>
-
-            <div>
-              <dt className="text-gray-500 dark:text-gray-400">Pricing enabled</dt>
-              <dd className="text-gray-900 dark:text-gray-100">
-                {settings.pricingEnabled ? "Yes" : "No"}
-              </dd>
-            </div>
-
-            <div>
-              <dt className="text-gray-500 dark:text-gray-400">Rendering enabled</dt>
-              <dd className="text-gray-900 dark:text-gray-100">
-                {settings.renderingEnabled ? "Yes" : "No"}
-              </dd>
-            </div>
-          </dl>
-        ) : (
-          <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-            No tenant_settings row found.
+            )}
           </div>
-        )}
-      </div>
-
-      {/* Future links */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <h2 className="font-semibold text-gray-900 dark:text-gray-100">
-          Platform controls
-        </h2>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <span className="rounded-xl border border-gray-200 px-3 py-2 text-xs dark:border-gray-800">
-            Industry manager (coming)
-          </span>
-          <span className="rounded-xl border border-gray-200 px-3 py-2 text-xs dark:border-gray-800">
-            LLM / guardrails (coming)
-          </span>
-          <span className="rounded-xl border border-gray-200 px-3 py-2 text-xs dark:border-gray-800">
-            Billing (coming)
-          </span>
         </div>
       </div>
     </div>
