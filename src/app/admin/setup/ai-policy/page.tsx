@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type AiMode = "assessment_only" | "range" | "fixed";
 type RenderingStyle = "photoreal" | "clean_oem" | "custom";
@@ -21,7 +22,6 @@ type PolicyResp =
         rendering_max_per_day: number;
         rendering_customer_opt_in_required: boolean;
 
-        // 🔥 Live Q&A
         live_qa_enabled?: boolean;
         live_qa_max_questions?: number;
       };
@@ -83,23 +83,26 @@ function clampInt(v: any, fallback: number, min: number, max: number) {
 }
 
 export default function AiPolicySetupPage() {
+  const router = useRouter();
+  const sp = useSearchParams();
+
+  const onboardingMode = sp.get("onboarding") === "1";
+  const returnTo = sp.get("returnTo");
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   const [role, setRole] = useState<"owner" | "admin" | "member" | null>(null);
 
-  // Existing policy
   const [aiMode, setAiMode] = useState<AiMode>("assessment_only");
   const [pricingEnabled, setPricingEnabled] = useState(false);
 
-  // Rendering policy
   const [renderingEnabled, setRenderingEnabled] = useState(false);
   const [renderingStyle, setRenderingStyle] = useState<RenderingStyle>("photoreal");
   const [renderingNotes, setRenderingNotes] = useState("");
   const [renderingMaxPerDay, setRenderingMaxPerDay] = useState<number>(20);
   const [renderingOptInRequired, setRenderingOptInRequired] = useState(true);
 
-  // 🔥 Live Q&A
   const [liveQaEnabled, setLiveQaEnabled] = useState(false);
   const [liveQaMaxQuestions, setLiveQaMaxQuestions] = useState(3);
 
@@ -108,13 +111,18 @@ export default function AiPolicySetupPage() {
 
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
+  function goBackToOnboarding() {
+    if (returnTo) router.push(returnTo);
+    else router.push("/onboarding/wizard");
+  }
+
   async function load() {
     setErr(null);
     setMsg(null);
     setLoading(true);
 
     try {
-      // ✅ Important: ensure cookies are sent/received on iOS Safari
+      // ensure cookies are sent/received
       await fetch("/api/tenant/context", { cache: "no-store", credentials: "include" });
 
       const res = await fetch("/api/admin/ai-policy", { cache: "no-store", credentials: "include" });
@@ -134,7 +142,6 @@ export default function AiPolicySetupPage() {
       );
       setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
 
-      // 🔥 Live Q&A (defaults)
       setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
       setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
     } catch (e: any) {
@@ -160,7 +167,6 @@ export default function AiPolicySetupPage() {
         rendering_max_per_day: Math.max(0, Math.min(1000, Number(renderingMaxPerDay) || 0)),
         rendering_customer_opt_in_required: renderingOptInRequired,
 
-        // 🔥 Live Q&A
         live_qa_enabled: Boolean(liveQaEnabled),
         live_qa_max_questions: Math.max(1, Math.min(10, Number(liveQaMaxQuestions) || 3)),
       };
@@ -169,16 +175,16 @@ export default function AiPolicySetupPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        credentials: "include", // ✅ critical
+        credentials: "include",
       });
 
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to save AI policy");
 
       setMsg("Saved.");
-
       setRole(data.role);
 
+      // keep UI in sync (in case backend normalizes)
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
@@ -190,9 +196,13 @@ export default function AiPolicySetupPage() {
       );
       setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
 
-      // 🔥 Live Q&A
       setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
       setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
+
+      // ✅ onboarding flow: bounce right back after save
+      if (onboardingMode) {
+        goBackToOnboarding();
+      }
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -206,12 +216,15 @@ export default function AiPolicySetupPage() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
+    <div className={onboardingMode ? "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen" : "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen"}>
+      {/* ✅ In onboarding mode, keep header minimal and unambiguous */}
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Setup: AI & Pricing Policy</h1>
+          <h1 className="text-2xl font-semibold text-gray-900">
+            {onboardingMode ? "Onboarding: AI & Pricing Policy" : "Setup: AI & Pricing Policy"}
+          </h1>
           <p className="mt-1 text-sm text-gray-600">
-            Decide what the AI returns to customers, optionally enable concept renderings, and configure Live Q&amp;A.
+            Decide what the AI returns, optionally enable renderings, and configure Live Q&amp;A.
           </p>
           {role ? (
             <div className="mt-2 text-sm">
@@ -223,18 +236,29 @@ export default function AiPolicySetupPage() {
         </div>
 
         <div className="flex gap-2">
-          <a
-            href="/admin/setup"
-            className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-          >
-            ← Setup Home
-          </a>
-          <button
-            onClick={load}
-            className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-          >
-            Refresh
-          </button>
+          {onboardingMode ? (
+            <button
+              onClick={goBackToOnboarding}
+              className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
+            >
+              ← Back to onboarding
+            </button>
+          ) : (
+            <>
+              <a
+                href="/admin/setup"
+                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
+              >
+                ← Setup Home
+              </a>
+              <button
+                onClick={load}
+                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
+              >
+                Refresh
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -260,14 +284,12 @@ export default function AiPolicySetupPage() {
                 selected={aiMode === "assessment_only"}
                 onClick={() => canEdit && setAiMode("assessment_only")}
               />
-
               <Card
                 title="Estimate range"
-                desc="AI can return a low/high range (we’ll wire this to your pricing config next)."
+                desc="AI can return a low/high range."
                 selected={aiMode === "range"}
                 onClick={() => canEdit && setAiMode("range")}
               />
-
               <Card
                 title="Fixed estimate"
                 desc="AI returns a single estimate (best for standardized services)."
@@ -302,7 +324,7 @@ export default function AiPolicySetupPage() {
               </div>
             </div>
 
-            {/* 🔥 Live Q&A */}
+            {/* Live Q&A */}
             <div className="rounded-xl border border-gray-200 bg-white p-5">
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -330,7 +352,7 @@ export default function AiPolicySetupPage() {
               <div className="mt-4 grid gap-4">
                 <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                   <div className="text-sm font-semibold text-gray-900">Max questions</div>
-                  <div className="mt-1 text-xs text-gray-600">Recommended: 3–5. Keep it short to avoid drop-off.</div>
+                  <div className="mt-1 text-xs text-gray-600">Recommended: 3–5.</div>
 
                   <div className="mt-3 flex items-center gap-3">
                     <input
@@ -344,29 +366,6 @@ export default function AiPolicySetupPage() {
                     />
                     <div className="w-10 text-right text-sm font-mono text-gray-900">{liveQaMaxQuestions}</div>
                   </div>
-
-                  <div className="mt-2 text-xs text-gray-500">
-                    If disabled, the quote returns an estimate immediately (single-step flow).
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-                  <div className="text-sm font-semibold text-gray-900">What customers see</div>
-                  <div className="mt-2 rounded-lg border border-gray-200 bg-white p-3 text-xs text-gray-700">
-                    <div className="font-semibold">Quick questions</div>
-                    <div className="mt-1 opacity-90">“One more step — answer these and we’ll finalize your estimate.”</div>
-                    <div className="mt-3 grid gap-2">
-                      <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
-                        What is the exact size (L×W) of the item?
-                      </div>
-                      <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
-                        Repair vs full replacement?
-                      </div>
-                      <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
-                        Any material preference?
-                      </div>
-                    </div>
-                  </div>
                 </div>
               </div>
             </div>
@@ -377,7 +376,7 @@ export default function AiPolicySetupPage() {
                 <div>
                   <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
                   <div className="mt-1 text-xs text-gray-600">
-                    Optional “concept render” image of the finished product. Costs more than text — keep this tenant-controlled.
+                    Optional “concept render” image of the finished product.
                   </div>
                 </div>
 
@@ -418,7 +417,7 @@ export default function AiPolicySetupPage() {
                     onChange={(e) => setRenderingNotes(e.target.value)}
                     disabled={!canEdit || !renderingEnabled}
                     rows={4}
-                    placeholder="Example: Keep original stitching pattern; show clean restored bolsters; avoid changing color unless requested…"
+                    placeholder="Example: Keep original stitching pattern; show clean restored bolsters…"
                     className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
                   />
                 </div>
@@ -473,27 +472,30 @@ export default function AiPolicySetupPage() {
                 disabled={!canEdit || saving}
                 className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                {saving ? "Saving…" : "Save Policy"}
+                {saving ? "Saving…" : onboardingMode ? "Save & return to onboarding" : "Save Policy"}
               </button>
 
               {msg && <span className="text-sm text-green-700">{msg}</span>}
               {err && <span className="text-sm text-red-700 whitespace-pre-wrap">{err}</span>}
             </div>
 
-            <div className="flex gap-2">
-              <a
-                href="/admin/setup/widget"
-                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-              >
-                Next: Widget setup →
-              </a>
-              <a
-                href="/quote"
-                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
-              >
-                Run a test quote →
-              </a>
-            </div>
+            {/* Only show admin “next links” when NOT onboarding */}
+            {!onboardingMode ? (
+              <div className="flex gap-2">
+                <a
+                  href="/admin/setup/widget"
+                  className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
+                >
+                  Next: Widget setup →
+                </a>
+                <a
+                  href="/quote"
+                  className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
+                >
+                  Run a test quote →
+                </a>
+              </div>
+            ) : null}
           </div>
         )}
       </div>
