@@ -23,9 +23,8 @@ const BrandLogoUrl = z.preprocess((v) => {
 }, z.string().trim().url().max(500).nullable());
 
 const BrandLogoVariant = z
-  .enum(["auto", "light", "dark"])
-  .optional()
-  .transform((v) => v ?? undefined);
+  .preprocess((v) => (typeof v === "string" ? v.trim().toLowerCase() : v), z.enum(["auto", "light", "dark"]).nullable())
+  .optional();
 
 const PostBody = z.object({
   business_name: z.string().trim().min(1).max(120),
@@ -34,25 +33,12 @@ const PostBody = z.object({
 
   // tenant branding
   brand_logo_url: BrandLogoUrl.optional(),
-  brand_logo_variant: BrandLogoVariant, // "auto" | "light" | "dark" (optional)
+  brand_logo_variant: BrandLogoVariant, // auto|light|dark|null
 
   // enterprise/oauth
   email_send_mode: z.enum(["standard", "enterprise"]).optional(),
   email_identity_id: z.string().uuid().nullable().optional(),
 });
-
-function firstRow(r: any): any | null {
-  // Drizzle execute can be array-like; avoid `.rows` assumptions
-  try {
-    if (!r) return null;
-    if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
-    if (Array.isArray(r)) return r[0] ?? null;
-    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 async function getTenantSettingsRow(tenantId: string) {
   const r = await db.execute(sql`
@@ -70,7 +56,7 @@ async function getTenantSettingsRow(tenantId: string) {
     limit 1
   `);
 
-  const row = firstRow(r);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   return row ?? null;
 }
 
@@ -87,24 +73,11 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
       ? (data.email_identity_id ?? null)
       : undefined;
 
-  // Same semantics for logo
+  // Same semantics for logo url
   const brandLogoUrl = "brand_logo_url" in data ? (data.brand_logo_url ?? null) : undefined;
 
-  // Same semantics for logo variant
-  const brandLogoVariant =
-    "brand_logo_variant" in data && data.brand_logo_variant
-      ? String(data.brand_logo_variant).trim().toLowerCase()
-      : ("brand_logo_variant" in data ? null : undefined);
-
-  // If provided but empty/invalid (shouldn't happen because zod enum), fall back
-  const normalizedVariant =
-    brandLogoVariant === undefined
-      ? undefined
-      : brandLogoVariant === null
-      ? null
-      : brandLogoVariant === "light" || brandLogoVariant === "dark" || brandLogoVariant === "auto"
-      ? (brandLogoVariant as "auto" | "light" | "dark")
-      : "auto";
+  // Same semantics for logo variant (treat null as "auto" default if you prefer; we allow clearing too)
+  const brandLogoVariant = "brand_logo_variant" in data ? (data.brand_logo_variant ?? null) : undefined;
 
   // 1) Try update first
   const upd = await db.execute(sql`
@@ -115,10 +88,7 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
       resend_from_email = ${data.resend_from_email},
 
       brand_logo_url = ${brandLogoUrl === undefined ? sql`brand_logo_url` : brandLogoUrl},
-
-      brand_logo_variant = ${
-        normalizedVariant === undefined ? sql`brand_logo_variant` : normalizedVariant ?? "auto"
-      },
+      brand_logo_variant = ${brandLogoVariant === undefined ? sql`brand_logo_variant` : brandLogoVariant},
 
       email_send_mode = ${emailSendMode},
       email_identity_id = ${emailIdentityId === undefined ? sql`email_identity_id` : emailIdentityId},
@@ -128,7 +98,7 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
     returning tenant_id
   `);
 
-  const updatedRow = firstRow(upd);
+  const updatedRow: any = (upd as any)?.rows?.[0] ?? (Array.isArray(upd) ? (upd as any)[0] : null);
   if (updatedRow?.tenant_id) return await getTenantSettingsRow(tenantId);
 
   // 2) Insert if missing (IMPORTANT: your table has NO id/created_at columns)
@@ -154,12 +124,7 @@ async function upsertTenantEmailSettings(tenantId: string, data: z.infer<typeof 
         ${data.lead_to_email},
         ${data.resend_from_email},
         ${"brand_logo_url" in data ? (data.brand_logo_url ?? null) : null},
-        ${(() => {
-          // if not provided, default 'auto'
-          if (!("brand_logo_variant" in data)) return "auto";
-          const v = String((data as any).brand_logo_variant ?? "").trim().toLowerCase();
-          return v === "light" || v === "dark" || v === "auto" ? v : "auto";
-        })()},
+        ${"brand_logo_variant" in data ? (data.brand_logo_variant ?? null) : "auto"},
         ${emailSendMode},
         ${emailSendMode === "enterprise" ? (data.email_identity_id ?? null) : null},
         now()

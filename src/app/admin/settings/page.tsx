@@ -1,5 +1,4 @@
 // src/app/admin/settings/page.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -19,8 +18,6 @@ type ContextResp =
   | { ok: true; activeTenantId: string | null; tenants: TenantRow[] }
   | { ok: false; error: string; message?: string };
 
-type BrandLogoVariant = "auto" | "light" | "dark";
-
 type SettingsResp =
   | {
       ok: true;
@@ -32,7 +29,7 @@ type SettingsResp =
         resend_from_email: string;
 
         brand_logo_url?: string | null;
-        brand_logo_variant?: BrandLogoVariant | null;
+        brand_logo_variant?: "auto" | "light" | "dark" | null;
 
         email_send_mode?: "standard" | "enterprise" | null;
         email_identity_id?: string | null;
@@ -80,13 +77,6 @@ function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function safeVariant(v: unknown): BrandLogoVariant {
-  const s = String(v ?? "").trim().toLowerCase();
-  if (s === "light") return "light";
-  if (s === "dark") return "dark";
-  return "auto";
-}
-
 /**
  * Accepts:
  * - "Name <email@domain.com>"
@@ -117,6 +107,13 @@ function extractDomainFromEmail(raw: string): string | null {
   if (!domain || domain.includes(" ") || domain.includes(">")) return null;
 
   return domain;
+}
+
+function normalizeVariant(v: any): "auto" | "light" | "dark" {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "light") return "light";
+  if (s === "dark") return "dark";
+  return "auto";
 }
 
 /* =======================
@@ -187,36 +184,36 @@ function Field(props: {
   );
 }
 
-function Segmented(props: {
-  value: BrandLogoVariant;
-  onChange: (v: BrandLogoVariant) => void;
+function Select(props: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
   disabled?: boolean;
+  options: Array<{ value: string; label: string; hint?: string }>;
+  hint?: string;
 }) {
-  const btn = (v: BrandLogoVariant, label: string, sub: string) => {
-    const active = props.value === v;
-    return (
-      <button
-        type="button"
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-800 dark:text-gray-200">{props.label}</label>
+      <select
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
         disabled={props.disabled}
-        onClick={() => props.onChange(v)}
         className={cx(
-          "rounded-xl border p-3 text-left transition disabled:opacity-50",
-          active
-            ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
-            : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+          "mt-1 w-full rounded-lg border px-3 py-2 text-sm outline-none transition",
+          "border-gray-300 bg-white text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
+          "disabled:cursor-not-allowed disabled:bg-gray-100",
+          "dark:border-white/10 dark:bg-white/5 dark:text-white dark:placeholder:text-gray-400",
+          "dark:focus:border-blue-400 dark:focus:ring-blue-400/20 dark:disabled:bg-white/5"
         )}
       >
-        <div className="text-sm font-semibold text-gray-900 dark:text-white">{label}</div>
-        <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">{sub}</div>
-      </button>
-    );
-  };
-
-  return (
-    <div className="grid gap-3 md:grid-cols-3">
-      {btn("auto", "Auto", "Use the same logo everywhere (default).")}
-      {btn("light", "Light", "Logo looks best on light backgrounds (dark text).")}
-      {btn("dark", "Dark", "Logo looks best on dark backgrounds (light text).")}
+        {props.options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {props.hint ? <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{props.hint}</p> : null}
     </div>
   );
 }
@@ -239,7 +236,7 @@ export default function AdminTenantSettingsPage() {
   const [leadToEmail, setLeadToEmail] = useState("");
   const [fromEmail, setFromEmail] = useState("");
   const [brandLogoUrl, setBrandLogoUrl] = useState("");
-  const [brandLogoVariant, setBrandLogoVariant] = useState<BrandLogoVariant>("auto");
+  const [brandLogoVariant, setBrandLogoVariant] = useState<"auto" | "light" | "dark">("auto");
 
   /* ---------- email ---------- */
   const [emailSendMode, setEmailSendMode] = useState<"standard" | "enterprise">("standard");
@@ -295,7 +292,7 @@ export default function AdminTenantSettingsPage() {
     setFromEmail(data.settings.resend_from_email || "");
 
     setBrandLogoUrl((data.settings.brand_logo_url ?? "").toString());
-    setBrandLogoVariant(safeVariant(data.settings.brand_logo_variant ?? "auto"));
+    setBrandLogoVariant(normalizeVariant(data.settings.brand_logo_variant));
 
     const modeRaw = String(data.settings.email_send_mode ?? "").trim().toLowerCase();
     setEmailSendMode(modeRaw === "enterprise" ? "enterprise" : "standard");
@@ -510,19 +507,13 @@ export default function AdminTenantSettingsPage() {
       };
     }
 
+    // UI-only for now (we’ll plug in Resend domain status next)
     return {
       state: "warn",
       title: "Verification required",
       detail: `To send as @${brandedDomain}, the domain must be verified in Resend. Until then, the platform may fall back to a verified sender.`,
     };
   }, [emailSendMode, fromEmail, brandedDomain]);
-
-  const logoVariantHint = useMemo(() => {
-    if (!hasBrandLogo) return "Set a logo first.";
-    if (brandLogoVariant === "auto") return "Auto is safest. Choose Light/Dark if contrast is bad in emails.";
-    if (brandLogoVariant === "light") return "Light: best for white/light email headers (dark logo).";
-    return "Dark: best for dark email headers (light logo).";
-  }, [brandLogoVariant, hasBrandLogo]);
 
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8 dark:bg-neutral-950">
@@ -679,7 +670,7 @@ export default function AdminTenantSettingsPage() {
                     Paste a public https URL (or we’ll set this automatically after upload).
                   </div>
 
-                  <div className="mt-3">
+                  <div className="mt-3 grid gap-4">
                     <Field
                       label="brand_logo_url"
                       value={brandLogoUrl}
@@ -688,27 +679,20 @@ export default function AdminTenantSettingsPage() {
                       placeholder="https://..."
                       hint="Tip: leave blank to remove."
                     />
-                  </div>
-                </div>
-              </div>
 
-              {/* ✅ Variant selector */}
-              <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/10 dark:bg-neutral-950/40">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-semibold text-gray-900 dark:text-white">Logo variant (contrast)</div>
-                    <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      Helps email headers choose an appropriate background so the logo stays readable.
-                    </div>
+                    <Select
+                      label="brand_logo_variant"
+                      value={brandLogoVariant}
+                      onChange={(v) => setBrandLogoVariant(normalizeVariant(v))}
+                      disabled={!canEdit}
+                      options={[
+                        { value: "auto", label: "auto (recommended)" },
+                        { value: "light", label: "light background (dark logo)" },
+                        { value: "dark", label: "dark background (light/white logo)" },
+                      ]}
+                      hint="This is a rendering hint for templates to avoid contrast issues. We’ll apply it to the email templates next."
+                    />
                   </div>
-                  <Pill tone="neutral">
-                    Setting: <span className="ml-1 font-mono">{brandLogoVariant}</span>
-                  </Pill>
-                </div>
-
-                <div className="mt-3">
-                  <Segmented value={brandLogoVariant} onChange={setBrandLogoVariant} disabled={!canEdit} />
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">{logoVariantHint}</div>
                 </div>
               </div>
 
@@ -718,7 +702,7 @@ export default function AdminTenantSettingsPage() {
                   <div>
                     <div className="text-sm font-semibold text-gray-900 dark:text-white">Preview</div>
                     <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                      Quick contrast check for light vs dark email header styles.
+                      Quick visual check (emails may scale it differently).
                     </div>
                   </div>
                   {hasBrandLogo ? (
@@ -738,32 +722,32 @@ export default function AdminTenantSettingsPage() {
                 </div>
 
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <div className="rounded-xl border border-dashed border-gray-300 bg-white p-5 dark:border-white/10">
-                    <div className="text-xs font-mono text-gray-500">LIGHT HEADER</div>
-                    <div className="mt-3 flex items-center justify-center">
+                  <div className="rounded-xl border border-dashed border-gray-300 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                    <div className="mb-2 text-xs font-semibold text-gray-700 dark:text-gray-200">Light</div>
+                    <div className="flex items-center justify-center rounded-lg bg-gray-50 p-6 dark:bg-black/30">
                       {hasBrandLogo ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
                           src={(brandLogoUrlStr ?? "").trim()}
-                          alt="Tenant logo (light preview)"
-                          className="max-h-16 max-w-[240px] object-contain"
+                          alt="Tenant logo"
+                          className="max-h-20 max-w-[260px] object-contain"
                           onError={() => setLogoErr("Logo preview failed to load. Check the URL or upload again.")}
                         />
                       ) : (
-                        <div className="text-sm text-gray-500">No logo set.</div>
+                        <div className="text-sm text-gray-500 dark:text-gray-400">No logo set.</div>
                       )}
                     </div>
                   </div>
 
-                  <div className="rounded-xl border border-dashed border-gray-300 bg-neutral-900 p-5 dark:border-white/10">
-                    <div className="text-xs font-mono text-gray-300">DARK HEADER</div>
-                    <div className="mt-3 flex items-center justify-center">
+                  <div className="rounded-xl border border-dashed border-gray-300 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                    <div className="mb-2 text-xs font-semibold text-gray-700 dark:text-gray-200">Dark</div>
+                    <div className="flex items-center justify-center rounded-lg bg-black p-6">
                       {hasBrandLogo ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
                           src={(brandLogoUrlStr ?? "").trim()}
-                          alt="Tenant logo (dark preview)"
-                          className="max-h-16 max-w-[240px] object-contain"
+                          alt="Tenant logo"
+                          className="max-h-20 max-w-[260px] object-contain"
                           onError={() => setLogoErr("Logo preview failed to load. Check the URL or upload again.")}
                         />
                       ) : (
@@ -773,11 +757,9 @@ export default function AdminTenantSettingsPage() {
                   </div>
                 </div>
 
-                {brandLogoVariant !== "auto" ? (
-                  <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                    Email templates will use this hint to pick the safest background for the header/logo area.
-                  </div>
-                ) : null}
+                <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  If the logo disappears on one side, set <span className="font-mono">brand_logo_variant</span> accordingly.
+                </div>
               </div>
             </div>
           </Card>
@@ -859,6 +841,29 @@ export default function AdminTenantSettingsPage() {
               <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-white/10 dark:bg-white/5 dark:text-gray-200">
                 <div className="font-semibold">{brandedReadiness.title}</div>
                 <div className="mt-1 text-sm text-gray-700 dark:text-gray-300">{brandedReadiness.detail}</div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm dark:border-white/10 dark:bg-neutral-950/40">
+                <div className="text-sm font-semibold text-gray-900 dark:text-white">How this works</div>
+                <ol className="mt-2 list-decimal space-y-1 pl-5 text-gray-700 dark:text-gray-300">
+                  <li>
+                    Set your desired sender in <span className="font-mono">Resend From Email</span> (below).
+                  </li>
+                  <li>Verify the domain with DNS records (we’ll show exact records in this card next).</li>
+                  <li>
+                    Once verified, emails send from your domain. If not verified, the platform can fall back to a verified
+                    sender to prevent failures.
+                  </li>
+                </ol>
+
+                <div className="mt-3 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3 text-xs text-gray-700 dark:border-white/10 dark:bg-black/30 dark:text-gray-300">
+                  <div className="font-semibold mb-1">Coming next (backend):</div>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>Domain verification status (read from Resend)</li>
+                    <li>DNS record list (SPF / DKIM / DMARC)</li>
+                    <li>“Start verification” + “Re-check” buttons</li>
+                  </ul>
+                </div>
               </div>
             </div>
           </Card>
@@ -1030,8 +1035,7 @@ export default function AdminTenantSettingsPage() {
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-white">Send Test Email</div>
                       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                        Sends a test message to{" "}
-                        <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
+                        Sends a test message to <span className="font-mono">{leadToEmail || "(set Lead To Email first)"}</span>.
                       </div>
                       {emailSendMode === "enterprise" ? (
                         <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -1064,7 +1068,7 @@ export default function AdminTenantSettingsPage() {
                 {/* Save row */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="text-xs text-gray-500 dark:text-gray-400">
-                    Tip: upload a logo, set the variant if needed, configure email routing, then click Save Settings.
+                    Tip: upload a logo, set the logo variant, configure email routing, then click Save Settings.
                   </div>
 
                   <div className="flex items-center gap-3">

@@ -2,15 +2,35 @@
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 
+export type BrandLogoVariant = "auto" | "light" | "dark";
+
 export type TenantEmailConfig = {
   businessName: string | null;
   leadToEmail: string | null;
-  resendFromEmail: string | null; // tenant preferred "From" (may be unverified)
+
+  // tenant preferred "From" (may be unverified)
+  resendFromEmail: string | null;
   emailSendMode: "standard" | "enterprise" | null;
 
   // enterprise/oauth placeholder
   emailIdentityId: string | null;
+
+  // ✅ Branding for templates
+  brandLogoUrl: string | null;
+  brandLogoVariant: BrandLogoVariant; // auto | light | dark
 };
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function normalizeVariant(v: unknown): BrandLogoVariant {
+  const s = safeTrim(v).toLowerCase();
+  if (s === "light") return "light";
+  if (s === "dark") return "dark";
+  return "auto";
+}
 
 export async function getTenantEmailConfig(tenantId: string): Promise<TenantEmailConfig> {
   const r = await db.execute(sql`
@@ -19,20 +39,22 @@ export async function getTenantEmailConfig(tenantId: string): Promise<TenantEmai
       lead_to_email,
       resend_from_email,
       email_send_mode,
-      email_identity_id
+      email_identity_id,
+      brand_logo_url,
+      brand_logo_variant
     from tenant_settings
     where tenant_id = ${tenantId}::uuid
     limit 1
   `);
 
-  const row: any =
-    (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
-  const modeRaw = (row?.email_send_mode ?? "standard").toString().trim().toLowerCase();
-  const emailSendMode: "standard" | "enterprise" =
-    modeRaw === "enterprise" ? "enterprise" : "standard";
-
+  const modeRaw = safeTrim(row?.email_send_mode).toLowerCase();
+  const emailSendMode: "standard" | "enterprise" = modeRaw === "enterprise" ? "enterprise" : "standard";
   const emailIdentityId = row?.email_identity_id ? String(row.email_identity_id) : null;
+
+  const brandLogoUrl = safeTrim(row?.brand_logo_url) || null;
+  const brandLogoVariant = normalizeVariant(row?.brand_logo_variant);
 
   return {
     businessName: row?.business_name ?? null,
@@ -40,6 +62,9 @@ export async function getTenantEmailConfig(tenantId: string): Promise<TenantEmai
     resendFromEmail: row?.resend_from_email ?? null,
     emailSendMode,
     emailIdentityId,
+
+    brandLogoUrl,
+    brandLogoVariant,
   };
 }
 
@@ -79,9 +104,6 @@ export function resolveFromAndReplyTo(cfg: TenantEmailConfig): {
 
   const tenantReplyTo = cfg.leadToEmail?.trim() || "";
 
-  // Mode-aware intent (no behavior difference today)
-  // - standard: platformFrom + Reply-To tenant inbox
-  // - enterprise: still platformFrom for now, Reply-To tenant inbox (until OAuth providers exist)
   return {
     from: platformFrom,
     replyTo: tenantReplyTo ? [tenantReplyTo] : [],
@@ -89,8 +111,30 @@ export function resolveFromAndReplyTo(cfg: TenantEmailConfig): {
 }
 
 /**
+ * ✅ Branding helper for email templates.
+ *
+ * - variant "auto" lets templates choose based on their background/theme.
+ * - "light" means prefer a logo that looks best on light backgrounds (dark logo).
+ * - "dark" means prefer a logo that looks best on dark backgrounds (white/light logo).
+ *
+ * Today we only store one URL. Variant is a rendering hint.
+ * Later we can add: brand_logo_url_light + brand_logo_url_dark if you want.
+ */
+export function resolveBrandingForEmail(cfg: TenantEmailConfig): {
+  logoUrl: string | null;
+  logoVariant: BrandLogoVariant;
+  businessName: string;
+} {
+  const businessName = safeTrim(cfg.businessName) || "your business";
+  return {
+    logoUrl: cfg.brandLogoUrl ? safeTrim(cfg.brandLogoUrl) : null,
+    logoVariant: normalizeVariant(cfg.brandLogoVariant),
+    businessName,
+  };
+}
+
+/**
  * Convenience helper for routes that want to display exactly what will be used.
- * (Keeps UI code clean and avoids duplicating replyTo[0] handling everywhere.)
  */
 export function resolveEmailHeadersForDisplay(cfg: TenantEmailConfig): {
   mode: "standard" | "enterprise";
