@@ -83,6 +83,8 @@ const QaQuestionsSchema = z.object({
   questions: z.array(z.string().min(1)).min(1),
 });
 
+type BrandLogoVariant = "light" | "dark" | "auto" | string | null;
+
 // ----------------- helpers -----------------
 function normalizePhone(raw: string) {
   const d = String(raw ?? "").replace(/\D/g, "");
@@ -104,6 +106,13 @@ function ensureLowHigh(low: number, high: number) {
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
+}
+
+function normalizeBrandLogoVariant(v: unknown): BrandLogoVariant {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (s === "light" || s === "dark" || s === "auto") return s;
+  return s; // keep forward-compatible
 }
 
 function getBaseUrl(req: Request) {
@@ -228,6 +237,7 @@ async function sendFinalEstimateEmails(args: {
   images: Array<{ url: string; shotType?: string }>;
   output: any;
   brandLogoUrl: string | null;
+  brandLogoVariant: BrandLogoVariant;
   businessNameFromSettings: string | null;
   renderOptIn: boolean;
 }) {
@@ -241,6 +251,7 @@ async function sendFinalEstimateEmails(args: {
     images,
     output,
     brandLogoUrl,
+    brandLogoVariant,
     businessNameFromSettings,
     renderOptIn,
   } = args;
@@ -282,6 +293,7 @@ async function sendFinalEstimateEmails(args: {
       notes,
       imageUrls: images.map((x) => x.url).filter(Boolean),
       brandLogoUrl,
+      brandLogoVariant,
       adminQuoteUrl,
 
       confidence: output.confidence ?? null,
@@ -336,6 +348,7 @@ async function sendFinalEstimateEmails(args: {
 
       imageUrls: images.map((x) => x.url).filter(Boolean),
       brandLogoUrl,
+      brandLogoVariant,
       replyToEmail: cfg.leadToEmail ?? null,
       quoteLogId,
     } as any);
@@ -566,6 +579,8 @@ export async function POST(req: Request) {
         tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
         brandLogoUrl: tenantSettings.brandLogoUrl,
+        // ✅ NEW: used for email/logo contrast
+        brandLogoVariant: (tenantSettings as any).brandLogoVariant,
         businessName: tenantSettings.businessName,
       })
       .from(tenantSettings)
@@ -575,6 +590,7 @@ export async function POST(req: Request) {
 
     const tenantIndustryKey = safeTrim(settings?.industryKey) || "service";
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
+    const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
     // Determine phase early (so we can pick industry snapshot BEFORE resolving prompts)
@@ -793,6 +809,7 @@ export async function POST(req: Request) {
           images,
           output,
           brandLogoUrl,
+          brandLogoVariant,
           businessNameFromSettings,
           renderOptIn,
         });
@@ -988,6 +1005,7 @@ export async function POST(req: Request) {
         images,
         output,
         brandLogoUrl,
+        brandLogoVariant,
         businessNameFromSettings,
         renderOptIn,
       });
