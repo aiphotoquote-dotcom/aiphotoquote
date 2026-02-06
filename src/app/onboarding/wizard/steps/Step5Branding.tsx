@@ -1,8 +1,61 @@
+// src/app/onboarding/wizard/steps/Step5Branding.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { guessLogoUrl } from "../utils";
 import { Field } from "./Field";
+
+function isEmail(v: string) {
+  const s = String(v ?? "").trim();
+  if (!s.includes("@")) return false;
+  // simple “good enough” check for onboarding (don’t over-reject)
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+function pickBestEmailFromAnalysis(aiAnalysis: any | null | undefined): string {
+  const emails: string[] = [];
+
+  // common places we might have put it in analysis
+  const direct = [
+    aiAnalysis?.contactEmail,
+    aiAnalysis?.ownerEmail,
+    aiAnalysis?.email,
+    aiAnalysis?.debug?.contactEmail,
+    aiAnalysis?.debug?.email,
+  ];
+  for (const v of direct) {
+    const s = String(v ?? "").trim();
+    if (s && isEmail(s)) emails.push(s);
+  }
+
+  // scan “extractedTextPreview” if present
+  const blob = String(aiAnalysis?.extractedTextPreview ?? aiAnalysis?.debug?.extractedTextPreview ?? "").trim();
+  if (blob) {
+    const matches = blob.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+    for (const m of matches) {
+      const s = String(m ?? "").trim();
+      if (s && isEmail(s)) emails.push(s);
+    }
+  }
+
+  // try structured fields if you stored them
+  const maybeList: any[] = Array.isArray(aiAnalysis?.contactEmails) ? aiAnalysis.contactEmails : [];
+  for (const v of maybeList) {
+    const s = String(v ?? "").trim();
+    if (s && isEmail(s)) emails.push(s);
+  }
+
+  // prefer “info@ / quotes@ / sales@ / support@ / contact@” over random
+  const uniq = Array.from(new Set(emails));
+  const preferredPrefixes = ["leads@", "quotes@", "info@", "sales@", "support@", "contact@"];
+
+  for (const p of preferredPrefixes) {
+    const hit = uniq.find((e) => e.toLowerCase().startsWith(p));
+    if (hit) return hit;
+  }
+
+  return uniq[0] ?? "";
+}
 
 export function Step5Branding(props: {
   tenantId: string | null;
@@ -19,11 +72,18 @@ export function Step5Branding(props: {
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const suggestedLogo = useMemo(() => guessLogoUrl(props.aiAnalysis), [props.aiAnalysis]);
+  const suggestedLeadEmail = useMemo(() => pickBestEmailFromAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
   useEffect(() => {
-    if (!brandLogoUrl.trim() && suggestedLogo) setBrandLogoUrl(suggestedLogo);
+    // one-time gentle autofill
+    if (!brandLogoUrl.trim() && suggestedLogo) setBrandLogoUrl(String(suggestedLogo).trim());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suggestedLogo]);
+
+  useEffect(() => {
+    if (!leadToEmail.trim() && suggestedLeadEmail) setLeadToEmail(String(suggestedLeadEmail).trim());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestedLeadEmail]);
 
   async function uploadLogo(file: File) {
     const tid = String(props.tenantId ?? "").trim();
@@ -35,7 +95,13 @@ export function Step5Branding(props: {
     const fd = new FormData();
     fd.append("file", file);
 
-    const res = await fetch("/api/admin/tenant-logo/upload", { method: "POST", body: fd });
+    const res = await fetch("/api/admin/tenant-logo/upload", {
+      method: "POST",
+      body: fd,
+      credentials: "include", // ✅ important on iOS/Safari + cookie-based tenant scope
+      cache: "no-store",
+    });
+
     const ct = res.headers.get("content-type") || "";
     const data = ct.includes("application/json") ? await res.json() : { ok: false, error: await res.text() };
 
@@ -43,14 +109,16 @@ export function Step5Branding(props: {
     return String(data.url || "").trim();
   }
 
-  const canSave = leadToEmail.trim().includes("@");
+  const canSave = isEmail(leadToEmail);
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Branding & lead routing</div>
+
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        Default sender will be <span className="font-mono">AI Photo Quote &lt;no-reply@aiphotoquote.com&gt;</span>. You can
-        personalize later in tenant settings.
+        We’ll send emails using{" "}
+        <span className="font-mono">AI Photo Quote &lt;no-reply@aiphotoquote.com&gt;</span> on our Resend platform by
+        default. You can personalize sender/branding later in tenant settings.
       </div>
 
       {err ? (
@@ -65,7 +133,7 @@ export function Step5Branding(props: {
             <div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Logo</div>
               <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                We auto-detected a logo from your website (if available). Upload a different one anytime.
+                We try to auto-detect a logo from your website. You can upload a different one anytime.
               </div>
             </div>
 
@@ -144,6 +212,14 @@ export function Step5Branding(props: {
               type="email"
             />
           </div>
+
+          {!leadToEmail.trim() ? (
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Tip: use the inbox you already watch (info@, quotes@, or your personal email).
+            </div>
+          ) : !canSave ? (
+            <div className="mt-2 text-xs text-red-600 dark:text-red-300">Please enter a valid email address.</div>
+          ) : null}
         </div>
       </div>
 
