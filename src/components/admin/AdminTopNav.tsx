@@ -2,8 +2,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { UserButton } from "@clerk/nextjs";
 
 import AdminTenantSwitcher from "@/components/admin/AdminTenantSwitcher";
@@ -57,13 +57,13 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
 }
 
 export default function AdminTopNav() {
+  const router = useRouter();
   const pathname = usePathname() || "";
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const activeKey = useMemo(() => activeFromPath(pathname), [pathname]);
 
-  const linkBase =
-    "inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-colors";
+  const linkBase = "inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold transition-colors";
   const linkIdle =
     "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-white/5 dark:hover:text-white";
   const linkActive = "bg-gray-900 text-white shadow-sm dark:bg-white dark:text-black";
@@ -76,52 +76,71 @@ export default function AdminTopNav() {
     { key: "widgets", href: "/admin/setup/widget", label: "Widgets" },
   ];
 
-  // ---- Tenant context (read-only, no side effects) ----
+  // ---- Tenant context ----
   const [ctx, setCtx] = useState<TenantContextResp | null>(null);
   const [ctxLoading, setCtxLoading] = useState(true);
 
-  // Prevent repeat-fetch spam in fast remount scenarios
-  const fetchedRef = useRef(false);
+  const loadContext = useCallback(async () => {
+    setCtxLoading(true);
+    try {
+      const res = await fetch("/api/tenant/context", {
+        cache: "no-store",
+        credentials: "include", // ✅ important for consistent cookie behavior
+      });
 
-  useEffect(() => {
-    let alive = true;
-    const ac = new AbortController();
-
-    async function loadContextOnce() {
-      if (fetchedRef.current) return;
-      fetchedRef.current = true;
-
-      setCtxLoading(true);
-      try {
-        const res = await fetch("/api/tenant/context", {
-          cache: "no-store",
-          signal: ac.signal,
-        });
-        const data = (await res.json().catch(() => null)) as TenantContextResp | null;
-        if (!alive) return;
-
-        setCtx(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid tenant context response" });
-      } catch (e: any) {
-        if (!alive) return;
-        // Don’t blow up the nav; just hide tenant UI
-        setCtx({ ok: false, error: "CONTEXT_FETCH_FAILED", message: e?.message ?? String(e) });
-      } finally {
-        if (!alive) return;
-        setCtxLoading(false);
-      }
+      const data = (await res.json().catch(() => null)) as TenantContextResp | null;
+      setCtx(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid tenant context response" });
+    } catch (e: any) {
+      setCtx({ ok: false, error: "CONTEXT_FETCH_FAILED", message: e?.message ?? String(e) });
+    } finally {
+      setCtxLoading(false);
     }
-
-    loadContextOnce();
-    return () => {
-      alive = false;
-      ac.abort();
-    };
   }, []);
+
+  // Initial load
+  useEffect(() => {
+    loadContext();
+  }, [loadContext]);
 
   // Close mobile drawer on route change
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
+
+  // Refresh tenant context on route change (keeps nav pill aligned while browsing)
+  useEffect(() => {
+    loadContext();
+  }, [pathname, loadContext]);
+
+  // Refresh tenant context when the tab becomes active again
+  useEffect(() => {
+    function onFocus() {
+      loadContext();
+    }
+    function onVis() {
+      if (document.visibilityState === "visible") loadContext();
+    }
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [loadContext]);
+
+  // Allow ANY component to request a context refresh:
+  // window.dispatchEvent(new Event("apq:tenant-changed"))
+  useEffect(() => {
+    function onTenantChanged() {
+      // reload context + refresh server components (reads new cookie)
+      loadContext().catch(() => null);
+      router.refresh();
+    }
+    window.addEventListener("apq:tenant-changed", onTenantChanged as any);
+    return () => {
+      window.removeEventListener("apq:tenant-changed", onTenantChanged as any);
+    };
+  }, [loadContext, router]);
 
   const activeTenant =
     ctx && "ok" in ctx && ctx.ok && ctx.activeTenantId
@@ -129,12 +148,7 @@ export default function AdminTopNav() {
       : null;
 
   const shouldShowSwitcher =
-    !ctxLoading &&
-    ctx &&
-    "ok" in ctx &&
-    ctx.ok &&
-    Array.isArray(ctx.tenants) &&
-    ctx.tenants.length > 0;
+    !ctxLoading && ctx && "ok" in ctx && ctx.ok && Array.isArray(ctx.tenants) && ctx.tenants.length > 0;
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/70 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/70">
@@ -153,11 +167,7 @@ export default function AdminTopNav() {
 
           <nav className="hidden md:flex items-center gap-1">
             {links.map((l) => (
-              <Link
-                key={l.key}
-                href={l.href}
-                className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}
-              >
+              <Link key={l.key} href={l.href} className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}>
                 {l.label}
               </Link>
             ))}
@@ -179,7 +189,6 @@ export default function AdminTopNav() {
 
         {/* Right: tenant switcher + account (desktop) */}
         <div className="hidden md:flex items-center gap-3">
-          {/* IMPORTANT: don’t render the switcher until context is loaded */}
           {shouldShowSwitcher ? <AdminTenantSwitcher /> : null}
 
           <div className="rounded-xl border border-gray-200 bg-white/70 px-2 py-1 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
@@ -228,11 +237,7 @@ export default function AdminTopNav() {
             {/* links */}
             <div className="mt-1 flex flex-col gap-1">
               {links.map((l) => (
-                <Link
-                  key={l.key}
-                  href={l.href}
-                  className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}
-                >
+                <Link key={l.key} href={l.href} className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}>
                   {l.label}
                 </Link>
               ))}

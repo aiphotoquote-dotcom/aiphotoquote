@@ -13,6 +13,10 @@ import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
 async function getBaseUrl() {
   const h = await headers();
   const proto = h.get("x-forwarded-proto") ?? "https";
@@ -30,7 +34,7 @@ function SectionHeader({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between min-w-0">
       <div className="min-w-0">
         <h1 className="text-2xl font-semibold">{title}</h1>
         {subtitle ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{subtitle}</p> : null}
@@ -52,8 +56,8 @@ function CodeBlock({
   preview?: React.ReactNode;
 }) {
   return (
-    <div className="max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950 max-w-full overflow-hidden">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between min-w-0">
         <div className="min-w-0">
           <div className="text-lg font-semibold">{title}</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{description}</div>
@@ -72,7 +76,7 @@ function CodeBlock({
       ) : null}
 
       <div className="mt-4 max-w-full overflow-x-auto rounded-xl border border-gray-200 bg-black dark:border-gray-800">
-        <pre className="block w-max max-w-full whitespace-pre p-4 text-xs text-white">{code}</pre>
+        <pre className="block w-max max-w-full p-4 text-xs text-white whitespace-pre">{code}</pre>
       </div>
 
       <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
@@ -109,7 +113,15 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{ display: "inline-block", background: "#111", color: "#fff", padding: "12px 16px", borderRadius: 12, textDecoration: "none", fontWeight: 700 }}
+      style={{
+        display: "inline-block",
+        background: "#111",
+        color: "#fff",
+        padding: "12px 16px",
+        borderRadius: 12,
+        textDecoration: "none",
+        fontWeight: 700,
+      }}
     >
       {label}
     </a>
@@ -120,7 +132,16 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{ display: "inline-block", background: "transparent", color: "#111", padding: "12px 16px", borderRadius: 12, textDecoration: "none", fontWeight: 700, border: "2px solid #111" }}
+      style={{
+        display: "inline-block",
+        background: "transparent",
+        color: "#111",
+        padding: "12px 16px",
+        borderRadius: 12,
+        textDecoration: "none",
+        fontWeight: 700,
+        border: "2px solid #111",
+      }}
     >
       {label}
     </a>
@@ -131,7 +152,18 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{ display: "inline-flex", alignItems: "center", gap: 10, background: "#0b0b0b", color: "#fff", padding: "12px 18px", borderRadius: 999, textDecoration: "none", fontWeight: 800, letterSpacing: ".2px" }}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 10,
+        background: "#0b0b0b",
+        color: "#fff",
+        padding: "12px 18px",
+        borderRadius: 999,
+        textDecoration: "none",
+        fontWeight: 800,
+        letterSpacing: ".2px",
+      }}
     >
       <span style={{ width: 10, height: 10, borderRadius: 999, background: "#22c55e", display: "inline-block" }} />
       {label}
@@ -143,7 +175,16 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{ display: "inline-block", background: "#f3f4f6", color: "#111", padding: "12px 16px", borderRadius: 12, textDecoration: "none", fontWeight: 800, border: "1px solid rgba(0,0,0,.12)" }}
+      style={{
+        display: "inline-block",
+        background: "#f3f4f6",
+        color: "#111",
+        padding: "12px 16px",
+        borderRadius: 12,
+        textDecoration: "none",
+        fontWeight: 800,
+        border: "1px solid rgba(0,0,0,.12)",
+      }}
     >
       {label}
     </a>
@@ -154,14 +195,23 @@ function ButtonOptions({ quoteUrl }: { quoteUrl: string }) {
       href={quoteUrl}
       target="_blank"
       rel="noreferrer"
-      style={{ display: "inline-block", background: "#111", color: "#fff", padding: "10px 12px", borderRadius: 10, textDecoration: "none", fontWeight: 800, fontSize: 14 }}
+      style={{
+        display: "inline-block",
+        background: "#111",
+        color: "#fff",
+        padding: "10px 12px",
+        borderRadius: 10,
+        textDecoration: "none",
+        fontWeight: 800,
+        fontSize: 14,
+      }}
     >
       {label}
     </a>
   );
 
   return (
-    <div className="max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950 max-w-full overflow-hidden">
       <div className="text-lg font-semibold">Button options</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
         Pick a style below — the code is plain HTML + inline CSS and works almost everywhere.
@@ -187,10 +237,10 @@ export default async function WidgetSetupPage() {
 
   const baseUrl = await getBaseUrl();
 
-  // ✅ single source of truth: canonical cookie (with legacy read fallback inside helper)
+  // ✅ canonical cookie reader (apq_tenant + legacy fallback handled centrally)
   let tenantId = await readActiveTenantIdFromCookies();
 
-  // If still missing, fall back to first owned tenant (only as last resort)
+  // If no cookie, fall back to owner’s first tenant (keeps page usable)
   if (!tenantId) {
     const t = await db
       .select({ id: tenants.id })
@@ -307,7 +357,7 @@ ${iframeHtml}
 ${iframeHtml}`;
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 overflow-x-hidden px-6 py-10 max-w-full">
+    <div className="mx-auto max-w-6xl px-6 py-10 space-y-6 max-w-full overflow-x-hidden">
       <SectionHeader
         title="Widgets"
         subtitle={`Embed your Photo Quote form anywhere. Tenant: ${tenantName}`}
@@ -321,8 +371,8 @@ ${iframeHtml}`;
         }
       />
 
-      <div className="max-w-full overflow-hidden rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black max-w-full overflow-hidden">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between min-w-0">
           <div className="min-w-0">
             <div className="text-sm font-semibold">Your public quote URL</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">This is the page your embeds point to.</div>
@@ -331,13 +381,16 @@ ${iframeHtml}`;
           <Link
             href={`/q/${encodeURIComponent(tenantSlug)}`}
             target="_blank"
-            className="shrink-0 rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+            className={cn(
+              "shrink-0 rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90",
+              "dark:bg-white dark:text-black"
+            )}
           >
             Preview
           </Link>
         </div>
 
-        <div className="mt-4 flex min-w-0 items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950 min-w-0">
           <div className="min-w-0 truncate font-mono text-xs text-gray-700 dark:text-gray-200">{quoteUrl}</div>
           <div className="shrink-0">
             <CopyButtonClient text={quoteUrl} />
