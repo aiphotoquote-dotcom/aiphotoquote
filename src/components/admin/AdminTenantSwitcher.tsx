@@ -47,9 +47,15 @@ export default function AdminTenantSwitcher() {
     setErr(null);
     setLoading(true);
     try {
-      const res = await fetch(CONTEXT_URL, { cache: "no-store" });
+      const res = await fetch(CONTEXT_URL, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "include", // ✅ ensure cookies are read consistently (esp iOS Safari)
+      });
+
       const data = await safeJson<ContextResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to load tenant context");
+
       setTenants(Array.isArray(data.tenants) ? data.tenants : []);
       setActiveTenantId(data.activeTenantId ?? null);
     } catch (e: any) {
@@ -83,7 +89,8 @@ export default function AdminTenantSwitcher() {
     setErr(null);
     setSwitchingTo(tenantId);
 
-    // Optimistic UI update (feels instant)
+    // Optimistic UI update
+    const prev = activeTenantId;
     setActiveTenantId(tenantId);
 
     try {
@@ -91,6 +98,8 @@ export default function AdminTenantSwitcher() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tenantId }),
+        credentials: "include", // ✅ critical: allow Set-Cookie to stick
+        cache: "no-store",
       });
 
       const data = await safeJson<any>(res);
@@ -100,15 +109,17 @@ export default function AdminTenantSwitcher() {
 
       setOpen(false);
 
-      // Re-sync switcher state from server (authoritative)
-      await load();
-
-      // Most important: force App Router server components/layouts to re-read cookies
+      // ✅ Force server components/layouts to re-read cookies immediately
       startTransition(() => {
         router.refresh();
       });
+
+      // ✅ Re-sync switcher state from server (authoritative)
+      // (After refresh request is queued, pull context again to avoid UI drift)
+      await load();
     } catch (e: any) {
       // Roll back optimistic selection on failure
+      setActiveTenantId(prev ?? null);
       await load();
       setErr(e?.message ?? String(e));
     } finally {
@@ -138,15 +149,13 @@ export default function AdminTenantSwitcher() {
 
       {open ? (
         <div className="absolute right-0 mt-2 w-80 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg dark:border-gray-800 dark:bg-black">
-          <div className="p-3 border-b border-gray-200 dark:border-gray-800">
+          <div className="border-b border-gray-200 p-3 dark:border-gray-800">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Switch tenant</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
               Your active tenant controls what quotes/settings you’re viewing.
             </div>
             {isPending ? (
-              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-                Updating views…
-              </div>
+              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updating views…</div>
             ) : null}
           </div>
 
@@ -154,13 +163,14 @@ export default function AdminTenantSwitcher() {
             {tenants.map((t) => {
               const isActive = t.tenantId === activeTenantId;
               const isBusy = switchingTo === t.tenantId;
+
               return (
                 <button
                   key={t.tenantId}
                   type="button"
                   onClick={() => switchTenant(t.tenantId)}
                   className={cn(
-                    "w-full text-left rounded-lg border px-3 py-2 text-sm transition-colors",
+                    "w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors",
                     isActive
                       ? "border-blue-400 bg-blue-50 text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-100"
                       : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
@@ -197,12 +207,12 @@ export default function AdminTenantSwitcher() {
           </div>
 
           {err ? (
-            <div className="p-3 border-t border-gray-200 text-sm text-red-700 dark:border-gray-800 dark:text-red-300">
+            <div className="border-t border-gray-200 p-3 text-sm text-red-700 dark:border-gray-800 dark:text-red-300">
               {err}
             </div>
           ) : null}
 
-          <div className="p-2 border-t border-gray-200 dark:border-gray-800 flex justify-end">
+          <div className="flex justify-end border-t border-gray-200 p-2 dark:border-gray-800">
             <button
               type="button"
               className="rounded-lg px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-900"
