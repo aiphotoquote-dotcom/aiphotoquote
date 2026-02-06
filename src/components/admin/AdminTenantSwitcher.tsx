@@ -19,9 +19,7 @@ async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ${text.slice(0, 120)}`
-    );
+    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). ${text.slice(0, 120)}`);
   }
   return (await res.json()) as T;
 }
@@ -50,11 +48,11 @@ export default function AdminTenantSwitcher() {
       const res = await fetch(CONTEXT_URL, {
         method: "GET",
         cache: "no-store",
-        credentials: "include", // ✅ ensure cookies are read consistently (esp iOS Safari)
+        credentials: "include",
       });
 
       const data = await safeJson<ContextResp>(res);
-      if (!data.ok) throw new Error(data.message || data.error || "Failed to load tenant context");
+      if (!data.ok) throw new Error((data as any).message || (data as any).error || "Failed to load tenant context");
 
       setTenants(Array.isArray(data.tenants) ? data.tenants : []);
       setActiveTenantId(data.activeTenantId ?? null);
@@ -98,27 +96,31 @@ export default function AdminTenantSwitcher() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tenantId }),
-        credentials: "include", // ✅ critical: allow Set-Cookie to stick
+        credentials: "include",
         cache: "no-store",
       });
 
       const data = await safeJson<any>(res);
-      if (!data?.ok) {
-        throw new Error(data?.message || data?.error || "Failed to switch tenant");
-      }
+      if (!data?.ok) throw new Error(data?.message || data?.error || "Failed to switch tenant");
 
       setOpen(false);
 
-      // ✅ Force server components/layouts to re-read cookies immediately
+      // ✅ Let the app know the active tenant cookie has changed
+      // AdminTopNav listens for this and will loadContext() + router.refresh().
+      try {
+        window.dispatchEvent(new Event("apq:tenant-changed"));
+      } catch {
+        // ignore
+      }
+
+      // ✅ Force server components/layouts/pages to re-read cookies
       startTransition(() => {
         router.refresh();
       });
 
-      // ✅ Re-sync switcher state from server (authoritative)
-      // (After refresh request is queued, pull context again to avoid UI drift)
+      // ✅ Re-sync from server after refresh is queued (keeps switcher truthful)
       await load();
     } catch (e: any) {
-      // Roll back optimistic selection on failure
       setActiveTenantId(prev ?? null);
       await load();
       setErr(e?.message ?? String(e));
@@ -141,9 +143,7 @@ export default function AdminTenantSwitcher() {
       >
         <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
         <span className="hidden sm:inline">Tenant:</span>
-        <span className="font-mono text-xs sm:text-sm">
-          {loading ? "Loading…" : activeTenant?.slug || "(none)"}
-        </span>
+        <span className="font-mono text-xs sm:text-sm">{loading ? "Loading…" : activeTenant?.slug || "(none)"}</span>
         <span className="text-xs opacity-70">▾</span>
       </button>
 
@@ -154,9 +154,7 @@ export default function AdminTenantSwitcher() {
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
               Your active tenant controls what quotes/settings you’re viewing.
             </div>
-            {isPending ? (
-              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updating views…</div>
-            ) : null}
+            {isPending ? <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updating views…</div> : null}
           </div>
 
           <div className="max-h-80 overflow-auto p-2">
