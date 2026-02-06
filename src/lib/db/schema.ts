@@ -163,7 +163,14 @@ export const tenantSettings = pgTable("tenant_settings", {
   leadToEmail: text("lead_to_email"),
   resendFromEmail: text("resend_from_email"),
 
+  // Branding
   brandLogoUrl: text("brand_logo_url"),
+
+  /**
+   * ✅ NEW: indicates which background the logo is optimized for (email + UI rendering hints)
+   * Values: "auto" | "light" | "dark"
+   */
+  brandLogoVariant: text("brand_logo_variant").notNull().default("auto"),
 
   emailSendMode: text("email_send_mode"),
   emailIdentityId: uuid("email_identity_id"),
