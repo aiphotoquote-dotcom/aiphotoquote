@@ -17,6 +17,10 @@ import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerRe
 // ✅ Tenant-aware PCC resolver (platform defaults + tenant overrides)
 import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
 
+// ✅ PCC config loader + industry prompt pack resolver
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { resolvePromptsForIndustry } from "@/lib/pcc/llm/resolvePrompts";
+
 export const runtime = "nodejs";
 
 // ----------------- schemas -----------------
@@ -144,9 +148,10 @@ function buildAiSnapshot(args: {
   tenantId: string;
   tenantSlug: string;
   renderOptIn: boolean;
-  resolved: Awaited<ReturnType<typeof resolveTenantLlm>>;
+  resolved: any;
+  industryKey: string;
 }) {
-  const { phase, tenantId, tenantSlug, renderOptIn, resolved } = args;
+  const { phase, tenantId, tenantSlug, renderOptIn, resolved, industryKey } = args;
 
   const quoteEstimatorSystem = resolved?.prompts?.quoteEstimatorSystem ?? "";
   const qaQuestionGeneratorSystem = resolved?.prompts?.qaQuestionGeneratorSystem ?? "";
@@ -159,6 +164,7 @@ function buildAiSnapshot(args: {
     tenant: {
       tenantId,
       tenantSlug,
+      industryKey,
     },
 
     models: {
@@ -170,7 +176,6 @@ function buildAiSnapshot(args: {
     prompts: {
       quoteEstimatorSystemSha256: sha256Hex(quoteEstimatorSystem),
       qaQuestionGeneratorSystemSha256: sha256Hex(qaQuestionGeneratorSystem),
-      // lightweight diagnostics (helps spot “wrong prompt loaded” quickly)
       quoteEstimatorSystemLen: quoteEstimatorSystem.length,
       qaQuestionGeneratorSystemLen: qaQuestionGeneratorSystem.length,
     },
@@ -179,7 +184,6 @@ function buildAiSnapshot(args: {
 
     tenantSettings: {
       ...resolved.tenant,
-      // important “runtime truth”:
       renderOptIn,
     },
 
@@ -559,12 +563,54 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    const industryKey = settings?.industryKey ?? "service";
+    const industryKey = safeTrim(settings?.industryKey) || "service";
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
     // ✅ Resolve tenant + PCC AI settings ONCE (request-scoped)
-    const resolved = await resolveTenantLlm(tenant.id);
+    const resolvedBase = await resolveTenantLlm(tenant.id);
+
+    /**
+     * ✅ Industry prompt packs (PCC) — applied only when tenant is still using PCC base prompt.
+     * Precedence target: tenant override > industry pack > platform base
+     */
+    const pccCfg = await loadPlatformLlmConfig();
+    const industryResolved = resolvePromptsForIndustry(pccCfg, industryKey);
+
+    const baseEstimator = String(pccCfg?.prompts?.quoteEstimatorSystem ?? "");
+    const baseQa = String(pccCfg?.prompts?.qaQuestionGeneratorSystem ?? "");
+
+    const resolvedEstimator = String(resolvedBase?.prompts?.quoteEstimatorSystem ?? "");
+    const resolvedQa = String(resolvedBase?.prompts?.qaQuestionGeneratorSystem ?? "");
+
+    const isUsingBaseEstimator = resolvedEstimator.trim() === baseEstimator.trim();
+    const isUsingBaseQa = resolvedQa.trim() === baseQa.trim();
+
+    const effectivePrompts = {
+      quoteEstimatorSystem: isUsingBaseEstimator && industryResolved.quoteEstimatorSystem
+        ? industryResolved.quoteEstimatorSystem
+        : resolvedEstimator,
+      qaQuestionGeneratorSystem: isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem
+        ? industryResolved.qaQuestionGeneratorSystem
+        : resolvedQa,
+    };
+
+    const resolved = {
+      ...resolvedBase,
+      prompts: {
+        ...resolvedBase.prompts,
+        quoteEstimatorSystem: effectivePrompts.quoteEstimatorSystem,
+        qaQuestionGeneratorSystem: effectivePrompts.qaQuestionGeneratorSystem,
+      },
+      meta: {
+        ...(resolvedBase as any)?.meta,
+        industryPromptPackApplied: {
+          industryKey,
+          estimatorApplied: Boolean(isUsingBaseEstimator && industryResolved.quoteEstimatorSystem),
+          qaApplied: Boolean(isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem),
+        },
+      },
+    };
 
     // ✅ denylist guardrail (PCC)
     const denylist = resolved.guardrails.blockedTopics ?? [];
@@ -580,6 +626,8 @@ export async function POST(req: Request) {
       renderOptIn: undefined as boolean | undefined, // per-request
       tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
+      industryKey,
+      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
     };
 
     // -------------------------
@@ -681,9 +729,10 @@ export async function POST(req: Request) {
         tenantSlug,
         renderOptIn,
         resolved,
+        industryKey,
       });
 
-      // ✅ system prompt + model from resolved tenant+PCC
+      // ✅ system prompt + model from resolved tenant+PCC (+ industry pack if applied)
       const systemEstimate = resolved.prompts.quoteEstimatorSystem;
 
       let output = await generateEstimate({
@@ -763,7 +812,10 @@ export async function POST(req: Request) {
     }
 
     if (!images.length) {
-      return NextResponse.json({ ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." },
+        { status: 400 }
+      );
     }
 
     const customer_context = parsed.data.customer_context ?? {};
@@ -804,6 +856,7 @@ export async function POST(req: Request) {
       tenantSlug,
       renderOptIn,
       resolved,
+      industryKey,
     });
 
     // Create quote log now
@@ -846,6 +899,7 @@ export async function POST(req: Request) {
         tenantSlug,
         renderOptIn,
         resolved,
+        industryKey,
       });
 
       await db
@@ -878,6 +932,7 @@ export async function POST(req: Request) {
       tenantSlug,
       renderOptIn,
       resolved,
+      industryKey,
     });
 
     let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshotEstimated };
