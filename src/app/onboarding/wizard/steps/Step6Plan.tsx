@@ -32,7 +32,6 @@ function tierPrice(t: PlanTier) {
 }
 
 function tierUsage(t: PlanTier) {
-  // purely cosmetic; doesn’t affect limits
   if (t === "tier0") return { label: "AI Usage", filled: 2, total: 5 };
   if (t === "tier1") return { label: "AI Usage", filled: 4, total: 6 };
   return { label: "AI Usage", filled: 6, total: 6 };
@@ -40,12 +39,7 @@ function tierUsage(t: PlanTier) {
 
 function tierDetails(t: PlanTier) {
   if (t === "tier0") {
-    return [
-      "5 quotes / month",
-      "Uses platform AI keys",
-      "Multiple users",
-      "Upgrade anytime",
-    ];
+    return ["5 quotes / month", "Uses platform AI keys", "Multiple users", "Upgrade anytime"];
   }
   if (t === "tier1") {
     return [
@@ -64,7 +58,6 @@ function tierDetails(t: PlanTier) {
 }
 
 function tierAccent(t: PlanTier) {
-  // Tailwind-safe static classes
   if (t === "tier0") {
     return {
       glow: "shadow-[0_0_0_1px_rgba(15,23,42,0.12),0_10px_30px_rgba(15,23,42,0.12)] dark:shadow-[0_0_0_1px_rgba(148,163,184,0.12),0_12px_36px_rgba(0,0,0,0.45)]",
@@ -76,8 +69,7 @@ function tierAccent(t: PlanTier) {
   }
   if (t === "tier1") {
     return {
-      glow:
-        "shadow-[0_0_0_1px_rgba(16,185,129,0.18),0_18px_60px_rgba(16,185,129,0.15)] dark:shadow-[0_0_0_1px_rgba(16,185,129,0.28),0_22px_70px_rgba(0,0,0,0.55)]",
+      glow: "shadow-[0_0_0_1px_rgba(16,185,129,0.18),0_18px_60px_rgba(16,185,129,0.15)] dark:shadow-[0_0_0_1px_rgba(16,185,129,0.28),0_22px_70px_rgba(0,0,0,0.55)]",
       borderGrad: "from-emerald-200 via-cyan-200 to-indigo-200 dark:from-emerald-700/40 dark:via-cyan-700/30 dark:to-indigo-700/30",
       badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200",
       check: "text-emerald-600 dark:text-emerald-400",
@@ -85,8 +77,7 @@ function tierAccent(t: PlanTier) {
     };
   }
   return {
-    glow:
-      "shadow-[0_0_0_1px_rgba(99,102,241,0.18),0_18px_60px_rgba(99,102,241,0.14)] dark:shadow-[0_0_0_1px_rgba(99,102,241,0.24),0_22px_70px_rgba(0,0,0,0.55)]",
+    glow: "shadow-[0_0_0_1px_rgba(99,102,241,0.18),0_18px_60px_rgba(99,102,241,0.14)] dark:shadow-[0_0_0_1px_rgba(99,102,241,0.24),0_22px_70px_rgba(0,0,0,0.55)]",
     borderGrad: "from-indigo-200 via-fuchsia-200 to-amber-200 dark:from-indigo-700/35 dark:via-fuchsia-700/25 dark:to-amber-700/20",
     badge: "bg-indigo-100 text-indigo-800 dark:bg-indigo-950/45 dark:text-indigo-200",
     check: "text-emerald-600 dark:text-emerald-400",
@@ -180,11 +171,7 @@ export function Step6Plan(props: {
       const res = await fetch("/api/onboarding/state", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          step: 6,
-          tenantId: tid,
-          plan: selected,
-        }),
+        body: JSON.stringify({ step: 6, tenantId: tid, plan: selected }),
       });
 
       const j = await res.json().catch(() => null);
@@ -195,7 +182,6 @@ export function Step6Plan(props: {
       }
 
       const serverPlan = safePlan(j?.planTier) ?? selected;
-
       setSavedPlan(serverPlan);
       props.onSaved(serverPlan);
     } catch (e: any) {
@@ -211,9 +197,7 @@ export function Step6Plan(props: {
   return (
     <div>
       <div className="text-center">
-        <div className="text-[11px] font-semibold tracking-[0.28em] text-slate-500 dark:text-slate-400">
-          STEP 6 OF 6
-        </div>
+        <div className="text-[11px] font-semibold tracking-[0.28em] text-slate-500 dark:text-slate-400">STEP 6 OF 6</div>
         <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
           How much AI do you want working for you?
         </div>
@@ -233,11 +217,7 @@ export function Step6Plan(props: {
           <div className="text-sm font-semibold text-emerald-950 dark:text-emerald-100">Plan saved ✅</div>
           <div className="mt-1 text-sm text-emerald-900/90 dark:text-emerald-100/90">
             Selected: <span className="font-mono">{savedPlan}</span>.
-            {needsKey ? (
-              <> Next: add your OpenAI key to activate Tier 1–2, then set up your widget.</>
-            ) : (
-              <> Next: set up your widget so customers can submit photos from your website.</>
-            )}
+            {needsKey ? <> Next: add your OpenAI key to activate Tier 1–2, then set up your widget.</> : <> Next: set up your widget so customers can submit photos from your website.</>}
           </div>
 
           <div className="mt-4 grid gap-3">
@@ -283,10 +263,21 @@ export function Step6Plan(props: {
                     active ? a.glow : "shadow-sm dark:shadow-none",
                   ].join(" ")}
                 >
+                  {/* ✅ Pro glow halo (stronger when selected) */}
+                  {t === "tier1" ? (
+                    <div
+                      aria-hidden="true"
+                      className={[
+                        "pointer-events-none absolute -inset-6 rounded-[40px] blur-3xl",
+                        "bg-[radial-gradient(circle_at_30%_20%,rgba(16,185,129,0.28),transparent_50%),radial-gradient(circle_at_70%_40%,rgba(99,102,241,0.22),transparent_52%),radial-gradient(circle_at_50%_85%,rgba(34,211,238,0.18),transparent_55%)]",
+                        active ? "opacity-100" : "opacity-55",
+                      ].join(" ")}
+                    />
+                  ) : null}
+
                   <div
                     className={[
-                      "absolute inset-0 rounded-[28px]",
-                      "bg-gradient-to-br",
+                      "absolute inset-0 rounded-[28px] bg-gradient-to-br",
                       a.borderGrad,
                       active ? "opacity-100" : "opacity-70",
                     ].join(" ")}
@@ -303,43 +294,37 @@ export function Step6Plan(props: {
                   >
                     {active ? <SparkleBg /> : null}
 
-                    {/* Top: force non-overlapping layout */}
-                    <div className="relative">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <div className="text-lg font-semibold text-slate-900 dark:text-white">
-                              {tierLabel(t)}
-                            </div>
-                            {popular ? (
-                              <span
-                                className={[
-                                  "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold whitespace-nowrap",
-                                  a.badge,
-                                ].join(" ")}
-                              >
-                                MOST POPULAR
-                              </span>
-                            ) : null}
-                          </div>
+                    {/* ✅ Header: no overlap (left is flex-1, badge is NOT in same row as price) */}
+                    <div className="relative flex items-start justify-between gap-4">
+                      <div className="min-w-0 flex-1 pr-2">
+                        <div className="text-lg font-semibold text-slate-900 dark:text-white">{tierLabel(t)}</div>
 
-                          <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                            {tierSubtitle(t)}
+                        {popular ? (
+                          <div className="mt-2">
+                            <span
+                              className={[
+                                "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+                                a.badge,
+                              ].join(" ")}
+                            >
+                              MOST POPULAR
+                            </span>
+                          </div>
+                        ) : null}
+
+                        <div className="mt-2 text-sm text-slate-600 dark:text-slate-300">{tierSubtitle(t)}</div>
+                      </div>
+
+                      <div className="shrink-0 text-right">
+                        <div className="flex items-baseline justify-end gap-1 whitespace-nowrap">
+                          <div className={["text-3xl font-semibold leading-none", a.price].join(" ")}>
+                            {price.dollars === 0 ? "Free" : `$${price.dollars}`}
+                          </div>
+                          <div className="text-sm text-slate-500 dark:text-slate-400">
+                            {price.dollars === 0 ? "" : "/ mo"}
                           </div>
                         </div>
-
-                        {/* Price: stacked + no wrap collisions */}
-                        <div className="shrink-0 text-right">
-                          <div className="flex items-baseline justify-end gap-1 whitespace-nowrap">
-                            <div className={["text-3xl font-semibold leading-none", a.price].join(" ")}>
-                              {price.dollars === 0 ? "Free" : `$${price.dollars}`}
-                            </div>
-                            <div className="text-sm text-slate-500 dark:text-slate-400">
-                              {price.dollars === 0 ? "" : "/ mo"}
-                            </div>
-                          </div>
-                          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{price.note}</div>
-                        </div>
+                        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{price.note}</div>
                       </div>
                     </div>
 
@@ -348,6 +333,7 @@ export function Step6Plan(props: {
                     <ul className="relative mt-5 space-y-3 text-sm">
                       {tierDetails(t).map((d) => (
                         <li key={d} className="flex items-start gap-2">
+                          {/* ✅ fixed icon sizing */}
                           <CheckIcon className={["mt-0.5 h-4 w-4 shrink-0", a.check].join(" ")} />
                           <span className="text-slate-800 dark:text-slate-200">{d}</span>
                         </li>
@@ -375,7 +361,6 @@ export function Step6Plan(props: {
             })}
           </div>
 
-          {/* Bottom value props (removed “No customer pricing shown”) */}
           <div className="mt-6 grid gap-2 text-sm text-slate-600 dark:text-slate-300">
             <div className="flex items-center gap-2">
               <CheckIcon className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
