@@ -3,44 +3,29 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 /**
- * Only these routes should ever require a Clerk session.
- * Everything else must stay public.
+ * IMPORTANT:
+ * - Middleware should only protect PAGE routes.
+ * - Do NOT protect /api/* here; API handlers should return JSON 401/403 themselves.
+ *   (Avoid Clerk protect rewrites on APIs that look like 404/hangs to clients.)
  */
-const isProtectedRoute = createRouteMatcher([
+const isProtectedPage = createRouteMatcher([
   "/admin(.*)",
   "/dashboard(.*)",
   "/onboarding(.*)",
   "/pcc(.*)",
-
-  // Protected API namespaces only (do NOT include all /api)
-  "/api/admin(.*)",
-  "/api/pcc(.*)",
-  "/api/tenant(.*)",
-  "/api/onboarding(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) {
+  if (isProtectedPage(req)) {
     await auth.protect();
   }
   return NextResponse.next();
 });
 
 /**
- * CRITICAL:
- * Keep matcher STRICTLY to protected surfaces only.
- * Do NOT include /sign-in or broad "all pages" matchers, or you can stall auth pages.
+ * Match ONLY protected page surfaces.
+ * Do NOT match broad "all pages" patterns and do NOT match /api/*.
  */
 export const config = {
-  matcher: [
-    "/admin(.*)",
-    "/dashboard(.*)",
-    "/onboarding(.*)",
-    "/pcc(.*)",
-
-    "/api/admin(.*)",
-    "/api/pcc(.*)",
-    "/api/tenant(.*)",
-    "/api/onboarding(.*)",
-  ],
+  matcher: ["/admin(.*)", "/dashboard(.*)", "/onboarding(.*)", "/pcc(.*)"],
 };
