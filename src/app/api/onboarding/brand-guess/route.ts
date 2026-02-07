@@ -171,7 +171,6 @@ function penaltyWords(urlOrHint: string) {
   for (const w of bad) if (s.includes(w)) p += 12;
   for (const w of contenty) if (s.includes(w)) p += 6;
 
-  // wordpress uploads are common for both logos and content, no penalty by itself
   return p;
 }
 
@@ -210,9 +209,24 @@ function uniqueByUrl(cands: LogoCandidate[]) {
   for (const c of cands) {
     const k = c.url.trim();
     if (!k) continue;
-    if (seen.has(k)) continue;
-    seen.add(k);
+    const key = k.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push(c);
+  }
+  return out;
+}
+
+function uniqueUrlsKeepOrder(urls: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of urls) {
+    const s = safeTrim(u);
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
   }
   return out;
 }
@@ -260,7 +274,6 @@ function extractMetaContent(html: string, key: { property?: string; name?: strin
 }
 
 function extractLogoishImgs(html: string) {
-  // Grab <img> tags; prefer those with logo-ish cues and those in header/nav-ish regions.
   const imgRe = /<img\b[^>]*>/gi;
   const attrsRe = /([a-zA-Z:_-]+)\s*=\s*["']([^"']+)["']/g;
 
@@ -282,8 +295,6 @@ function extractLogoishImgs(html: string) {
 
     const hint = [alt, cls, id, src].filter(Boolean).join(" ");
     const logoish = hint.includes("logo") || hint.includes("brand") || hint.includes("site-logo") || hint.includes("custom-logo");
-
-    // Only include “logoish” images; don’t dump the whole page’s image list.
     if (!logoish) continue;
 
     out.push({ src, hint });
@@ -293,7 +304,6 @@ function extractLogoishImgs(html: string) {
 }
 
 function extractJsonLdOrgLogo(html: string) {
-  // Parse <script type="application/ld+json"> blocks, look for Organization.logo
   const scripts: string[] = [];
   const scriptRe = /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
 
@@ -310,7 +320,6 @@ function extractJsonLdOrgLogo(html: string) {
     try {
       data = JSON.parse(txt);
     } catch {
-      // some sites put multiple JSON objects without valid JSON; skip
       continue;
     }
 
@@ -392,7 +401,6 @@ function bestLogoCandidate(website: string, html: string) {
     });
   }
 
-  // Keep these as “last resorts”
   const tw = safeTrim(extractMetaContent(html, { name: "twitter:image" }));
   if (tw) {
     const abs = toAbs(website, tw);
@@ -482,6 +490,7 @@ export async function GET(req: Request) {
             brandLogoUrl: currentBrandLogoUrl || null,
             leadToEmail: currentLeadToEmail || null,
           },
+          suggestedLogos: currentBrandLogoUrl ? [currentBrandLogoUrl] : [],
           debug: { used: "tenant_settings" },
         },
         { status: 200 }
@@ -496,6 +505,7 @@ export async function GET(req: Request) {
           website: null,
           current: { brandLogoUrl: null, leadToEmail: null },
           suggested: { brandLogoUrl: null, leadToEmail: null },
+          suggestedLogos: [],
           debug: { used: "none", note: "No website saved on tenant_onboarding." },
         },
         { status: 200 }
@@ -503,17 +513,23 @@ export async function GET(req: Request) {
     }
 
     // AI suggestion is allowed, but we still run scrape scoring because AI may be noisy.
-    const aiLogo = safeTrim(guessLogoFromAi(aiAnalysis));
+    const aiLogoRaw = safeTrim(guessLogoFromAi(aiAnalysis));
+    const aiLogoAbs = aiLogoRaw ? toAbs(website, aiLogoRaw) : "";
 
     const htmlRes = await fetchHtml(website);
     const html = htmlRes.text || "";
 
     const scored = bestLogoCandidate(website, html);
-    const bestScraped = scored.best?.url ? String(scored.best.url) : "";
 
-    // Choose: best scrape first, then AI, then nothing.
-    // (Reason: scrape now strongly prefers Organization.logo / logoish imgs / icons over og:image)
-    const suggestedLogoUrl = bestScraped || (aiLogo ? toAbs(website, aiLogo) : "");
+    const scrapedUrls = scored.ranked.map((x) => safeTrim(x.url)).filter(Boolean);
+    const mergedTop = uniqueUrlsKeepOrder([
+      ...scrapedUrls,
+      aiLogoAbs, // include AI as a fallback option if not already present
+    ]).slice(0, 3);
+
+    // Back-compat: suggested.brandLogoUrl remains “best”
+    const bestScraped = safeTrim(scored.best?.url);
+    const suggestedLogoUrl = bestScraped || aiLogoAbs || "";
 
     const emails = extractEmails(html);
     const suggestedEmail = pickBestEmail(emails, website);
@@ -528,6 +544,7 @@ export async function GET(req: Request) {
           brandLogoUrl: suggestedLogoUrl || null,
           leadToEmail: suggestedEmail || null,
         },
+        suggestedLogos: mergedTop,
         debug: {
           used: htmlRes.ok ? "scrape_scored" : "scrape_failed",
           httpStatus: htmlRes.status,
@@ -536,7 +553,7 @@ export async function GET(req: Request) {
             ? { kind: scored.best.kind, score: scored.best.score, url: scored.best.url, hint: scored.best.hint }
             : null,
           logoTop: scored.ranked.map((x) => ({ kind: x.kind, score: x.score, url: x.url })),
-          aiLogo: aiLogo || null,
+          aiLogo: aiLogoAbs || null,
           emailCount: emails.length,
         },
       },
