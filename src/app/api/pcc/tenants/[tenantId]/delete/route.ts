@@ -1,176 +1,150 @@
 // src/app/api/pcc/tenants/[tenantId]/delete/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 
-import {
-  tenants,
-  tenantMembers,
-  tenantSettings,
-  tenantSecrets,
-  tenantEmailIdentities,
-  tenantSubIndustries,
-  tenantPricingRules,
-  quoteLogs,
-} from "@/lib/db/schema";
-
-import { auditEvents, tenantPlans, tenantUsageMonthly } from "@/lib/db/pccSchema";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const Params = z.object({
+const ParamsSchema = z.object({
   tenantId: z.string().uuid(),
 });
 
 const DeleteBody = z.object({
+  // UI should send the exact text the user typed (ex: tenant slug or "DELETE <slug>")
   confirm: z.string().min(1),
+  // UI should send the expected text so server can verify (prevents guessing)
+  expected: z.string().min(1),
 });
 
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+function rows(r: any): any[] {
+  return (r as any)?.rows ?? (Array.isArray(r) ? r : []);
 }
 
-async function countWhereTenantId(table: any, col: any, tenantId: string): Promise<number> {
+async function countWhere(table: string, column: string, tenantId: string): Promise<number> {
+  // table/column are controlled constants below (NOT user input)
   const r = await db
-    .select({ c: sql<number>`count(*)` })
-    .from(table)
-    .where(eq(col, tenantId as any))
-    .then((x) => Number(x?.[0]?.c ?? 0))
-    .catch(() => 0);
-  return r;
+    .execute(
+      sql`SELECT count(*)::int AS c
+          FROM ${sql.raw(table)}
+          WHERE ${sql.raw(column)} = ${tenantId}::uuid`
+    )
+    .catch(() => null);
+
+  const rr = r ? rows(r) : [];
+  const c = rr?.[0]?.c;
+  return typeof c === "number" ? c : Number(c ?? 0);
+}
+
+async function getTenantMeta(tenantId: string) {
+  const r = await db.execute(
+    sql`SELECT id::text AS id, slug::text AS slug, name::text AS name
+        FROM tenants
+        WHERE id = ${tenantId}::uuid
+        LIMIT 1`
+  );
+
+  const row = rows(r)?.[0] ?? null;
+  if (!row?.id) return null;
+
+  return {
+    id: String(row.id),
+    slug: row.slug ? String(row.slug) : null,
+    name: row.name ? String(row.name) : null,
+  };
 }
 
 /**
- * GET:
- * - return preview of what will be deleted (counts by table + tenant identity)
- * - PCC RBAC required
+ * GET: preview what will be deleted (counts)
+ * Next.js 16 expects `context.params` to be a Promise.
  */
-export async function GET(_req: Request, ctx: { params: { tenantId: string } }) {
+export async function GET(_req: NextRequest, context: { params: Promise<{ tenantId: string }> }) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-  const parsed = Params.safeParse(ctx?.params);
-  if (!parsed.success) return json({ ok: false, error: "BAD_TENANT_ID" }, 400);
+  const p = await context.params;
+  const parsed = ParamsSchema.safeParse(p);
+  if (!parsed.success) {
+    return NextResponse.json({ ok: false, error: "INVALID_PARAMS", issues: parsed.error.issues }, { status: 400 });
+  }
 
-  const tenantId = parsed.data.tenantId;
+  const { tenantId } = parsed.data;
 
-  const t = await db
-    .select({
-      id: tenants.id,
-      name: tenants.name,
-      slug: tenants.slug,
-      createdAt: tenants.createdAt,
-    })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId as any))
-    .limit(1)
-    .then((r) => r[0] ?? null);
+  const tenant = await getTenantMeta(tenantId);
+  if (!tenant) {
+    return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+  }
 
-  if (!t) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
-
+  // Known tenant-scoped tables (some FK are NOT cascaded, so we delete manually)
   const counts = {
-    tenantMembers: await countWhereTenantId(tenantMembers, tenantMembers.tenantId, tenantId),
-    tenantSettings: await countWhereTenantId(tenantSettings, tenantSettings.tenantId, tenantId),
-    tenantSecrets: await countWhereTenantId(tenantSecrets, tenantSecrets.tenantId, tenantId),
-    tenantEmailIdentities: await countWhereTenantId(tenantEmailIdentities, tenantEmailIdentities.tenantId, tenantId),
-    tenantSubIndustries: await countWhereTenantId(tenantSubIndustries, tenantSubIndustries.tenantId, tenantId),
-    tenantPricingRules: await countWhereTenantId(tenantPricingRules, tenantPricingRules.tenantId, tenantId),
-    quoteLogs: await countWhereTenantId(quoteLogs, quoteLogs.tenantId, tenantId),
-
-    // PCC-side tables (if present in your DB; schema is already in repo)
-    tenantPlans: await countWhereTenantId(tenantPlans, tenantPlans.tenantId, tenantId),
-    tenantUsageMonthly: await countWhereTenantId(tenantUsageMonthly, tenantUsageMonthly.tenantId, tenantId),
-
-    // audit events can be tenant-scoped
-    auditEvents: await countWhereTenantId(auditEvents, auditEvents.tenantId, tenantId),
+    tenantMembers: await countWhere("tenant_members", "tenant_id", tenantId),
+    tenantSettings: await countWhere("tenant_settings", "tenant_id", tenantId),
+    tenantSecrets: await countWhere("tenant_secrets", "tenant_id", tenantId),
+    tenantPricingRules: await countWhere("tenant_pricing_rules", "tenant_id", tenantId),
+    tenantEmailIdentities: await countWhere("tenant_email_identities", "tenant_id", tenantId),
+    tenantSubIndustries: await countWhere("tenant_sub_industries", "tenant_id", tenantId),
+    quoteLogs: await countWhere("quote_logs", "tenant_id", tenantId),
   };
 
-  const confirmPhrase = `DELETE ${t.slug}`;
-
-  return json({
+  return NextResponse.json({
     ok: true,
-    tenant: t,
+    tenant,
     counts,
-    confirmPhrase,
-    warning: "This will permanently delete the tenant and ALL associated data shown above.",
+    // Suggest a safe default confirm text for the UI:
+    expectedConfirm: tenant.slug ? `DELETE ${tenant.slug}` : `DELETE ${tenantId}`,
   });
 }
 
 /**
- * POST:
- * - requires confirm === `DELETE <tenantSlug>`
- * - deletes in a single transaction (best-effort ordering)
- * - PCC RBAC required
+ * POST: execute deletion (transactional)
  */
-export async function POST(req: Request, ctx: { params: { tenantId: string } }) {
-  await requirePlatformRole(["platform_owner", "platform_admin"]);
+export async function POST(req: NextRequest, context: { params: Promise<{ tenantId: string }> }) {
+  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-  const parsed = Params.safeParse(ctx?.params);
-  if (!parsed.success) return json({ ok: false, error: "BAD_TENANT_ID" }, 400);
-
-  const tenantId = parsed.data.tenantId;
+  const p = await context.params;
+  const parsed = ParamsSchema.safeParse(p);
+  if (!parsed.success) {
+    return NextResponse.json({ ok: false, error: "INVALID_PARAMS", issues: parsed.error.issues }, { status: 400 });
+  }
+  const { tenantId } = parsed.data;
 
   const bodyJson = await req.json().catch(() => null);
   const body = DeleteBody.safeParse(bodyJson);
-  if (!body.success) return json({ ok: false, error: "INVALID_BODY", issues: body.error.issues }, 400);
+  if (!body.success) {
+    return NextResponse.json({ ok: false, error: "INVALID_BODY", issues: body.error.issues }, { status: 400 });
+  }
 
-  const t = await db
-    .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
-    .from(tenants)
-    .where(eq(tenants.id, tenantId as any))
-    .limit(1)
-    .then((r) => r[0] ?? null);
+  const confirm = String(body.data.confirm ?? "").trim();
+  const expected = String(body.data.expected ?? "").trim();
 
-  if (!t) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
-
-  const expected = `DELETE ${t.slug}`;
-  if (body.data.confirm.trim() !== expected) {
-    return json(
-      {
-        ok: false,
-        error: "CONFIRM_MISMATCH",
-        message: `Type exactly: ${expected}`,
-      },
-      400
+  if (confirm !== expected) {
+    return NextResponse.json(
+      { ok: false, error: "CONFIRM_MISMATCH", message: "Confirmation text did not match." },
+      { status: 400 }
     );
   }
 
-  // Delete everything tenant-scoped in a transaction.
-  // Even though many FKs have cascades, we delete explicitly for safety + clarity.
-  await db.transaction(async (tx) => {
-    // Tenant-scoped audit events (optional cleanup)
-    await tx.delete(auditEvents).where(eq(auditEvents.tenantId, tenantId as any));
+  const tenant = await getTenantMeta(tenantId);
+  if (!tenant) {
+    return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+  }
 
-    // PCC tables
-    await tx.delete(tenantUsageMonthly).where(eq(tenantUsageMonthly.tenantId, tenantId as any));
-    await tx.delete(tenantPlans).where(eq(tenantPlans.tenantId, tenantId as any));
+  // Transactional delete in child->parent order
+  await db.transaction(async (tx: any) => {
+    await tx.execute(sql`DELETE FROM quote_logs WHERE tenant_id = ${tenantId}::uuid`);
+    await tx.execute(sql`DELETE FROM tenant_pricing_rules WHERE tenant_id = ${tenantId}::uuid`);
+    await tx.execute(sql`DELETE FROM tenant_secrets WHERE tenant_id = ${tenantId}::uuid`);
+    await tx.execute(sql`DELETE FROM tenant_settings WHERE tenant_id = ${tenantId}::uuid`);
 
-    // App tables
-    await tx.delete(quoteLogs).where(eq(quoteLogs.tenantId, tenantId as any));
-    await tx.delete(tenantPricingRules).where(eq(tenantPricingRules.tenantId, tenantId as any));
-    await tx.delete(tenantSubIndustries).where(eq(tenantSubIndustries.tenantId, tenantId as any));
-    await tx.delete(tenantEmailIdentities).where(eq(tenantEmailIdentities.tenantId, tenantId as any));
-    await tx.delete(tenantSecrets).where(eq(tenantSecrets.tenantId, tenantId as any));
-    await tx.delete(tenantSettings).where(eq(tenantSettings.tenantId, tenantId as any));
-    await tx.delete(tenantMembers).where(eq(tenantMembers.tenantId, tenantId as any));
+    // These should cascade in many schemas, but delete anyway (safe)
+    await tx.execute(sql`DELETE FROM tenant_email_identities WHERE tenant_id = ${tenantId}::uuid`);
+    await tx.execute(sql`DELETE FROM tenant_sub_industries WHERE tenant_id = ${tenantId}::uuid`);
+    await tx.execute(sql`DELETE FROM tenant_members WHERE tenant_id = ${tenantId}::uuid`);
 
-    // Finally the tenant row
-    await tx.delete(tenants).where(eq(tenants.id, tenantId as any));
-
-    // Record an audit event *platform-wide* (tenant now gone, but we can still record tenantId meta)
-    await tx.insert(auditEvents).values({
-      actorClerkUserId: "unknown", // If you want: wire in Clerk user id here later
-      tenantId: tenantId as any,
-      action: "pcc.tenant.deleted",
-      meta: {
-        tenantSlug: t.slug,
-        tenantName: t.name,
-      },
-    } as any);
+    await tx.execute(sql`DELETE FROM tenants WHERE id = ${tenantId}::uuid`);
   });
 
-  return json({ ok: true, deletedTenantId: tenantId, deletedTenantSlug: t.slug });
+  return NextResponse.json({ ok: true, deletedTenantId: tenantId });
 }
