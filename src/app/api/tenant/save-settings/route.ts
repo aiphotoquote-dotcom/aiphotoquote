@@ -22,10 +22,14 @@ export const dynamic = "force-dynamic";
  * - Tenant resolution is ONLY via requireTenantRole (RBAC + active tenant cookie).
  * - No cookie hunting. No fallback to "first tenant owned".
  * - This avoids tenant drift and keeps future multi-user tenants correct.
+ *
+ * NEW:
+ * - On FIRST insert only, seed defaults for:
+ *   - tier0 trial credits (activation_grace_credits=5, used=0)
+ *   - platform email defaults (standard mode + from aiphotoquote.com)
  */
 
 const Body = z.object({
-  // NOTE: We keep tenantSlug because clients send it today, but we validate + apply it to the ACTIVE tenant only.
   tenantSlug: z.string().min(3),
 
   // allow both keys from different clients
@@ -38,7 +42,6 @@ const Body = z.object({
   thankYouUrl: z.string().optional().nullable(),
   thank_you_url: z.string().optional().nullable(),
 
-  // extra tenant_settings fields (optional)
   businessName: z.string().optional().nullable(),
   business_name: z.string().optional().nullable(),
 
@@ -47,6 +50,13 @@ const Body = z.object({
 
   resendFromEmail: z.string().optional().nullable(),
   resend_from_email: z.string().optional().nullable(),
+
+  // ✅ email send mode / identity
+  emailSendMode: z.string().optional().nullable(),
+  email_send_mode: z.string().optional().nullable(),
+
+  emailIdentityId: z.string().uuid().optional().nullable(),
+  email_identity_id: z.string().uuid().optional().nullable(),
 
   aiMode: z.string().optional().nullable(),
   ai_mode: z.string().optional().nullable(),
@@ -121,12 +131,16 @@ function isAdminRole(role: string) {
   return role === "owner" || role === "admin";
 }
 
+// ✅ platform defaults (first insert only)
+const DEFAULT_TRIAL_TIER = "tier0";
+const DEFAULT_TRIAL_CREDITS = 5;
+const DEFAULT_EMAIL_SEND_MODE = "standard";
+const DEFAULT_FROM_EMAIL = "no-reply@aiphotoquote.com";
+
 export async function POST(req: Request) {
-  // RBAC gate (active tenant must exist, and membership must be active)
   const gate = await requireTenantRole(["owner", "admin", "member"]);
   if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
 
-  // Only owner/admin can mutate settings (member can read elsewhere)
   if (!isAdminRole(gate.role)) {
     return json({ ok: false, error: "FORBIDDEN", message: "Only owner/admin can update tenant settings." }, 403);
   }
@@ -142,22 +156,16 @@ export async function POST(req: Request) {
     const data: any = parsed.data;
     const desiredSlug = String(data.tenantSlug || "").trim();
 
-    // Load tenant by ACTIVE tenant id (not owner model)
+    // Load tenant by ACTIVE tenant id
     const tenant = await db
-      .select({
-        id: tenants.id,
-        slug: tenants.slug,
-      })
+      .select({ id: tenants.id, slug: tenants.slug })
       .from(tenants)
       .where(eq(tenants.id, gate.tenantId as any))
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    if (!tenant) {
-      return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
-    }
+    if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404);
 
-    // Update slug if changed (still scoped to active tenant)
     if (desiredSlug && desiredSlug !== tenant.slug) {
       await db.update(tenants).set({ slug: desiredSlug }).where(eq(tenants.id, tenant.id));
     }
@@ -174,8 +182,12 @@ export async function POST(req: Request) {
         leadToEmail: tenantSettings.leadToEmail,
         resendFromEmail: tenantSettings.resendFromEmail,
 
+        emailSendMode: tenantSettings.emailSendMode,
+        emailIdentityId: tenantSettings.emailIdentityId,
+
         aiMode: tenantSettings.aiMode,
         pricingEnabled: tenantSettings.pricingEnabled,
+
         renderingEnabled: tenantSettings.renderingEnabled,
         renderingStyle: tenantSettings.renderingStyle,
         renderingNotes: tenantSettings.renderingNotes,
@@ -186,7 +198,7 @@ export async function POST(req: Request) {
         reportingTimezone: tenantSettings.reportingTimezone,
         weekStartsOn: tenantSettings.weekStartsOn,
 
-        // ✅ plan fields
+        // plan fields
         planTier: tenantSettings.planTier,
         monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
         activationGraceCredits: tenantSettings.activationGraceCredits,
@@ -198,20 +210,14 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // ✅ If this is the first time creating tenant_settings, seed trial credits here.
     const isFirstInsert = !existing;
 
     // Industry key: required ONLY on first insert
     const incomingIndustryKey = pick<string>(data, "industryKey", "industry_key")?.trim();
     const industryKey = incomingIndustryKey ?? existing?.industryKey ?? "";
-
     if (!industryKey) {
       return json(
-        {
-          ok: false,
-          error: "MISSING_INDUSTRY_KEY",
-          message: "industryKey is required the first time settings are saved.",
-        },
+        { ok: false, error: "MISSING_INDUSTRY_KEY", message: "industryKey is required the first time settings are saved." },
         400
       );
     }
@@ -219,36 +225,44 @@ export async function POST(req: Request) {
     const redirectUrlRaw = pick<string | null>(data, "redirectUrl", "redirect_url");
     const thankYouUrlRaw = pick<string | null>(data, "thankYouUrl", "thank_you_url");
 
-    const redirectUrl =
-      redirectUrlRaw !== undefined ? normalizeUrl(redirectUrlRaw) : existing?.redirectUrl ?? null;
-
-    const thankYouUrl =
-      thankYouUrlRaw !== undefined ? normalizeUrl(thankYouUrlRaw) : existing?.thankYouUrl ?? null;
+    const redirectUrl = redirectUrlRaw !== undefined ? normalizeUrl(redirectUrlRaw) : existing?.redirectUrl ?? null;
+    const thankYouUrl = thankYouUrlRaw !== undefined ? normalizeUrl(thankYouUrlRaw) : existing?.thankYouUrl ?? null;
 
     const businessNameRaw = pick<string | null>(data, "businessName", "business_name");
     const businessName =
       businessNameRaw !== undefined ? (String(businessNameRaw ?? "").trim() || null) : existing?.businessName ?? null;
 
     const leadToEmailRaw = pick<string | null>(data, "leadToEmail", "lead_to_email");
-    const leadToEmail =
-      leadToEmailRaw !== undefined ? normalizeEmail(leadToEmailRaw) : existing?.leadToEmail ?? null;
+    const leadToEmail = leadToEmailRaw !== undefined ? normalizeEmail(leadToEmailRaw) : existing?.leadToEmail ?? null;
 
     const resendFromEmailRaw = pick<string | null>(data, "resendFromEmail", "resend_from_email");
+    // ✅ on first insert, default from email if not provided
     const resendFromEmail =
-      resendFromEmailRaw !== undefined ? normalizeEmail(resendFromEmailRaw) : existing?.resendFromEmail ?? null;
+      resendFromEmailRaw !== undefined
+        ? normalizeEmail(resendFromEmailRaw)
+        : isFirstInsert
+          ? normalizeEmail(DEFAULT_FROM_EMAIL)
+          : existing?.resendFromEmail ?? null;
 
     if (!looksLikeEmail(leadToEmail)) {
-      return json(
-        { ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." },
-        400
-      );
+      return json({ ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." }, 400);
     }
     if (!looksLikeEmail(resendFromEmail)) {
-      return json(
-        { ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." },
-        400
-      );
+      return json({ ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." }, 400);
     }
+
+    const emailSendModeRaw = pick<string | null>(data, "emailSendMode", "email_send_mode");
+    // ✅ on first insert, default standard mode if not provided
+    const emailSendMode =
+      emailSendModeRaw !== undefined
+        ? (String(emailSendModeRaw ?? "").trim() || null)
+        : isFirstInsert
+          ? DEFAULT_EMAIL_SEND_MODE
+          : existing?.emailSendMode ?? null;
+
+    const emailIdentityIdRaw = pick<string | null>(data, "emailIdentityId", "email_identity_id");
+    const emailIdentityId =
+      emailIdentityIdRaw !== undefined ? (emailIdentityIdRaw ?? null) : existing?.emailIdentityId ?? null;
 
     const aiModeRaw = pick<string | null>(data, "aiMode", "ai_mode");
     const aiMode = aiModeRaw !== undefined ? (aiModeRaw ?? null) : existing?.aiMode ?? null;
@@ -293,18 +307,16 @@ export async function POST(req: Request) {
     const weekStartsOn = weekStartsOnRaw !== undefined ? (weekStartsOnRaw ?? null) : existing?.weekStartsOn ?? 1;
 
     // ✅ Trial seed values (ONLY on first insert)
-    // Adjust credits here whenever you want (3/5/10 etc).
     const planSeed = isFirstInsert
       ? {
-          planTier: "free",
+          planTier: DEFAULT_TRIAL_TIER,
           monthlyQuoteLimit: null,
-          activationGraceCredits: 3,
+          activationGraceCredits: DEFAULT_TRIAL_CREDITS,
           activationGraceUsed: 0,
           planSelectedAt: new Date(),
         }
       : {};
 
-    // Upsert tenant_settings (tenant_id is PK)
     await db
       .insert(tenantSettings)
       .values({
@@ -316,6 +328,10 @@ export async function POST(req: Request) {
         businessName,
         leadToEmail,
         resendFromEmail,
+
+        emailSendMode,
+        emailIdentityId,
+
         aiMode,
         pricingEnabled,
         renderingEnabled,
@@ -328,7 +344,7 @@ export async function POST(req: Request) {
         reportingTimezone,
         weekStartsOn,
 
-        ...planSeed, // ✅ only seeds on first creation
+        ...planSeed,
 
         updatedAt: new Date(),
       })
@@ -341,7 +357,12 @@ export async function POST(req: Request) {
 
           businessName,
           leadToEmail,
-          resendFromEmail,
+
+          // ✅ only overwrite these if caller provided them explicitly
+          ...(resendFromEmailRaw !== undefined ? { resendFromEmail } : {}),
+          ...(emailSendModeRaw !== undefined ? { emailSendMode } : {}),
+          ...(emailIdentityIdRaw !== undefined ? { emailIdentityId } : {}),
+
           aiMode,
           pricingEnabled,
           renderingEnabled,
@@ -360,7 +381,6 @@ export async function POST(req: Request) {
         },
       });
 
-    // Return saved settings (snake_case response)
     const settings = await db
       .select({
         tenant_id: tenantSettings.tenantId,
@@ -371,6 +391,10 @@ export async function POST(req: Request) {
         business_name: tenantSettings.businessName,
         lead_to_email: tenantSettings.leadToEmail,
         resend_from_email: tenantSettings.resendFromEmail,
+
+        email_send_mode: tenantSettings.emailSendMode,
+        email_identity_id: tenantSettings.emailIdentityId,
+
         ai_mode: tenantSettings.aiMode,
         pricing_enabled: tenantSettings.pricingEnabled,
         rendering_enabled: tenantSettings.renderingEnabled,
@@ -383,7 +407,6 @@ export async function POST(req: Request) {
         reporting_timezone: tenantSettings.reportingTimezone,
         week_starts_on: tenantSettings.weekStartsOn,
 
-        // ✅ plan fields in response (handy for admin UI)
         plan_tier: tenantSettings.planTier,
         monthly_quote_limit: tenantSettings.monthlyQuoteLimit,
         activation_grace_credits: tenantSettings.activationGraceCredits,
