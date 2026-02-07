@@ -11,6 +11,10 @@ type BrandGuessResponse = {
   website: string | null;
   current?: { brandLogoUrl: string | null; leadToEmail: string | null };
   suggested?: { brandLogoUrl: string | null; leadToEmail: string | null };
+
+  // ✅ forward-compatible: when we upgrade the API, UI will start using this automatically
+  suggestedLogos?: Array<string | null | undefined>;
+
   error?: string;
   message?: string;
 };
@@ -19,13 +23,9 @@ type PreviewBgMode = "auto" | "light" | "dark" | "checker";
 
 type ContrastProbe = {
   ok: boolean;
-  // 0..1 (higher = brighter)
-  brightness: number;
-  // 0..1 (higher = more pixels transparent / effectively missing)
-  transparentRatio: number;
-  // recommendations
+  brightness: number; // 0..1 (higher = brighter)
+  transparentRatio: number; // 0..1 (higher = more transparent)
   recommended: Exclude<PreviewBgMode, "auto">;
-  // diagnostics
   samplePixels: number;
 };
 
@@ -34,13 +34,30 @@ function clamp01(n: number) {
   return Math.max(0, Math.min(1, n));
 }
 
+function safeUrl(u: unknown) {
+  const s = String(u ?? "").trim();
+  if (!s) return "";
+  // allow http(s), data:, and relative? (we only expect absolute)
+  return s;
+}
+
+function uniqKeepOrder(urls: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of urls) {
+    const s = safeUrl(u);
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
 /**
- * Best-effort: infer good preview background for the logo:
- * - Transparent / mostly transparent => checker
- * - Very bright logo => dark
- * - Otherwise => light
- *
- * NOTE: This is ONLY for preview UX; nothing is persisted.
+ * Best-effort: infer good preview background for a logo.
+ * NOTE: preview-only UX; nothing persisted.
  */
 async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastProbe> {
   const src = String(url || "").trim();
@@ -54,11 +71,8 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
     };
   }
 
-  // SVGs frequently have transparent background and can be light-on-transparent.
   const isSvg = /\.svg(\?|#|$)/i.test(src) || src.startsWith("data:image/svg+xml");
 
-  // If the source is cross-origin and doesn't allow CORS, canvas sampling will throw.
-  // We handle that gracefully and fall back to "dark" for SVG, otherwise "light".
   try {
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -67,9 +81,7 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
     const loaded = await new Promise<HTMLImageElement>((resolve, reject) => {
       img.onload = () => resolve(img);
       img.onerror = () => reject(new Error("IMAGE_LOAD_FAILED"));
-      // cache-bust very lightly to avoid stale on repeated tries
       const u = new URL(src, typeof window !== "undefined" ? window.location.href : "https://example.com");
-      // don't spam, but avoid some aggressive caches
       if (!u.searchParams.has("_ts")) u.searchParams.set("_ts", String(Date.now()));
       img.src = u.toString();
     });
@@ -88,7 +100,6 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) throw new Error("NO_CTX");
 
-    // Draw on transparent canvas
     ctx.clearRect(0, 0, w, h);
     ctx.drawImage(loaded, 0, 0, w, h);
 
@@ -98,15 +109,13 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
     let opaqueCount = 0;
     let transparentCount = 0;
 
-    // sample all pixels (w*h is capped by maxSide)
     for (let i = 0; i < data.length; i += 4) {
       const r = data[i]!;
       const g = data[i + 1]!;
       const b = data[i + 2]!;
-      const a = data[i + 3]!; // 0..255
+      const a = data[i + 3]!;
       const alpha = a / 255;
 
-      // treat very low alpha as transparent
       if (alpha < 0.08) {
         transparentCount++;
         continue;
@@ -114,7 +123,6 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
 
       opaqueCount++;
 
-      // relative luminance-ish (not gamma-correct but good enough for heuristic)
       const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
       brightSum += lum;
     }
@@ -123,10 +131,6 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
     const transparentRatio = totalPixels > 0 ? transparentCount / totalPixels : 0;
     const brightness = opaqueCount > 0 ? brightSum / opaqueCount : 0;
 
-    // Heuristics
-    // - Transparent logos: checker gives the clearest signal for transparency + edges
-    // - Very bright logos: dark background
-    // - Otherwise: light
     const recommended: Exclude<PreviewBgMode, "auto"> =
       transparentRatio > 0.35 || (opaqueCount < totalPixels * 0.25 && transparentRatio > 0.15)
         ? "checker"
@@ -142,7 +146,6 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
       samplePixels: totalPixels,
     };
   } catch {
-    // Fallback if CORS/canvas sampling fails
     const fallback: Exclude<PreviewBgMode, "auto"> = isSvg ? "dark" : "light";
     return {
       ok: false,
@@ -155,13 +158,20 @@ async function probeLogoContrast(url: string, maxSide = 220): Promise<ContrastPr
 }
 
 function previewBoxClass(mode: Exclude<PreviewBgMode, "auto">) {
-  // keep it simple; no extra dependencies
   if (mode === "dark") return "bg-black";
   if (mode === "light") return "bg-white";
-
-  // checker
   return "bg-[linear-gradient(45deg,rgba(0,0,0,0.06)_25%,transparent_25%,transparent_75%,rgba(0,0,0,0.06)_75%,rgba(0,0,0,0.06)),linear-gradient(45deg,rgba(0,0,0,0.06)_25%,transparent_25%,transparent_75%,rgba(0,0,0,0.06)_75%,rgba(0,0,0,0.06))] bg-[length:20px_20px] bg-[position:0_0,10px_10px]";
 }
+
+function labelForSource(src: "saved" | "website" | "ai" | "upload" | "manual") {
+  if (src === "saved") return "Saved";
+  if (src === "website") return "Website";
+  if (src === "ai") return "AI guess";
+  if (src === "upload") return "Uploaded";
+  return "Manual";
+}
+
+type LogoCandidate = { url: string; source: "saved" | "website" | "ai" | "upload" | "manual" };
 
 export function Step5Branding(props: {
   tenantId: string | null;
@@ -178,26 +188,35 @@ export function Step5Branding(props: {
   const [err, setErr] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
+  // Candidate picker state
+  const [candidates, setCandidates] = useState<LogoCandidate[]>([]);
+  const [selectedUrl, setSelectedUrl] = useState<string>("");
+
   // --- contrast-safe preview state ---
   const [previewMode, setPreviewMode] = useState<PreviewBgMode>("auto");
   const [probe, setProbe] = useState<ContrastProbe | null>(null);
   const [probing, setProbing] = useState(false);
 
-  const suggestedLogoFromAi = useMemo(() => guessLogoUrl(props.aiAnalysis), [props.aiAnalysis]);
+  const suggestedLogoFromAi = useMemo(() => safeUrl(guessLogoUrl(props.aiAnalysis)), [props.aiAnalysis]);
 
-  // ✅ If we already have AI analysis guess and logo field is empty, prime it immediately
+  // Keep brandLogoUrl and selectedUrl aligned
   useEffect(() => {
-    if (!brandLogoUrl.trim() && suggestedLogoFromAi) setBrandLogoUrl(String(suggestedLogoFromAi).trim());
+    const u = safeUrl(brandLogoUrl);
+    if (!u) {
+      setSelectedUrl("");
+      return;
+    }
+    if (safeUrl(selectedUrl).toLowerCase() !== u.toLowerCase()) setSelectedUrl(u);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestedLogoFromAi]);
+  }, [brandLogoUrl]);
 
   // ✅ Server-side “brand guess” autofill (scrape + saved tenant_settings)
   useEffect(() => {
     const tid = String(props.tenantId ?? "").trim();
     if (!tid) return;
 
-    // Only fetch guesses if fields are still empty (don’t clobber user edits)
-    if (leadToEmail.trim() || brandLogoUrl.trim()) return;
+    // only fetch guesses if lead/email fields are empty and we have no candidates yet
+    if (leadToEmail.trim() || candidates.length) return;
 
     let alive = true;
 
@@ -205,7 +224,6 @@ export function Step5Branding(props: {
       setLoadingGuess(true);
       setErr(null);
       try {
-        // Not strictly required for this route, but safe: keeps tenant context consistent across flows
         await props.ensureActiveTenant(tid).catch(() => null);
 
         const res = await fetch(`/api/onboarding/brand-guess?tenantId=${encodeURIComponent(tid)}`, {
@@ -219,15 +237,45 @@ export function Step5Branding(props: {
 
         if (!alive) return;
 
-        const currentLogo = String(j?.current?.brandLogoUrl ?? "").trim();
-        const currentEmail = String(j?.current?.leadToEmail ?? "").trim();
+        const currentLogo = safeUrl(j?.current?.brandLogoUrl);
+        const currentEmail = safeUrl(j?.current?.leadToEmail);
 
-        const suggLogo = String(j?.suggested?.brandLogoUrl ?? "").trim();
-        const suggEmail = String(j?.suggested?.leadToEmail ?? "").trim();
+        const suggestedLogoSingle = safeUrl(j?.suggested?.brandLogoUrl);
+        const suggestedEmail = safeUrl(j?.suggested?.leadToEmail);
 
-        // prefer current (saved), else suggested
-        if (!brandLogoUrl.trim() && (currentLogo || suggLogo)) setBrandLogoUrl((currentLogo || suggLogo).trim());
-        if (!leadToEmail.trim() && (currentEmail || suggEmail)) setLeadToEmail((currentEmail || suggEmail).trim());
+        // ✅ candidate list:
+        // - prefer API suggestedLogos if present
+        // - else fall back to current + suggested + ai guess (dedup)
+        const apiList = Array.isArray(j?.suggestedLogos)
+          ? (j!.suggestedLogos || []).map((x) => safeUrl(x)).filter(Boolean)
+          : [];
+
+        const baseUrls = apiList.length
+          ? apiList
+          : uniqKeepOrder([currentLogo, suggestedLogoSingle, suggestedLogoFromAi].filter(Boolean));
+
+        const nextCandidates: LogoCandidate[] = [];
+        for (let i = 0; i < baseUrls.length; i++) {
+          const u = baseUrls[i]!;
+          // Label sources heuristically when API doesn’t give structured data yet
+          const src: LogoCandidate["source"] =
+            currentLogo && u.toLowerCase() === currentLogo.toLowerCase()
+              ? "saved"
+              : suggestedLogoSingle && u.toLowerCase() === suggestedLogoSingle.toLowerCase()
+              ? "website"
+              : suggestedLogoFromAi && u.toLowerCase() === suggestedLogoFromAi.toLowerCase()
+              ? "ai"
+              : "website";
+          nextCandidates.push({ url: u, source: src });
+        }
+
+        setCandidates(nextCandidates.slice(0, 3));
+
+        // prefer current (saved) else first candidate
+        const preferred = currentLogo || nextCandidates[0]?.url || "";
+        if (!brandLogoUrl.trim() && preferred) setBrandLogoUrl(preferred);
+
+        if (!leadToEmail.trim() && (currentEmail || suggestedEmail)) setLeadToEmail((currentEmail || suggestedEmail).trim());
       } catch (ex: any) {
         if (!alive) return;
         setErr(ex?.message ?? String(ex));
@@ -242,7 +290,18 @@ export function Step5Branding(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tenantId]);
 
-  // ✅ Probe the logo whenever URL changes to improve preview contrast
+  // If we have an AI guess and no candidates/logo yet, seed a candidate
+  useEffect(() => {
+    if (!suggestedLogoFromAi) return;
+    if (brandLogoUrl.trim() || candidates.length) return;
+
+    const next = [{ url: suggestedLogoFromAi, source: "ai" as const }];
+    setCandidates(next);
+    setBrandLogoUrl(suggestedLogoFromAi);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestedLogoFromAi]);
+
+  // ✅ Probe the logo whenever URL changes
   useEffect(() => {
     const url = brandLogoUrl.trim();
     if (!url) {
@@ -282,7 +341,6 @@ export function Step5Branding(props: {
     const tid = String(props.tenantId ?? "").trim();
     if (!tid) throw new Error("NO_TENANT: missing tenantId for logo upload.");
 
-    // Ensure correct tenant cookie before calling tenant-scoped upload endpoint
     await props.ensureActiveTenant(tid);
 
     const fd = new FormData();
@@ -324,7 +382,7 @@ export function Step5Branding(props: {
             <div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Logo</div>
               <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-                We try to auto-detect a logo from your website. Upload a different one anytime.
+                Choose the best match. Upload a different one anytime.
               </div>
             </div>
 
@@ -342,6 +400,18 @@ export function Step5Branding(props: {
                   setUploading(true);
                   try {
                     const url = await uploadLogo(f);
+
+                    // add as candidate + select
+                    setCandidates((prev) => {
+                      const merged = uniqKeepOrder([url, ...prev.map((x) => x.url)]);
+                      const next: LogoCandidate[] = [];
+                      for (const u of merged) {
+                        const existing = prev.find((p) => p.url.toLowerCase() === u.toLowerCase());
+                        next.push(existing ? existing : { url: u, source: u.toLowerCase() === url.toLowerCase() ? "upload" : "website" });
+                      }
+                      return next.slice(0, 3);
+                    });
+
                     setBrandLogoUrl(url);
                     setPreviewMode("auto");
                   } catch (ex: any) {
@@ -368,6 +438,7 @@ export function Step5Branding(props: {
                   className="rounded-2xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
                   onClick={() => {
                     setBrandLogoUrl("");
+                    setSelectedUrl("");
                     setPreviewMode("auto");
                     setProbe(null);
                   }}
@@ -379,8 +450,46 @@ export function Step5Branding(props: {
             </div>
           </div>
 
+          {/* Candidate Picker */}
+          {candidates.length ? (
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              {candidates.map((c) => {
+                const isSelected = safeUrl(selectedUrl).toLowerCase() === c.url.toLowerCase();
+                return (
+                  <button
+                    key={`${c.source}:${c.url}`}
+                    type="button"
+                    onClick={() => {
+                      setBrandLogoUrl(c.url);
+                      setSelectedUrl(c.url);
+                      setPreviewMode("auto");
+                    }}
+                    disabled={uploading || saving}
+                    className={[
+                      "rounded-2xl border p-3 text-left transition",
+                      isSelected
+                        ? "border-gray-900 ring-2 ring-gray-900 dark:border-white dark:ring-white"
+                        : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700",
+                      "bg-white dark:bg-gray-950",
+                    ].join(" ")}
+                    title={c.url}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{labelForSource(c.source)}</div>
+                      <div className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-[160px]">{c.url}</div>
+                    </div>
+                    <div className="mt-3 flex items-center justify-center rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 dark:border-gray-700 dark:bg-black/30">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={c.url} alt="Logo candidate" className="max-h-16 max-w-[140px] object-contain" />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
           {brandLogoUrl.trim() ? (
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 Preview background:{" "}
                 <span className="font-mono">
@@ -390,54 +499,21 @@ export function Step5Branding(props: {
               </div>
 
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
-                    previewMode === "auto"
-                      ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                      : "border-gray-200 bg-white text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  }`}
-                  onClick={() => setPreviewMode("auto")}
-                  disabled={uploading || saving}
-                >
-                  Auto
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
-                    previewMode === "light"
-                      ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                      : "border-gray-200 bg-white text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  }`}
-                  onClick={() => setPreviewMode("light")}
-                  disabled={uploading || saving}
-                >
-                  Light
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
-                    previewMode === "dark"
-                      ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                      : "border-gray-200 bg-white text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  }`}
-                  onClick={() => setPreviewMode("dark")}
-                  disabled={uploading || saving}
-                >
-                  Dark
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
-                    previewMode === "checker"
-                      ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                      : "border-gray-200 bg-white text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  }`}
-                  onClick={() => setPreviewMode("checker")}
-                  disabled={uploading || saving}
-                >
-                  Checker
-                </button>
+                {(["auto", "light", "dark", "checker"] as PreviewBgMode[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`rounded-xl border px-3 py-1.5 text-xs font-semibold ${
+                      previewMode === m
+                        ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
+                        : "border-gray-200 bg-white text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    }`}
+                    onClick={() => setPreviewMode(m)}
+                    disabled={uploading || saving}
+                  >
+                    {m === "auto" ? "Auto" : m[0]!.toUpperCase() + m.slice(1)}
+                  </button>
+                ))}
               </div>
             </div>
           ) : null}
@@ -450,11 +526,7 @@ export function Step5Branding(props: {
           >
             {brandLogoUrl.trim() ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={brandLogoUrl.trim()}
-                alt="Logo preview"
-                className="max-h-24 max-w-[280px] object-contain"
-              />
+              <img src={brandLogoUrl.trim()} alt="Logo preview" className="max-h-24 max-w-[280px] object-contain" />
             ) : (
               <div className="text-sm text-gray-500 dark:text-gray-400">No logo selected.</div>
             )}
@@ -481,8 +553,23 @@ export function Step5Branding(props: {
               label="Logo URL (optional)"
               value={brandLogoUrl}
               onChange={(v) => {
-                setBrandLogoUrl(v);
+                const u = safeUrl(v);
+                setBrandLogoUrl(u);
+                setSelectedUrl(u);
                 setPreviewMode("auto");
+
+                // keep candidates fresh with manual entry (but don’t bloat)
+                if (u) {
+                  setCandidates((prev) => {
+                    const merged = uniqKeepOrder([u, ...prev.map((x) => x.url)]);
+                    const next: LogoCandidate[] = [];
+                    for (const url of merged) {
+                      const existing = prev.find((p) => p.url.toLowerCase() === url.toLowerCase());
+                      next.push(existing ? existing : { url, source: url.toLowerCase() === u.toLowerCase() ? "manual" : "website" });
+                    }
+                    return next.slice(0, 3);
+                  });
+                }
               }}
               placeholder="https://..."
             />
