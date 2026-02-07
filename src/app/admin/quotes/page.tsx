@@ -1,3 +1,5 @@
+// src/app/admin/quotes/page.tsx
+
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
@@ -14,13 +16,39 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+// Drizzle RowList can be array-like; avoid `.rows`
+function firstRow(r: any): any | null {
+  try {
+    if (!r) return null;
+    if (Array.isArray(r)) return r[0] ?? null;
+    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
+    // common variants
     jar.get("activeTenantId")?.value,
     jar.get("active_tenant_id")?.value,
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
+
+    // “namespaced” variants (often used by custom switchers)
+    jar.get("apq_activeTenantId")?.value,
+    jar.get("apq_active_tenant_id")?.value,
+    jar.get("apqTenantId")?.value,
+    jar.get("apq_tenant_id")?.value,
+
+    // __Host- prefix variants (stricter cookie rules)
+    jar.get("__Host-activeTenantId")?.value,
+    jar.get("__Host-active_tenant_id")?.value,
+    jar.get("__Host-tenantId")?.value,
+    jar.get("__Host-tenant_id")?.value,
   ].filter(Boolean) as string[];
+
   return candidates[0] || null;
 }
 
@@ -39,28 +67,12 @@ function formatUSPhone(raw: string) {
 }
 
 function pickLead(input: any) {
-  const c =
-    input?.customer ??
-    input?.contact ??
-    input?.customer_context?.customer ??
-    input?.lead ??
-    input?.contact ??
-    {};
+  const c = input?.customer ?? input?.contact ?? input?.customer_context?.customer ?? input?.lead ?? input?.contact ?? {};
 
   const name =
-    c?.name ??
-    c?.fullName ??
-    c?.customerName ??
-    input?.name ??
-    input?.customer_context?.name ??
-    "New customer";
+    c?.name ?? c?.fullName ?? c?.customerName ?? input?.name ?? input?.customer_context?.name ?? "New customer";
 
-  const phone =
-    c?.phone ??
-    c?.phoneNumber ??
-    input?.phone ??
-    input?.customer_context?.phone ??
-    null;
+  const phone = c?.phone ?? c?.phoneNumber ?? input?.phone ?? input?.customer_context?.phone ?? null;
 
   const email = c?.email ?? input?.email ?? input?.customer_context?.email ?? null;
 
@@ -114,12 +126,14 @@ function renderChip(renderStatusRaw: unknown) {
         Rendered
       </span>
     );
+
   if (s === "failed")
     return (
       <span className="rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
         Render failed
       </span>
     );
+
   if (s === "queued" || s === "running")
     return (
       <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[11px] font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
@@ -140,12 +154,12 @@ function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" 
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-      : tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+          : tone === "blue"
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200";
 
   return <span className={cn(base, cls)}>{label}</span>;
 }
@@ -181,10 +195,8 @@ function normalizeAiOutput(outputRaw: any) {
 
   const est = merged?.estimate && typeof merged.estimate === "object" ? merged.estimate : null;
 
-  const estimateLow =
-    est?.low ?? merged?.estimateLow ?? merged?.estimate_low ?? root?.estimate?.low ?? null;
-  const estimateHigh =
-    est?.high ?? merged?.estimateHigh ?? merged?.estimate_high ?? root?.estimate?.high ?? null;
+  const estimateLow = est?.low ?? merged?.estimateLow ?? merged?.estimate_low ?? root?.estimate?.low ?? null;
+  const estimateHigh = est?.high ?? merged?.estimateHigh ?? merged?.estimate_high ?? root?.estimate?.high ?? null;
 
   return {
     summary: merged?.summary ?? null,
@@ -193,8 +205,8 @@ function normalizeAiOutput(outputRaw: any) {
       typeof merged?.inspection_required === "boolean"
         ? merged.inspection_required
         : typeof merged?.inspectionRequired === "boolean"
-        ? merged.inspectionRequired
-        : null,
+          ? merged.inspectionRequired
+          : null,
     estimateLow,
     estimateHigh,
   };
@@ -255,9 +267,7 @@ function filterPill(opts: { href: string; label: string; active: boolean }) {
 }
 
 type PageProps = {
-  searchParams?:
-    | Promise<Record<string, string | string[] | undefined>>
-    | Record<string, string | string[] | undefined>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
 };
 
 type ViewMode = "all" | "unread" | "new" | "in_progress" | "custom";
@@ -275,8 +285,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const viewNorm = String(viewRaw ?? "").toLowerCase().trim();
 
   const legacyUnread = sp.unread === "1" || (Array.isArray(sp.unread) && sp.unread.includes("1"));
-  const legacyInProgress =
-    sp.in_progress === "1" || (Array.isArray(sp.in_progress) && sp.in_progress.includes("1"));
+  const legacyInProgress = sp.in_progress === "1" || (Array.isArray(sp.in_progress) && sp.in_progress.includes("1"));
 
   const stageParamRaw = Array.isArray(sp.stage) ? sp.stage[0] : sp.stage;
   const legacyStage = stageParamRaw ? normalizeStage(stageParamRaw) : null;
@@ -315,13 +324,42 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const deleteIdRaw = sp?.deleteId;
   const confirmDeleteRaw = sp?.confirmDelete;
   const deleteId = Array.isArray(deleteIdRaw) ? String(deleteIdRaw[0] ?? "") : String(deleteIdRaw ?? "");
-  const confirmDelete =
-    confirmDeleteRaw === "1" || (Array.isArray(confirmDeleteRaw) && confirmDeleteRaw.includes("1"));
+  const confirmDelete = confirmDeleteRaw === "1" || (Array.isArray(confirmDeleteRaw) && confirmDeleteRaw.includes("1"));
 
-  // tenant
+  // -------------------------
+  // tenant selection (cookie -> validated membership -> recent membership -> owned fallback)
+  // -------------------------
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
+  // validate cookie tenant membership (prevents stale/wrong tenant cookie)
+  if (tenantIdMaybe) {
+    const ok = await db.execute(sql`
+      select 1 as ok
+      from tenant_members
+      where tenant_id = ${tenantIdMaybe}::uuid
+        and clerk_user_id = ${userId}
+        and status = 'active'
+      limit 1
+    `);
+    if (!firstRow(ok)?.ok) tenantIdMaybe = null;
+  }
+
+  // fall back to most recently updated active membership
+  if (!tenantIdMaybe) {
+    const r = await db.execute(sql`
+      select tenant_id
+      from tenant_members
+      where clerk_user_id = ${userId}
+        and status = 'active'
+      order by updated_at desc nulls last, created_at desc
+      limit 1
+    `);
+    const row = firstRow(r);
+    tenantIdMaybe = row?.tenant_id ? String(row.tenant_id) : null;
+  }
+
+  // last resort: first owned tenant
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -379,10 +417,10 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
           viewMode === "unread"
             ? "unread"
             : viewMode === "new"
-            ? "new"
-            : viewMode === "in_progress"
-            ? "in_progress"
-            : null,
+              ? "new"
+              : viewMode === "in_progress"
+                ? "in_progress"
+                : null,
         unread: null,
         in_progress: null,
         stage: null,
@@ -456,8 +494,8 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
           <h1 className="text-2xl font-semibold">Quotes</h1>
 
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page{" "}
-            {safePage} / {totalPages}
+            {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page {safePage}{" "}
+            / {totalPages}
           </p>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -545,15 +583,14 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
               const st = normalizeStage(r.stage);
               const unread = !r.isRead;
 
-              const ai = normalizeAiOutput(r.output);
+              const ai = normalizeAiOutput((r as any).output);
               const estLow = asNumber(ai.estimateLow);
               const estHigh = asNumber(ai.estimateHigh);
 
               const conf = String(ai.confidence ?? "").toLowerCase().trim();
               const confTone = conf === "high" ? "green" : conf === "medium" ? "yellow" : conf === "low" ? "red" : "gray";
 
-              const inspTone =
-                ai.inspectionRequired === true ? "yellow" : ai.inspectionRequired === false ? "green" : "gray";
+              const inspTone = ai.inspectionRequired === true ? "yellow" : ai.inspectionRequired === false ? "green" : "gray";
 
               const quoteId = String((r as any)?.id ?? "");
               const quoteHref = quoteId ? `/admin/quotes/${encodeURIComponent(quoteId)}` : "/admin/quotes";
@@ -562,19 +599,12 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
               const anchor = `q-${r.id}`;
 
               const confirmHref =
-                `/admin/quotes` +
-                qs({ ...filterParams, page: safePage, pageSize, deleteId: r.id, confirmDelete: 1 }) +
-                `#${anchor}`;
+                `/admin/quotes` + qs({ ...filterParams, page: safePage, pageSize, deleteId: r.id, confirmDelete: 1 }) + `#${anchor}`;
 
-              const cancelHref =
-                `/admin/quotes` + qs({ ...filterParams, page: safePage, pageSize }) + `#${anchor}`;
+              const cancelHref = `/admin/quotes` + qs({ ...filterParams, page: safePage, pageSize }) + `#${anchor}`;
 
               return (
-                <li
-                  key={r.id}
-                  id={anchor}
-                  className={cn("p-5 scroll-mt-24", unread ? "bg-yellow-50/60 dark:bg-yellow-950/10" : "")}
-                >
+                <li key={r.id} id={anchor} className={cn("p-5 scroll-mt-24", unread ? "bg-yellow-50/60 dark:bg-yellow-950/10" : "")}>
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
@@ -593,13 +623,11 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         )}
 
                         {stageChip(st)}
-                        {renderChip(r.renderStatus)}
+                        {renderChip((r as any).renderStatus)}
 
-                        {/* ✅ AI badges */}
+                        {/* AI badges */}
                         {ai.confidence ? chip(`Confidence: ${String(ai.confidence)}`, confTone as any) : null}
-                        {ai.inspectionRequired != null
-                          ? chip(ai.inspectionRequired ? "Inspection" : "No inspection", inspTone as any)
-                          : null}
+                        {ai.inspectionRequired != null ? chip(ai.inspectionRequired ? "Inspection" : "No inspection", inspTone as any) : null}
                       </div>
 
                       <div className="mt-1 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
@@ -612,7 +640,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         ) : null}
                       </div>
 
-                      {/* ✅ Presentable AI preview */}
+                      {/* Presentable AI preview */}
                       <div className="mt-3 grid gap-2">
                         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                           {estLow == null && estHigh == null ? (
@@ -625,16 +653,14 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         </div>
 
                         {ai.summary ? (
-                          <div className="text-sm text-gray-700 dark:text-gray-200 line-clamp-2">
-                            {String(ai.summary)}
-                          </div>
+                          <div className="text-sm text-gray-700 dark:text-gray-200 line-clamp-2">{String(ai.summary)}</div>
                         ) : (
                           <div className="text-sm text-gray-500 dark:text-gray-400 italic">No AI summary yet.</div>
                         )}
                       </div>
 
                       <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                        {r.createdAt ? new Date(r.createdAt).toLocaleString() : "—"}
+                        {r.createdAt ? new Date(r.createdAt as any).toLocaleString() : "—"}
                       </div>
                     </div>
 
@@ -672,10 +698,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
                             <form action={deleteLead}>
                               <input type="hidden" name="id" value={r.id} />
-                              <button
-                                type="submit"
-                                className="rounded-md bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:opacity-90"
-                              >
+                              <button type="submit" className="rounded-md bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:opacity-90">
                                 Yes, delete
                               </button>
                             </form>
