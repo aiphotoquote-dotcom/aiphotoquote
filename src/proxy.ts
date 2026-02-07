@@ -1,25 +1,51 @@
 // src/proxy.ts
-import { clerkMiddleware } from "@clerk/nextjs/server";
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 /**
- * Recovery mode:
- * - Run Clerk middleware so `auth()` works in server components/routes.
- * - DO NOT call `protect()` here (it is rewriting to /404 with dev-browser-missing).
- *
- * Page/API handlers already enforce auth/roles.
+ * Only these routes require a Clerk session.
+ * Public quote flow + public APIs must remain public.
  */
-export default clerkMiddleware(() => {
+const isProtectedRoute = createRouteMatcher([
+  "/admin(.*)",
+  "/dashboard(.*)",
+  "/onboarding(.*)",
+  "/pcc(.*)",
+
+  // Protected API namespaces only (do NOT include all /api)
+  "/api/admin(.*)",
+  "/api/pcc(.*)",
+  "/api/tenant(.*)",
+  "/api/onboarding(.*)",
+]);
+
+export default clerkMiddleware(async (auth, req: NextRequest) => {
+  // ✅ Protect only protected routes
+  if (isProtectedRoute(req)) {
+    // Clerk handles redirects/rewrites internally.
+    // We still must allow the middleware to complete normally.
+    await auth.protect();
+  }
+
+  // ✅ CRITICAL: Always return a response so Next never “hangs”
   return NextResponse.next();
 });
 
 /**
  * IMPORTANT:
- * Match all NON-static routes so Clerk context is available anywhere `auth()` is used.
- * Do NOT include _next/static, _next/image, etc.
+ * - Do NOT match all `/api/*` routes (keeps public ingestion endpoints public).
+ * - DO match all NON-API page routes so Clerk is present where `auth()` might run.
+ * - Add specific protected API namespaces that require auth().
  */
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:css|js|map|png|jpg|jpeg|gif|svg|webp|ico|txt|xml)$).*)",
+    // All NON-API pages (public + protected), excluding Next internals + common static assets
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:css|js|map|png|jpg|jpeg|gif|svg|webp|ico|txt|xml)$).*)",
+
+    // Only protected API namespaces (do NOT include all /api)
+    "/api/admin(.*)",
+    "/api/pcc(.*)",
+    "/api/tenant(.*)",
+    "/api/onboarding(.*)",
   ],
 };
