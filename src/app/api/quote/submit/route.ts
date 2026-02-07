@@ -281,9 +281,9 @@ async function resolveOpenAiClient(args: {
   }
 
   // Consume grace atomically (NULL-safe)
-  // ✅ IMPORTANT: schema-qualify to avoid search_path / schema mismatch with Drizzle resolution
+  // ✅ IMPORTANT: reference the Drizzle table object so it uses the exact same schema as Drizzle
   const upd = await db.execute(sql`
-    update public.tenant_settings
+    update ${tenantSettings}
     set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
         updated_at = now()
     where tenant_id = ${tenantId}::uuid
@@ -306,7 +306,7 @@ async function resolveOpenAiClient(args: {
       select
         coalesce(activation_grace_used, 0) as used,
         coalesce(activation_grace_credits, 0) as credits
-      from public.tenant_settings
+      from ${tenantSettings}
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
@@ -755,23 +755,13 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "MAINTENANCE",
-          message: pc.maintenanceMessage || "Service temporarily unavailable.",
-          ...(debugEnabled ? { debugId } : {}),
-        },
+        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
         { status: 503 }
       );
     }
     if (pc && pc.aiQuotingEnabled === false) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "AI_DISABLED",
-          message: "AI quoting is currently disabled.",
-          ...(debugEnabled ? { debugId } : {}),
-        },
+        { ok: false, error: "AI_DISABLED", message: "AI quoting is currently disabled.", ...(debugEnabled ? { debugId } : {}) },
         { status: 503 }
       );
     }
@@ -792,11 +782,7 @@ export async function POST(req: Request) {
 
     // Determine phase
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
-    debug("phase.detected", {
-      isPhase2,
-      quoteLogId: parsed.data.quoteLogId ?? null,
-      qaAnswersLen: parsed.data.qaAnswers?.length ?? 0,
-    });
+    debug("phase.detected", { isPhase2, quoteLogId: parsed.data.quoteLogId ?? null, qaAnswersLen: parsed.data.qaAnswers?.length ?? 0 });
 
     // Settings (required to track plan/grace usage)
     const settings = await db
@@ -830,8 +816,6 @@ export async function POST(req: Request) {
     });
 
     if (!settings) {
-      // This is the exact condition your curl is hitting. With debug enabled,
-      // you'll see tenantId + dbTarget + lookup result.
       const e: any = new Error("SETTINGS_MISSING");
       e.code = "SETTINGS_MISSING";
       e.status = 500;
@@ -1009,12 +993,7 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            {
-              ok: false,
-              error: "CONTENT_BLOCKED",
-              message: "Your answers include content we can’t process. Please revise.",
-              ...(debugEnabled ? { debugId } : {}),
-            },
+            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
             { status: 400 }
           );
         }
@@ -1123,12 +1102,7 @@ export async function POST(req: Request) {
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "CONTENT_BLOCKED",
-          message: "Your request includes content we can’t process. Please revise and try again.",
-          ...(debugEnabled ? { debugId } : {}),
-        },
+        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
         { status: 400 }
       );
     }
@@ -1272,7 +1246,6 @@ export async function POST(req: Request) {
     const msg = e?.message ?? String(e);
     const code = e?.code || msg;
 
-    // Always log error stage when debug is enabled
     if (debugEnabled) {
       console.log(
         JSON.stringify({
@@ -1326,7 +1299,6 @@ export async function POST(req: Request) {
     }
 
     if (code === "SETTINGS_MISSING") {
-      // This is what you’re hitting. Now we’ll have the truth in Vercel logs: dbTarget + tenantId + settings lookup result.
       return NextResponse.json(
         { ok: false, error: "SETTINGS_MISSING", message: "Tenant settings could not be loaded. See debugId in logs.", ...(debugEnabled ? { debugId } : {}) },
         { status: 500 }
