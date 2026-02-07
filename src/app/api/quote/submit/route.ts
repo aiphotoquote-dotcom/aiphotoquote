@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, tenantSettings, quoteLogs } from "@/lib/db/schema";
+import { tenants, tenantSecrets, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 import { sendEmail } from "@/lib/email";
@@ -157,6 +157,126 @@ function pickIndustrySnapshotFromInput(inputAny: any): string {
   return "";
 }
 
+function startOfMonthUTC(d: Date) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+function startOfNextMonthUTC(d: Date) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+}
+
+type KeySource = "tenant" | "platform_grace";
+
+function platformOpenAiKey(): string | null {
+  const k =
+    process.env.PLATFORM_OPENAI_API_KEY?.trim() ||
+    process.env.OPENAI_API_KEY?.trim() ||
+    "";
+  return k ? k : null;
+}
+
+/**
+ * Enforce monthly quote limits (Phase 1 only)
+ */
+async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: number | null }) {
+  const { tenantId, monthlyQuoteLimit } = args;
+  if (!monthlyQuoteLimit || !Number.isFinite(monthlyQuoteLimit) || monthlyQuoteLimit <= 0) return;
+
+  const now = new Date();
+  const from = startOfMonthUTC(now);
+  const to = startOfNextMonthUTC(now);
+
+  const r = await db.execute(sql`
+    select count(*)::int as c
+    from quote_logs
+    where tenant_id = ${tenantId}::uuid
+      and created_at >= ${from.toISOString()}::timestamptz
+      and created_at < ${to.toISOString()}::timestamptz
+  `);
+
+  const count = Number((r as any)?.rows?.[0]?.c ?? 0);
+
+  if (count >= monthlyQuoteLimit) {
+    const err: any = new Error("PLAN_LIMIT_REACHED");
+    err.code = "PLAN_LIMIT_REACHED";
+    err.status = 402;
+    err.meta = { used: count, limit: monthlyQuoteLimit };
+    throw err;
+  }
+}
+
+/**
+ * Resolve OpenAI client using:
+ * - tenant secret if present
+ * - else platform key if grace credits available (optionally consumes one)
+ *
+ * IMPORTANT:
+ * - Phase 1: consumeGrace=true (atomic increment)
+ * - Phase 2: consumeGrace=false (use prior llmKeySource from quote log)
+ */
+async function resolveOpenAiClient(args: {
+  tenantId: string;
+  consumeGrace: boolean;
+  forceKeySource?: KeySource | null;
+}): Promise<{ openai: OpenAI; keySource: KeySource }> {
+  const { tenantId, consumeGrace, forceKeySource } = args;
+
+  // 1) Tenant key if exists (unless explicitly forced to platform)
+  if (!forceKeySource || forceKeySource === "tenant") {
+    const secretRow = await db
+      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+      .from(tenantSecrets)
+      .where(eq(tenantSecrets.tenantId, tenantId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (secretRow?.openaiKeyEnc) {
+      const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+      return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
+    }
+
+    // If caller forced tenant but no key, fall through to error/plan logic
+    if (forceKeySource === "tenant") {
+      const e: any = new Error("MISSING_OPENAI_KEY");
+      e.code = "MISSING_OPENAI_KEY";
+      throw e;
+    }
+  }
+
+  // 2) Platform grace key
+  const platformKey = platformOpenAiKey();
+  if (!platformKey) {
+    const e: any = new Error("MISSING_OPENAI_KEY");
+    e.code = "MISSING_OPENAI_KEY";
+    throw e;
+  }
+
+  // If we are not consuming grace (phase2 finalize), allow platform usage
+  // even if grace is currently exhausted, as long as phase1 already decided so.
+  if (!consumeGrace) {
+    return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
+  }
+
+  // Consume grace atomically
+  const upd = await db.execute(sql`
+    update tenant_settings
+    set activation_grace_used = activation_grace_used + 1,
+        updated_at = now()
+    where tenant_id = ${tenantId}::uuid
+      and activation_grace_used < activation_grace_credits
+    returning activation_grace_used, activation_grace_credits
+  `);
+
+  const row = (upd as any)?.rows?.[0] ?? null;
+  if (!row) {
+    const e: any = new Error("TRIAL_EXHAUSTED");
+    e.code = "TRIAL_EXHAUSTED";
+    e.status = 402;
+    throw e;
+  }
+
+  return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
+}
+
 /**
  * ✅ Auditable AI snapshot:
  * - store prompt hashes (not full prompts) to avoid giant JSON + accidental leakage
@@ -169,8 +289,9 @@ function buildAiSnapshot(args: {
   renderOptIn: boolean;
   resolved: any;
   industryKey: string;
+  llmKeySource: KeySource;
 }) {
-  const { phase, tenantId, tenantSlug, renderOptIn, resolved, industryKey } = args;
+  const { phase, tenantId, tenantSlug, renderOptIn, resolved, industryKey, llmKeySource } = args;
 
   const quoteEstimatorSystem = resolved?.prompts?.quoteEstimatorSystem ?? "";
   const qaQuestionGeneratorSystem = resolved?.prompts?.qaQuestionGeneratorSystem ?? "";
@@ -204,26 +325,11 @@ function buildAiSnapshot(args: {
     tenantSettings: {
       ...resolved.tenant,
       renderOptIn,
+      llmKeySource,
     },
 
     pricing: resolved.pricing ?? null,
   };
-}
-
-async function getOpenAiForTenant(tenantId: string) {
-  const secretRow = await db
-    .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-    .from(tenantSecrets)
-    .where(eq(tenantSecrets.tenantId, tenantId))
-    .limit(1)
-    .then((r) => r[0] ?? null);
-
-  if (!secretRow?.openaiKeyEnc) {
-    throw new Error("MISSING_OPENAI_KEY");
-  }
-
-  const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
-  return new OpenAI({ apiKey: openaiKey });
 }
 
 // ---------------- email helpers ----------------
@@ -561,6 +667,30 @@ export async function POST(req: Request) {
 
     const { tenantSlug } = parsed.data;
 
+    // ✅ platform gates
+    const pc = await db
+      .select({
+        aiQuotingEnabled: platformConfig.aiQuotingEnabled,
+        maintenanceEnabled: platformConfig.maintenanceEnabled,
+        maintenanceMessage: platformConfig.maintenanceMessage,
+      })
+      .from(platformConfig)
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (pc?.maintenanceEnabled) {
+      return NextResponse.json(
+        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable." },
+        { status: 503 }
+      );
+    }
+    if (pc && pc.aiQuotingEnabled === false) {
+      return NextResponse.json(
+        { ok: false, error: "AI_DISABLED", message: "AI quoting is currently disabled." },
+        { status: 503 }
+      );
+    }
+
     // Tenant lookup
     const tenant = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
@@ -573,32 +703,44 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
     }
 
-    // Settings (optional) — used for non-LLM defaults like branding + industry selection
+    // Determine phase early
+    const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
+
+    // Settings (optional)
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
         industryKey: tenantSettings.industryKey,
         brandLogoUrl: tenantSettings.brandLogoUrl,
-        // ✅ NEW: used for email/logo contrast
         brandLogoVariant: (tenantSettings as any).brandLogoVariant,
         businessName: tenantSettings.businessName,
+
+        // ✅ plan fields
+        planTier: tenantSettings.planTier,
+        monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
+        activationGraceCredits: tenantSettings.activationGraceCredits,
+        activationGraceUsed: tenantSettings.activationGraceUsed,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
       .limit(1)
       .then((r) => r[0] ?? null);
 
+    // ✅ enforce plan limits on phase 1 only
+    if (!isPhase2) {
+      const limit = typeof settings?.monthlyQuoteLimit === "number" ? settings.monthlyQuoteLimit : null;
+      await enforceMonthlyLimit({ tenantId: tenant.id, monthlyQuoteLimit: limit });
+    }
+
     const tenantIndustryKey = safeTrim(settings?.industryKey) || "service";
     const brandLogoUrl = safeTrim(settings?.brandLogoUrl) || null;
     const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings?.businessName) || null;
 
-    // Determine phase early (so we can pick industry snapshot BEFORE resolving prompts)
-    const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
-
-    // Pre-load quote log if phase2 (needed for immutable industry + category + notes)
+    // Pre-load quote log if phase2 (needed for immutable industry + key source)
     let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
     let industryKeyForQuote = tenantIndustryKey;
+    let phase2KeySource: KeySource | null = null;
 
     if (isPhase2) {
       const quoteLogId = parsed.data.quoteLogId!;
@@ -615,18 +757,16 @@ export async function POST(req: Request) {
 
       const inputAny: any = phase2Existing.input ?? {};
       industryKeyForQuote = pickIndustrySnapshotFromInput(inputAny) || tenantIndustryKey;
+
+      const ks = String(inputAny?.llmKeySource ?? "").trim();
+      phase2KeySource = ks === "platform_grace" ? "platform_grace" : ks === "tenant" ? "tenant" : null;
     } else {
-      // Phase 1: server-authoritative industry is tenant settings at the time of submission
       industryKeyForQuote = tenantIndustryKey;
     }
 
     // ✅ Resolve tenant + PCC AI settings ONCE (request-scoped)
     const resolvedBase = await resolveTenantLlm(tenant.id);
 
-    /**
-     * ✅ Industry prompt packs (PCC) — applied only when tenant is still using PCC base prompt.
-     * Precedence target: tenant override > industry pack > platform base
-     */
     const pccCfg = await loadPlatformLlmConfig();
     const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
 
@@ -666,19 +806,24 @@ export async function POST(req: Request) {
     // ✅ denylist guardrail (PCC)
     const denylist = resolved.guardrails.blockedTopics ?? [];
 
-    // ✅ OpenAI per-tenant
-    const openai = await getOpenAiForTenant(tenant.id);
+    // ✅ Resolve OpenAI client (plan-aware)
+    const { openai, keySource } = await resolveOpenAiClient({
+      tenantId: tenant.id,
+      consumeGrace: !isPhase2, // consume only on phase1 submit
+      forceKeySource: isPhase2 ? phase2KeySource : null,
+    });
 
     // ✅ always return server-authoritative ai flags to client
     const aiEnvelope = {
       liveQaEnabled: resolved.tenant.liveQaEnabled,
       liveQaMaxQuestions: resolved.tenant.liveQaMaxQuestions,
       tenantRenderEnabled: resolved.tenant.tenantRenderEnabled,
-      renderOptIn: undefined as boolean | undefined, // per-request
+      renderOptIn: undefined as boolean | undefined,
       tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
       industryKey: industryKeyForQuote,
       industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
+      llmKeySource: keySource,
     };
 
     // -------------------------
@@ -701,7 +846,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG" }, { status: 400 });
       }
 
-      // Normalize incoming QA answers:
       const qaStored: any = existing.qa ?? {};
       const storedQuestions: string[] = Array.isArray(qaStored?.questions)
         ? qaStored.questions.map((x: unknown) => String(x)).filter(Boolean)
@@ -709,7 +853,6 @@ export async function POST(req: Request) {
 
       let normalizedAnswers: Array<{ question: string; answer: string }> = [];
 
-      // If client sent ["a1","a2"], pair with stored questions
       if (Array.isArray(parsed.data.qaAnswers) && typeof (parsed.data.qaAnswers as any)[0] === "string") {
         const answersOnly = (parsed.data.qaAnswers as string[]).map((s) => String(s ?? "").trim());
         normalizedAnswers = answersOnly.map((ans, i) => ({
@@ -723,12 +866,10 @@ export async function POST(req: Request) {
         }));
       }
 
-      // Keep answers aligned to what was asked (never store extra)
       if (storedQuestions.length) {
         normalizedAnswers = normalizedAnswers.slice(0, storedQuestions.length);
       }
 
-      // Store answers into quote_logs.qa
       const qaPayload = {
         ...(qaStored ?? {}),
         questions: storedQuestions,
@@ -745,26 +886,19 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      // ✅ denylist check on phase-2 answers too
       if (denylist.length) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            {
-              ok: false,
-              error: "CONTENT_BLOCKED",
-              message: "Your answers include content we can’t process. Please revise.",
-            },
+            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise." },
             { status: 400 }
           );
         }
       }
 
-      // render opt-in was stored in inputToStore; return server-authoritative value
       const renderOptIn = Boolean(inputAny?.render_opt_in);
       aiEnvelope.renderOptIn = renderOptIn;
 
-      // ✅ persist AI snapshot (phase2)
       const aiSnapshot = buildAiSnapshot({
         phase: "phase2_finalized",
         tenantId: tenant.id,
@@ -772,9 +906,9 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
+        llmKeySource: (phase2KeySource ?? keySource) as KeySource,
       });
 
-      // ✅ system prompt + model from resolved tenant+PCC (+ industry pack if applied)
       const systemEstimate = resolved.prompts.quoteEstimatorSystem;
 
       const output = await generateEstimate({
@@ -788,7 +922,6 @@ export async function POST(req: Request) {
         normalizedAnswers,
       });
 
-      // Always persist snapshot in output (auditing)
       let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshot };
 
       await db.execute(sql`
@@ -797,7 +930,6 @@ export async function POST(req: Request) {
         where id = ${quoteLogId}::uuid
       `);
 
-      // Send estimate emails exactly once (best-effort)
       try {
         const emailResult = await sendFinalEstimateEmails({
           req,
@@ -863,43 +995,38 @@ export async function POST(req: Request) {
 
     const customer_context = parsed.data.customer_context ?? {};
 
-    // ✅ category is server-authoritative: tenant industry at submission time (immutable snapshot)
     const category = industryKeyForQuote || "service";
     const service_type = safeTrim(customer_context.service_type) || "upholstery";
     const notes = safeTrim(customer_context.notes) || "";
 
-    // ✅ denylist guardrail on notes
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "CONTENT_BLOCKED",
-          message: "Your request includes content we can’t process. Please revise and try again.",
-        },
+        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again." },
         { status: 400 }
       );
     }
 
-    // ✅ Only allow render opt-in if tenant enabled it
     const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
     aiEnvelope.renderOptIn = renderOptIn;
 
-    // Store input (✅ includes immutable industry snapshot)
+    // Store input (✅ includes immutable industry snapshot + key source for phase2)
     const inputToStore = {
       tenantSlug,
       images,
       render_opt_in: renderOptIn,
       customer,
 
-      // ✅ immutable industry snapshot (do NOT rely on tenant_settings later)
+      // ✅ immutable industry snapshot
       industryKeySnapshot: industryKeyForQuote,
       industrySource: "tenant_settings" as const,
+
+      // ✅ critical for phase2 finalize in trial mode
+      llmKeySource: keySource,
 
       customer_context: { category, service_type, notes },
       createdAt: nowIso(),
     };
 
-    // ✅ Persist snapshot at insert-time (auditing even if later phases fail)
     const aiSnapshotInsert = buildAiSnapshot({
       phase: "phase1_insert",
       tenantId: tenant.id,
@@ -907,9 +1034,9 @@ export async function POST(req: Request) {
       renderOptIn,
       resolved,
       industryKey: industryKeyForQuote,
+      llmKeySource: keySource,
     });
 
-    // Create quote log now
     const inserted = await db
       .insert(quoteLogs)
       .values({
@@ -927,7 +1054,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
     }
 
-    // ✅ Live Q&A path (server-authoritative)
     if (resolved.tenant.liveQaEnabled && resolved.tenant.liveQaMaxQuestions > 0) {
       const questions = await generateQaQuestions({
         openai,
@@ -942,7 +1068,6 @@ export async function POST(req: Request) {
 
       const qa = { questions, answers: [], askedAt: nowIso() };
 
-      // Update snapshot for “asking” phase (optional but useful)
       const aiSnapshotAsking = buildAiSnapshot({
         phase: "phase1_qa_asking",
         tenantId: tenant.id,
@@ -950,6 +1075,7 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
+        llmKeySource: keySource,
       });
 
       await db
@@ -965,7 +1091,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope });
     }
 
-    // Otherwise, estimate immediately
     const output = await generateEstimate({
       openai,
       model: resolved.models.estimatorModel,
@@ -983,6 +1108,7 @@ export async function POST(req: Request) {
       renderOptIn,
       resolved,
       industryKey: industryKeyForQuote,
+      llmKeySource: keySource,
     });
 
     let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshotEstimated };
@@ -993,7 +1119,6 @@ export async function POST(req: Request) {
       where id = ${quoteLogId}::uuid
     `);
 
-    // ✅ Estimate emails (ONLY here, estimate-only strategy)
     try {
       const emailResult = await sendFinalEstimateEmails({
         req,
@@ -1024,9 +1149,37 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    if (msg === "MISSING_OPENAI_KEY") {
-      return NextResponse.json({ ok: false, error: "MISSING_OPENAI_KEY" }, { status: 400 });
+    const code = e?.code || msg;
+
+    if (code === "PLAN_LIMIT_REACHED") {
+      return NextResponse.json(
+        { ok: false, error: "PLAN_LIMIT_REACHED", message: "Monthly quote limit reached for your plan.", meta: e?.meta ?? undefined },
+        { status: 402 }
+      );
     }
+
+    if (code === "TRIAL_EXHAUSTED") {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "TRIAL_EXHAUSTED",
+          message: "Trial credits exhausted. Add your OpenAI key in Settings (AI Setup) or upgrade your plan.",
+        },
+        { status: 402 }
+      );
+    }
+
+    if (code === "MISSING_OPENAI_KEY") {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "MISSING_OPENAI_KEY",
+          message: "No OpenAI key is configured for this tenant. Add a tenant key in AI Setup.",
+        },
+        { status: 400 }
+      );
+    }
+
     return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status: 500 });
   }
 }
