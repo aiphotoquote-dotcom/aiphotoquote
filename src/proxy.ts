@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 /**
  * Only these routes should ever require a Clerk session.
- * Everything else (public quote flow + public APIs) must stay public for AIaaS.
+ * Everything else (public quote flow + public APIs) must stay public.
  */
 const isProtectedRoute = createRouteMatcher([
   "/admin(.*)",
@@ -16,33 +16,35 @@ const isProtectedRoute = createRouteMatcher([
   "/api/admin(.*)",
   "/api/pcc(.*)",
   "/api/tenant(.*)",
-  "/api/onboarding(.*)", // ✅ onboarding APIs call auth()/currentUser()
+  "/api/onboarding(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
-  // Clerk runs on ALL matched routes, but we ONLY enforce auth on protected routes.
   if (isProtectedRoute(req)) {
-    // IMPORTANT:
-    // In your Clerk version, `auth.protect()` exists on `auth` (NOT on `auth()`).
-    // Also: do NOT return its value — always return a middleware Response.
     await auth.protect();
   }
-
   return NextResponse.next();
 });
 
 /**
- * CRITICAL:
- * - Do NOT match all `/api/*` routes here (keeps public ingestion endpoints public).
- * - DO match all NON-API page routes so Clerk is present anywhere `auth()` might run.
- * - Add specific protected API namespaces that require auth().
+ * IMPORTANT:
+ * Keep matcher NARROW.
+ * If we match all non-API pages, we can accidentally stall public pages / auth routes.
+ * Only run middleware where Clerk is needed.
  */
 export const config = {
   matcher: [
-    // ✅ All NON-API pages (public + protected), excluding Next.js internals + common static assets.
-    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:css|js|map|png|jpg|jpeg|gif|svg|webp|ico|txt|xml)$).*)",
+    // UI areas (protected)
+    "/admin(.*)",
+    "/dashboard(.*)",
+    "/onboarding(.*)",
+    "/pcc(.*)",
 
-    // ✅ Only protected API namespaces (do NOT include all /api)
+    // Clerk auth pages (public but should have Clerk middleware)
+    "/sign-in(.*)",
+    "/sign-up(.*)",
+
+    // Protected API namespaces
     "/api/admin(.*)",
     "/api/pcc(.*)",
     "/api/tenant(.*)",
