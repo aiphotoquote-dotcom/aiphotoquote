@@ -16,17 +16,18 @@ const isProtectedRoute = createRouteMatcher([
   "/api/admin(.*)",
   "/api/pcc(.*)",
   "/api/tenant(.*)",
-  "/api/onboarding(.*)", // onboarding APIs call auth()/currentUser()
+  "/api/onboarding(.*)", // ✅ onboarding APIs call auth()/currentUser()
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
-  // Clerk runs on ALL matched routes, but we ONLY enforce auth on protected routes.
+export default clerkMiddleware((auth, req) => {
+  // IMPORTANT:
+  // In this Clerk/Next combo, `auth().protect()` does NOT return a Response.
+  // It enforces auth (redirect/throw internally) — so we must not `return` it.
   if (isProtectedRoute(req)) {
-    // IMPORTANT: return the response from protect() so middleware always resolves
-    return await auth.protect();
+    auth().protect();
   }
 
-  // Public routes must always continue
+  // Always continue the request for public routes (and after protect passes).
   return NextResponse.next();
 });
 
@@ -38,10 +39,10 @@ export default clerkMiddleware(async (auth, req) => {
  */
 export const config = {
   matcher: [
-    // All NON-API pages (public + protected), excluding Next.js internals + common static assets.
+    // ✅ All NON-API pages (public + protected), excluding Next.js internals + common static assets.
     "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:css|js|map|png|jpg|jpeg|gif|svg|webp|ico|txt|xml)$).*)",
 
-    // Only protected API namespaces (do NOT include all /api)
+    // ✅ Only protected API namespaces (do NOT include all /api)
     "/api/admin(.*)",
     "/api/pcc(.*)",
     "/api/tenant(.*)",
