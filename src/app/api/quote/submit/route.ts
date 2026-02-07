@@ -14,10 +14,7 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
-// ✅ Tenant-aware PCC resolver (platform defaults + tenant overrides)
 import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
-
-// ✅ PCC config loader + industry prompt pack resolver
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { resolvePromptsForIndustry } from "@/lib/pcc/llm/resolvePrompts";
 
@@ -38,7 +35,6 @@ const QaAnswerSchema = z.object({
 const Req = z.object({
   tenantSlug: z.string().min(3),
 
-  // Phase 1 fields
   images: z
     .array(z.object({ url: z.string().url(), shotType: z.string().optional() }))
     .min(1)
@@ -54,13 +50,11 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(), // back-compat
+      category: z.string().optional(),
     })
     .optional(),
 
-  // Phase 2 fields
   quoteLogId: z.string().uuid().optional(),
-
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
 });
 
@@ -164,9 +158,76 @@ function startOfNextMonthUTC(d: Date) {
 type KeySource = "tenant" | "platform_grace";
 
 function platformOpenAiKey(): string | null {
-  // ✅ per your note: Vercel uses OPENAI_API_KEY
+  // per your note: Vercel uses OPENAI_API_KEY
   const k = process.env.OPENAI_API_KEY?.trim() || "";
   return k ? k : null;
+}
+
+/**
+ * ✅ Hardening: tenant_settings should exist, but if anything causes it to read as null
+ * (drift, env mismatch, race, bad seed), we auto-create a minimal row and proceed.
+ *
+ * IMPORTANT: email config is NOT a readiness gate; quotes must still work.
+ */
+async function ensureTenantSettings(args: {
+  tenantId: string;
+  preferredIndustryKey?: string | null;
+}) {
+  const { tenantId, preferredIndustryKey } = args;
+
+  const read = async () =>
+    db
+      .select({
+        tenantId: tenantSettings.tenantId,
+        industryKey: tenantSettings.industryKey,
+        brandLogoUrl: tenantSettings.brandLogoUrl,
+        brandLogoVariant: (tenantSettings as any).brandLogoVariant,
+        businessName: tenantSettings.businessName,
+
+        planTier: tenantSettings.planTier,
+        monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
+        activationGraceCredits: tenantSettings.activationGraceCredits,
+        activationGraceUsed: tenantSettings.activationGraceUsed,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenantId))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+  const existing = await read();
+  if (existing) return existing;
+
+  const seedIndustry = safeTrim(preferredIndustryKey) || "service";
+
+  // Seed with safe defaults (do NOT block public quoting)
+  // Credits default to 0 so you don't accidentally hand out free usage
+  await db
+    .insert(tenantSettings)
+    .values({
+      tenantId,
+      industryKey: seedIndustry,
+
+      // defaults aligned to your onboarding intent
+      emailSendMode: "standard" as any,
+      resendFromEmail: "no-reply@aiphotoquote.com" as any,
+
+      planTier: "free" as any,
+      monthlyQuoteLimit: null as any,
+      activationGraceCredits: 0 as any,
+      activationGraceUsed: 0 as any,
+
+      updatedAt: new Date(),
+    } as any)
+    .onConflictDoNothing();
+
+  // Re-read after insert attempt
+  const after = await read();
+  if (after) return after;
+
+  const e: any = new Error("SETTINGS_MISSING");
+  e.code = "SETTINGS_MISSING";
+  e.status = 400;
+  throw e;
 }
 
 /**
@@ -263,7 +324,6 @@ async function resolveOpenAiClient(args: {
 
   const row = (upd as any)?.rows?.[0] ?? null;
   if (!row) {
-    // Determine whether this is truly exhausted vs settings missing
     const cur = await db.execute(sql`
       select
         coalesce(activation_grace_used, 0) as used,
@@ -695,36 +755,14 @@ export async function POST(req: Request) {
     // Determine phase early
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
 
-    // Settings are REQUIRED for trial/plan enforcement (and for tracking credits)
-    const settings = await db
-      .select({
-        tenantId: tenantSettings.tenantId,
-        industryKey: tenantSettings.industryKey,
-        brandLogoUrl: tenantSettings.brandLogoUrl,
-        brandLogoVariant: (tenantSettings as any).brandLogoVariant,
-        businessName: tenantSettings.businessName,
+    // ✅ HARDENED settings fetch (never block public quoting on this)
+    const preferredIndustry =
+      safeTrim(parsed.data?.customer_context?.category) || safeTrim(parsed.data?.customer_context?.service_type) || "service";
 
-        planTier: tenantSettings.planTier,
-        monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
-        activationGraceCredits: tenantSettings.activationGraceCredits,
-        activationGraceUsed: tenantSettings.activationGraceUsed,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenant.id))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!settings) {
-      // ✅ this was the hidden cause of "TRIAL_EXHAUSTED" for some tenants/environments
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "SETUP_INCOMPLETE",
-          message: "This business is not fully configured yet. Please complete onboarding in Admin before using Photo Quote.",
-        },
-        { status: 400 }
-      );
-    }
+    const settings = await ensureTenantSettings({
+      tenantId: tenant.id,
+      preferredIndustryKey: preferredIndustry,
+    });
 
     // ✅ enforce plan limits on phase 1 only
     if (!isPhase2) {
@@ -781,9 +819,13 @@ export async function POST(req: Request) {
 
     const effectivePrompts = {
       quoteEstimatorSystem:
-        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem ? industryResolved.quoteEstimatorSystem : resolvedEstimator,
+        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem
+          ? industryResolved.quoteEstimatorSystem
+          : resolvedEstimator,
       qaQuestionGeneratorSystem:
-        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
+        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem
+          ? industryResolved.qaQuestionGeneratorSystem
+          : resolvedQa,
     };
 
     const resolved = {
@@ -1143,17 +1185,6 @@ export async function POST(req: Request) {
       );
     }
 
-    if (code === "SETTINGS_MISSING") {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "SETUP_INCOMPLETE",
-          message: "This business is not fully configured yet. Please complete onboarding in Admin before using Photo Quote.",
-        },
-        { status: 400 }
-      );
-    }
-
     if (code === "TRIAL_EXHAUSTED") {
       return NextResponse.json(
         {
@@ -1181,6 +1212,18 @@ export async function POST(req: Request) {
       return NextResponse.json(
         { ok: false, error: "MISSING_OPENAI_KEY", message: "No OpenAI key is configured for this tenant. Add a tenant key in AI Setup." },
         { status: 400 }
+      );
+    }
+
+    if (code === "SETTINGS_MISSING") {
+      // still possible if DB is truly unreachable / constraint issues
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "SETTINGS_MISSING",
+          message: "Tenant settings could not be loaded. Please retry or contact support.",
+        },
+        { status: 500 }
       );
     }
 
