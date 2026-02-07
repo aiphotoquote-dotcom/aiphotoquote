@@ -54,7 +54,7 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(), // NOTE: accepted for back-compat, but server will prefer tenant industry snapshot
+      category: z.string().optional(), // accepted for back-compat; server uses tenant snapshot
     })
     .optional(),
 
@@ -112,7 +112,7 @@ function normalizeBrandLogoVariant(v: unknown): BrandLogoVariant {
   const s = String(v ?? "").trim().toLowerCase();
   if (!s) return null;
   if (s === "light" || s === "dark" || s === "auto") return s;
-  return s; // keep forward-compatible
+  return s;
 }
 
 function getBaseUrl(req: Request) {
@@ -166,11 +166,12 @@ function startOfNextMonthUTC(d: Date) {
 
 type KeySource = "tenant" | "platform_grace";
 
+/**
+ * NOTE: per your Vercel setup, the platform key is OPENAI_API_KEY.
+ * We still allow PLATFORM_OPENAI_API_KEY as an optional alias.
+ */
 function platformOpenAiKey(): string | null {
-  const k =
-    process.env.PLATFORM_OPENAI_API_KEY?.trim() ||
-    process.env.OPENAI_API_KEY?.trim() ||
-    "";
+  const k = process.env.OPENAI_API_KEY?.trim() || process.env.PLATFORM_OPENAI_API_KEY?.trim() || "";
   return k ? k : null;
 }
 
@@ -205,58 +206,40 @@ async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: 
 }
 
 /**
- * Resolve OpenAI client using:
- * - tenant secret if present
- * - else platform key if grace credits available (optionally consumes one)
- *
- * IMPORTANT:
- * - Phase 1: consumeGrace=true (atomic increment)
- * - Phase 2: consumeGrace=false (use prior llmKeySource from quote log)
+ * Tenant OpenAI key if present.
  */
-async function resolveOpenAiClient(args: {
-  tenantId: string;
-  consumeGrace: boolean;
-  forceKeySource?: KeySource | null;
-}): Promise<{ openai: OpenAI; keySource: KeySource }> {
-  const { tenantId, consumeGrace, forceKeySource } = args;
+async function getTenantOpenAiClientIfPresent(tenantId: string): Promise<OpenAI | null> {
+  const secretRow = await db
+    .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+    .from(tenantSecrets)
+    .where(eq(tenantSecrets.tenantId, tenantId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
 
-  // 1) Tenant key if exists (unless explicitly forced to platform)
-  if (!forceKeySource || forceKeySource === "tenant") {
-    const secretRow = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+  if (!secretRow?.openaiKeyEnc) return null;
 
-    if (secretRow?.openaiKeyEnc) {
-      const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
-      return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
-    }
+  const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+  return new OpenAI({ apiKey: openaiKey });
+}
 
-    // If caller forced tenant but no key, fall through to error/plan logic
-    if (forceKeySource === "tenant") {
-      const e: any = new Error("MISSING_OPENAI_KEY");
-      e.code = "MISSING_OPENAI_KEY";
-      throw e;
-    }
-  }
-
-  // 2) Platform grace key
-  const platformKey = platformOpenAiKey();
-  if (!platformKey) {
+/**
+ * Platform OpenAI client (requires platform key to exist).
+ */
+function getPlatformOpenAiClient(): OpenAI {
+  const k = platformOpenAiKey();
+  if (!k) {
     const e: any = new Error("MISSING_OPENAI_KEY");
     e.code = "MISSING_OPENAI_KEY";
     throw e;
   }
+  return new OpenAI({ apiKey: k });
+}
 
-  // If we are not consuming grace (phase2 finalize), allow platform usage
-  // even if grace is currently exhausted, as long as phase1 already decided so.
-  if (!consumeGrace) {
-    return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
-  }
-
-  // Consume grace atomically (NULL-safe)
+/**
+ * Consume a single grace credit atomically (NULL-safe).
+ * IMPORTANT: Call this ONLY after quote_log insert succeeds.
+ */
+async function consumeGraceCreditOrThrow(tenantId: string) {
   const upd = await db.execute(sql`
     update tenant_settings
     set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
@@ -269,34 +252,32 @@ async function resolveOpenAiClient(args: {
   `);
 
   const row = (upd as any)?.rows?.[0] ?? null;
-  if (!row) {
-    // Optional: fetch current values so we can return helpful meta
-    const cur = await db.execute(sql`
-      select
-        coalesce(activation_grace_used, 0) as used,
-        coalesce(activation_grace_credits, 0) as credits
-      from tenant_settings
-      where tenant_id = ${tenantId}::uuid
-      limit 1
-    `);
+  if (row) return;
 
-    const used = Number((cur as any)?.rows?.[0]?.used ?? 0);
-    const credits = Number((cur as any)?.rows?.[0]?.credits ?? 0);
+  // Provide useful meta when exhausted
+  const cur = await db.execute(sql`
+    select
+      coalesce(activation_grace_used, 0) as used,
+      coalesce(activation_grace_credits, 0) as credits
+    from tenant_settings
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
 
-    const e: any = new Error("TRIAL_EXHAUSTED");
-    e.code = "TRIAL_EXHAUSTED";
-    e.status = 402;
-    e.meta = { used, credits };
-    throw e;
-  }
+  const used = Number((cur as any)?.rows?.[0]?.used ?? 0);
+  const credits = Number((cur as any)?.rows?.[0]?.credits ?? 0);
 
-  return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
+  const e: any = new Error("TRIAL_EXHAUSTED");
+  e.code = "TRIAL_EXHAUSTED";
+  e.status = 402;
+  e.meta = { used, credits };
+  throw e;
 }
 
 /**
  * ✅ Auditable AI snapshot:
- * - store prompt hashes (not full prompts) to avoid giant JSON + accidental leakage
- * - persist models/guardrails/tenant flags/pricing
+ * - store prompt hashes (not full prompts)
+ * - persist models/guardrails/tenant flags/pricing + llmKeySource
  */
 function buildAiSnapshot(args: {
   phase: "phase1_insert" | "phase1_qa_asking" | "phase1_estimated" | "phase2_finalized";
@@ -731,7 +712,7 @@ export async function POST(req: Request) {
         brandLogoVariant: (tenantSettings as any).brandLogoVariant,
         businessName: tenantSettings.businessName,
 
-        // ✅ plan fields
+        // plan fields
         planTier: tenantSettings.planTier,
         monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
         activationGraceCredits: tenantSettings.activationGraceCredits,
@@ -742,7 +723,7 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    // ✅ enforce plan limits on phase 1 only
+    // ✅ enforce plan limits on phase 1 only (counting quote_logs rows)
     if (!isPhase2) {
       const limit = typeof settings?.monthlyQuoteLimit === "number" ? settings.monthlyQuoteLimit : null;
       await enforceMonthlyLimit({ tenantId: tenant.id, monthlyQuoteLimit: limit });
@@ -819,28 +800,8 @@ export async function POST(req: Request) {
       },
     };
 
-    // ✅ denylist guardrail (PCC)
+    // denylist guardrail (PCC)
     const denylist = resolved.guardrails.blockedTopics ?? [];
-
-    // ✅ Resolve OpenAI client (plan-aware)
-    const { openai, keySource } = await resolveOpenAiClient({
-      tenantId: tenant.id,
-      consumeGrace: !isPhase2, // consume only on phase1 submit
-      forceKeySource: isPhase2 ? phase2KeySource : null,
-    });
-
-    // ✅ always return server-authoritative ai flags to client
-    const aiEnvelope = {
-      liveQaEnabled: resolved.tenant.liveQaEnabled,
-      liveQaMaxQuestions: resolved.tenant.liveQaMaxQuestions,
-      tenantRenderEnabled: resolved.tenant.tenantRenderEnabled,
-      renderOptIn: undefined as boolean | undefined,
-      tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
-      tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
-      industryKey: industryKeyForQuote,
-      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
-      llmKeySource: keySource,
-    };
 
     // -------------------------
     // Phase 2: finalize after QA
@@ -912,6 +873,38 @@ export async function POST(req: Request) {
         }
       }
 
+      // ✅ Phase2: choose client based on stored llmKeySource (NO NEW CONSUMPTION)
+      const ks = phase2KeySource ?? "platform_grace";
+
+      let openai: OpenAI;
+      let keySource: KeySource;
+
+      if (ks === "tenant") {
+        const tenantClient = await getTenantOpenAiClientIfPresent(tenant.id);
+        if (!tenantClient) {
+          const e: any = new Error("MISSING_OPENAI_KEY");
+          e.code = "MISSING_OPENAI_KEY";
+          throw e;
+        }
+        openai = tenantClient;
+        keySource = "tenant";
+      } else {
+        openai = getPlatformOpenAiClient();
+        keySource = "platform_grace";
+      }
+
+      const aiEnvelope = {
+        liveQaEnabled: resolved.tenant.liveQaEnabled,
+        liveQaMaxQuestions: resolved.tenant.liveQaMaxQuestions,
+        tenantRenderEnabled: resolved.tenant.tenantRenderEnabled,
+        renderOptIn: undefined as boolean | undefined,
+        tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
+        tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
+        industryKey: industryKeyForQuote,
+        industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
+        llmKeySource: keySource,
+      };
+
       const renderOptIn = Boolean(inputAny?.render_opt_in);
       aiEnvelope.renderOptIn = renderOptIn;
 
@@ -922,7 +915,7 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
-        llmKeySource: (phase2KeySource ?? keySource) as KeySource,
+        llmKeySource: keySource,
       });
 
       const systemEstimate = resolved.prompts.quoteEstimatorSystem;
@@ -1022,21 +1015,41 @@ export async function POST(req: Request) {
       );
     }
 
+    // Decide render opt-in (server authoritative)
     const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
-    aiEnvelope.renderOptIn = renderOptIn;
 
-    // Store input (✅ includes immutable industry snapshot + key source for phase2)
+    /**
+     * ✅ Phase1 key selection WITHOUT consuming:
+     * - if tenant key exists => tenant
+     * - else => platform_grace (but consume AFTER quote_log insert)
+     */
+    const tenantClient = await getTenantOpenAiClientIfPresent(tenant.id);
+    const keySource: KeySource = tenantClient ? "tenant" : "platform_grace";
+
+    // ✅ always return server-authoritative ai flags to client
+    const aiEnvelope = {
+      liveQaEnabled: resolved.tenant.liveQaEnabled,
+      liveQaMaxQuestions: resolved.tenant.liveQaMaxQuestions,
+      tenantRenderEnabled: resolved.tenant.tenantRenderEnabled,
+      renderOptIn: renderOptIn as boolean | undefined,
+      tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
+      tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
+      industryKey: industryKeyForQuote,
+      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
+      llmKeySource: keySource,
+    };
+
+    // Store input (includes immutable industry snapshot + key source for phase2)
     const inputToStore = {
       tenantSlug,
       images,
       render_opt_in: renderOptIn,
       customer,
 
-      // ✅ immutable industry snapshot
       industryKeySnapshot: industryKeyForQuote,
       industrySource: "tenant_settings" as const,
 
-      // ✅ critical for phase2 finalize in trial mode
+      // critical for phase2 finalize in trial mode
       llmKeySource: keySource,
 
       customer_context: { category, service_type, notes },
@@ -1053,6 +1066,7 @@ export async function POST(req: Request) {
       llmKeySource: keySource,
     });
 
+    // Insert quote log FIRST (so we never burn credits on failures before persistence)
     const inserted = await db
       .insert(quoteLogs)
       .values({
@@ -1070,6 +1084,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
     }
 
+    // NOW consume grace if needed (and roll back the quote_log row if exhausted)
+    let openai: OpenAI;
+    if (keySource === "tenant") {
+      openai = tenantClient!;
+    } else {
+      try {
+        // will throw TRIAL_EXHAUSTED if no credits remain
+        await consumeGraceCreditOrThrow(tenant.id);
+        openai = getPlatformOpenAiClient();
+      } catch (e: any) {
+        // remove the quote log to avoid counting against monthly limits / clutter
+        try {
+          await db.delete(quoteLogs).where(eq(quoteLogs.id, quoteLogId as any));
+        } catch {
+          // ignore cleanup failure
+        }
+        throw e;
+      }
+    }
+
+    // Live Q&A path
     if (resolved.tenant.liveQaEnabled && resolved.tenant.liveQaMaxQuestions > 0) {
       const questions = await generateQaQuestions({
         openai,
@@ -1107,6 +1142,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope });
     }
 
+    // Otherwise estimate immediately
     const output = await generateEstimate({
       openai,
       model: resolved.models.estimatorModel,
@@ -1135,6 +1171,7 @@ export async function POST(req: Request) {
       where id = ${quoteLogId}::uuid
     `);
 
+    // Estimate emails
     try {
       const emailResult = await sendFinalEstimateEmails({
         req,
@@ -1180,6 +1217,7 @@ export async function POST(req: Request) {
           ok: false,
           error: "TRIAL_EXHAUSTED",
           message: "Trial credits exhausted. Add your OpenAI key in Settings (AI Setup) or upgrade your plan.",
+          meta: e?.meta ?? undefined,
         },
         { status: 402 }
       );
