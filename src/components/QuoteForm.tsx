@@ -33,8 +33,15 @@ function defaultShotTypeForIndex(idx: number): ShotType {
 type ServerAi = {
   liveQaEnabled?: boolean;
   liveQaMaxQuestions?: number;
+
   tenantRenderEnabled?: boolean;
+
+  // server may echo back final opt-in state
   renderOptIn?: boolean;
+
+  // ✅ NEW: server policy for whether opt-in is required
+  renderOptInRequired?: boolean;
+
   tenantStyleKey?: string;
   tenantRenderNotes?: string;
 };
@@ -42,11 +49,23 @@ type ServerAi = {
 function extractServerAi(json: any): ServerAi | null {
   const ai = json?.ai;
   if (!ai || typeof ai !== "object") return null;
+
   return {
     liveQaEnabled: typeof ai.liveQaEnabled === "boolean" ? ai.liveQaEnabled : undefined,
     liveQaMaxQuestions: typeof ai.liveQaMaxQuestions === "number" ? ai.liveQaMaxQuestions : undefined,
+
     tenantRenderEnabled: typeof ai.tenantRenderEnabled === "boolean" ? ai.tenantRenderEnabled : undefined,
+
     renderOptIn: typeof ai.renderOptIn === "boolean" ? ai.renderOptIn : undefined,
+
+    // Accept either camelCase or snake_case coming back from API
+    renderOptInRequired:
+      typeof ai.renderOptInRequired === "boolean"
+        ? ai.renderOptInRequired
+        : typeof ai.render_opt_in_required === "boolean"
+        ? ai.render_opt_in_required
+        : undefined,
+
     tenantStyleKey: typeof ai.tenantStyleKey === "string" ? ai.tenantStyleKey : undefined,
     tenantRenderNotes: typeof ai.tenantRenderNotes === "string" ? ai.tenantRenderNotes : undefined,
   };
@@ -55,9 +74,11 @@ function extractServerAi(json: any): ServerAi | null {
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false, // legacy/initial hint (server becomes authoritative after submit)
+  aiRenderingOptInRequired = false, // ✅ initial hint (server becomes authoritative after submit)
 }: {
   tenantSlug: string;
   aiRenderingEnabled?: boolean;
+  aiRenderingOptInRequired?: boolean;
 }) {
   const MIN_PHOTOS = 1;
   const MAX_PHOTOS = 12;
@@ -131,7 +152,7 @@ export default function QuoteForm({
   const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
 
   /**
-   * ✅ Effective rendering flag:
+   * ✅ Effective rendering enabled:
    * - before first response: use prop
    * - after first response: serverAi.tenantRenderEnabled is authoritative
    */
@@ -139,6 +160,16 @@ export default function QuoteForm({
     if (serverAi && typeof serverAi.tenantRenderEnabled === "boolean") return serverAi.tenantRenderEnabled;
     return aiRenderingEnabled;
   }, [serverAi, aiRenderingEnabled]);
+
+  /**
+   * ✅ Effective opt-in required:
+   * - before first response: use prop hint
+   * - after first response: serverAi.renderOptInRequired is authoritative
+   */
+  const effectiveRenderOptInRequired = useMemo(() => {
+    if (serverAi && typeof serverAi.renderOptInRequired === "boolean") return serverAi.renderOptInRequired;
+    return aiRenderingOptInRequired;
+  }, [serverAi, aiRenderingOptInRequired]);
 
   const showRendering = useMemo(
     () => effectiveAiRenderingEnabled && renderOptIn,
@@ -714,6 +745,7 @@ export default function QuoteForm({
             disabledReason={disabledReason}
             canSubmit={canSubmit}
             aiRenderingEnabled={effectiveAiRenderingEnabled}
+            renderOptInRequired={effectiveRenderOptInRequired}
             renderOptIn={renderOptIn}
             onCustomerName={setCustomerName}
             onEmail={setEmail}
