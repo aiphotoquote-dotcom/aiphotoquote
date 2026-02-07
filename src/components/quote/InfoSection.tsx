@@ -23,6 +23,7 @@ export function InfoSection({
   onStartOver,
 
   // NEW
+  renderOptInRequired = false,
   collapsed = false,
 }: {
   sectionRef: React.RefObject<HTMLElement | null>;
@@ -48,21 +49,21 @@ export function InfoSection({
   onSubmitEstimate: () => Promise<void>;
   onStartOver: () => void;
 
-  // ✅ when true, show a compact “info received” card with an Edit toggle
+  // ✅ When true, show a compact “info received” card with an Edit toggle
   collapsed?: boolean;
+
+  // ✅ When true and aiRenderingEnabled, customer MUST opt-in to proceed
+  renderOptInRequired?: boolean;
 }) {
   // Local expand/collapse so QA can keep it compact, but user can still edit.
   const [expanded, setExpanded] = useState(!collapsed);
 
   useEffect(() => {
-    // If parent says "not collapsed", ensure expanded.
     if (!collapsed) setExpanded(true);
-    // If parent says "collapsed", default to compact view (but user can expand).
     if (collapsed) setExpanded(false);
   }, [collapsed]);
 
   // iOS Safari zoom guard:
-  // Inline fontSize >= 16 prevents zoom even if classes get overridden.
   const inputCls =
     "mt-2 w-full rounded-xl border border-gray-200 bg-white p-3 text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100";
   const labelCls = "text-xs text-gray-700 dark:text-gray-200";
@@ -76,7 +77,19 @@ export function InfoSection({
     return parts.length ? parts.join(" • ") : "Info not completed yet.";
   }, [customerName, email, phone]);
 
-  // Compact card (used during QA / after estimate) — keeps page from feeling “too tall”.
+  const renderGateEnabled = Boolean(aiRenderingEnabled) && Boolean(renderOptInRequired);
+  const renderGateMissing = renderGateEnabled && !renderOptIn;
+
+  // Final submit gate lives here so we can enforce “required opt-in” without hunting other files yet.
+  const effectiveCanSubmit = Boolean(canSubmit) && !renderGateMissing;
+
+  const effectiveDisabledReason = useMemo(() => {
+    if (working) return null;
+    if (renderGateMissing) return "Please check the AI rendering consent box to continue.";
+    return disabledReason;
+  }, [working, renderGateMissing, disabledReason]);
+
+  // Compact card (used during QA / after estimate)
   if (collapsed && !expanded) {
     return (
       <section
@@ -207,7 +220,12 @@ export function InfoSection({
       </label>
 
       {aiRenderingEnabled ? (
-        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div
+          className={[
+            "rounded-xl border p-4",
+            renderGateMissing ? "border-red-200 bg-red-50 dark:border-red-900/40 dark:bg-red-950/30" : "border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-950",
+          ].join(" ")}
+        >
           <div className="flex items-start gap-3">
             <input
               id="renderOptIn"
@@ -219,11 +237,26 @@ export function InfoSection({
             />
             <label htmlFor="renderOptIn" className="cursor-pointer">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                Optional: AI rendering preview
+                {renderOptInRequired ? (
+                  <>
+                    AI rendering consent <span className="text-red-600">*</span>
+                  </>
+                ) : (
+                  "Optional: AI rendering preview"
+                )}
               </div>
+
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                If selected, we’ll generate a visual “after” concept as a second step after your estimate.
+                {renderOptInRequired
+                  ? "This business requires consent to generate a visual “after” concept as part of the quote flow."
+                  : "If selected, we’ll generate a visual “after” concept as a second step after your estimate."}
               </div>
+
+              {renderGateMissing ? (
+                <div className="mt-2 text-xs font-semibold text-red-700 dark:text-red-300">
+                  Please check this box to continue.
+                </div>
+              ) : null}
             </label>
           </div>
         </div>
@@ -236,30 +269,22 @@ export function InfoSection({
             type="button"
             className="w-full rounded-xl bg-black text-white py-3.5 font-semibold disabled:opacity-50 dark:bg-white dark:text-black"
             onClick={() => onSubmitEstimate()}
-            disabled={!canSubmit}
+            disabled={!effectiveCanSubmit}
             aria-busy={working}
           >
             Get Estimate
           </button>
 
-          <div
-            aria-live="polite"
-            className={[
-              "text-xs text-gray-600 dark:text-gray-300",
-              "min-h-[2.5rem]",
-            ].join(" ")}
-          >
-            {disabledReason ? (
-              <span className="block leading-relaxed text-gray-500 dark:text-gray-400">{disabledReason}</span>
+          <div aria-live="polite" className={["text-xs text-gray-600 dark:text-gray-300", "min-h-[2.5rem]"].join(" ")}>
+            {effectiveDisabledReason ? (
+              <span className="block leading-relaxed text-gray-500 dark:text-gray-400">{effectiveDisabledReason}</span>
             ) : (
               <span className="block">&nbsp;</span>
             )}
           </div>
         </>
       ) : (
-        <div className="text-xs text-gray-600 dark:text-gray-300">
-          Info received. Continue below.
-        </div>
+        <div className="text-xs text-gray-600 dark:text-gray-300">Info received. Continue below.</div>
       )}
 
       <button
