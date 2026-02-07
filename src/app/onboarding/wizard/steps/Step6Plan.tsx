@@ -40,7 +40,12 @@ function tierUsage(t: PlanTier) {
 
 function tierDetails(t: PlanTier) {
   if (t === "tier0") {
-    return ["5 quotes / month", "Uses platform AI keys", "Single user (owner)", "Upgrade anytime"];
+    return [
+      "5 quotes / month",
+      "Uses platform AI keys",
+      "Multiple users",
+      "Upgrade anytime",
+    ];
   }
   if (t === "tier1") {
     return [
@@ -62,41 +67,30 @@ function tierAccent(t: PlanTier) {
   // Tailwind-safe static classes
   if (t === "tier0") {
     return {
-      ring: "ring-slate-200 dark:ring-slate-800",
       glow: "shadow-[0_0_0_1px_rgba(15,23,42,0.12),0_10px_30px_rgba(15,23,42,0.12)] dark:shadow-[0_0_0_1px_rgba(148,163,184,0.12),0_12px_36px_rgba(0,0,0,0.45)]",
       borderGrad: "from-slate-200 via-slate-100 to-slate-200 dark:from-slate-800 dark:via-slate-900 dark:to-slate-800",
       badge: "bg-slate-100 text-slate-700 dark:bg-slate-900 dark:text-slate-200",
-      cta: "bg-slate-900 text-white hover:bg-black dark:bg-white dark:text-black dark:hover:bg-slate-100",
       check: "text-emerald-600 dark:text-emerald-400",
       price: "text-slate-900 dark:text-white",
-      sub: "text-slate-600 dark:text-slate-300",
     };
   }
   if (t === "tier1") {
     return {
-      ring: "ring-emerald-200 dark:ring-emerald-900/60",
       glow:
         "shadow-[0_0_0_1px_rgba(16,185,129,0.18),0_18px_60px_rgba(16,185,129,0.15)] dark:shadow-[0_0_0_1px_rgba(16,185,129,0.28),0_22px_70px_rgba(0,0,0,0.55)]",
       borderGrad: "from-emerald-200 via-cyan-200 to-indigo-200 dark:from-emerald-700/40 dark:via-cyan-700/30 dark:to-indigo-700/30",
       badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200",
-      cta:
-        "bg-gradient-to-r from-emerald-600 via-cyan-600 to-indigo-600 text-white hover:opacity-95",
       check: "text-emerald-600 dark:text-emerald-400",
       price: "text-slate-900 dark:text-white",
-      sub: "text-slate-600 dark:text-slate-300",
     };
   }
   return {
-    ring: "ring-indigo-200 dark:ring-indigo-900/60",
     glow:
       "shadow-[0_0_0_1px_rgba(99,102,241,0.18),0_18px_60px_rgba(99,102,241,0.14)] dark:shadow-[0_0_0_1px_rgba(99,102,241,0.24),0_22px_70px_rgba(0,0,0,0.55)]",
     borderGrad: "from-indigo-200 via-fuchsia-200 to-amber-200 dark:from-indigo-700/35 dark:via-fuchsia-700/25 dark:to-amber-700/20",
     badge: "bg-indigo-100 text-indigo-800 dark:bg-indigo-950/45 dark:text-indigo-200",
-    cta:
-      "bg-gradient-to-r from-indigo-600 via-fuchsia-600 to-amber-500 text-white hover:opacity-95",
     check: "text-emerald-600 dark:text-emerald-400",
     price: "text-slate-900 dark:text-white",
-    sub: "text-slate-600 dark:text-slate-300",
   };
 }
 
@@ -113,7 +107,6 @@ function CheckIcon({ className }: { className?: string }) {
 }
 
 function UsageMeter({ filled, total, accent }: { filled: number; total: number; accent: PlanTier }) {
-  const a = tierAccent(accent);
   const cells = Array.from({ length: total });
   return (
     <div className="mt-5">
@@ -144,18 +137,13 @@ function UsageMeter({ filled, total, accent }: { filled: number; total: number; 
           );
         })}
       </div>
-      <div className="sr-only">{a.sub}</div>
     </div>
   );
 }
 
 function SparkleBg() {
-  // lightweight “premium” texture via gradients (no images)
   return (
-    <div
-      aria-hidden="true"
-      className="pointer-events-none absolute inset-0 overflow-hidden rounded-[28px]"
-    >
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden rounded-[28px]">
       <div className="absolute -top-20 -left-16 h-56 w-56 rounded-full bg-gradient-to-br from-white/50 to-white/0 blur-2xl dark:from-white/10 dark:to-white/0" />
       <div className="absolute -bottom-24 -right-20 h-64 w-64 rounded-full bg-gradient-to-tr from-indigo-400/20 to-transparent blur-3xl dark:from-indigo-500/20" />
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.25),transparent_40%),radial-gradient(circle_at_70%_30%,rgba(99,102,241,0.10),transparent_45%),radial-gradient(circle_at_50%_90%,rgba(16,185,129,0.10),transparent_40%)] dark:bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.08),transparent_40%),radial-gradient(circle_at_70%_30%,rgba(99,102,241,0.18),transparent_45%),radial-gradient(circle_at_50%_90%,rgba(16,185,129,0.14),transparent_40%)]" />
@@ -222,7 +210,6 @@ export function Step6Plan(props: {
 
   return (
     <div>
-      {/* Header */}
       <div className="text-center">
         <div className="text-[11px] font-semibold tracking-[0.28em] text-slate-500 dark:text-slate-400">
           STEP 6 OF 6
@@ -277,7 +264,6 @@ export function Step6Plan(props: {
         </div>
       ) : (
         <>
-          {/* Cards */}
           <div className="mt-6 grid gap-4 lg:grid-cols-3">
             {cards.map((t) => {
               const active = selected === t;
@@ -297,7 +283,6 @@ export function Step6Plan(props: {
                     active ? a.glow : "shadow-sm dark:shadow-none",
                   ].join(" ")}
                 >
-                  {/* Gradient border */}
                   <div
                     className={[
                       "absolute inset-0 rounded-[28px]",
@@ -308,89 +293,81 @@ export function Step6Plan(props: {
                     aria-hidden="true"
                   />
 
-                  {/* Inner */}
                   <div
                     className={[
                       "relative rounded-[27px] border",
                       "bg-white/90 dark:bg-slate-950/70 backdrop-blur",
-                      active
-                        ? "border-white/40 dark:border-white/10"
-                        : "border-slate-200 dark:border-slate-800",
+                      active ? "border-white/40 dark:border-white/10" : "border-slate-200 dark:border-slate-800",
                       "px-5 py-5",
                     ].join(" ")}
                   >
-                    {/* Premium texture on selected */}
                     {active ? <SparkleBg /> : null}
 
-                    {/* Top row */}
-                    <div className="relative flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <div className="text-lg font-semibold text-slate-900 dark:text-white">
-                            {tierLabel(t)}
+                    {/* Top: force non-overlapping layout */}
+                    <div className="relative">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <div className="text-lg font-semibold text-slate-900 dark:text-white">
+                              {tierLabel(t)}
+                            </div>
+                            {popular ? (
+                              <span
+                                className={[
+                                  "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+                                  a.badge,
+                                ].join(" ")}
+                              >
+                                MOST POPULAR
+                              </span>
+                            ) : null}
                           </div>
-                          {popular ? (
-                            <span
-                              className={[
-                                "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold",
-                                a.badge,
-                              ].join(" ")}
-                            >
-                              MOST POPULAR
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                          {tierSubtitle(t)}
-                        </div>
-                      </div>
 
-                      <div className="shrink-0 text-right">
-                        <div className="flex items-baseline justify-end gap-1">
-                          <div className={["text-3xl font-semibold", a.price].join(" ")}>
-                            {price.dollars === 0 ? "Free" : `$${price.dollars}`}
-                          </div>
-                          <div className="text-sm text-slate-500 dark:text-slate-400">
-                            {price.dollars === 0 ? "" : "/ mo"}
+                          <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                            {tierSubtitle(t)}
                           </div>
                         </div>
-                        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{price.note}</div>
+
+                        {/* Price: stacked + no wrap collisions */}
+                        <div className="shrink-0 text-right">
+                          <div className="flex items-baseline justify-end gap-1 whitespace-nowrap">
+                            <div className={["text-3xl font-semibold leading-none", a.price].join(" ")}>
+                              {price.dollars === 0 ? "Free" : `$${price.dollars}`}
+                            </div>
+                            <div className="text-sm text-slate-500 dark:text-slate-400">
+                              {price.dollars === 0 ? "" : "/ mo"}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{price.note}</div>
+                        </div>
                       </div>
                     </div>
 
-                    {/* Divider */}
                     <div className="relative mt-5 h-px w-full bg-slate-200/70 dark:bg-slate-800/70" />
 
-                    {/* Features */}
                     <ul className="relative mt-5 space-y-3 text-sm">
                       {tierDetails(t).map((d) => (
                         <li key={d} className="flex items-start gap-2">
-                          <CheckIcon className={["mt-0.5 h-4 w-4", a.check].join(" ")} />
+                          <CheckIcon className={["mt-0.5 h-4 w-4 shrink-0", a.check].join(" ")} />
                           <span className="text-slate-800 dark:text-slate-200">{d}</span>
                         </li>
                       ))}
                     </ul>
 
-                    {/* Usage meter */}
                     <div className="relative">
                       <UsageMeter filled={usage.filled} total={usage.total} accent={t} />
                     </div>
 
-                    {/* Footer row */}
                     <div className="relative mt-5 flex items-center justify-between">
                       <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">{t}</div>
 
-                      <div className="flex items-center gap-2">
-                        {active ? (
-                          <span className="inline-flex items-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white dark:bg-white dark:text-black">
-                            Selected
-                          </span>
-                        ) : (
-                          <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
-                            Select
-                          </span>
-                        )}
-                      </div>
+                      {active ? (
+                        <span className="inline-flex items-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white dark:bg-white dark:text-black">
+                          Selected
+                        </span>
+                      ) : (
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">Select</span>
+                      )}
                     </div>
                   </div>
                 </button>
@@ -398,23 +375,18 @@ export function Step6Plan(props: {
             })}
           </div>
 
-          {/* Bottom value props */}
+          {/* Bottom value props (removed “No customer pricing shown”) */}
           <div className="mt-6 grid gap-2 text-sm text-slate-600 dark:text-slate-300">
             <div className="flex items-center gap-2">
-              <CheckIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              <CheckIcon className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
               Change plans anytime
             </div>
             <div className="flex items-center gap-2">
-              <CheckIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-              No customer pricing shown
-            </div>
-            <div className="flex items-center gap-2">
-              <CheckIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              <CheckIcon className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
               Manual review always possible
             </div>
           </div>
 
-          {/* Actions */}
           <div className="mt-6 grid grid-cols-2 gap-3">
             <button
               type="button"
