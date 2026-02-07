@@ -4,142 +4,239 @@ import { z } from "zod";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants } from "@/lib/db/schema";
 import { requirePlatformRole } from "@/lib/rbac/guards";
+import {
+  tenants,
+  quoteLogs,
+  tenantMembers,
+  tenantSettings,
+  tenantSubIndustries,
+  tenantEmailIdentities,
+  tenantPricingRules,
+  tenantSecrets,
+} from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const Body = z.object({
-  confirm: z.string().min(3),
+const Params = z.object({
+  tenantId: z.string().uuid(),
+});
+
+const DeleteBody = z.object({
+  confirm: z.string().min(1),
 });
 
 function rows(r: any): any[] {
   return (r as any)?.rows ?? (Array.isArray(r) ? r : []);
 }
 
-async function countWhere(table: string, tenantId: string, column: string = "tenant_id"): Promise<number> {
-  // table/column are controlled constants below (not user input)
-  const q = sql.raw(`SELECT count(*)::int AS c FROM ${table} WHERE ${column} = $1::uuid`);
-  const r = await db.execute(sql`${q}`.bind(sql, tenantId as any) as any).catch(() => null);
-  const rr = r ? rows(r) : [];
-  const c = rr?.[0]?.c;
-  return typeof c === "number" ? c : Number(c ?? 0);
+async function countByTenantId(table: "quote_logs" | "tenant_members" | "tenant_settings" | "tenant_sub_industries" | "tenant_email_identities" | "tenant_pricing_rules" | "tenant_secrets", tenantId: string) {
+  // NOTE: table names are controlled constants here (not user input)
+  // We still avoid sql.raw + bind tricks; use direct SQL per table.
+  switch (table) {
+    case "quote_logs": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from quote_logs where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    case "tenant_members": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from tenant_members where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    case "tenant_settings": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from tenant_settings where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    case "tenant_sub_industries": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from tenant_sub_industries where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    case "tenant_email_identities": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from tenant_email_identities where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    case "tenant_pricing_rules": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from tenant_pricing_rules where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    case "tenant_secrets": {
+      const r = await db.execute(
+        sql`select count(*)::int as c from tenant_secrets where tenant_id = ${tenantId}::uuid`
+      );
+      return Number(rows(r)?.[0]?.c ?? 0);
+    }
+    default:
+      return 0;
+  }
 }
 
-async function tenantExists(tenantId: string) {
-  const r = await db
-    .select({ id: tenants.id, name: tenants.name, slug: tenants.slug })
+async function loadTenant(tenantId: string) {
+  const t = await db
+    .select({ id: tenants.id, name: tenants.name, slug: tenants.slug, createdAt: tenants.createdAt })
     .from(tenants)
     .where(sql`${tenants.id} = ${tenantId}::uuid`)
     .limit(1)
-    .then((x) => x?.[0] ?? null);
+    .then((r) => r[0] ?? null);
 
-  return r;
+  return t;
 }
 
-export async function GET(_: Request, ctx: { params: Promise<{ tenantId: string }> | { tenantId: string } }) {
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+function buildConfirmStrings(t: { id: string; slug: string }) {
+  const id8 = String(t.id).slice(0, 8);
+  return {
+    confirmA: `DELETE ${t.slug}`,
+    confirmB: `DELETE ${id8}`,
+  };
+}
 
-  const p = await ctx.params;
-  const tenantId = String((p as any)?.tenantId ?? "").trim();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
+/**
+ * GET: Preview tenant + counts (safe for platform_support too)
+ */
+export async function GET(_req: Request, ctx: { params: Promise<{ tenantId: string }> | { tenantId: string } }) {
+  try {
+    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-  const t = await tenantExists(tenantId);
-  if (!t) return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
-
-  // Preview counts (tables we know about from your schema + expected core tables)
-  // NOTE: Some tables may not exist in all envs; we harden by treating failures as 0.
-  const counts: Array<{ key: string; label: string; table: string; col?: string }> = [
-    { key: "tenant_members", label: "Tenant members", table: "tenant_members" },
-    { key: "tenant_settings", label: "Tenant settings", table: "tenant_settings" },
-    { key: "tenant_secrets", label: "Tenant secrets", table: "tenant_secrets" },
-    { key: "tenant_pricing_rules", label: "Pricing rules", table: "tenant_pricing_rules" },
-    { key: "tenant_sub_industries", label: "Sub-industries", table: "tenant_sub_industries" },
-    { key: "tenant_email_identities", label: "Email identities", table: "tenant_email_identities" },
-
-    // PCC schema tables (no FK in drizzle definitions)
-    { key: "tenant_plans", label: "Tenant plan", table: "tenant_plans" },
-    { key: "tenant_usage_monthly", label: "Tenant usage (monthly)", table: "tenant_usage_monthly" },
-
-    // Audit events (nullable tenant_id)
-    { key: "audit_events", label: "Audit events", table: "audit_events" },
-
-    // Core lead data (exists in your app; we delete explicitly even if FK is cascade)
-    { key: "quote_logs", label: "Quote logs (leads)", table: "quote_logs" },
-  ];
-
-  const out = [];
-  const notes: string[] = [
-    "This operation deletes DB records. External objects (e.g. uploaded images in Blob) are not automatically purged unless you add a storage cleanup step.",
-  ];
-
-  for (const c of counts) {
-    try {
-      const col = c.col ?? "tenant_id";
-      const n = await countWhere(c.table, tenantId, col);
-      out.push({ key: c.key, label: c.label, count: n });
-    } catch {
-      out.push({ key: c.key, label: c.label, count: 0 });
+    const p = await ctx.params;
+    const parsed = Params.safeParse(p);
+    if (!parsed.success) {
+      return NextResponse.json({ ok: false, error: "BAD_TENANT_ID" }, { status: 400 });
     }
-  }
 
-  return NextResponse.json({
-    ok: true,
-    tenant: { id: String(t.id), name: String(t.name), slug: String(t.slug ?? "") || null },
-    counts: out,
-    notes,
-  });
-}
+    const tenantId = parsed.data.tenantId;
 
-export async function POST(req: Request, ctx: { params: Promise<{ tenantId: string }> | { tenantId: string } }) {
-  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+    const t = await loadTenant(tenantId);
+    if (!t) {
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    }
 
-  const p = await ctx.params;
-  const tenantId = String((p as any)?.tenantId ?? "").trim();
-  if (!tenantId) return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
+    const [
+      quotesCount,
+      membersCount,
+      settingsCount,
+      subIndustriesCount,
+      identitiesCount,
+      pricingRulesCount,
+      secretsCount,
+    ] = await Promise.all([
+      countByTenantId("quote_logs", tenantId),
+      countByTenantId("tenant_members", tenantId),
+      countByTenantId("tenant_settings", tenantId),
+      countByTenantId("tenant_sub_industries", tenantId),
+      countByTenantId("tenant_email_identities", tenantId),
+      countByTenantId("tenant_pricing_rules", tenantId),
+      countByTenantId("tenant_secrets", tenantId),
+    ]);
 
-  const body = await req.json().catch(() => null);
-  const parsed = Body.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ ok: false, error: "INVALID_BODY", issues: parsed.error.issues }, { status: 400 });
-  }
+    const confirm = buildConfirmStrings({ id: String(t.id), slug: String(t.slug) });
 
-  const t = await tenantExists(tenantId);
-  if (!t) return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
-
-  const slug = String(t.slug ?? "");
-  const required = `DELETE ${slug}`;
-  if (parsed.data.confirm.trim() !== required) {
     return NextResponse.json(
-      { ok: false, error: "CONFIRM_MISMATCH", message: `Confirmation must match exactly: "${required}"` },
-      { status: 400 }
+      {
+        ok: true,
+        tenant: {
+          id: String(t.id),
+          name: String(t.name),
+          slug: String(t.slug),
+          createdAt: t.createdAt ?? null,
+        },
+        counts: {
+          quoteLogs: quotesCount,
+          tenantMembers: membersCount,
+          tenantSettings: settingsCount,
+          tenantSubIndustries: subIndustriesCount,
+          tenantEmailIdentities: identitiesCount,
+          tenantPricingRules: pricingRulesCount,
+          tenantSecrets: secretsCount,
+        },
+        confirm,
+      },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
     );
   }
+}
 
-  // ✅ Transactional delete: remove non-cascade / non-FK tables first, then tenant
-  await db.transaction(async (tx) => {
-    // PCC/no-FK tables
-    await tx.execute(sql`DELETE FROM tenant_usage_monthly WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
-    await tx.execute(sql`DELETE FROM tenant_plans WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
+/**
+ * POST: Delete tenant (platform_owner/admin only), requires typed confirmation.
+ * Transactional + child->parent delete order.
+ */
+export async function POST(req: Request, ctx: { params: Promise<{ tenantId: string }> | { tenantId: string } }) {
+  try {
+    await requirePlatformRole(["platform_owner", "platform_admin"]);
 
-    // Audit
-    await tx.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
+    const p = await ctx.params;
+    const parsed = Params.safeParse(p);
+    if (!parsed.success) {
+      return NextResponse.json({ ok: false, error: "BAD_TENANT_ID" }, { status: 400 });
+    }
+    const tenantId = parsed.data.tenantId;
 
-    // Core lead table
-    await tx.execute(sql`DELETE FROM quote_logs WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
+    const bodyJson = await req.json().catch(() => null);
+    const b = DeleteBody.safeParse(bodyJson);
+    if (!b.success) {
+      return NextResponse.json({ ok: false, error: "BAD_BODY", issues: b.error.issues }, { status: 400 });
+    }
 
-    // App tenant tables (some may already cascade, but we do explicit deletes safely)
-    await tx.execute(sql`DELETE FROM tenant_email_identities WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
-    await tx.execute(sql`DELETE FROM tenant_sub_industries WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
-    await tx.execute(sql`DELETE FROM tenant_pricing_rules WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
-    await tx.execute(sql`DELETE FROM tenant_secrets WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
-    await tx.execute(sql`DELETE FROM tenant_settings WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
-    await tx.execute(sql`DELETE FROM tenant_members WHERE tenant_id = ${tenantId}::uuid`).catch(() => null);
+    const t = await loadTenant(tenantId);
+    if (!t) {
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+    }
 
-    // Finally, tenant row
-    await tx.execute(sql`DELETE FROM tenants WHERE id = ${tenantId}::uuid`);
-  });
+    const { confirmA, confirmB } = buildConfirmStrings({ id: String(t.id), slug: String(t.slug) });
+    const typed = String(b.data.confirm ?? "").trim();
 
-  return NextResponse.json({ ok: true });
+    if (typed !== confirmA && typed !== confirmB) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "CONFIRMATION_MISMATCH",
+          message: `Type exactly "${confirmA}" (or "${confirmB}") to confirm.`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Transactional delete — safe even if DB lacks ON DELETE CASCADE on some FKs.
+    await db.transaction(async (tx: any) => {
+      await tx.delete(quoteLogs).where(sql`${quoteLogs.tenantId} = ${tenantId}::uuid`);
+      await tx.delete(tenantSecrets).where(sql`${tenantSecrets.tenantId} = ${tenantId}::uuid`);
+      await tx.delete(tenantEmailIdentities).where(sql`${tenantEmailIdentities.tenantId} = ${tenantId}::uuid`);
+      await tx.delete(tenantPricingRules).where(sql`${tenantPricingRules.tenantId} = ${tenantId}::uuid`);
+      await tx.delete(tenantSubIndustries).where(sql`${tenantSubIndustries.tenantId} = ${tenantId}::uuid`);
+      await tx.delete(tenantSettings).where(sql`${tenantSettings.tenantId} = ${tenantId}::uuid`);
+      await tx.delete(tenantMembers).where(sql`${tenantMembers.tenantId} = ${tenantId}::uuid`);
+
+      // Finally delete tenant
+      await tx.delete(tenants).where(sql`${tenants.id} = ${tenantId}::uuid`);
+    });
+
+    return NextResponse.json(
+      {
+        ok: true,
+        deletedTenantId: tenantId,
+        deletedTenantSlug: String(t.slug),
+      },
+      { status: 200 }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: "INTERNAL", message: e?.message ?? String(e) },
+      { status: 500 }
+    );
+  }
 }
