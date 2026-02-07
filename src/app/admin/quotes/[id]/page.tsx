@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
@@ -16,13 +16,37 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+// Drizzle RowList can be array-like; avoid `.rows`
+function firstRow(r: any): any | null {
+  try {
+    if (!r) return null;
+    if (Array.isArray(r)) return r[0] ?? null;
+    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
+  // include common variants (switchers often use prefixed cookies)
   const candidates = [
     jar.get("activeTenantId")?.value,
     jar.get("active_tenant_id")?.value,
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
+
+    jar.get("apq_activeTenantId")?.value,
+    jar.get("apq_active_tenant_id")?.value,
+    jar.get("apqTenantId")?.value,
+    jar.get("apq_tenant_id")?.value,
+
+    jar.get("__Host-activeTenantId")?.value,
+    jar.get("__Host-active_tenant_id")?.value,
+    jar.get("__Host-tenantId")?.value,
+    jar.get("__Host-tenant_id")?.value,
   ].filter(Boolean) as string[];
+
   return candidates[0] || null;
 }
 
@@ -52,20 +76,9 @@ function pickLead(input: any) {
     {};
 
   const name =
-    c?.name ??
-    c?.fullName ??
-    c?.customerName ??
-    input?.name ??
-    input?.customer_context?.name ??
-    "New customer";
+    c?.name ?? c?.fullName ?? c?.customerName ?? input?.name ?? input?.customer_context?.name ?? "New customer";
 
-  const phone =
-    c?.phone ??
-    c?.phoneNumber ??
-    input?.phone ??
-    input?.customer_context?.phone ??
-    null;
-
+  const phone = c?.phone ?? c?.phoneNumber ?? input?.phone ?? input?.customer_context?.phone ?? null;
   const email = c?.email ?? input?.email ?? input?.customer_context?.email ?? null;
 
   const phoneDigits = phone ? digitsOnly(String(phone)) : "";
@@ -163,12 +176,12 @@ function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" 
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-      : tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+          : tone === "blue"
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
   return <span className={cn(base, cls)}>{label}</span>;
 }
 
@@ -194,9 +207,7 @@ function formatUSD(n: number) {
 
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
-  searchParams?:
-    | Promise<Record<string, string | string[] | undefined>>
-    | Record<string, string | string[] | undefined>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
 };
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
@@ -214,7 +225,35 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // fallback tenant (owner)
+  // 1) If cookie tenant exists, ensure user is actually a member of it (prevents “wrong tenant fallback”)
+  if (tenantIdMaybe) {
+    const membership = await db.execute(sql`
+      select 1 as ok
+      from tenant_members
+      where tenant_id = ${tenantIdMaybe}::uuid
+        and clerk_user_id = ${userId}
+        and status = 'active'
+      limit 1
+    `);
+    const mrow = firstRow(membership);
+    if (!mrow?.ok) tenantIdMaybe = null;
+  }
+
+  // 2) If no valid tenant cookie, choose first active membership for this user
+  if (!tenantIdMaybe) {
+    const r = await db.execute(sql`
+      select tenant_id
+      from tenant_members
+      where clerk_user_id = ${userId}
+        and status = 'active'
+      order by created_at asc
+      limit 1
+    `);
+    const row = firstRow(r);
+    tenantIdMaybe = row?.tenant_id ? String(row.tenant_id) : null;
+  }
+
+  // 3) Absolute fallback: first tenant owned by user (legacy)
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -229,7 +268,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId = tenantIdMaybe;
 
-  // ✅ IMPORTANT: include output + renderImageUrl (latest results live in output)
   const row = await db
     .select({
       id: quoteLogs.id,
@@ -250,12 +288,37 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!row) redirect("/admin/quotes");
+  // ✅ Don’t silently bounce back — show a helpful “not found”
+  if (!row) {
+    return (
+      <div className="mx-auto max-w-3xl px-6 py-10">
+        <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
+          ← Back to quotes
+        </Link>
 
-  // Track UI-state for read/unread (because we update DB after fetch)
+        <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-6 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
+          <div className="text-base font-semibold">Quote not found for the active tenant</div>
+          <div className="mt-2">
+            This usually happens when the quote belongs to a different tenant than the one currently active in your cookie.
+          </div>
+          <div className="mt-3 font-mono text-xs opacity-80">
+            quoteId={id} · tenantId={tenantId}
+          </div>
+          <div className="mt-4">
+            <Link
+              href="/admin/quotes"
+              className="inline-flex rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+            >
+              Go back and switch tenant
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   let isRead = Boolean(row.isRead);
 
-  // Auto-mark read on open (unless user explicitly marked unread and we redirected back with skip flag)
   if (!skipAutoRead && !isRead) {
     await db
       .update(quoteLogs)
@@ -269,52 +332,31 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
-  const stageLabel =
-    stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+  const stageLabel = stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  // ✅ Latest AI output is stored in quote_logs.output
   const ai = (row.output ?? null) as any;
-
-  // Try a few common shapes (based on the payload you pasted)
   const aiAssessment = ai?.assessment ?? ai?.output?.assessment ?? ai?.output ?? ai ?? null;
-  const aiEstimate =
-    ai?.estimate ??
-    ai?.output?.estimate ??
-    aiAssessment?.estimate ??
-    null;
+  const aiEstimate = ai?.estimate ?? ai?.output?.estimate ?? aiAssessment?.estimate ?? null;
 
   const estLow = safeMoney(aiEstimate?.low ?? aiAssessment?.estimate?.low);
   const estHigh = safeMoney(aiEstimate?.high ?? aiAssessment?.estimate?.high);
 
-  const confidence =
-    aiAssessment?.confidence ?? ai?.output?.confidence ?? ai?.confidence ?? null;
+  const confidence = aiAssessment?.confidence ?? ai?.output?.confidence ?? ai?.confidence ?? null;
 
   const inspectionRequired =
     typeof aiAssessment?.inspection_required === "boolean"
       ? aiAssessment.inspection_required
       : typeof ai?.output?.inspection_required === "boolean"
-      ? ai.output.inspection_required
-      : typeof ai?.inspection_required === "boolean"
-      ? ai.inspection_required
-      : null;
+        ? ai.output.inspection_required
+        : typeof ai?.inspection_required === "boolean"
+          ? ai.inspection_required
+          : null;
 
-  const summary =
-    aiAssessment?.summary ??
-    ai?.output?.summary ??
-    ai?.summary ??
-    "";
+  const summary = aiAssessment?.summary ?? ai?.output?.summary ?? ai?.summary ?? "";
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions)
-    ? aiAssessment.questions.map((x: any) => String(x))
-    : [];
-
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
-    ? aiAssessment.assumptions.map((x: any) => String(x))
-    : [];
-
-  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
-    ? aiAssessment.visible_scope.map((x: any) => String(x))
-    : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
+  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope) ? aiAssessment.visible_scope.map((x: any) => String(x)) : [];
 
   async function setStage(formData: FormData) {
     "use server";
@@ -322,32 +364,19 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db
-      .update(quoteLogs)
-      .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
-
+    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
-
-    // prevent auto-read from flipping back immediately
+    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
-
+    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -365,10 +394,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           </p>
         </div>
 
-        {/* ✅ Presentable “circles” area (grouped status bar) */}
         <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-center gap-2">
-            {/* Primary status */}
             {isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
             {chip(`Stage: ${stageLabel}`, stageNorm === "new" ? "blue" : "gray")}
             {renderChip(row.renderStatus)}
@@ -431,7 +458,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             </div>
           </div>
 
-          {/* Stage control */}
           <div className="w-full lg:w-[340px]">
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
               <div className="text-sm font-semibold">Stage</div>
@@ -468,7 +494,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* ✅ Customer notes between contact + photos */}
+      {/* Customer notes */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div>
           <h3 className="text-lg font-semibold">Customer notes</h3>
@@ -476,27 +502,28 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
 
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? <div className="whitespace-pre-wrap leading-relaxed">{notes}</div> : <div className="italic text-gray-500">No notes provided.</div>}
+          {notes ? (
+            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
+          ) : (
+            <div className="italic text-gray-500">No notes provided.</div>
+          )}
         </div>
       </section>
 
-      {/* Customer submitted photos */}
+      {/* Photos */}
       <QuotePhotoGallery photos={photos} />
 
-      {/* ✅ Details: AI output first, then render below */}
+      {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Details</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              AI assessment first. If a render exists, it’s shown below.
-            </p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI assessment first. Render (if any) below.</p>
           </div>
           {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
         </div>
 
         <div className="mt-5 grid gap-4">
-          {/* AI Assessment (pretty, not raw JSON) */}
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm font-semibold">AI assessment</div>
@@ -557,7 +584,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               </div>
             </div>
 
-            {/* Optional raw AI JSON */}
             <details className="mt-4">
               <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
                 Raw AI JSON (debug)
@@ -568,7 +594,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             </details>
           </div>
 
-          {/* Render section */}
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm font-semibold">Rendering</div>
@@ -614,7 +639,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* Raw submission payload (admin-only debug) */}
       <details className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <summary className="cursor-pointer text-sm font-semibold">Raw submission payload</summary>
         <pre className="mt-4 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
