@@ -50,15 +50,12 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(), // back-compat
+      category: z.string().optional(),
     })
     .optional(),
 
   quoteLogId: z.string().uuid().optional(),
 
-  // accept BOTH:
-  // - [{question, answer}]
-  // - ["answer1", "answer2"]
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
 });
 
@@ -162,7 +159,6 @@ function startOfNextMonthUTC(d: Date) {
 type KeySource = "tenant" | "platform_grace";
 
 function platformOpenAiKey(): string | null {
-  // per your note: Vercel uses OPENAI_API_KEY
   const k = process.env.OPENAI_API_KEY?.trim() || "";
   return k ? k : null;
 }
@@ -221,14 +217,55 @@ async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: 
   }
 }
 
+async function logSqlSessionTruth(debug: DebugFn | undefined) {
+  try {
+    const s = await db.execute(sql`
+      select
+        current_schema() as current_schema,
+        current_user as current_user,
+        current_setting('search_path', true) as search_path,
+        to_regclass('tenant_settings') as to_regclass_tenant_settings,
+        to_regclass('public.tenant_settings') as to_regclass_public_tenant_settings
+    `);
+
+    const row = (s as any)?.rows?.[0] ?? null;
+    debug?.("resolveOpenAiClient.session", {
+      current_schema: row?.current_schema ?? null,
+      current_user: row?.current_user ?? null,
+      search_path: row?.search_path ?? null,
+      to_regclass_tenant_settings: row?.to_regclass_tenant_settings ?? null,
+      to_regclass_public_tenant_settings: row?.to_regclass_public_tenant_settings ?? null,
+    });
+
+    const rel = await db.execute(sql`
+      select
+        n.nspname as schema,
+        c.relname as relname,
+        c.relkind as relkind
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      where c.relname = 'tenant_settings'
+      order by n.nspname asc
+      limit 25
+    `);
+
+    const rows = ((rel as any)?.rows ?? []) as Array<any>;
+    debug?.("resolveOpenAiClient.relations", {
+      tenant_settings_relations: rows.map((r) => ({
+        schema: r?.schema ?? null,
+        relname: r?.relname ?? null,
+        relkind: r?.relkind ?? null,
+      })),
+    });
+  } catch (e: any) {
+    debug?.("resolveOpenAiClient.sessionProbeError", { message: e?.message ?? String(e) });
+  }
+}
+
 /**
  * Resolve OpenAI client using:
  * - tenant secret if present
  * - else platform key if grace credits available (optionally consumes one)
- *
- * IMPORTANT:
- * - Phase 1: consumeGrace=true (atomic increment)
- * - Phase 2: consumeGrace=false (use prior llmKeySource from quote log)
  */
 async function resolveOpenAiClient(args: {
   tenantId: string;
@@ -240,7 +277,6 @@ async function resolveOpenAiClient(args: {
 
   debug?.("resolveOpenAiClient.start", { tenantId, consumeGrace, forceKeySource: forceKeySource ?? null });
 
-  // 1) Tenant key if exists (unless explicitly forced to platform)
   if (!forceKeySource || forceKeySource === "tenant") {
     const secretRow = await db
       .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
@@ -264,7 +300,6 @@ async function resolveOpenAiClient(args: {
     }
   }
 
-  // 2) Platform grace key
   const platformKey = platformOpenAiKey();
   debug?.("resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
 
@@ -274,14 +309,14 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
-  // Phase 2 finalize: do NOT consume; honor phase1’s decision
   if (!consumeGrace) {
     debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // Consume grace atomically (NULL-safe)
-  // ✅ IMPORTANT: reference the Drizzle table object so it uses the exact same schema as Drizzle
+  // 🔎 PROVE THE SQL SESSION/TRUTH right before the grace consume path
+  await logSqlSessionTruth(debug);
+
   const upd = await db.execute(sql`
     update ${tenantSettings}
     set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
@@ -301,7 +336,6 @@ async function resolveOpenAiClient(args: {
   });
 
   if (!row) {
-    // Determine whether this is truly exhausted vs settings missing
     const cur = await db.execute(sql`
       select
         coalesce(activation_grace_used, 0) as used,
@@ -339,9 +373,6 @@ async function resolveOpenAiClient(args: {
   return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
 }
 
-/**
- * ✅ Auditable AI snapshot (hash prompts, store key source)
- */
 function buildAiSnapshot(args: {
   phase: "phase1_insert" | "phase1_qa_asking" | "phase1_estimated" | "phase2_finalized";
   tenantId: string;
@@ -697,7 +728,6 @@ export async function POST(req: Request) {
 
   const debug: DebugFn = (stage, data) => {
     if (!debugEnabled) return;
-    // All logged fields must be safe (no secrets, no full env, no raw DB url)
     console.log(
       JSON.stringify({
         tag: "apq_debug",
@@ -736,7 +766,6 @@ export async function POST(req: Request) {
     const { tenantSlug } = parsed.data;
     debug("tenantSlug.parsed", { tenantSlug });
 
-    // platform gates
     const pc = await db
       .select({
         aiQuotingEnabled: platformConfig.aiQuotingEnabled,
@@ -766,7 +795,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Tenant lookup by slug
     const tenant = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
       .from(tenants)
@@ -780,11 +808,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND", ...(debugEnabled ? { debugId } : {}) }, { status: 404 });
     }
 
-    // Determine phase
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
     debug("phase.detected", { isPhase2, quoteLogId: parsed.data.quoteLogId ?? null, qaAnswersLen: parsed.data.qaAnswers?.length ?? 0 });
 
-    // Settings (required to track plan/grace usage)
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -822,7 +848,6 @@ export async function POST(req: Request) {
       throw e;
     }
 
-    // enforce plan limits on phase 1 only
     if (!isPhase2) {
       const limit = typeof settings.monthlyQuoteLimit === "number" ? settings.monthlyQuoteLimit : null;
       await enforceMonthlyLimit({ tenantId: tenant.id, monthlyQuoteLimit: limit });
@@ -833,7 +858,6 @@ export async function POST(req: Request) {
     const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings.businessName) || null;
 
-    // Pre-load quote log if phase2 (immutable industry + key source)
     let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
     let industryKeyForQuote = tenantIndustryKey;
     let phase2KeySource: KeySource | null = null;
@@ -864,7 +888,6 @@ export async function POST(req: Request) {
       industryKeyForQuote = tenantIndustryKey;
     }
 
-    // Resolve tenant + PCC AI settings
     const resolvedBase = await resolveTenantLlm(tenant.id);
     const pccCfg = await loadPlatformLlmConfig();
     const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
@@ -911,7 +934,6 @@ export async function POST(req: Request) {
 
     const denylist = resolved.guardrails.blockedTopics ?? [];
 
-    // Resolve OpenAI client (plan-aware)
     const { openai, keySource } = await resolveOpenAiClient({
       tenantId: tenant.id,
       consumeGrace: !isPhase2,
@@ -932,7 +954,7 @@ export async function POST(req: Request) {
     };
 
     // -------------------------
-    // Phase 2: finalize after QA
+    // Phase 2
     // -------------------------
     if (isPhase2) {
       const quoteLogId = parsed.data.quoteLogId!;
@@ -1062,7 +1084,7 @@ export async function POST(req: Request) {
     }
 
     // -------------------------
-    // Phase 1: initial submission
+    // Phase 1
     // -------------------------
     const images = parsed.data.images ?? [];
 
