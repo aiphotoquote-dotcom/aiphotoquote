@@ -86,7 +86,6 @@ export function Step6Plan(props: {
         accent: {
           ring: "ring-slate-200/70 dark:ring-slate-800/60",
           border: "border-slate-200 dark:border-slate-800",
-          // slightly stronger so it shows on white
           glow:
             "bg-[radial-gradient(circle_at_35%_25%,rgba(148,163,184,0.42),transparent_58%)] dark:bg-[radial-gradient(circle_at_35%_25%,rgba(148,163,184,0.22),transparent_60%)]",
           usage: "bg-slate-900 dark:bg-slate-200",
@@ -184,16 +183,13 @@ export function Step6Plan(props: {
 
   return (
     <div className="relative">
-      {/* Stage backdrop (this is what makes the “mock look” possible) */}
+      {/* Stage backdrop */}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 -top-6 mx-auto h-[520px] max-w-5xl overflow-hidden rounded-[40px]"
       >
-        {/* soft vignette */}
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_15%,rgba(15,23,42,0.10),transparent_55%)] dark:bg-[radial-gradient(circle_at_50%_15%,rgba(15,23,42,0.55),transparent_60%)]" />
-        {/* color bloom */}
         <div className="absolute -inset-24 blur-3xl opacity-80 dark:opacity-70 bg-[radial-gradient(circle_at_20%_25%,rgba(16,185,129,0.18),transparent_55%),radial-gradient(circle_at_55%_15%,rgba(99,102,241,0.16),transparent_56%),radial-gradient(circle_at_85%_35%,rgba(168,85,247,0.14),transparent_58%)]" />
-        {/* subtle grain */}
         <div className="absolute inset-0 opacity-[0.055] dark:opacity-[0.10] bg-[linear-gradient(0deg,rgba(0,0,0,0.0),rgba(0,0,0,0.0)),url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22><filter id=%22n%22 x=%220%22 y=%220%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%222%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.35%22/></svg>')]" />
       </div>
 
@@ -268,7 +264,7 @@ export function Step6Plan(props: {
                       p.accent.border,
                     ].join(" ")}
                   >
-                    {/* Outer glow (stronger in light mode so it reads like the mock) */}
+                    {/* Outer glow */}
                     <div
                       aria-hidden="true"
                       className={[
@@ -286,7 +282,7 @@ export function Step6Plan(props: {
                         active ? "bg-white/75 dark:bg-gray-950/60" : "bg-white/60 dark:bg-gray-950/50",
                       ].join(" ")}
                     >
-                      {/* Inner sheen + subtle border highlight */}
+                      {/* Sheen */}
                       <div
                         aria-hidden="true"
                         className={[
@@ -296,17 +292,13 @@ export function Step6Plan(props: {
                           active ? "opacity-100" : "opacity-60",
                         ].join(" ")}
                       />
-                      <div
-                        aria-hidden="true"
-                        className="pointer-events-none absolute inset-0 rounded-[22px] shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.10)]"
-                      />
 
                       <div className="relative p-5">
-                        {/* Top row: use grid so badge/price never overlap */}
-                        <div className="grid grid-cols-[1fr_auto] items-start gap-4">
-                          <div className="min-w-0">
+                        {/* Header: make left shrinkable + clipped so it can NEVER collide with price */}
+                        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4">
+                          <div className="min-w-0 overflow-hidden pr-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              <div className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                              <div className="truncate text-base font-semibold text-gray-900 dark:text-gray-100">
                                 {p.name}
                               </div>
                               {p.popular ? (
@@ -315,14 +307,13 @@ export function Step6Plan(props: {
                                 </span>
                               ) : null}
                             </div>
-                            <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                              {p.subtitle}
-                            </div>
+                            <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">{p.subtitle}</div>
                           </div>
 
-                          <div className="text-right">
+                          {/* Fixed width price column = no collisions */}
+                          <div className="w-[118px] text-right sm:w-[138px]">
                             <div className="flex items-baseline justify-end gap-1 whitespace-nowrap">
-                              <div className="text-3xl font-semibold leading-none text-gray-900 dark:text-gray-100">
+                              <div className="text-2xl font-semibold leading-none text-gray-900 dark:text-gray-100 sm:text-3xl">
                                 {p.price.dollars === 0 ? "Free" : `$${p.price.dollars}`}
                               </div>
                               <div className="text-sm text-slate-500 dark:text-slate-400">
@@ -337,7 +328,6 @@ export function Step6Plan(props: {
 
                         <div className="mt-4 h-px w-full bg-slate-200/70 dark:bg-slate-800/70" />
 
-                        {/* Features */}
                         <ul className="mt-4 space-y-2.5">
                           {p.features.map((f) => (
                             <li
@@ -350,7 +340,6 @@ export function Step6Plan(props: {
                           ))}
                         </ul>
 
-                        {/* Usage */}
                         <div className="mt-5">
                           <div className="flex items-center justify-between text-[11px] font-medium text-slate-500 dark:text-slate-400">
                             <div>AI Usage</div>
@@ -361,16 +350,12 @@ export function Step6Plan(props: {
                           <UsageBars filled={p.usage.filled} total={p.usage.total} barClass={p.accent.usage} />
                         </div>
 
-                        {/* Bottom row */}
                         <div className="mt-5 flex items-center justify-between">
                           <div className="text-[11px] font-mono text-slate-400">{p.tier}</div>
-
                           <span
                             className={[
                               "inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold",
-                              active
-                                ? p.accent.pill
-                                : "bg-transparent text-slate-700 dark:text-slate-200",
+                              active ? p.accent.pill : "bg-transparent text-slate-700 dark:text-slate-200",
                             ].join(" ")}
                           >
                             {active ? "Selected" : "Select"}
@@ -383,7 +368,6 @@ export function Step6Plan(props: {
               })}
             </div>
 
-            {/* Notes */}
             <div className="mt-6 space-y-2">
               <div className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-200">
                 <CheckIcon className="mt-[2px] text-emerald-600" />
@@ -395,7 +379,6 @@ export function Step6Plan(props: {
               </div>
             </div>
 
-            {/* Actions */}
             <div className="mt-7 grid grid-cols-2 gap-3">
               <button
                 type="button"
