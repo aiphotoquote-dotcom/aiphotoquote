@@ -19,15 +19,15 @@ const isProtectedRoute = createRouteMatcher([
   "/api/onboarding(.*)", // ✅ onboarding APIs call auth()/currentUser()
 ]);
 
-export default clerkMiddleware((auth, req) => {
-  // IMPORTANT:
-  // In this Clerk/Next combo, `auth().protect()` does NOT return a Response.
-  // It enforces auth (redirect/throw internally) — so we must not `return` it.
+export default clerkMiddleware(async (auth, req) => {
+  // Clerk runs on ALL matched routes, but we ONLY enforce auth on protected routes.
   if (isProtectedRoute(req)) {
-    auth().protect();
+    // IMPORTANT:
+    // In your Clerk version, `auth.protect()` exists on `auth` (NOT on `auth()`).
+    // Also: do NOT return its value — always return a middleware Response.
+    await auth.protect();
   }
 
-  // Always continue the request for public routes (and after protect passes).
   return NextResponse.next();
 });
 
