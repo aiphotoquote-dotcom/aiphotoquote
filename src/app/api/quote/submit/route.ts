@@ -256,21 +256,37 @@ async function resolveOpenAiClient(args: {
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // Consume grace atomically
+  // Consume grace atomically (NULL-safe)
   const upd = await db.execute(sql`
     update tenant_settings
-    set activation_grace_used = activation_grace_used + 1,
+    set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
         updated_at = now()
     where tenant_id = ${tenantId}::uuid
-      and activation_grace_used < activation_grace_credits
-    returning activation_grace_used, activation_grace_credits
+      and coalesce(activation_grace_used, 0) < coalesce(activation_grace_credits, 0)
+    returning
+      coalesce(activation_grace_used, 0) as activation_grace_used,
+      coalesce(activation_grace_credits, 0) as activation_grace_credits
   `);
 
   const row = (upd as any)?.rows?.[0] ?? null;
   if (!row) {
+    // Optional: fetch current values so we can return helpful meta
+    const cur = await db.execute(sql`
+      select
+        coalesce(activation_grace_used, 0) as used,
+        coalesce(activation_grace_credits, 0) as credits
+      from tenant_settings
+      where tenant_id = ${tenantId}::uuid
+      limit 1
+    `);
+
+    const used = Number((cur as any)?.rows?.[0]?.used ?? 0);
+    const credits = Number((cur as any)?.rows?.[0]?.credits ?? 0);
+
     const e: any = new Error("TRIAL_EXHAUSTED");
     e.code = "TRIAL_EXHAUSTED";
     e.status = 402;
+    e.meta = { used, credits };
     throw e;
   }
 

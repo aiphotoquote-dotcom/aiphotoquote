@@ -140,7 +140,6 @@ export async function POST(req: Request) {
     }
 
     const data: any = parsed.data;
-
     const desiredSlug = String(data.tenantSlug || "").trim();
 
     // Load tenant by ACTIVE tenant id (not owner model)
@@ -186,11 +185,21 @@ export async function POST(req: Request) {
 
         reportingTimezone: tenantSettings.reportingTimezone,
         weekStartsOn: tenantSettings.weekStartsOn,
+
+        // ✅ plan fields
+        planTier: tenantSettings.planTier,
+        monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
+        activationGraceCredits: tenantSettings.activationGraceCredits,
+        activationGraceUsed: tenantSettings.activationGraceUsed,
+        planSelectedAt: tenantSettings.planSelectedAt,
       })
       .from(tenantSettings)
       .where(eq(tenantSettings.tenantId, tenant.id))
       .limit(1)
       .then((r) => r[0] ?? null);
+
+    // ✅ If this is the first time creating tenant_settings, seed trial credits here.
+    const isFirstInsert = !existing;
 
     // Industry key: required ONLY on first insert
     const incomingIndustryKey = pick<string>(data, "industryKey", "industry_key")?.trim();
@@ -229,10 +238,16 @@ export async function POST(req: Request) {
       resendFromEmailRaw !== undefined ? normalizeEmail(resendFromEmailRaw) : existing?.resendFromEmail ?? null;
 
     if (!looksLikeEmail(leadToEmail)) {
-      return json({ ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." }, 400);
+      return json(
+        { ok: false, error: "INVALID_LEAD_TO_EMAIL", message: "lead_to_email must be a valid email address." },
+        400
+      );
     }
     if (!looksLikeEmail(resendFromEmail)) {
-      return json({ ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." }, 400);
+      return json(
+        { ok: false, error: "INVALID_FROM_EMAIL", message: "resend_from_email must be a valid email address." },
+        400
+      );
     }
 
     const aiModeRaw = pick<string | null>(data, "aiMode", "ai_mode");
@@ -277,6 +292,18 @@ export async function POST(req: Request) {
     const weekStartsOnRaw = pick<number | null>(data, "weekStartsOn", "week_starts_on");
     const weekStartsOn = weekStartsOnRaw !== undefined ? (weekStartsOnRaw ?? null) : existing?.weekStartsOn ?? 1;
 
+    // ✅ Trial seed values (ONLY on first insert)
+    // Adjust credits here whenever you want (3/5/10 etc).
+    const planSeed = isFirstInsert
+      ? {
+          planTier: "free",
+          monthlyQuoteLimit: null,
+          activationGraceCredits: 3,
+          activationGraceUsed: 0,
+          planSelectedAt: new Date(),
+        }
+      : {};
+
     // Upsert tenant_settings (tenant_id is PK)
     await db
       .insert(tenantSettings)
@@ -301,6 +328,8 @@ export async function POST(req: Request) {
         reportingTimezone,
         weekStartsOn,
 
+        ...planSeed, // ✅ only seeds on first creation
+
         updatedAt: new Date(),
       })
       .onConflictDoUpdate({
@@ -324,6 +353,8 @@ export async function POST(req: Request) {
 
           reportingTimezone,
           weekStartsOn,
+
+          // ✅ DO NOT update plan fields here (never reset credits)
 
           updatedAt: new Date(),
         },
@@ -351,6 +382,13 @@ export async function POST(req: Request) {
 
         reporting_timezone: tenantSettings.reportingTimezone,
         week_starts_on: tenantSettings.weekStartsOn,
+
+        // ✅ plan fields in response (handy for admin UI)
+        plan_tier: tenantSettings.planTier,
+        monthly_quote_limit: tenantSettings.monthlyQuoteLimit,
+        activation_grace_credits: tenantSettings.activationGraceCredits,
+        activation_grace_used: tenantSettings.activationGraceUsed,
+        plan_selected_at: tenantSettings.planSelectedAt,
 
         updated_at: tenantSettings.updatedAt,
       })
