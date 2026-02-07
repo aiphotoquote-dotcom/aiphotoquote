@@ -1,31 +1,25 @@
 // src/proxy.ts
-import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { clerkMiddleware } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 /**
- * IMPORTANT:
- * - Middleware should only protect PAGE routes.
- * - Do NOT protect /api/* here; API handlers should return JSON 401/403 themselves.
- *   (Avoid Clerk protect rewrites on APIs that look like 404/hangs to clients.)
+ * Recovery mode:
+ * - Run Clerk middleware so `auth()` works in server components/routes.
+ * - DO NOT call `protect()` here (it is rewriting to /404 with dev-browser-missing).
+ *
+ * Page/API handlers already enforce auth/roles.
  */
-const isProtectedPage = createRouteMatcher([
-  "/admin(.*)",
-  "/dashboard(.*)",
-  "/onboarding(.*)",
-  "/pcc(.*)",
-]);
-
-export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedPage(req)) {
-    await auth.protect();
-  }
+export default clerkMiddleware(() => {
   return NextResponse.next();
 });
 
 /**
- * Match ONLY protected page surfaces.
- * Do NOT match broad "all pages" patterns and do NOT match /api/*.
+ * IMPORTANT:
+ * Match all NON-static routes so Clerk context is available anywhere `auth()` is used.
+ * Do NOT include _next/static, _next/image, etc.
  */
 export const config = {
-  matcher: ["/admin(.*)", "/dashboard(.*)", "/onboarding(.*)", "/pcc(.*)"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:css|js|map|png|jpg|jpeg|gif|svg|webp|ico|txt|xml)$).*)",
+  ],
 };
