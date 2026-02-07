@@ -21,15 +21,21 @@ function tierLabel(t: PlanTier) {
 
 function tierSubtitle(t: PlanTier) {
   if (t === "tier0") return "Try AI quoting for free";
-  if (t === "tier1") return "For small teams shipping fast";
+  if (t === "tier1") return "Boost your business";
   return "Maximize your workflow";
 }
 
 function tierPrice(t: PlanTier) {
-  // Fake pricing for now (UI polish only; no billing implied)
-  if (t === "tier0") return { amount: "$0", suffix: "/ mo", note: "No card required" };
-  if (t === "tier1") return { amount: "$49", suffix: "/ mo", note: "Best for most shops" };
-  return { amount: "$99", suffix: "/ mo", note: "For growing teams" };
+  if (t === "tier0") return { dollars: 0, note: "No card required" };
+  if (t === "tier1") return { dollars: 49, note: "Best for most shops" };
+  return { dollars: 199, note: "For power users" };
+}
+
+function tierUsage(t: PlanTier) {
+  // purely cosmetic; doesn’t affect limits
+  if (t === "tier0") return { label: "AI Usage", filled: 2, total: 5 };
+  if (t === "tier1") return { label: "AI Usage", filled: 4, total: 6 };
+  return { label: "AI Usage", filled: 6, total: 6 };
 }
 
 function tierDetails(t: PlanTier) {
@@ -52,10 +58,109 @@ function tierDetails(t: PlanTier) {
   ];
 }
 
-function tierIcon(t: PlanTier) {
-  if (t === "tier0") return "🧰";
-  if (t === "tier1") return "⚡️";
-  return "👑";
+function tierAccent(t: PlanTier) {
+  // Tailwind-safe static classes
+  if (t === "tier0") {
+    return {
+      ring: "ring-slate-200 dark:ring-slate-800",
+      glow: "shadow-[0_0_0_1px_rgba(15,23,42,0.12),0_10px_30px_rgba(15,23,42,0.12)] dark:shadow-[0_0_0_1px_rgba(148,163,184,0.12),0_12px_36px_rgba(0,0,0,0.45)]",
+      borderGrad: "from-slate-200 via-slate-100 to-slate-200 dark:from-slate-800 dark:via-slate-900 dark:to-slate-800",
+      badge: "bg-slate-100 text-slate-700 dark:bg-slate-900 dark:text-slate-200",
+      cta: "bg-slate-900 text-white hover:bg-black dark:bg-white dark:text-black dark:hover:bg-slate-100",
+      check: "text-emerald-600 dark:text-emerald-400",
+      price: "text-slate-900 dark:text-white",
+      sub: "text-slate-600 dark:text-slate-300",
+    };
+  }
+  if (t === "tier1") {
+    return {
+      ring: "ring-emerald-200 dark:ring-emerald-900/60",
+      glow:
+        "shadow-[0_0_0_1px_rgba(16,185,129,0.18),0_18px_60px_rgba(16,185,129,0.15)] dark:shadow-[0_0_0_1px_rgba(16,185,129,0.28),0_22px_70px_rgba(0,0,0,0.55)]",
+      borderGrad: "from-emerald-200 via-cyan-200 to-indigo-200 dark:from-emerald-700/40 dark:via-cyan-700/30 dark:to-indigo-700/30",
+      badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200",
+      cta:
+        "bg-gradient-to-r from-emerald-600 via-cyan-600 to-indigo-600 text-white hover:opacity-95",
+      check: "text-emerald-600 dark:text-emerald-400",
+      price: "text-slate-900 dark:text-white",
+      sub: "text-slate-600 dark:text-slate-300",
+    };
+  }
+  return {
+    ring: "ring-indigo-200 dark:ring-indigo-900/60",
+    glow:
+      "shadow-[0_0_0_1px_rgba(99,102,241,0.18),0_18px_60px_rgba(99,102,241,0.14)] dark:shadow-[0_0_0_1px_rgba(99,102,241,0.24),0_22px_70px_rgba(0,0,0,0.55)]",
+    borderGrad: "from-indigo-200 via-fuchsia-200 to-amber-200 dark:from-indigo-700/35 dark:via-fuchsia-700/25 dark:to-amber-700/20",
+    badge: "bg-indigo-100 text-indigo-800 dark:bg-indigo-950/45 dark:text-indigo-200",
+    cta:
+      "bg-gradient-to-r from-indigo-600 via-fuchsia-600 to-amber-500 text-white hover:opacity-95",
+    check: "text-emerald-600 dark:text-emerald-400",
+    price: "text-slate-900 dark:text-white",
+    sub: "text-slate-600 dark:text-slate-300",
+  };
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="currentColor" className={className ?? ""} aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        d="M16.704 5.29a1 1 0 01.006 1.414l-7.25 7.29a1 1 0 01-1.423-.005L3.29 9.23a1 1 0 011.42-1.41l3.02 3.04 6.54-6.57a1 1 0 011.414 0z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+function UsageMeter({ filled, total, accent }: { filled: number; total: number; accent: PlanTier }) {
+  const a = tierAccent(accent);
+  const cells = Array.from({ length: total });
+  return (
+    <div className="mt-5">
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-medium text-slate-600 dark:text-slate-300">AI Usage</div>
+        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+          {filled}/{total}
+        </div>
+      </div>
+      <div className="mt-2 flex gap-1.5">
+        {cells.map((_, i) => {
+          const on = i < filled;
+          return (
+            <div
+              key={i}
+              className={[
+                "h-2.5 flex-1 rounded-sm",
+                on
+                  ? accent === "tier0"
+                    ? "bg-slate-900 dark:bg-white"
+                    : accent === "tier1"
+                      ? "bg-emerald-500"
+                      : "bg-indigo-500"
+                  : "bg-slate-200 dark:bg-slate-800",
+              ].join(" ")}
+              aria-hidden="true"
+            />
+          );
+        })}
+      </div>
+      <div className="sr-only">{a.sub}</div>
+    </div>
+  );
+}
+
+function SparkleBg() {
+  // lightweight “premium” texture via gradients (no images)
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 overflow-hidden rounded-[28px]"
+    >
+      <div className="absolute -top-20 -left-16 h-56 w-56 rounded-full bg-gradient-to-br from-white/50 to-white/0 blur-2xl dark:from-white/10 dark:to-white/0" />
+      <div className="absolute -bottom-24 -right-20 h-64 w-64 rounded-full bg-gradient-to-tr from-indigo-400/20 to-transparent blur-3xl dark:from-indigo-500/20" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.25),transparent_40%),radial-gradient(circle_at_70%_30%,rgba(99,102,241,0.10),transparent_45%),radial-gradient(circle_at_50%_90%,rgba(16,185,129,0.10),transparent_40%)] dark:bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.08),transparent_40%),radial-gradient(circle_at_70%_30%,rgba(99,102,241,0.18),transparent_45%),radial-gradient(circle_at_50%_90%,rgba(16,185,129,0.14),transparent_40%)]" />
+    </div>
+  );
 }
 
 export function Step6Plan(props: {
@@ -117,19 +222,21 @@ export function Step6Plan(props: {
 
   return (
     <div>
-      {/* Hero header (mobile-first, light/dark safe) */}
+      {/* Header */}
       <div className="text-center">
-        <div className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Step 6 of 6</div>
-        <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+        <div className="text-[11px] font-semibold tracking-[0.28em] text-slate-500 dark:text-slate-400">
+          STEP 6 OF 6
+        </div>
+        <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
           How much AI do you want working for you?
         </div>
-        <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+        <div className="mt-2 text-sm text-slate-600 dark:text-slate-300">
           Select the plan that fits your business today. You can change this anytime.
         </div>
       </div>
 
       {err ? (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+        <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
           {err}
         </div>
       ) : null}
@@ -170,115 +277,148 @@ export function Step6Plan(props: {
         </div>
       ) : (
         <>
-          {/* Subtle “atmosphere” shell */}
-          <div className="mt-6 rounded-3xl border border-gray-200 bg-gradient-to-b from-gray-50 to-white p-3 dark:border-gray-800 dark:from-gray-900 dark:to-gray-950">
-            <div className="grid gap-3">
-              {cards.map((t) => {
-                const active = selected === t;
-                const price = tierPrice(t);
-                const popular = t === "tier1";
+          {/* Cards */}
+          <div className="mt-6 grid gap-4 lg:grid-cols-3">
+            {cards.map((t) => {
+              const active = selected === t;
+              const a = tierAccent(t);
+              const price = tierPrice(t);
+              const usage = tierUsage(t);
+              const popular = t === "tier1";
 
-                const cls = [
-                  "relative text-left rounded-3xl border p-4 transition",
-                  "focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2",
-                  "focus-visible:ring-gray-900 dark:focus-visible:ring-white",
-                  "focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950",
-                  active
-                    ? "border-gray-900 bg-gray-900 text-white shadow-lg dark:border-white dark:bg-white dark:text-black"
-                    : popular
-                      ? "border-emerald-400/60 bg-white shadow-lg dark:border-emerald-500/40 dark:bg-gray-950"
-                      : "border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950",
-                  // subtle “glow” for Pro even when not selected (keeps it premium on both themes)
-                  !active && popular ? "ring-1 ring-emerald-400/25 dark:ring-emerald-500/20" : "",
-                ].join(" ");
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setSelected(t)}
+                  className={[
+                    "relative text-left rounded-[28px] p-[1px] transition",
+                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/60 dark:focus-visible:ring-slate-500/60",
+                    active ? a.glow : "shadow-sm dark:shadow-none",
+                  ].join(" ")}
+                >
+                  {/* Gradient border */}
+                  <div
+                    className={[
+                      "absolute inset-0 rounded-[28px]",
+                      "bg-gradient-to-br",
+                      a.borderGrad,
+                      active ? "opacity-100" : "opacity-70",
+                    ].join(" ")}
+                    aria-hidden="true"
+                  />
 
-                return (
-                  <button key={t} type="button" className={cls} onClick={() => setSelected(t)}>
-                    {/* Most popular badge */}
-                    {popular ? (
-                      <div className="mb-3 inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
-                        Most popular
-                      </div>
-                    ) : (
-                      <div className="mb-3 h-[26px]" />
-                    )}
+                  {/* Inner */}
+                  <div
+                    className={[
+                      "relative rounded-[27px] border",
+                      "bg-white/90 dark:bg-slate-950/70 backdrop-blur",
+                      active
+                        ? "border-white/40 dark:border-white/10"
+                        : "border-slate-200 dark:border-slate-800",
+                      "px-5 py-5",
+                    ].join(" ")}
+                  >
+                    {/* Premium texture on selected */}
+                    {active ? <SparkleBg /> : null}
 
-                    <div className="flex items-start justify-between gap-3">
+                    {/* Top row */}
+                    <div className="relative flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-base">{tierIcon(t)}</span>
-                          <div className="text-base font-semibold">{tierLabel(t)}</div>
+                          <div className="text-lg font-semibold text-slate-900 dark:text-white">
+                            {tierLabel(t)}
+                          </div>
+                          {popular ? (
+                            <span
+                              className={[
+                                "inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold",
+                                a.badge,
+                              ].join(" ")}
+                            >
+                              MOST POPULAR
+                            </span>
+                          ) : null}
                         </div>
-
-                        <div className={active ? "mt-1 text-sm opacity-90" : "mt-1 text-sm text-gray-600 dark:text-gray-300"}>
+                        <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
                           {tierSubtitle(t)}
                         </div>
                       </div>
 
                       <div className="shrink-0 text-right">
-                        <div className="text-xl font-semibold">
-                          {price.amount} <span className="text-sm font-medium opacity-90">{price.suffix}</span>
+                        <div className="flex items-baseline justify-end gap-1">
+                          <div className={["text-3xl font-semibold", a.price].join(" ")}>
+                            {price.dollars === 0 ? "Free" : `$${price.dollars}`}
+                          </div>
+                          <div className="text-sm text-slate-500 dark:text-slate-400">
+                            {price.dollars === 0 ? "" : "/ mo"}
+                          </div>
                         </div>
-                        <div className={active ? "mt-1 text-xs opacity-85" : "mt-1 text-xs text-gray-500 dark:text-gray-400"}>
-                          {price.note}
-                        </div>
+                        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{price.note}</div>
                       </div>
                     </div>
 
-                    <ul className="mt-4 space-y-2 text-sm">
+                    {/* Divider */}
+                    <div className="relative mt-5 h-px w-full bg-slate-200/70 dark:bg-slate-800/70" />
+
+                    {/* Features */}
+                    <ul className="relative mt-5 space-y-3 text-sm">
                       {tierDetails(t).map((d) => (
                         <li key={d} className="flex items-start gap-2">
-                          <span className={active ? "mt-[2px] text-white/90 dark:text-black/90" : "mt-[2px] text-emerald-600 dark:text-emerald-400"}>
-                            ✓
-                          </span>
-                          <span className={active ? "opacity-95" : "text-gray-700 dark:text-gray-200"}>{d}</span>
+                          <CheckIcon className={["mt-0.5 h-4 w-4", a.check].join(" ")} />
+                          <span className="text-slate-800 dark:text-slate-200">{d}</span>
                         </li>
                       ))}
                     </ul>
 
-                    {/* Card footer / selection affordance */}
-                    <div className="mt-4 flex items-center justify-between">
-                      <div className="text-xs font-mono opacity-70">{t}</div>
+                    {/* Usage meter */}
+                    <div className="relative">
+                      <UsageMeter filled={usage.filled} total={usage.total} accent={t} />
+                    </div>
 
-                      <div
-                        className={[
-                          "rounded-xl px-4 py-2 text-center text-sm font-semibold",
-                          active
-                            ? "bg-white/10 text-white dark:bg-black/10 dark:text-black"
-                            : popular
-                              ? "bg-emerald-600 text-white"
-                              : "border border-gray-300 text-gray-700 dark:border-gray-700 dark:text-gray-200",
-                        ].join(" ")}
-                      >
-                        {active ? "Selected" : "Select plan"}
+                    {/* Footer row */}
+                    <div className="relative mt-5 flex items-center justify-between">
+                      <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">{t}</div>
+
+                      <div className="flex items-center gap-2">
+                        {active ? (
+                          <span className="inline-flex items-center rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold text-white dark:bg-white dark:text-black">
+                            Selected
+                          </span>
+                        ) : (
+                          <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                            Select
+                          </span>
+                        )}
                       </div>
                     </div>
-                  </button>
-                );
-              })}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Bottom value props */}
+          <div className="mt-6 grid gap-2 text-sm text-slate-600 dark:text-slate-300">
+            <div className="flex items-center gap-2">
+              <CheckIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              Change plans anytime
+            </div>
+            <div className="flex items-center gap-2">
+              <CheckIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              No customer pricing shown
+            </div>
+            <div className="flex items-center gap-2">
+              <CheckIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+              Manual review always possible
             </div>
           </div>
 
-          {/* Trust points (subtle) */}
-          <div className="mt-4 grid gap-2 text-sm text-gray-600 dark:text-gray-300">
-            <div className="flex items-start gap-2">
-              <span className="mt-[2px] text-emerald-600 dark:text-emerald-400">✓</span>
-              <span>Change plans anytime</span>
-            </div>
-            <div className="flex items-start gap-2">
-              <span className="mt-[2px] text-emerald-600 dark:text-emerald-400">✓</span>
-              <span>No customer pricing shown in your quotes</span>
-            </div>
-            <div className="flex items-start gap-2">
-              <span className="mt-[2px] text-emerald-600 dark:text-emerald-400">✓</span>
-              <span>Manual review always possible</span>
-            </div>
-          </div>
-
+          {/* Actions */}
           <div className="mt-6 grid grid-cols-2 gap-3">
             <button
               type="button"
-              className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              className="rounded-2xl border border-slate-200 bg-white py-3 text-sm font-semibold text-slate-900 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-white dark:hover:bg-slate-900"
               onClick={props.onBack}
               disabled={saving}
             >
@@ -287,7 +427,7 @@ export function Step6Plan(props: {
 
             <button
               type="button"
-              className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+              className="rounded-2xl bg-slate-900 py-3 text-sm font-semibold text-white hover:bg-black disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-slate-100"
               onClick={savePlan}
               disabled={!canSave}
             >
@@ -295,7 +435,7 @@ export function Step6Plan(props: {
             </button>
           </div>
 
-          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          <div className="mt-3 text-xs text-slate-500 dark:text-slate-400">
             Note: Tier 1–2 require your OpenAI key before they’re fully active (we’ll wire that next).
           </div>
         </>
