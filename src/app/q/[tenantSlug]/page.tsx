@@ -27,7 +27,11 @@ export default async function Page(props: PageProps) {
   let tenantName: string | null = null;
 
   let industry_key: string | null = null;
-  let ai_rendering_enabled: boolean | null = null;
+
+  // ✅ Pull BOTH canonical + legacy so we don’t “accidentally disable” rendering
+  let ai_rendering_enabled: boolean | null = null; // canonical
+  let rendering_enabled: boolean | null = null; // legacy
+  let rendering_customer_opt_in_required: boolean | null = null; // used later (UI)
 
   let brand_logo_url: string | null = null;
   let business_name: string | null = null;
@@ -54,55 +58,55 @@ export default async function Page(props: PageProps) {
 
     if (tenantName) displayTenantName = tenantName;
 
-    // Settings lookup (prefer modern columns; fall back safely)
+    // Settings lookup (prefer canonical columns; fall back to legacy)
     if (tenantId) {
-      try {
-        const settingsRes = await db.execute(sql`
-          select
-            "industry_key",
-            "ai_rendering_enabled",
-            "brand_logo_url",
-            "business_name"
-          from "tenant_settings"
-          where "tenant_id" = ${tenantId}::uuid
-          limit 1
-        `);
+      const settingsRes = await db.execute(sql`
+        select
+          "industry_key",
+          "ai_rendering_enabled",
+          "rendering_enabled",
+          "rendering_customer_opt_in_required",
+          "brand_logo_url",
+          "business_name"
+        from "tenant_settings"
+        where "tenant_id" = ${tenantId}::uuid
+        limit 1
+      `);
 
-        const settings = firstRow<{
-          industry_key: string | null;
-          ai_rendering_enabled: boolean | null;
-          brand_logo_url: string | null;
-          business_name: string | null;
-        }>(settingsRes);
+      const settings = firstRow<{
+        industry_key: string | null;
+        ai_rendering_enabled: boolean | null;
+        rendering_enabled: boolean | null;
+        rendering_customer_opt_in_required: boolean | null;
+        brand_logo_url: string | null;
+        business_name: string | null;
+      }>(settingsRes);
 
-        industry_key = settings?.industry_key ?? null;
-        ai_rendering_enabled =
-          typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
+      industry_key = settings?.industry_key ?? null;
 
-        brand_logo_url = settings?.brand_logo_url ?? null;
-        business_name = settings?.business_name ?? null;
+      ai_rendering_enabled =
+        typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
 
-        if (industry_key) displayIndustry = industry_key;
-        aiRenderingEnabled = ai_rendering_enabled === true;
+      rendering_enabled =
+        typeof settings?.rendering_enabled === "boolean" ? settings.rendering_enabled : null;
 
-        // If tenantSettings has a business name, prefer it for display
-        if (business_name && business_name.trim()) {
-          displayTenantName = business_name.trim();
-        }
-      } catch {
-        // ultra-safe fallback for older DB shape
-        const settingsRes = await db.execute(sql`
-          select "industry_key"
-          from "tenant_settings"
-          where "tenant_id" = ${tenantId}::uuid
-          limit 1
-        `);
+      rendering_customer_opt_in_required =
+        typeof settings?.rendering_customer_opt_in_required === "boolean"
+          ? settings.rendering_customer_opt_in_required
+          : null;
 
-        const settings = firstRow<{ industry_key: string | null }>(settingsRes);
-        industry_key = settings?.industry_key ?? null;
+      brand_logo_url = settings?.brand_logo_url ?? null;
+      business_name = settings?.business_name ?? null;
 
-        if (industry_key) displayIndustry = industry_key;
-        aiRenderingEnabled = false;
+      if (industry_key) displayIndustry = industry_key;
+
+      // ✅ Effective: canonical wins, otherwise legacy wins
+      aiRenderingEnabled =
+        ai_rendering_enabled === true ? true : rendering_enabled === true ? true : false;
+
+      // If tenantSettings has a business name, prefer it for display
+      if (business_name && business_name.trim()) {
+        displayTenantName = business_name.trim();
       }
     }
   } catch {
@@ -182,10 +186,9 @@ export default async function Page(props: PageProps) {
               </div>
 
               <div className="mt-6">
+                {/* NOTE: opt-in-required is read above and will be wired next */}
                 <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
               </div>
-
-             
             </div>
           </div>
         </div>
