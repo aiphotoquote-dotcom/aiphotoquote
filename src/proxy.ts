@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 /**
  * Only these routes should ever require a Clerk session.
- * Everything else (public quote flow + public APIs) must stay public.
+ * Everything else must stay public.
  */
 const isProtectedRoute = createRouteMatcher([
   "/admin(.*)",
@@ -27,24 +27,17 @@ export default clerkMiddleware(async (auth, req) => {
 });
 
 /**
- * IMPORTANT:
- * Keep matcher NARROW.
- * If we match all non-API pages, we can accidentally stall public pages / auth routes.
- * Only run middleware where Clerk is needed.
+ * CRITICAL:
+ * Keep matcher STRICTLY to protected surfaces only.
+ * Do NOT include /sign-in or broad "all pages" matchers, or you can stall auth pages.
  */
 export const config = {
   matcher: [
-    // UI areas (protected)
     "/admin(.*)",
     "/dashboard(.*)",
     "/onboarding(.*)",
     "/pcc(.*)",
 
-    // Clerk auth pages (public but should have Clerk middleware)
-    "/sign-in(.*)",
-    "/sign-up(.*)",
-
-    // Protected API namespaces
     "/api/admin(.*)",
     "/api/pcc(.*)",
     "/api/tenant(.*)",
