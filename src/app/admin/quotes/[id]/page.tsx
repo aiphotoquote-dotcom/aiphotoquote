@@ -29,7 +29,6 @@ function firstRow(r: any): any | null {
 }
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
-  // include common variants (switchers often use prefixed cookies)
   const candidates = [
     jar.get("activeTenantId")?.value,
     jar.get("active_tenant_id")?.value,
@@ -38,13 +37,9 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
 
     jar.get("apq_activeTenantId")?.value,
     jar.get("apq_active_tenant_id")?.value,
-    jar.get("apqTenantId")?.value,
-    jar.get("apq_tenant_id")?.value,
 
     jar.get("__Host-activeTenantId")?.value,
     jar.get("__Host-active_tenant_id")?.value,
-    jar.get("__Host-tenantId")?.value,
-    jar.get("__Host-tenant_id")?.value,
   ].filter(Boolean) as string[];
 
   return candidates[0] || null;
@@ -65,10 +60,8 @@ function formatUSPhone(raw: string) {
 }
 
 function pickLead(input: any) {
-  // New normalized shape (preferred)
   const c =
     input?.customer ??
-    // back-compat shapes
     input?.contact ??
     input?.customer_context?.customer ??
     input?.customer_context ??
@@ -76,9 +69,20 @@ function pickLead(input: any) {
     {};
 
   const name =
-    c?.name ?? c?.fullName ?? c?.customerName ?? input?.name ?? input?.customer_context?.name ?? "New customer";
+    c?.name ??
+    c?.fullName ??
+    c?.customerName ??
+    input?.name ??
+    input?.customer_context?.name ??
+    "New customer";
 
-  const phone = c?.phone ?? c?.phoneNumber ?? input?.phone ?? input?.customer_context?.phone ?? null;
+  const phone =
+    c?.phone ??
+    c?.phoneNumber ??
+    input?.phone ??
+    input?.customer_context?.phone ??
+    null;
+
   const email = c?.email ?? input?.email ?? input?.customer_context?.email ?? null;
 
   const phoneDigits = phone ? digitsOnly(String(phone)) : "";
@@ -107,7 +111,6 @@ function pickCustomerNotes(input: any) {
 function pickPhotos(input: any): QuotePhoto[] {
   const out: QuotePhoto[] = [];
 
-  // 1) input.images: [{ url, shotType? }]
   const images = Array.isArray(input?.images) ? input.images : null;
   if (images) {
     for (const it of images) {
@@ -116,7 +119,6 @@ function pickPhotos(input: any): QuotePhoto[] {
     }
   }
 
-  // 2) input.photos: [{ url }]
   const photos = Array.isArray(input?.photos) ? input.photos : null;
   if (photos) {
     for (const it of photos) {
@@ -125,13 +127,11 @@ function pickPhotos(input: any): QuotePhoto[] {
     }
   }
 
-  // 3) input.imageUrls: [string]
   const imageUrls = Array.isArray(input?.imageUrls) ? input.imageUrls : null;
   if (imageUrls) {
     for (const url of imageUrls) if (url) out.push({ url: String(url) });
   }
 
-  // 4) input.customer_context.images: [{url}]
   const ccImages = Array.isArray(input?.customer_context?.images) ? input.customer_context.images : null;
   if (ccImages) {
     for (const it of ccImages) {
@@ -140,7 +140,6 @@ function pickPhotos(input: any): QuotePhoto[] {
     }
   }
 
-  // de-dupe by url, preserve order
   const seen = new Set<string>();
   return out.filter((p) => {
     if (!p.url) return false;
@@ -165,7 +164,7 @@ type StageKey = (typeof STAGES)[number]["key"];
 
 function normalizeStage(s: unknown): StageKey | "read" {
   const v = String(s ?? "").toLowerCase().trim();
-  if (v === "read") return "read"; // legacy value that may exist in DB
+  if (v === "read") return "read";
   const hit = STAGES.find((x) => x.key === v)?.key;
   return (hit ?? "new") as StageKey;
 }
@@ -225,7 +224,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // 1) If cookie tenant exists, ensure user is actually a member of it (prevents “wrong tenant fallback”)
+  // If cookie tenant exists, validate membership
   if (tenantIdMaybe) {
     const membership = await db.execute(sql`
       select 1 as ok
@@ -239,21 +238,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     if (!mrow?.ok) tenantIdMaybe = null;
   }
 
-  // 2) If no valid tenant cookie, choose first active membership for this user
-  if (!tenantIdMaybe) {
-    const r = await db.execute(sql`
-      select tenant_id
-      from tenant_members
-      where clerk_user_id = ${userId}
-        and status = 'active'
-      order by created_at asc
-      limit 1
-    `);
-    const row = firstRow(r);
-    tenantIdMaybe = row?.tenant_id ? String(row.tenant_id) : null;
-  }
-
-  // 3) Absolute fallback: first tenant owned by user (legacy)
+  // Fallback: first owned tenant (legacy)
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -268,9 +253,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId = tenantIdMaybe;
 
-  const row = await db
+  // 1) Try strict tenant-scoped lookup (correct behavior)
+  let row = await db
     .select({
       id: quoteLogs.id,
+      tenantId: quoteLogs.tenantId,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
       output: quoteLogs.output,
@@ -288,8 +275,36 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // ✅ Don’t silently bounce back — show a helpful “not found”
+  // 2) If not found, auto-heal:
+  // Find the quote's tenant, verify membership, activate tenant cookie, and retry.
   if (!row) {
+    const q = await db
+      .select({ tenantId: quoteLogs.tenantId })
+      .from(quoteLogs)
+      .where(eq(quoteLogs.id, id))
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    const quoteTenantId = q?.tenantId ? String(q.tenantId) : null;
+
+    if (quoteTenantId) {
+      const membership = await db.execute(sql`
+        select 1 as ok
+        from tenant_members
+        where tenant_id = ${quoteTenantId}::uuid
+          and clerk_user_id = ${userId}
+          and status = 'active'
+        limit 1
+      `);
+
+      const mrow = firstRow(membership);
+      if (mrow?.ok) {
+        const next = `/admin/quotes/${encodeURIComponent(id)}`;
+        redirect(`/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`);
+      }
+    }
+
+    // If we got here, user either isn't a member or quote doesn't exist
     return (
       <div className="mx-auto max-w-3xl px-6 py-10">
         <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
@@ -299,17 +314,17 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-6 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
           <div className="text-base font-semibold">Quote not found for the active tenant</div>
           <div className="mt-2">
-            This usually happens when the quote belongs to a different tenant than the one currently active in your cookie.
+            The quote either belongs to a different tenant (and you’re not a member), or it no longer exists.
           </div>
           <div className="mt-3 font-mono text-xs opacity-80">
-            quoteId={id} · tenantId={tenantId}
+            quoteId={id} · activeTenantId={tenantId}
           </div>
           <div className="mt-4">
             <Link
               href="/admin/quotes"
               className="inline-flex rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
             >
-              Go back and switch tenant
+              Go back
             </Link>
           </div>
         </div>
@@ -317,6 +332,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     );
   }
 
+  // Track UI-state for read/unread (because we update DB after fetch)
   let isRead = Boolean(row.isRead);
 
   if (!skipAutoRead && !isRead) {
@@ -332,7 +348,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
-  const stageLabel = stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+  const stageLabel =
+    stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
   const ai = (row.output ?? null) as any;
   const aiAssessment = ai?.assessment ?? ai?.output?.assessment ?? ai?.output ?? ai ?? null;
@@ -364,19 +381,29 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ stage: next } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: false } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: true } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -510,7 +537,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </section>
 
-      {/* Photos */}
       <QuotePhotoGallery photos={photos} />
 
       {/* Details */}
@@ -518,7 +544,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Details</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI assessment first. Render (if any) below.</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              AI assessment first. If a render exists, it’s shown below.
+            </p>
           </div>
           {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
         </div>
