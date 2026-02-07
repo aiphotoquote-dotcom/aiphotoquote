@@ -19,8 +19,11 @@ function fmtDate(d: any) {
   }
 }
 
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
 export default async function PccTenantsPage() {
-  // Gate the whole page
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
   const rows = await db
@@ -34,7 +37,7 @@ export default async function PccTenantsPage() {
     })
     .from(tenants)
     .orderBy(desc(tenants.createdAt))
-    .limit(100);
+    .limit(200);
 
   return (
     <div className="space-y-4">
@@ -43,7 +46,7 @@ export default async function PccTenantsPage() {
           <div>
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Tenants</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Read-only list (v1). Click a tenant to view details.
+              PCC tenant list. Use “Delete” to remove a tenant and all associated data (with safety confirmation).
             </p>
           </div>
 
@@ -58,7 +61,7 @@ export default async function PccTenantsPage() {
           <div className="col-span-4">Tenant</div>
           <div className="col-span-3">Slug</div>
           <div className="col-span-3">Owner</div>
-          <div className="col-span-2 text-right">Created</div>
+          <div className="col-span-2 text-right">Actions</div>
         </div>
 
         {rows.length ? (
@@ -67,28 +70,44 @@ export default async function PccTenantsPage() {
               const owner = t.ownerUserId
                 ? `user:${String(t.ownerUserId).slice(0, 8)}`
                 : t.ownerClerkUserId
-                  ? `clerk:${String(t.ownerClerkUserId).slice(0, 8)}`
-                  : "—";
+                ? `clerk:${String(t.ownerClerkUserId).slice(0, 8)}`
+                : "—";
 
               return (
-                <Link
-                  key={t.id}
-                  href={`/pcc/tenants/${t.id}`}
-                  className="grid grid-cols-12 gap-0 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-900"
-                >
+                <div key={t.id} className="grid grid-cols-12 gap-0 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-900">
                   <div className="col-span-4 min-w-0">
                     <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
-                    <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{String(t.id).slice(0, 8)}</div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400 truncate">
+                      {String(t.id).slice(0, 8)} · {fmtDate(t.createdAt)}
+                    </div>
                   </div>
 
                   <div className="col-span-3 min-w-0 text-sm text-gray-700 dark:text-gray-200 truncate">{t.slug}</div>
 
                   <div className="col-span-3 min-w-0 text-sm text-gray-700 dark:text-gray-200 truncate">{owner}</div>
 
-                  <div className="col-span-2 text-right text-xs text-gray-500 dark:text-gray-400">
-                    {fmtDate(t.createdAt)}
+                  <div className="col-span-2 flex justify-end gap-2">
+                    <Link
+                      href={`/pcc/tenants/${t.id}`}
+                      className={cn(
+                        "inline-flex items-center rounded-lg border px-3 py-2 text-xs font-semibold",
+                        "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-950"
+                      )}
+                    >
+                      View
+                    </Link>
+
+                    <Link
+                      href={`/pcc/tenants/${t.id}/delete`}
+                      className={cn(
+                        "inline-flex items-center rounded-lg border px-3 py-2 text-xs font-semibold",
+                        "border-red-200 bg-red-50 text-red-800 hover:bg-red-100 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200 dark:hover:bg-red-950/60"
+                      )}
+                    >
+                      Delete
+                    </Link>
                   </div>
-                </Link>
+                </div>
               );
             })}
           </div>
