@@ -1,7 +1,7 @@
 // src/app/api/quote/submit/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import OpenAI from "openai";
 import crypto from "crypto";
 
@@ -50,12 +50,15 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(),
+      category: z.string().optional(), // back-compat
     })
     .optional(),
 
   quoteLogId: z.string().uuid().optional(),
 
+  // accept BOTH:
+  // - [{question, answer}]
+  // - ["answer1", "answer2"]
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
 });
 
@@ -159,6 +162,7 @@ function startOfNextMonthUTC(d: Date) {
 type KeySource = "tenant" | "platform_grace";
 
 function platformOpenAiKey(): string | null {
+  // per your note: Vercel uses OPENAI_API_KEY
   const k = process.env.OPENAI_API_KEY?.trim() || "";
   return k ? k : null;
 }
@@ -217,55 +221,14 @@ async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: 
   }
 }
 
-async function logSqlSessionTruth(debug: DebugFn | undefined) {
-  try {
-    const s = await db.execute(sql`
-      select
-        current_schema() as current_schema,
-        current_user as current_user,
-        current_setting('search_path', true) as search_path,
-        to_regclass('tenant_settings') as to_regclass_tenant_settings,
-        to_regclass('public.tenant_settings') as to_regclass_public_tenant_settings
-    `);
-
-    const row = (s as any)?.rows?.[0] ?? null;
-    debug?.("resolveOpenAiClient.session", {
-      current_schema: row?.current_schema ?? null,
-      current_user: row?.current_user ?? null,
-      search_path: row?.search_path ?? null,
-      to_regclass_tenant_settings: row?.to_regclass_tenant_settings ?? null,
-      to_regclass_public_tenant_settings: row?.to_regclass_public_tenant_settings ?? null,
-    });
-
-    const rel = await db.execute(sql`
-      select
-        n.nspname as schema,
-        c.relname as relname,
-        c.relkind as relkind
-      from pg_class c
-      join pg_namespace n on n.oid = c.relnamespace
-      where c.relname = 'tenant_settings'
-      order by n.nspname asc
-      limit 25
-    `);
-
-    const rows = ((rel as any)?.rows ?? []) as Array<any>;
-    debug?.("resolveOpenAiClient.relations", {
-      tenant_settings_relations: rows.map((r) => ({
-        schema: r?.schema ?? null,
-        relname: r?.relname ?? null,
-        relkind: r?.relkind ?? null,
-      })),
-    });
-  } catch (e: any) {
-    debug?.("resolveOpenAiClient.sessionProbeError", { message: e?.message ?? String(e) });
-  }
-}
-
 /**
  * Resolve OpenAI client using:
  * - tenant secret if present
  * - else platform key if grace credits available (optionally consumes one)
+ *
+ * IMPORTANT:
+ * - Phase 1: consumeGrace=true (atomic increment)
+ * - Phase 2: consumeGrace=false (use prior llmKeySource from quote log)
  */
 async function resolveOpenAiClient(args: {
   tenantId: string;
@@ -277,6 +240,7 @@ async function resolveOpenAiClient(args: {
 
   debug?.("resolveOpenAiClient.start", { tenantId, consumeGrace, forceKeySource: forceKeySource ?? null });
 
+  // 1) Tenant key if exists (unless explicitly forced to platform)
   if (!forceKeySource || forceKeySource === "tenant") {
     const secretRow = await db
       .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
@@ -300,6 +264,7 @@ async function resolveOpenAiClient(args: {
     }
   }
 
+  // 2) Platform grace key
   const platformKey = platformOpenAiKey();
   debug?.("resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
 
@@ -309,26 +274,32 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
+  // Phase 2 finalize: do NOT consume; honor phase1’s decision
   if (!consumeGrace) {
     debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // 🔎 PROVE THE SQL SESSION/TRUTH right before the grace consume path
-  await logSqlSessionTruth(debug);
+  // ✅ FIX B: Use Drizzle update/select (consistent result shape; avoids db.execute RETURNING row parsing issues)
+  const updated = await db
+    .update(tenantSettings)
+    .set({
+      activationGraceUsed: sql`coalesce(${tenantSettings.activationGraceUsed}, 0) + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(tenantSettings.tenantId, tenantId),
+        sql`coalesce(${tenantSettings.activationGraceUsed}, 0) < coalesce(${tenantSettings.activationGraceCredits}, 0)`
+      )
+    )
+    .returning({
+      activation_grace_used: sql`coalesce(${tenantSettings.activationGraceUsed}, 0)`,
+      activation_grace_credits: sql`coalesce(${tenantSettings.activationGraceCredits}, 0)`,
+    });
 
-  const upd = await db.execute(sql`
-    update ${tenantSettings}
-    set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
-        updated_at = now()
-    where tenant_id = ${tenantId}::uuid
-      and coalesce(activation_grace_used, 0) < coalesce(activation_grace_credits, 0)
-    returning
-      coalesce(activation_grace_used, 0) as activation_grace_used,
-      coalesce(activation_grace_credits, 0) as activation_grace_credits
-  `);
+  const row = updated?.[0] ?? null;
 
-  const row = (upd as any)?.rows?.[0] ?? null;
   debug?.("resolveOpenAiClient.grace.updateResult", {
     updatedRowReturned: Boolean(row),
     activation_grace_used: row?.activation_grace_used ?? null,
@@ -336,16 +307,17 @@ async function resolveOpenAiClient(args: {
   });
 
   if (!row) {
-    const cur = await db.execute(sql`
-      select
-        coalesce(activation_grace_used, 0) as used,
-        coalesce(activation_grace_credits, 0) as credits
-      from ${tenantSettings}
-      where tenant_id = ${tenantId}::uuid
-      limit 1
-    `);
+    const cur = await db
+      .select({
+        used: sql`coalesce(${tenantSettings.activationGraceUsed}, 0)`,
+        credits: sql`coalesce(${tenantSettings.activationGraceCredits}, 0)`,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenantId))
+      .limit(1);
 
-    const curRow = (cur as any)?.rows?.[0] ?? null;
+    const curRow = cur?.[0] ?? null;
+
     debug?.("resolveOpenAiClient.grace.current", {
       hasRow: Boolean(curRow),
       used: curRow?.used ?? null,
@@ -373,6 +345,9 @@ async function resolveOpenAiClient(args: {
   return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
 }
 
+/**
+ * ✅ Auditable AI snapshot (hash prompts, store key source)
+ */
 function buildAiSnapshot(args: {
   phase: "phase1_insert" | "phase1_qa_asking" | "phase1_estimated" | "phase2_finalized";
   tenantId: string;
@@ -766,6 +741,7 @@ export async function POST(req: Request) {
     const { tenantSlug } = parsed.data;
     debug("tenantSlug.parsed", { tenantSlug });
 
+    // platform gates
     const pc = await db
       .select({
         aiQuotingEnabled: platformConfig.aiQuotingEnabled,
@@ -795,6 +771,7 @@ export async function POST(req: Request) {
       );
     }
 
+    // Tenant lookup by slug
     const tenant = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
       .from(tenants)
@@ -808,9 +785,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND", ...(debugEnabled ? { debugId } : {}) }, { status: 404 });
     }
 
+    // Determine phase
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
     debug("phase.detected", { isPhase2, quoteLogId: parsed.data.quoteLogId ?? null, qaAnswersLen: parsed.data.qaAnswers?.length ?? 0 });
 
+    // Settings
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -848,6 +827,7 @@ export async function POST(req: Request) {
       throw e;
     }
 
+    // enforce plan limits on phase 1 only
     if (!isPhase2) {
       const limit = typeof settings.monthlyQuoteLimit === "number" ? settings.monthlyQuoteLimit : null;
       await enforceMonthlyLimit({ tenantId: tenant.id, monthlyQuoteLimit: limit });
@@ -858,6 +838,7 @@ export async function POST(req: Request) {
     const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings.businessName) || null;
 
+    // Pre-load quote log if phase2 (immutable industry + key source)
     let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
     let industryKeyForQuote = tenantIndustryKey;
     let phase2KeySource: KeySource | null = null;
@@ -888,6 +869,7 @@ export async function POST(req: Request) {
       industryKeyForQuote = tenantIndustryKey;
     }
 
+    // Resolve tenant + PCC AI settings
     const resolvedBase = await resolveTenantLlm(tenant.id);
     const pccCfg = await loadPlatformLlmConfig();
     const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
@@ -934,6 +916,7 @@ export async function POST(req: Request) {
 
     const denylist = resolved.guardrails.blockedTopics ?? [];
 
+    // Resolve OpenAI client (plan-aware)
     const { openai, keySource } = await resolveOpenAiClient({
       tenantId: tenant.id,
       consumeGrace: !isPhase2,
@@ -954,7 +937,7 @@ export async function POST(req: Request) {
     };
 
     // -------------------------
-    // Phase 2
+    // Phase 2: finalize after QA
     // -------------------------
     if (isPhase2) {
       const quoteLogId = parsed.data.quoteLogId!;
@@ -1084,7 +1067,7 @@ export async function POST(req: Request) {
     }
 
     // -------------------------
-    // Phase 1
+    // Phase 1: initial submission
     // -------------------------
     const images = parsed.data.images ?? [];
 
