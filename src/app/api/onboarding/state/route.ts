@@ -38,8 +38,6 @@ function safePlan(v: unknown): PlanTier | null {
 }
 
 function planToDbValue(p: PlanTier): string {
-  // Keep writing tier0/tier1/tier2 going forward.
-  // Existing rows may still be "free" — we map that in safePlan().
   return p;
 }
 
@@ -412,9 +410,9 @@ export async function POST(req: Request) {
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
 
       // IMPORTANT:
-      // - Default resend_from_email to platform no-reply ONLY if not already set.
-      // - Do not overwrite if tenant later customizes sender.
-      const defaultFrom = "no-reply@aiphotoquote.com";
+      // - Set resend_from_email to the platform default ONLY if it's currently null.
+      // - Never overwrite a tenant's custom configured sender later.
+      const platformFrom = "no-reply@aiphotoquote.com";
 
       await db.execute(sql`
         insert into tenant_settings (
@@ -430,17 +428,16 @@ export async function POST(req: Request) {
           'service',
           ${leadToEmail},
           ${brandLogoUrl},
-          ${defaultFrom},
+          ${platformFrom},
           now()
         )
         on conflict (tenant_id) do update
           set lead_to_email = excluded.lead_to_email,
               brand_logo_url = excluded.brand_logo_url,
-              resend_from_email = coalesce(nullif(tenant_settings.resend_from_email, ''), excluded.resend_from_email),
+              resend_from_email = coalesce(tenant_settings.resend_from_email, excluded.resend_from_email),
               updated_at = now()
       `);
 
-      // advance onboarding to step 6 (not completed yet)
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
         values (${tid}::uuid, 6, false, now(), now())
@@ -464,14 +461,17 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, { status: 400 });
       }
 
-      // ✅ business rules (per your latest decision)
-      // tier0: 5 quotes/mo, platform keys allowed (handled later)
+      // Business rules:
+      // tier0: 5 quotes/mo, platform key allowed via grace credits
       // tier1: 50 quotes/mo
       // tier2: unlimited (NULL)
       const monthlyLimit = plan === "tier0" ? 5 : plan === "tier1" ? 50 : null;
 
-      // Optional: small grace bucket for paid tiers (until they set tenant key) — we’ll enforce later.
-      const graceCredits = plan === "tier0" ? 0 : 30;
+      // FIX:
+      // tier0 MUST have grace credits or it will immediately TRIAL_EXHAUSTED.
+      // Keep tier0 aligned with your platform behavior (20 initial grace credits).
+      // Paid tiers get a larger temporary bucket until they add a tenant key.
+      const graceCredits = plan === "tier0" ? 20 : 30;
 
       await db.execute(sql`
         update tenant_settings
