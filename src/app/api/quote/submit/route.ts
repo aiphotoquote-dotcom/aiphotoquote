@@ -281,8 +281,9 @@ async function resolveOpenAiClient(args: {
   }
 
   // Consume grace atomically (NULL-safe)
+  // ✅ IMPORTANT: schema-qualify to avoid search_path / schema mismatch with Drizzle resolution
   const upd = await db.execute(sql`
-    update tenant_settings
+    update public.tenant_settings
     set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
         updated_at = now()
     where tenant_id = ${tenantId}::uuid
@@ -305,7 +306,7 @@ async function resolveOpenAiClient(args: {
       select
         coalesce(activation_grace_used, 0) as used,
         coalesce(activation_grace_credits, 0) as credits
-      from tenant_settings
+      from public.tenant_settings
       where tenant_id = ${tenantId}::uuid
       limit 1
     `);
@@ -754,13 +755,23 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MAINTENANCE",
+          message: pc.maintenanceMessage || "Service temporarily unavailable.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 503 }
       );
     }
     if (pc && pc.aiQuotingEnabled === false) {
       return NextResponse.json(
-        { ok: false, error: "AI_DISABLED", message: "AI quoting is currently disabled.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "AI_DISABLED",
+          message: "AI quoting is currently disabled.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 503 }
       );
     }
@@ -781,7 +792,11 @@ export async function POST(req: Request) {
 
     // Determine phase
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
-    debug("phase.detected", { isPhase2, quoteLogId: parsed.data.quoteLogId ?? null, qaAnswersLen: parsed.data.qaAnswers?.length ?? 0 });
+    debug("phase.detected", {
+      isPhase2,
+      quoteLogId: parsed.data.quoteLogId ?? null,
+      qaAnswersLen: parsed.data.qaAnswers?.length ?? 0,
+    });
 
     // Settings (required to track plan/grace usage)
     const settings = await db
@@ -994,7 +1009,12 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
+            {
+              ok: false,
+              error: "CONTENT_BLOCKED",
+              message: "Your answers include content we can’t process. Please revise.",
+              ...(debugEnabled ? { debugId } : {}),
+            },
             { status: 400 }
           );
         }
@@ -1103,7 +1123,12 @@ export async function POST(req: Request) {
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "CONTENT_BLOCKED",
+          message: "Your request includes content we can’t process. Please revise and try again.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
