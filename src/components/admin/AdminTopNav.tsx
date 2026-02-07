@@ -56,15 +56,6 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
   );
 }
 
-function hardReloadSamePage() {
-  try {
-    const next = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
-    window.location.assign(next);
-  } catch {
-    window.location.reload();
-  }
-}
-
 export default function AdminTopNav() {
   const router = useRouter();
   const pathname = usePathname() || "";
@@ -94,7 +85,7 @@ export default function AdminTopNav() {
     try {
       const res = await fetch("/api/tenant/context", {
         cache: "no-store",
-        credentials: "include", // ✅ important for consistent cookie behavior
+        credentials: "include",
       });
 
       const data = (await res.json().catch(() => null)) as TenantContextResp | null;
@@ -116,7 +107,7 @@ export default function AdminTopNav() {
     setMobileOpen(false);
   }, [pathname]);
 
-  // Refresh tenant context on route change (keeps nav pill aligned while browsing)
+  // Refresh tenant context on route change
   useEffect(() => {
     loadContext();
   }, [pathname, loadContext]);
@@ -137,17 +128,25 @@ export default function AdminTopNav() {
     };
   }, [loadContext]);
 
+  function hardReloadSameUrl() {
+    try {
+      window.location.assign(window.location.href);
+    } catch {
+      // ignore
+    }
+  }
+
   // Allow ANY component to request a context refresh:
   // window.dispatchEvent(new Event("apq:tenant-changed"))
   useEffect(() => {
     function onTenantChanged() {
-      // reload context + refresh server components (reads new cookie)
       loadContext().catch(() => null);
+
+      // Try soft refresh first…
       router.refresh();
 
-      // ✅ HARDENING: guarantee all admin pages reflect new tenant immediately
-      // (iOS/Safari can be sticky with app-router caches)
-      hardReloadSamePage();
+      // …but iOS can keep stale RSC on the current route; hard reload guarantees consistency.
+      hardReloadSameUrl();
     }
     window.addEventListener("apq:tenant-changed", onTenantChanged as any);
     return () => {
@@ -226,10 +225,14 @@ export default function AdminTopNav() {
       {/* Mobile drawer */}
       {mobileOpen ? (
         <div className="md:hidden border-t border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/80">
-          <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-2">
-            {/* Tenant (mobile): pill + switcher */}
-            <div className="rounded-xl border border-gray-200 bg-white/70 px-3 py-3 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
-              <div className="flex items-center justify-between">
+          <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-3">
+            {/* Tenant switcher (mobile) */}
+            {shouldShowSwitcher ? (
+              <div className="rounded-xl border border-gray-200 bg-white/70 px-3 py-3 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
+                <AdminTenantSwitcher variant="select" />
+              </div>
+            ) : (
+              <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white/70 px-3 py-3 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant</div>
                 {ctxLoading ? (
                   <Pill>…</Pill>
@@ -241,10 +244,7 @@ export default function AdminTopNav() {
                   <Pill tone="warn">none</Pill>
                 )}
               </div>
-
-              {/* ✅ Mobile switcher: AdminTenantSwitcher renders native <select> on small screens */}
-              <div className="mt-3">{shouldShowSwitcher ? <AdminTenantSwitcher /> : null}</div>
-            </div>
+            )}
 
             {/* account */}
             <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white/70 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">

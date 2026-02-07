@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 type TenantRow = {
   tenantId: string;
@@ -28,8 +28,18 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-export default function AdminTenantSwitcher() {
+type Props = {
+  /**
+   * button: existing dropdown button UI (desktop)
+   * select: native <select> (mobile-friendly)
+   */
+  variant?: "button" | "select";
+  className?: string;
+};
+
+export default function AdminTenantSwitcher({ variant = "button", className }: Props) {
   const router = useRouter();
+  const pathname = usePathname() || "";
   const [isPending, startTransition] = useTransition();
 
   const [loading, setLoading] = useState(true);
@@ -37,7 +47,7 @@ export default function AdminTenantSwitcher() {
   const [activeTenantId, setActiveTenantId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // Desktop popover state (kept, but iOS will use native <select>)
+  // dropdown state for button variant
   const [open, setOpen] = useState(false);
   const [switchingTo, setSwitchingTo] = useState<string | null>(null);
 
@@ -80,12 +90,20 @@ export default function AdminTenantSwitcher() {
   const show = tenants.length > 1;
   if (!show) return null;
 
-  function hardReloadSamePage() {
+  function dispatchTenantChanged() {
     try {
-      const next = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
-      window.location.assign(next);
+      window.dispatchEvent(new Event("apq:tenant-changed"));
     } catch {
-      window.location.reload();
+      // ignore
+    }
+  }
+
+  function hardReloadSameUrl() {
+    // iOS/Safari/Chrome can be stubborn with RSC refresh; this guarantees the new cookie is used.
+    try {
+      window.location.assign(window.location.href);
+    } catch {
+      // ignore
     }
   }
 
@@ -116,24 +134,22 @@ export default function AdminTenantSwitcher() {
 
       setOpen(false);
 
-      // Notify any listeners
-      try {
-        window.dispatchEvent(new Event("apq:tenant-changed"));
-      } catch {
-        // ignore
-      }
+      // Let listeners update pills, etc.
+      dispatchTenantChanged();
 
-      // Refresh server components (best-effort)
+      // Ask Next to re-fetch server components
       startTransition(() => {
         router.refresh();
       });
 
-      // Re-sync switcher state (best-effort)
+      // Keep switcher truthful
       await load();
 
-      // ✅ HARDENING: guarantee every page reflects the new tenant cookie
-      // This fixes “same page still showing old tenant” across the whole admin.
-      hardReloadSamePage();
+      // 🔥 iOS hardening: if we stayed on the same route, force a full reload to eliminate stale RSC payloads
+      // This is what fixes "dashboard correct but quotes list old tenant remnant" on mobile.
+      if (pathname.startsWith("/admin")) {
+        hardReloadSameUrl();
+      }
     } catch (e: any) {
       setActiveTenantId(prev ?? null);
       await load();
@@ -143,120 +159,135 @@ export default function AdminTenantSwitcher() {
     }
   }
 
-  return (
-    <div className="relative">
-      {/* ✅ Mobile: native select (iOS-safe) */}
-      <div className="sm:hidden">
-        <label className="sr-only" htmlFor="tenant-switcher-mobile">
-          Tenant
-        </label>
-        <select
-          id="tenant-switcher-mobile"
-          value={activeTenantId ?? ""}
-          onChange={(e) => switchTenant(e.target.value)}
-          className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 shadow-sm
-                     dark:border-gray-800 dark:bg-black dark:text-gray-100"
-          disabled={loading || isPending}
-        >
-          {tenants.map((t) => (
-            <option key={t.tenantId} value={t.tenantId}>
-              {t.slug}
+  // ---------- SELECT (mobile-friendly) ----------
+  if (variant === "select") {
+    return (
+      <div className={cn("w-full", className)}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant</div>
+          <span className="rounded-full border border-green-200 bg-green-50 px-2.5 py-1 text-xs font-semibold text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200">
+            {activeTenant?.slug || "(none)"}
+          </span>
+        </div>
+
+        <div className="mt-3">
+          <select
+            className="w-full rounded-xl border border-gray-200 bg-white px-3 py-3 text-sm font-semibold text-gray-900 shadow-sm dark:border-gray-800 dark:bg-black dark:text-gray-100"
+            value={activeTenantId ?? ""}
+            disabled={loading || !!switchingTo}
+            onChange={(e) => switchTenant(e.target.value)}
+            aria-label="Select tenant"
+          >
+            <option value="" disabled>
+              Select tenant…
             </option>
-          ))}
-        </select>
+            {tenants.map((t) => (
+              <option key={t.tenantId} value={t.tenantId}>
+                {t.slug}
+              </option>
+            ))}
+          </select>
 
-        {err ? <div className="mt-2 text-xs text-red-700 dark:text-red-300">{err}</div> : null}
+          {isPending ? <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updating views…</div> : null}
+          {err ? <div className="mt-2 text-sm text-red-700 dark:text-red-300">{err}</div> : null}
+        </div>
       </div>
+    );
+  }
 
-      {/* ✅ Desktop: keep your existing popover UI */}
-      <div className="hidden sm:block">
-        <button
-          type="button"
-          className={cn(
-            "inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold",
-            "text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-          )}
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          aria-label="Tenant switcher"
-        >
-          <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
-          <span className="hidden sm:inline">Tenant:</span>
-          <span className="font-mono text-xs sm:text-sm">{loading ? "Loading…" : activeTenant?.slug || "(none)"}</span>
-          <span className="text-xs opacity-70">▾</span>
-        </button>
+  // ---------- BUTTON (desktop) ----------
+  return (
+    <div className={cn("relative", className)}>
+      <button
+        type="button"
+        className={cn(
+          "inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold",
+          "text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+        )}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label="Tenant switcher"
+      >
+        <span className="inline-block h-2 w-2 rounded-full bg-green-600" />
+        <span className="hidden sm:inline">Tenant:</span>
+        <span className="font-mono text-xs sm:text-sm">{loading ? "Loading…" : activeTenant?.slug || "(none)"}</span>
+        <span className="text-xs opacity-70">▾</span>
+      </button>
 
-        {open ? (
-          <div className="absolute right-0 mt-2 w-80 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg dark:border-gray-800 dark:bg-black">
-            <div className="border-b border-gray-200 p-3 dark:border-gray-800">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Switch tenant</div>
-              <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                Your active tenant controls what quotes/settings you’re viewing.
-              </div>
-              {isPending ? <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updating views…</div> : null}
+      {open ? (
+        <div className="absolute right-0 mt-2 w-80 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg dark:border-gray-800 dark:bg-black">
+          <div className="border-b border-gray-200 p-3 dark:border-gray-800">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Switch tenant</div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+              Your active tenant controls what quotes/settings you’re viewing.
             </div>
+            {isPending ? <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Updating views…</div> : null}
+          </div>
 
-            <div className="max-h-80 overflow-auto p-2">
-              {tenants.map((t) => {
-                const isActive = t.tenantId === activeTenantId;
-                const isBusy = switchingTo === t.tenantId;
+          <div className="max-h-80 overflow-auto p-2">
+            {tenants.map((t) => {
+              const isActive = t.tenantId === activeTenantId;
+              const isBusy = switchingTo === t.tenantId;
 
-                return (
-                  <button
-                    key={t.tenantId}
-                    type="button"
-                    onClick={() => switchTenant(t.tenantId)}
-                    className={cn(
-                      "w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-                      isActive
-                        ? "border-blue-400 bg-blue-50 text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-100"
-                        : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-                    )}
-                    disabled={isBusy || loading}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate font-semibold">
-                          {t.name || t.slug}{" "}
-                          <span className="font-normal text-gray-500 dark:text-gray-400">({t.slug})</span>
-                        </div>
-                        <div className="mt-1 truncate text-[11px] font-mono text-gray-500 dark:text-gray-400">{t.tenantId}</div>
+              return (
+                <button
+                  key={t.tenantId}
+                  type="button"
+                  onClick={() => switchTenant(t.tenantId)}
+                  className={cn(
+                    "w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                    isActive
+                      ? "border-blue-400 bg-blue-50 text-blue-900 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-100"
+                      : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+                  )}
+                  disabled={isBusy || loading}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate font-semibold">
+                        {t.name || t.slug}{" "}
+                        <span className="font-normal text-gray-500 dark:text-gray-400">({t.slug})</span>
                       </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="rounded-full border border-gray-200 px-2 py-1 text-[11px] font-mono text-gray-700 dark:border-gray-800 dark:text-gray-200">
-                          {t.role}
-                        </span>
-                        {isActive ? (
-                          <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
-                            Active
-                          </span>
-                        ) : isBusy ? (
-                          <span className="text-[11px] text-gray-500 dark:text-gray-400">Switching…</span>
-                        ) : null}
+                      <div className="mt-1 truncate text-[11px] font-mono text-gray-500 dark:text-gray-400">
+                        {t.tenantId}
                       </div>
                     </div>
-                  </button>
-                );
-              })}
-            </div>
 
-            {err ? (
-              <div className="border-t border-gray-200 p-3 text-sm text-red-700 dark:border-gray-800 dark:text-red-300">{err}</div>
-            ) : null}
-
-            <div className="flex justify-end border-t border-gray-200 p-2 dark:border-gray-800">
-              <button
-                type="button"
-                className="rounded-lg px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-900"
-                onClick={() => setOpen(false)}
-              >
-                Close
-              </button>
-            </div>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-full border border-gray-200 px-2 py-1 text-[11px] font-mono text-gray-700 dark:border-gray-800 dark:text-gray-200">
+                        {t.role}
+                      </span>
+                      {isActive ? (
+                        <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
+                          Active
+                        </span>
+                      ) : isBusy ? (
+                        <span className="text-[11px] text-gray-500 dark:text-gray-400">Switching…</span>
+                      ) : null}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
-        ) : null}
-      </div>
+
+          {err ? (
+            <div className="border-t border-gray-200 p-3 text-sm text-red-700 dark:border-gray-800 dark:text-red-300">
+              {err}
+            </div>
+          ) : null}
+
+          <div className="flex justify-end border-t border-gray-200 p-2 dark:border-gray-800">
+            <button
+              type="button"
+              className="rounded-lg px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-900"
+              onClick={() => setOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
