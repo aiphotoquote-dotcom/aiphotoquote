@@ -1,5 +1,6 @@
 // src/proxy.ts
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 
 /**
  * Only these routes should ever require a Clerk session.
@@ -15,16 +16,18 @@ const isProtectedRoute = createRouteMatcher([
   "/api/admin(.*)",
   "/api/pcc(.*)",
   "/api/tenant(.*)",
-  "/api/onboarding(.*)", // ✅ onboarding APIs call auth()/currentUser()
+  "/api/onboarding(.*)", // onboarding APIs call auth()/currentUser()
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
-  // IMPORTANT:
-  // Clerk runs on ALL non-API pages (public + protected) due to matcher below,
-  // but we ONLY enforce auth on protected routes.
+  // Clerk runs on ALL matched routes, but we ONLY enforce auth on protected routes.
   if (isProtectedRoute(req)) {
-    await auth.protect();
+    // IMPORTANT: return the response from protect() so middleware always resolves
+    return await auth.protect();
   }
+
+  // Public routes must always continue
+  return NextResponse.next();
 });
 
 /**
@@ -35,13 +38,13 @@ export default clerkMiddleware(async (auth, req) => {
  */
 export const config = {
   matcher: [
-    // ✅ All NON-API pages (public + protected), excluding Next.js internals + common static assets.
+    // All NON-API pages (public + protected), excluding Next.js internals + common static assets.
     "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:css|js|map|png|jpg|jpeg|gif|svg|webp|ico|txt|xml)$).*)",
 
-    // ✅ Only protected API namespaces (do NOT include all /api)
+    // Only protected API namespaces (do NOT include all /api)
     "/api/admin(.*)",
     "/api/pcc(.*)",
     "/api/tenant(.*)",
-    "/api/onboarding(.*)", // ✅
+    "/api/onboarding(.*)",
   ],
 };
