@@ -411,12 +411,32 @@ export async function POST(req: Request) {
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
 
+      // IMPORTANT:
+      // - Default resend_from_email to platform no-reply ONLY if not already set.
+      // - Do not overwrite if tenant later customizes sender.
+      const defaultFrom = "no-reply@aiphotoquote.com";
+
       await db.execute(sql`
-        insert into tenant_settings (tenant_id, industry_key, lead_to_email, brand_logo_url, updated_at)
-        values (${tid}::uuid, 'service', ${leadToEmail}, ${brandLogoUrl}, now())
+        insert into tenant_settings (
+          tenant_id,
+          industry_key,
+          lead_to_email,
+          brand_logo_url,
+          resend_from_email,
+          updated_at
+        )
+        values (
+          ${tid}::uuid,
+          'service',
+          ${leadToEmail},
+          ${brandLogoUrl},
+          ${defaultFrom},
+          now()
+        )
         on conflict (tenant_id) do update
           set lead_to_email = excluded.lead_to_email,
               brand_logo_url = excluded.brand_logo_url,
+              resend_from_email = coalesce(nullif(tenant_settings.resend_from_email, ''), excluded.resend_from_email),
               updated_at = now()
       `);
 
