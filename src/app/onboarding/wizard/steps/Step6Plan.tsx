@@ -15,12 +15,7 @@ function safePlan(v: any): PlanTier | null {
 
 function CheckIcon({ className = "" }: { className?: string }) {
   return (
-    <svg
-      viewBox="0 0 20 20"
-      aria-hidden="true"
-      className={["h-4 w-4 shrink-0", className].join(" ")}
-      fill="none"
-    >
+    <svg viewBox="0 0 20 20" aria-hidden="true" className={["h-4 w-4 shrink-0", className].join(" ")} fill="none">
       <path
         d="M16.25 5.75L8.5 13.5L4.75 9.75"
         stroke="currentColor"
@@ -48,10 +43,7 @@ function UsageBars({
         return (
           <div
             key={i}
-            className={[
-              "h-2 w-7 rounded-full",
-              on ? barClass : "bg-slate-200 dark:bg-slate-800",
-            ].join(" ")}
+            className={["h-2 w-7 rounded-full", on ? barClass : "bg-slate-200 dark:bg-slate-800"].join(" ")}
           />
         );
       })}
@@ -84,12 +76,11 @@ export function Step6Plan(props: {
         popular: false,
         usage: { filled: 2, total: 5 },
         accent: {
-          ring: "ring-slate-200/70 dark:ring-slate-800/60",
           border: "border-slate-200 dark:border-slate-800",
-          glow:
-            "bg-[radial-gradient(circle_at_35%_25%,rgba(148,163,184,0.42),transparent_58%)] dark:bg-[radial-gradient(circle_at_35%_25%,rgba(148,163,184,0.22),transparent_60%)]",
+          ring: "ring-slate-200/70 dark:ring-slate-800/60",
           usage: "bg-slate-900 dark:bg-slate-200",
-          pill: "bg-slate-900 text-white dark:bg-white dark:text-black",
+          glow:
+            "bg-[radial-gradient(circle_at_35%_25%,rgba(148,163,184,0.30),transparent_55%)] dark:bg-[radial-gradient(circle_at_35%_25%,rgba(148,163,184,0.18),transparent_60%)]",
         },
         features: ["5 quotes / month", "Uses platform AI keys", "Multiple users", "Upgrade anytime"],
       },
@@ -101,12 +92,11 @@ export function Step6Plan(props: {
         popular: true,
         usage: { filled: 4, total: 6 },
         accent: {
-          ring: "ring-emerald-200/70 dark:ring-emerald-900/30",
           border: "border-emerald-200/70 dark:border-emerald-900/40",
-          glow:
-            "bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.55),transparent_60%),radial-gradient(circle_at_70%_35%,rgba(99,102,241,0.40),transparent_62%),radial-gradient(circle_at_50%_90%,rgba(34,211,238,0.28),transparent_65%)] dark:bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.32),transparent_62%),radial-gradient(circle_at_70%_35%,rgba(99,102,241,0.26),transparent_65%),radial-gradient(circle_at_50%_90%,rgba(34,211,238,0.18),transparent_68%)]",
+          ring: "ring-emerald-200/70 dark:ring-emerald-900/30",
           usage: "bg-emerald-500",
-          pill: "bg-emerald-600 text-white",
+          glow:
+            "bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.40),transparent_55%),radial-gradient(circle_at_70%_35%,rgba(99,102,241,0.34),transparent_60%),radial-gradient(circle_at_50%_85%,rgba(34,211,238,0.26),transparent_62%)] dark:bg-[radial-gradient(circle_at_30%_25%,rgba(16,185,129,0.24),transparent_60%),radial-gradient(circle_at_70%_35%,rgba(99,102,241,0.22),transparent_65%),radial-gradient(circle_at_50%_85%,rgba(34,211,238,0.14),transparent_70%)]",
         },
         features: [
           "50 quotes / month",
@@ -123,12 +113,11 @@ export function Step6Plan(props: {
         popular: false,
         usage: { filled: 6, total: 6 },
         accent: {
-          ring: "ring-indigo-200/70 dark:ring-indigo-900/30",
           border: "border-indigo-200/70 dark:border-indigo-900/40",
-          glow:
-            "bg-[radial-gradient(circle_at_20%_15%,rgba(99,102,241,0.50),transparent_60%),radial-gradient(circle_at_75%_25%,rgba(168,85,247,0.38),transparent_64%),radial-gradient(circle_at_50%_92%,rgba(34,211,238,0.22),transparent_66%)] dark:bg-[radial-gradient(circle_at_20%_15%,rgba(99,102,241,0.30),transparent_62%),radial-gradient(circle_at_75%_25%,rgba(168,85,247,0.22),transparent_66%),radial-gradient(circle_at_50%_92%,rgba(34,211,238,0.14),transparent_70%)]",
+          ring: "ring-indigo-200/70 dark:ring-indigo-900/30",
           usage: "bg-indigo-500",
-          pill: "bg-indigo-600 text-white",
+          glow:
+            "bg-[radial-gradient(circle_at_20%_15%,rgba(99,102,241,0.38),transparent_55%),radial-gradient(circle_at_70%_30%,rgba(168,85,247,0.28),transparent_60%),radial-gradient(circle_at_50%_95%,rgba(34,211,238,0.18),transparent_60%)] dark:bg-[radial-gradient(circle_at_20%_15%,rgba(99,102,241,0.26),transparent_62%),radial-gradient(circle_at_70%_30%,rgba(168,85,247,0.18),transparent_66%),radial-gradient(circle_at_50%_95%,rgba(34,211,238,0.10),transparent_72%)]",
         },
         features: [
           "Unlimited quotes",
@@ -153,22 +142,16 @@ export function Step6Plan(props: {
       const res = await fetch("/api/onboarding/state", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          step: 6,
-          tenantId: tid,
-          plan: selected,
-        }),
+        body: JSON.stringify({ step: 6, tenantId: tid, plan: selected }),
       });
 
       const j = await res.json().catch(() => null);
-
       if (!res.ok || !j?.ok) {
         const msg = String(j?.message || j?.error || "").trim();
         throw new Error(msg || `Request failed (HTTP ${res.status})`);
       }
 
       const serverPlan = safePlan(j?.planTier) ?? selected;
-
       setSavedPlan(serverPlan);
       props.onSaved(serverPlan);
     } catch (e: any) {
@@ -183,24 +166,19 @@ export function Step6Plan(props: {
 
   return (
     <div className="relative">
-      {/* Stage backdrop */}
+      {/* soft stage (keeps your nice glow) */}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-x-0 -top-6 mx-auto h-[520px] max-w-5xl overflow-hidden rounded-[40px]"
       >
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_15%,rgba(15,23,42,0.10),transparent_55%)] dark:bg-[radial-gradient(circle_at_50%_15%,rgba(15,23,42,0.55),transparent_60%)]" />
-        <div className="absolute -inset-24 blur-3xl opacity-80 dark:opacity-70 bg-[radial-gradient(circle_at_20%_25%,rgba(16,185,129,0.18),transparent_55%),radial-gradient(circle_at_55%_15%,rgba(99,102,241,0.16),transparent_56%),radial-gradient(circle_at_85%_35%,rgba(168,85,247,0.14),transparent_58%)]" />
-        <div className="absolute inset-0 opacity-[0.055] dark:opacity-[0.10] bg-[linear-gradient(0deg,rgba(0,0,0,0.0),rgba(0,0,0,0.0)),url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22><filter id=%22n%22 x=%220%22 y=%220%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%222%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.35%22/></svg>')]" />
+        <div className="absolute -inset-24 blur-3xl opacity-80 dark:opacity-70 bg-[radial-gradient(circle_at_20%_25%,rgba(16,185,129,0.16),transparent_55%),radial-gradient(circle_at_55%_15%,rgba(99,102,241,0.14),transparent_56%),radial-gradient(circle_at_85%_35%,rgba(168,85,247,0.12),transparent_58%)]" />
       </div>
 
       <div className="relative">
         <div className="text-center">
-          <div className="text-[11px] font-semibold tracking-[0.22em] text-slate-500 dark:text-slate-400">
-            STEP 6 OF 6
-          </div>
-          <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
-            How much AI do you want working for you?
-          </div>
+          <div className="text-[11px] font-semibold tracking-[0.22em] text-slate-500 dark:text-slate-400">STEP 6 OF 6</div>
+          <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">How much AI do you want working for you?</div>
           <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
             Select the plan that fits your business today. You can change this anytime.
           </div>
@@ -241,10 +219,6 @@ export function Step6Plan(props: {
                 Back
               </button>
             </div>
-
-            <div className="mt-3 text-xs text-emerald-950/70 dark:text-emerald-100/70">
-              Tip: after widget setup, run a test quote to confirm emails + AI estimate flow.
-            </div>
           </div>
         ) : (
           <>
@@ -258,49 +232,33 @@ export function Step6Plan(props: {
                     type="button"
                     onClick={() => setSelected(p.tier)}
                     className={[
-                      "group relative text-left rounded-[28px] border bg-white p-5 shadow-sm transition",
-                      "dark:bg-gray-950",
+                      "group relative text-left rounded-[28px] border bg-white p-5 shadow-sm transition dark:bg-gray-950",
                       active ? "shadow-md" : "hover:shadow-md",
                       p.accent.border,
                     ].join(" ")}
                   >
-                    {/* Outer glow */}
+                    {/* per-card glow */}
                     <div
                       aria-hidden="true"
                       className={[
-                        "pointer-events-none absolute -inset-10 rounded-[46px] blur-3xl transition-opacity",
+                        "pointer-events-none absolute -inset-8 rounded-[44px] blur-3xl transition-opacity",
                         p.accent.glow,
-                        active ? "opacity-100" : "opacity-60",
+                        active ? "opacity-100" : "opacity-55",
                       ].join(" ")}
                     />
 
-                    {/* Card body */}
-                    <div
-                      className={[
-                        "relative overflow-hidden rounded-[22px] ring-1",
-                        p.accent.ring,
-                        active ? "bg-white/75 dark:bg-gray-950/60" : "bg-white/60 dark:bg-gray-950/50",
-                      ].join(" ")}
-                    >
-                      {/* Sheen */}
+                    <div className={["relative rounded-[22px] ring-1", p.accent.ring, "bg-white/70 dark:bg-gray-950/55"].join(" ")}>
                       <div
                         aria-hidden="true"
-                        className={[
-                          "pointer-events-none absolute inset-0",
-                          "bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.65),transparent_38%)]",
-                          "dark:bg-[radial-gradient(circle_at_18%_12%,rgba(255,255,255,0.10),transparent_44%)]",
-                          active ? "opacity-100" : "opacity-60",
-                        ].join(" ")}
+                        className="pointer-events-none absolute inset-0 rounded-[22px] bg-[radial-gradient(circle_at_18%_10%,rgba(255,255,255,0.60),transparent_38%)] dark:bg-[radial-gradient(circle_at_18%_10%,rgba(255,255,255,0.10),transparent_44%)]"
                       />
-
                       <div className="relative p-5">
-                        {/* Header: make left shrinkable + clipped so it can NEVER collide with price */}
-                        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4">
-                          <div className="min-w-0 overflow-hidden pr-1">
+                        {/* HEADER (simple + safe) */}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                              <div className="truncate text-base font-semibold text-gray-900 dark:text-gray-100">
-                                {p.name}
-                              </div>
+                              {/* truncate prevents overlap */}
+                              <div className="truncate text-base font-semibold text-gray-900 dark:text-gray-100">{p.name}</div>
                               {p.popular ? (
                                 <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 dark:bg-emerald-900/30 dark:text-emerald-100">
                                   MOST POPULAR
@@ -310,19 +268,17 @@ export function Step6Plan(props: {
                             <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">{p.subtitle}</div>
                           </div>
 
-                          {/* Fixed width price column = no collisions */}
-                          <div className="w-[118px] text-right sm:w-[138px]">
+                          {/* price column */}
+                          <div className="shrink-0 text-right">
                             <div className="flex items-baseline justify-end gap-1 whitespace-nowrap">
-                              <div className="text-2xl font-semibold leading-none text-gray-900 dark:text-gray-100 sm:text-3xl">
+                              <div className="text-3xl font-semibold leading-none text-gray-900 dark:text-gray-100">
                                 {p.price.dollars === 0 ? "Free" : `$${p.price.dollars}`}
                               </div>
-                              <div className="text-sm text-slate-500 dark:text-slate-400">
-                                {p.price.dollars === 0 ? "" : "/ mo"}
-                              </div>
+                              {p.price.dollars === 0 ? null : (
+                                <div className="text-sm text-slate-500 dark:text-slate-400">/ mo</div>
+                              )}
                             </div>
-                            <div className="mt-1 text-[11px] leading-tight text-slate-500 dark:text-slate-400">
-                              {p.price.note}
-                            </div>
+                            <div className="mt-1 text-[11px] leading-tight text-slate-500 dark:text-slate-400">{p.price.note}</div>
                           </div>
                         </div>
 
@@ -330,10 +286,7 @@ export function Step6Plan(props: {
 
                         <ul className="mt-4 space-y-2.5">
                           {p.features.map((f) => (
-                            <li
-                              key={f}
-                              className="flex items-start gap-2.5 text-sm text-slate-800 dark:text-slate-200"
-                            >
+                            <li key={f} className="flex items-start gap-2.5 text-sm text-slate-800 dark:text-slate-200">
                               <CheckIcon className="mt-[2px] text-emerald-600" />
                               <span className="leading-snug">{f}</span>
                             </li>
@@ -355,7 +308,7 @@ export function Step6Plan(props: {
                           <span
                             className={[
                               "inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold",
-                              active ? p.accent.pill : "bg-transparent text-slate-700 dark:text-slate-200",
+                              active ? "bg-slate-900 text-white dark:bg-white dark:text-black" : "text-slate-700 dark:text-slate-200",
                             ].join(" ")}
                           >
                             {active ? "Selected" : "Select"}
