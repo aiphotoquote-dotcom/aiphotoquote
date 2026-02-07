@@ -50,11 +50,15 @@ const Req = z.object({
     .object({
       notes: z.string().optional(),
       service_type: z.string().optional(),
-      category: z.string().optional(),
+      category: z.string().optional(), // back-compat
     })
     .optional(),
 
   quoteLogId: z.string().uuid().optional(),
+
+  // accept BOTH:
+  // - [{question, answer}]
+  // - ["answer1", "answer2"]
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
 });
 
@@ -163,72 +167,29 @@ function platformOpenAiKey(): string | null {
   return k ? k : null;
 }
 
-/**
- * ✅ Hardening: tenant_settings should exist, but if anything causes it to read as null
- * (drift, env mismatch, race, bad seed), we auto-create a minimal row and proceed.
- *
- * IMPORTANT: email config is NOT a readiness gate; quotes must still work.
- */
-async function ensureTenantSettings(args: {
-  tenantId: string;
-  preferredIndustryKey?: string | null;
-}) {
-  const { tenantId, preferredIndustryKey } = args;
-
-  const read = async () =>
-    db
-      .select({
-        tenantId: tenantSettings.tenantId,
-        industryKey: tenantSettings.industryKey,
-        brandLogoUrl: tenantSettings.brandLogoUrl,
-        brandLogoVariant: (tenantSettings as any).brandLogoVariant,
-        businessName: tenantSettings.businessName,
-
-        planTier: tenantSettings.planTier,
-        monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
-        activationGraceCredits: tenantSettings.activationGraceCredits,
-        activationGraceUsed: tenantSettings.activationGraceUsed,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-  const existing = await read();
-  if (existing) return existing;
-
-  const seedIndustry = safeTrim(preferredIndustryKey) || "service";
-
-  // Seed with safe defaults (do NOT block public quoting)
-  // Credits default to 0 so you don't accidentally hand out free usage
-  await db
-    .insert(tenantSettings)
-    .values({
-      tenantId,
-      industryKey: seedIndustry,
-
-      // defaults aligned to your onboarding intent
-      emailSendMode: "standard" as any,
-      resendFromEmail: "no-reply@aiphotoquote.com" as any,
-
-      planTier: "free" as any,
-      monthlyQuoteLimit: null as any,
-      activationGraceCredits: 0 as any,
-      activationGraceUsed: 0 as any,
-
-      updatedAt: new Date(),
-    } as any)
-    .onConflictDoNothing();
-
-  // Re-read after insert attempt
-  const after = await read();
-  if (after) return after;
-
-  const e: any = new Error("SETTINGS_MISSING");
-  e.code = "SETTINGS_MISSING";
-  e.status = 400;
-  throw e;
+function isDebugEnabled(req: Request) {
+  const h = req.headers.get("x-apq-debug");
+  if (h && h.trim() === "1") return true;
+  try {
+    const u = new URL(req.url);
+    return u.searchParams.get("debug") === "1";
+  } catch {
+    return false;
+  }
 }
+
+function safeDbTargetFromEnv(): { host: string | null; db: string | null } {
+  const raw = process.env.DATABASE_URL || process.env.POSTGRES_URL || "";
+  if (!raw) return { host: null, db: null };
+  try {
+    const u = new URL(raw);
+    return { host: u.host || null, db: (u.pathname || "").replace("/", "") || null };
+  } catch {
+    return { host: "unparseable", db: null };
+  }
+}
+
+type DebugFn = (stage: string, data?: Record<string, any>) => void;
 
 /**
  * Enforce monthly quote limits (Phase 1 only)
@@ -273,8 +234,11 @@ async function resolveOpenAiClient(args: {
   tenantId: string;
   consumeGrace: boolean;
   forceKeySource?: KeySource | null;
+  debug?: DebugFn;
 }): Promise<{ openai: OpenAI; keySource: KeySource }> {
-  const { tenantId, consumeGrace, forceKeySource } = args;
+  const { tenantId, consumeGrace, forceKeySource, debug } = args;
+
+  debug?.("resolveOpenAiClient.start", { tenantId, consumeGrace, forceKeySource: forceKeySource ?? null });
 
   // 1) Tenant key if exists (unless explicitly forced to platform)
   if (!forceKeySource || forceKeySource === "tenant") {
@@ -285,8 +249,11 @@ async function resolveOpenAiClient(args: {
       .limit(1)
       .then((r) => r[0] ?? null);
 
+    debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret: Boolean(secretRow?.openaiKeyEnc) });
+
     if (secretRow?.openaiKeyEnc) {
       const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+      debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
       return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
     }
 
@@ -299,6 +266,8 @@ async function resolveOpenAiClient(args: {
 
   // 2) Platform grace key
   const platformKey = platformOpenAiKey();
+  debug?.("resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
+
   if (!platformKey) {
     const e: any = new Error("MISSING_PLATFORM_OPENAI_KEY");
     e.code = "MISSING_PLATFORM_OPENAI_KEY";
@@ -307,6 +276,7 @@ async function resolveOpenAiClient(args: {
 
   // Phase 2 finalize: do NOT consume; honor phase1’s decision
   if (!consumeGrace) {
+    debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
@@ -323,7 +293,14 @@ async function resolveOpenAiClient(args: {
   `);
 
   const row = (upd as any)?.rows?.[0] ?? null;
+  debug?.("resolveOpenAiClient.grace.updateResult", {
+    updatedRowReturned: Boolean(row),
+    activation_grace_used: row?.activation_grace_used ?? null,
+    activation_grace_credits: row?.activation_grace_credits ?? null,
+  });
+
   if (!row) {
+    // Determine whether this is truly exhausted vs settings missing
     const cur = await db.execute(sql`
       select
         coalesce(activation_grace_used, 0) as used,
@@ -334,6 +311,12 @@ async function resolveOpenAiClient(args: {
     `);
 
     const curRow = (cur as any)?.rows?.[0] ?? null;
+    debug?.("resolveOpenAiClient.grace.current", {
+      hasRow: Boolean(curRow),
+      used: curRow?.used ?? null,
+      credits: curRow?.credits ?? null,
+    });
+
     if (!curRow) {
       const e: any = new Error("SETTINGS_MISSING");
       e.code = "SETTINGS_MISSING";
@@ -351,6 +334,7 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
+  debug?.("resolveOpenAiClient.platformGrace.consumeOk", { keySource: "platform_grace" });
   return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
 }
 
@@ -707,16 +691,51 @@ async function generateEstimate(args: {
 
 // ----------------- handler -----------------
 export async function POST(req: Request) {
+  const debugEnabled = isDebugEnabled(req);
+  const debugId = debugEnabled ? (crypto.randomUUID?.() || crypto.randomBytes(8).toString("hex")) : null;
+
+  const debug: DebugFn = (stage, data) => {
+    if (!debugEnabled) return;
+    // All logged fields must be safe (no secrets, no full env, no raw DB url)
+    console.log(
+      JSON.stringify({
+        tag: "apq_debug",
+        debugId,
+        stage,
+        ts: new Date().toISOString(),
+        ...(data || {}),
+      })
+    );
+  };
+
   try {
+    debug("request.start", {
+      method: "POST",
+      urlPath: (() => {
+        try {
+          return new URL(req.url).pathname;
+        } catch {
+          return null;
+        }
+      })(),
+      dbTarget: safeDbTargetFromEnv(),
+      hasOpenAiPlatformKey: Boolean(platformOpenAiKey()),
+    });
+
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json({ ok: false, error: "INVALID_BODY", issues: parsed.error.issues }, { status: 400 });
+      debug("request.invalid_body", { issuesCount: parsed.error.issues?.length ?? 0 });
+      return NextResponse.json(
+        { ok: false, error: "INVALID_BODY", issues: parsed.error.issues, ...(debugEnabled ? { debugId } : {}) },
+        { status: 400 }
+      );
     }
 
     const { tenantSlug } = parsed.data;
+    debug("tenantSlug.parsed", { tenantSlug });
 
-    // ✅ platform gates
+    // platform gates
     const pc = await db
       .select({
         aiQuotingEnabled: platformConfig.aiQuotingEnabled,
@@ -727,20 +746,26 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
+    debug("platformConfig.loaded", {
+      found: Boolean(pc),
+      maintenanceEnabled: Boolean(pc?.maintenanceEnabled),
+      aiQuotingEnabled: pc?.aiQuotingEnabled ?? null,
+    });
+
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable." },
+        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
         { status: 503 }
       );
     }
     if (pc && pc.aiQuotingEnabled === false) {
       return NextResponse.json(
-        { ok: false, error: "AI_DISABLED", message: "AI quoting is currently disabled." },
+        { ok: false, error: "AI_DISABLED", message: "AI quoting is currently disabled.", ...(debugEnabled ? { debugId } : {}) },
         { status: 503 }
       );
     }
 
-    // Tenant lookup
+    // Tenant lookup by slug
     const tenant = await db
       .select({ id: tenants.id, slug: tenants.slug, name: tenants.name })
       .from(tenants)
@@ -748,23 +773,57 @@ export async function POST(req: Request) {
       .limit(1)
       .then((r) => r[0] ?? null);
 
+    debug("tenant.lookup", { found: Boolean(tenant), tenantId: tenant?.id ?? null, tenantSlugDb: tenant?.slug ?? null });
+
     if (!tenant) {
-      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND" }, { status: 404 });
+      return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND", ...(debugEnabled ? { debugId } : {}) }, { status: 404 });
     }
 
-    // Determine phase early
+    // Determine phase
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
+    debug("phase.detected", { isPhase2, quoteLogId: parsed.data.quoteLogId ?? null, qaAnswersLen: parsed.data.qaAnswers?.length ?? 0 });
 
-    // ✅ HARDENED settings fetch (never block public quoting on this)
-    const preferredIndustry =
-      safeTrim(parsed.data?.customer_context?.category) || safeTrim(parsed.data?.customer_context?.service_type) || "service";
+    // Settings (required to track plan/grace usage)
+    const settings = await db
+      .select({
+        tenantId: tenantSettings.tenantId,
+        industryKey: tenantSettings.industryKey,
+        brandLogoUrl: tenantSettings.brandLogoUrl,
+        brandLogoVariant: (tenantSettings as any).brandLogoVariant,
+        businessName: tenantSettings.businessName,
+        planTier: tenantSettings.planTier,
+        monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
+        activationGraceCredits: tenantSettings.activationGraceCredits,
+        activationGraceUsed: tenantSettings.activationGraceUsed,
+        emailSendMode: (tenantSettings as any).emailSendMode,
+        resendFromEmail: tenantSettings.resendFromEmail,
+      })
+      .from(tenantSettings)
+      .where(eq(tenantSettings.tenantId, tenant.id))
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const settings = await ensureTenantSettings({
-      tenantId: tenant.id,
-      preferredIndustryKey: preferredIndustry,
+    debug("tenantSettings.lookup", {
+      found: Boolean(settings),
+      settingsTenantId: settings?.tenantId ?? null,
+      industryKey: settings?.industryKey ?? null,
+      planTier: settings?.planTier ?? null,
+      activationGraceCredits: settings?.activationGraceCredits ?? null,
+      activationGraceUsed: settings?.activationGraceUsed ?? null,
+      emailSendMode: (settings as any)?.emailSendMode ?? null,
+      hasResendFromEmail: Boolean(settings?.resendFromEmail),
     });
 
-    // ✅ enforce plan limits on phase 1 only
+    if (!settings) {
+      // This is the exact condition your curl is hitting. With debug enabled,
+      // you'll see tenantId + dbTarget + lookup result.
+      const e: any = new Error("SETTINGS_MISSING");
+      e.code = "SETTINGS_MISSING";
+      e.status = 500;
+      throw e;
+    }
+
+    // enforce plan limits on phase 1 only
     if (!isPhase2) {
       const limit = typeof settings.monthlyQuoteLimit === "number" ? settings.monthlyQuoteLimit : null;
       await enforceMonthlyLimit({ tenantId: tenant.id, monthlyQuoteLimit: limit });
@@ -775,7 +834,7 @@ export async function POST(req: Request) {
     const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings.businessName) || null;
 
-    // Pre-load quote log if phase2 (needed for immutable industry + key source)
+    // Pre-load quote log if phase2 (immutable industry + key source)
     let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
     let industryKeyForQuote = tenantIndustryKey;
     let phase2KeySource: KeySource | null = null;
@@ -789,8 +848,10 @@ export async function POST(req: Request) {
         .limit(1)
         .then((r) => r[0] ?? null);
 
+      debug("quoteLog.phase2.lookup", { found: Boolean(phase2Existing), quoteLogId });
+
       if (!phase2Existing) {
-        return NextResponse.json({ ok: false, error: "QUOTE_NOT_FOUND" }, { status: 404 });
+        return NextResponse.json({ ok: false, error: "QUOTE_NOT_FOUND", ...(debugEnabled ? { debugId } : {}) }, { status: 404 });
       }
 
       const inputAny: any = phase2Existing.input ?? {};
@@ -798,19 +859,19 @@ export async function POST(req: Request) {
 
       const ks = String(inputAny?.llmKeySource ?? "").trim();
       phase2KeySource = ks === "platform_grace" ? "platform_grace" : ks === "tenant" ? "tenant" : null;
+
+      debug("quoteLog.phase2.snapshot", { industryKeyForQuote, phase2KeySource });
     } else {
       industryKeyForQuote = tenantIndustryKey;
     }
 
-    // ✅ Resolve tenant + PCC AI settings ONCE (request-scoped)
+    // Resolve tenant + PCC AI settings
     const resolvedBase = await resolveTenantLlm(tenant.id);
-
     const pccCfg = await loadPlatformLlmConfig();
     const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
 
     const baseEstimator = String(pccCfg?.prompts?.quoteEstimatorSystem ?? "");
     const baseQa = String(pccCfg?.prompts?.qaQuestionGeneratorSystem ?? "");
-
     const resolvedEstimator = String(resolvedBase?.prompts?.quoteEstimatorSystem ?? "");
     const resolvedQa = String(resolvedBase?.prompts?.qaQuestionGeneratorSystem ?? "");
 
@@ -819,13 +880,9 @@ export async function POST(req: Request) {
 
     const effectivePrompts = {
       quoteEstimatorSystem:
-        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem
-          ? industryResolved.quoteEstimatorSystem
-          : resolvedEstimator,
+        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem ? industryResolved.quoteEstimatorSystem : resolvedEstimator,
       qaQuestionGeneratorSystem:
-        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem
-          ? industryResolved.qaQuestionGeneratorSystem
-          : resolvedQa,
+        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
     };
 
     const resolved = {
@@ -845,13 +902,22 @@ export async function POST(req: Request) {
       },
     };
 
+    debug("pcc.resolved", {
+      industryKeyForQuote,
+      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? null,
+      liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
+      liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
+      tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
+    });
+
     const denylist = resolved.guardrails.blockedTopics ?? [];
 
-    // ✅ Resolve OpenAI client (plan-aware)
+    // Resolve OpenAI client (plan-aware)
     const { openai, keySource } = await resolveOpenAiClient({
       tenantId: tenant.id,
       consumeGrace: !isPhase2,
       forceKeySource: isPhase2 ? phase2KeySource : null,
+      debug,
     });
 
     const aiEnvelope = {
@@ -883,7 +949,7 @@ export async function POST(req: Request) {
       const notes = safeTrim(customer_context.notes) || "";
 
       if (!customer?.name || !customer?.email || !customer?.phone) {
-        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG" }, { status: 400 });
+        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) }, { status: 400 });
       }
 
       const qaStored: any = existing.qa ?? {};
@@ -928,7 +994,7 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise." },
+            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
             { status: 400 }
           );
         }
@@ -993,7 +1059,7 @@ export async function POST(req: Request) {
         outputToStore = { ...(outputToStore ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
       }
 
-      return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope });
+      return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
     }
 
     // -------------------------
@@ -1004,7 +1070,7 @@ export async function POST(req: Request) {
     const incoming = parsed.data.customer ?? parsed.data.contact;
     if (!incoming) {
       return NextResponse.json(
-        { ok: false, error: "MISSING_CUSTOMER", message: "Customer info is required (name, phone, email)." },
+        { ok: false, error: "MISSING_CUSTOMER", message: "Customer info is required (name, phone, email).", ...(debugEnabled ? { debugId } : {}) },
         { status: 400 }
       );
     }
@@ -1017,13 +1083,16 @@ export async function POST(req: Request) {
 
     if (customer.phone.replace(/\D/g, "").length < 10) {
       return NextResponse.json(
-        { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits." },
+        { ok: false, error: "INVALID_PHONE", message: "Phone must include at least 10 digits.", ...(debugEnabled ? { debugId } : {}) },
         { status: 400 }
       );
     }
 
     if (!images.length) {
-      return NextResponse.json({ ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "MISSING_IMAGES", message: "At least 1 image is required.", ...(debugEnabled ? { debugId } : {}) },
+        { status: 400 }
+      );
     }
 
     const customer_context = parsed.data.customer_context ?? {};
@@ -1034,7 +1103,7 @@ export async function POST(req: Request) {
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again." },
+        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
         { status: 400 }
       );
     }
@@ -1078,7 +1147,7 @@ export async function POST(req: Request) {
 
     const quoteLogId = inserted?.id ? String(inserted.id) : null;
     if (!quoteLogId) {
-      return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE" }, { status: 500 });
+      return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_QUOTE", ...(debugEnabled ? { debugId } : {}) }, { status: 500 });
     }
 
     if (resolved.tenant.liveQaEnabled && resolved.tenant.liveQaMaxQuestions > 0) {
@@ -1115,7 +1184,7 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope });
+      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
     }
 
     const output = await generateEstimate({
@@ -1173,14 +1242,28 @@ export async function POST(req: Request) {
       outputToStore = { ...(outputToStore ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
     }
 
-    return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope });
+    return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const code = e?.code || msg;
 
+    // Always log error stage when debug is enabled
+    if (debugEnabled) {
+      console.log(
+        JSON.stringify({
+          tag: "apq_debug",
+          debugId,
+          stage: "request.error",
+          ts: new Date().toISOString(),
+          code: code ?? null,
+          message: msg ?? null,
+        })
+      );
+    }
+
     if (code === "PLAN_LIMIT_REACHED") {
       return NextResponse.json(
-        { ok: false, error: "PLAN_LIMIT_REACHED", message: "Monthly quote limit reached for your plan.", meta: e?.meta ?? undefined },
+        { ok: false, error: "PLAN_LIMIT_REACHED", message: "Monthly quote limit reached for your plan.", meta: e?.meta ?? undefined, ...(debugEnabled ? { debugId } : {}) },
         { status: 402 }
       );
     }
@@ -1192,6 +1275,7 @@ export async function POST(req: Request) {
           error: "TRIAL_EXHAUSTED",
           message: "Trial credits exhausted. Add your OpenAI key in Settings (AI Setup) or upgrade your plan.",
           meta: e?.meta ?? undefined,
+          ...(debugEnabled ? { debugId } : {}),
         },
         { status: 402 }
       );
@@ -1203,6 +1287,7 @@ export async function POST(req: Request) {
           ok: false,
           error: "MISSING_PLATFORM_OPENAI_KEY",
           message: "Platform OpenAI key is not configured. Set OPENAI_API_KEY in Vercel environment variables.",
+          ...(debugEnabled ? { debugId } : {}),
         },
         { status: 500 }
       );
@@ -1210,23 +1295,19 @@ export async function POST(req: Request) {
 
     if (code === "MISSING_OPENAI_KEY") {
       return NextResponse.json(
-        { ok: false, error: "MISSING_OPENAI_KEY", message: "No OpenAI key is configured for this tenant. Add a tenant key in AI Setup." },
+        { ok: false, error: "MISSING_OPENAI_KEY", message: "No OpenAI key is configured for this tenant. Add a tenant key in AI Setup.", ...(debugEnabled ? { debugId } : {}) },
         { status: 400 }
       );
     }
 
     if (code === "SETTINGS_MISSING") {
-      // still possible if DB is truly unreachable / constraint issues
+      // This is what you’re hitting. Now we’ll have the truth in Vercel logs: dbTarget + tenantId + settings lookup result.
       return NextResponse.json(
-        {
-          ok: false,
-          error: "SETTINGS_MISSING",
-          message: "Tenant settings could not be loaded. Please retry or contact support.",
-        },
+        { ok: false, error: "SETTINGS_MISSING", message: "Tenant settings could not be loaded. See debugId in logs.", ...(debugEnabled ? { debugId } : {}) },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status: 500 });
+    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg, ...(debugEnabled ? { debugId } : {}) }, { status: 500 });
   }
 }
