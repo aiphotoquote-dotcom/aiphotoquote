@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
+import ConfirmIndustryButton from "./ConfirmIndustryButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,6 +50,16 @@ function toNum(v: any, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function titleFromKey(key: string) {
+  const s = String(key ?? "").trim();
+  if (!s) return "";
+  return s
+    .split(/[_\-]+/g)
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
@@ -75,7 +86,8 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   }
 
   // -----------------------------
-  // Industry metadata
+  // Industry metadata (optional)
+  // If industries table is empty, we still render the page using key-derived label.
   // -----------------------------
   const industryR = await db.execute(sql`
     select
@@ -89,31 +101,18 @@ export default async function PccIndustryDetailPage({ params }: Props) {
     limit 1
   `);
 
-  const industry = firstRow(industryR);
-  if (!industry?.key) {
-    return (
-      <div className="space-y-6">
-        <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industry not found</h1>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            No industry exists with key: <span className="font-mono text-xs">{key}</span>
-          </p>
-          <div className="mt-4">
-            <Link
-              href="/pcc/industries"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            >
-              Back to industries
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const industryRow = firstRow(industryR);
+
+  const industry = {
+    key,
+    label: industryRow?.label ? String(industryRow.label) : titleFromKey(key) || key,
+    description: industryRow?.description ? String(industryRow.description) : null,
+    createdAt: industryRow?.createdAt ?? null,
+    isCanonical: Boolean(industryRow?.key),
+  };
 
   // -----------------------------
   // Confirmed tenants (tenant_settings.industry_key)
-  // Includes plan + credit info from tenant_settings
   // -----------------------------
   const confirmedR = await db.execute(sql`
     select
@@ -199,15 +198,11 @@ export default async function PccIndustryDetailPage({ params }: Props) {
     aiRound: r.aiRound ? toNum(r.aiRound, 0) : null,
   }));
 
-  // Separate AI suggestions into:
-  // - "Unconfirmed" (not currently set in tenant_settings)
-  // - "Also confirmed" (already confirmed -> useful for debugging AI quality)
   const aiUnconfirmed = aiSuggestedAll.filter((t: any) => !confirmedIds.has(t.tenantId));
   const aiAlsoConfirmed = aiSuggestedAll.filter((t: any) => confirmedIds.has(t.tenantId));
 
   // -----------------------------
-  // Tenant sub-industry overrides summary
-  // IMPORTANT: tenant_sub_industries has no industry_key, so we scope it to confirmed tenants for this industry.
+  // Tenant sub-industry overrides summary (scoped to confirmed tenants)
   // -----------------------------
   const overridesR = await db.execute(sql`
     select
@@ -228,9 +223,6 @@ export default async function PccIndustryDetailPage({ params }: Props) {
     tenantCount: toNum(r.tenantCount, 0),
   }));
 
-  // -----------------------------
-  // Page
-  // -----------------------------
   const confirmedCount = confirmed.length;
   const aiSuggestedCount = aiSuggestedAll.length;
   const aiUnconfirmedCount = aiUnconfirmed.length;
@@ -246,9 +238,16 @@ export default async function PccIndustryDetailPage({ params }: Props) {
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="text-xs text-gray-500 dark:text-gray-400">PCC • Industries</div>
+
             <h1 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">{industry.label}</h1>
+
             <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Key: <span className="font-mono text-xs">{industry.key}</span>
+              {!industry.isCanonical ? (
+                <span className="ml-2 text-[11px] text-amber-700 dark:text-amber-200">
+                  (derived — industries table has no row for this key yet)
+                </span>
+              ) : null}
             </div>
 
             {industry.description ? (
@@ -423,6 +422,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
                       <div className="font-mono text-[11px] text-gray-600 dark:text-gray-300 truncate">{t.slug}</div>
+
                       <div className="mt-1 flex flex-wrap gap-2 text-[11px]">
                         <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
                           fit: {t.fit ?? "—"}
@@ -447,13 +447,18 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                       ) : null}
                     </div>
 
-                    <div className="shrink-0 text-right">
+                    <div className="shrink-0 text-right space-y-2">
                       <Link href={`/pcc/tenants/${encodeURIComponent(t.tenantId)}`} className="text-xs font-semibold underline">
                         View →
                       </Link>
-                      <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-                        {t.createdAt ? fmtDate(t.createdAt) : ""}
-                      </div>
+
+                      <div className="text-[11px] text-gray-500 dark:text-gray-400">{t.createdAt ? fmtDate(t.createdAt) : ""}</div>
+
+                      <ConfirmIndustryButton
+                        tenantId={t.tenantId}
+                        industryKey={key}
+                        onDone={() => window.location.reload()}
+                      />
                     </div>
                   </div>
                 </div>
@@ -493,9 +498,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                       <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">
                         {Math.round((t.confidenceScore ?? 0) * 100)}%
                       </td>
-                      <td className="py-3 pr-3 text-xs text-gray-700 dark:text-gray-200">
-                        {t.needsConfirmation ? "yes" : "no"}
-                      </td>
+                      <td className="py-3 pr-3 text-xs text-gray-700 dark:text-gray-200">{t.needsConfirmation ? "yes" : "no"}</td>
                       <td className="py-3 pr-0 text-right">
                         <Link href={`/pcc/tenants/${encodeURIComponent(t.tenantId)}`} className="text-xs font-semibold underline">
                           View →
