@@ -40,6 +40,15 @@ function rowsOf(r: any): any[] {
   return [];
 }
 
+function safeJsonStringify(v: any): string {
+  try {
+    // Avoid passing [object Object] into SQL params: always serialize explicitly.
+    return JSON.stringify(v ?? {});
+  } catch {
+    return "{}";
+  }
+}
+
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -165,11 +174,16 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
 }
 
 async function writeAiAnalysis(tenantId: string, ai: any) {
+  // ✅ Critical fix: serialize JS object to JSON for jsonb param
+  const aiJson = safeJsonStringify(ai);
+
+  // ✅ Make resilient: onboarding row might not exist yet -> upsert
   await db.execute(sql`
-    update tenant_onboarding
-    set ai_analysis = ${ai}::jsonb,
-        updated_at = now()
-    where tenant_id = ${tenantId}::uuid
+    insert into tenant_onboarding (tenant_id, ai_analysis, created_at, updated_at)
+    values (${tenantId}::uuid, ${aiJson}::jsonb, now(), now())
+    on conflict (tenant_id) do update
+      set ai_analysis = excluded.ai_analysis,
+          updated_at = now()
   `);
 }
 
@@ -190,7 +204,6 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
   const existing = baseAi?.industryInference;
 
   if (existing && typeof existing === "object" && existing?.mode === "interview") {
-    // normalize minimal required fields
     const answers = Array.isArray(existing.answers) ? existing.answers : [];
     const round = Number(existing.round ?? 1);
     const confidenceScore = Number(existing.confidenceScore ?? 0) || 0;
@@ -239,7 +252,6 @@ function nextQuestionFor(inf: IndustryInference) {
 function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string; label: string }>): Candidate[] {
   const text = answers.map((a) => a.answer).join(" | ");
 
-  // raw scores by keyword map
   const scores = new Map<string, number>();
   for (const [k, patterns] of Object.entries(KEYWORDS)) {
     let s = 0;
@@ -253,11 +265,9 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
     if (s > 0) scores.set(k, s);
   }
 
-  // If canon list exists, prefer those keys; otherwise allow from keyword set.
   const canonKeys = new Set(canon.map((c) => c.key));
   const candidates: Candidate[] = [];
 
-  // Add scored keys
   for (const [k, s] of scores.entries()) {
     if (canonKeys.size === 0 || canonKeys.has(k)) {
       const label = canon.find((c) => c.key === k)?.label ?? k;
@@ -265,21 +275,11 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
     }
   }
 
-  // Fallback candidate if nothing matched
   if (!candidates.length) {
     candidates.push({ key: "service", label: canon.find((c) => c.key === "service")?.label ?? "Service", score: 1 });
   }
 
-  // sort by score desc
   candidates.sort((a, b) => b.score - a.score);
-
-  // normalize score into rough confidence (top score dominance)
-  const top = candidates[0]?.score ?? 0;
-  const second = candidates[1]?.score ?? 0;
-
-  // Confidence heuristic:
-  // - If we only have weak signals, keep asking.
-  // - If top is clearly above second, confidence rises quickly.
   return candidates.slice(0, 6).map((c) => ({ ...c, score: c.score }));
 }
 
@@ -289,13 +289,9 @@ function computeConfidence(cands: Candidate[]) {
 
   if (top <= 0) return 0;
 
-  // base by magnitude (cap)
   const mag = Math.min(1, top / 6);
-
-  // separation bonus
   const sep = top > 0 ? Math.max(0, Math.min(1, (top - second) / Math.max(1, top))) : 0;
 
-  // combined
   const conf = 0.45 * mag + 0.55 * sep;
   return Math.max(0, Math.min(1, conf));
 }
@@ -353,7 +349,6 @@ export async function POST(req: Request) {
     }
 
     if (parsed.data.action === "start") {
-      // only set next question; do not wipe existing answers
       const nq = nextQuestionFor(inf);
       inf.nextQuestion = nq ? { ...nq } : null;
 
@@ -377,11 +372,9 @@ export async function POST(req: Request) {
     const q = QUESTIONS.find((x) => x.qid === qid);
     const qText = q?.question ?? qid;
 
-    // Append answer (do not overwrite; we want “history”)
     const answers = Array.isArray(inf.answers) ? [...inf.answers] : [];
     answers.push({ qid, question: qText, answer: ans, createdAt: now });
 
-    // Score candidates + confidence
     const candidates = scoreCandidates(answers, canon);
     const confidenceScore = computeConfidence(candidates);
 
@@ -394,7 +387,7 @@ export async function POST(req: Request) {
     const exhausted = round >= MaxRounds;
 
     const status: IndustryInference["status"] = reachedTarget || exhausted ? "suggested" : "collecting";
-    const needsConfirmation = true; // always true until user confirms in Step3 (or we add “confirm here” later)
+    const needsConfirmation = true;
 
     const nextQ = status === "collecting" ? nextQuestionFor({ ...inf, answers }) : null;
 
@@ -411,11 +404,9 @@ export async function POST(req: Request) {
       meta: { updatedAt: now },
     };
 
-    // Persist into ai_analysis
     ai.industryInference = next;
 
-    // For compatibility with your existing downstream logic (Step3 reads suggestedIndustryKey from aiAnalysis)
-    // we also reflect the suggestion at the top-level fields.
+    // keep compatibility with downstream (Step3 reads these)
     ai.suggestedIndustryKey = suggestedIndustryKey;
     ai.confidenceScore = confidenceScore;
     ai.needsConfirmation = true;
