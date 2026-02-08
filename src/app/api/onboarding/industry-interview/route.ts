@@ -106,7 +106,7 @@ type IndustryInference = {
 
   conflicts: Conflict[];
 
-  meta: { updatedAt: string };
+  meta: { updatedAt: string; lastAskedQid?: string | null };
 };
 
 /* -------------------- tuning -------------------- */
@@ -116,9 +116,8 @@ const MaxRounds = 8;
 
 const MinTopScoreForHighConfidence = 3;
 
-// IMPORTANT UX RULE:
-// We may "suggest" at exhaustion only if we are NOT in a conflict state.
-// Otherwise keep collecting (even if round hits MaxRounds) and let UI "Continue anyway".
+// Don’t “lock” just because we hit MaxRounds when still in conflict.
+// We can still suggest at exhaustion if there are no blocking conflicts.
 const ForceSuggestAtExhaustion = true;
 
 // conflict tuning (deterministic)
@@ -127,7 +126,7 @@ const ConfidencePlateauDelta = 0.05; // change < 5% between rounds is "not impro
 
 /**
  * Question bank (>= MaxRounds recommended).
- * These are your generic questions. Clarifiers are generated dynamically.
+ * Clarifiers are generated dynamically.
  */
 const QUESTIONS: Array<{
   qid: string;
@@ -285,10 +284,6 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
   return row?.ai_analysis ?? null;
 }
 
-/**
- * ✅ CRITICAL:
- * MUST stringify objects to jsonb
- */
 async function writeAiAnalysis(tenantId: string, ai: any) {
   await db.execute(sql`
     insert into tenant_onboarding (tenant_id, ai_analysis, updated_at, created_at)
@@ -336,7 +331,7 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
       answers,
       candidates: Array.isArray(existing.candidates) ? existing.candidates : [],
       conflicts: Array.isArray(existing.conflicts) ? existing.conflicts : [],
-      meta: { updatedAt: now },
+      meta: { updatedAt: now, lastAskedQid: safeTrim(existing?.meta?.lastAskedQid) || null },
     };
 
     baseAi.industryInference = inf;
@@ -354,7 +349,7 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
     answers: [],
     candidates: [],
     conflicts: [],
-    meta: { updatedAt: now },
+    meta: { updatedAt: now, lastAskedQid: null },
   };
 
   baseAi.industryInference = inf;
@@ -367,7 +362,6 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
   const text = answers.map((a) => a.answer).join(" | ");
   const scores = new Map<string, number>();
 
-  // 1) Keyword scoring
   for (const [k, patterns] of Object.entries(KEYWORDS)) {
     let s = 0;
     for (const p of patterns) {
@@ -380,7 +374,6 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
     if (s > 0) scores.set(k, (scores.get(k) ?? 0) + s);
   }
 
-  // 2) Option boosts
   for (const a of answers) {
     const boosts = OPTION_BOOST[a.qid] ?? [];
     for (const b of boosts) {
@@ -388,7 +381,6 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
     }
   }
 
-  // Keep only industries that exist (if canon present)
   const canonKeys = new Set(canon.map((c) => c.key));
   const candidates: Candidate[] = [];
 
@@ -428,7 +420,7 @@ function computeConfidence(cands: Candidate[]) {
   return Math.max(0, Math.min(1, conf));
 }
 
-/* -------------------- conflict detection + clarifiers -------------------- */
+/* -------------------- conflicts + clarifiers -------------------- */
 
 function detectConflicts(prev: IndustryInference, nextCandidates: Candidate[], nextConfidence: number): Conflict[] {
   const out: Conflict[] = [];
@@ -437,12 +429,7 @@ function detectConflicts(prev: IndustryInference, nextCandidates: Candidate[], n
   const nextTop = nextCandidates?.[0]?.key ? normalizeKey(nextCandidates[0].key) : "";
 
   if (prevTop && nextTop && prevTop !== nextTop) {
-    out.push({
-      type: "top_flipped",
-      from: prevTop,
-      to: nextTop,
-      reason: "Top match changed after new answers.",
-    });
+    out.push({ type: "top_flipped", from: prevTop, to: nextTop, reason: "Top match changed after new answers." });
   }
 
   const top = nextCandidates?.[0];
@@ -476,10 +463,6 @@ function hasBlockingConflict(conflicts: Conflict[]) {
   return conflicts.some((c) => c.type === "close_call" || c.type === "top_flipped" || c.type === "confidence_plateau");
 }
 
-/**
- * Generated clarifiers when top-two are known.
- * These are the “feels intelligent” questions.
- */
 function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
   const top = candidates[0];
   const second = candidates[1];
@@ -505,7 +488,7 @@ function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
       return {
         qid: "clarify_detail_vs_cleaning",
         question: "Quick clarification — what do customers usually hire you for?",
-        help: "These can sound similar, but your quote templates differ a lot.",
+        help: "These sound similar, but your starter templates differ a lot.",
         options: [
           "Car detailing (paint/interior + appearance)",
           "General cleaning (homes/businesses/janitorial)",
@@ -538,16 +521,11 @@ function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
   };
 }
 
-/* -------------------- NEW: adaptive question selection -------------------- */
+/* -------------------- adaptive + anti-loop question picking -------------------- */
 
-/**
- * Decide which generic question is most discriminating NEXT,
- * based on the current top contenders.
- */
 function pickDiscriminatingQid(inf: IndustryInference): string | null {
   const answered = new Set(inf.answers.map((a) => a.qid));
 
-  // If we haven't asked "services" yet, always ask it first.
   if (!answered.has("services")) return "services";
 
   const top = normalizeKey(inf.candidates?.[0]?.key ?? "");
@@ -555,7 +533,6 @@ function pickDiscriminatingQid(inf: IndustryInference): string | null {
 
   const pair = [top, second].filter(Boolean).sort().join("|");
 
-  // Auto cluster: specialty + top_jobs disambiguate faster than "who_for"
   if (pair.includes("auto_")) {
     if (!answered.has("specialty")) return "specialty";
     if (!answered.has("top_jobs")) return "top_jobs";
@@ -564,7 +541,6 @@ function pickDiscriminatingQid(inf: IndustryInference): string | null {
     return null;
   }
 
-  // Home services: materials + job_type help early
   if (["hvac", "plumbing", "electrical", "roofing"].includes(top) || ["hvac", "plumbing", "electrical", "roofing"].includes(second)) {
     if (!answered.has("job_type")) return "job_type";
     if (!answered.has("materials")) return "materials";
@@ -573,7 +549,6 @@ function pickDiscriminatingQid(inf: IndustryInference): string | null {
     return null;
   }
 
-  // Cleaning vs anything: who_for + top_jobs helps
   if (top === "cleaning_services" || second === "cleaning_services") {
     if (!answered.has("who_for")) return "who_for";
     if (!answered.has("top_jobs")) return "top_jobs";
@@ -581,7 +556,6 @@ function pickDiscriminatingQid(inf: IndustryInference): string | null {
     return null;
   }
 
-  // Default: ask top_jobs early (highest signal freeform)
   if (!answered.has("top_jobs")) return "top_jobs";
   if (!answered.has("materials_objects")) return "materials_objects";
   if (!answered.has("job_type")) return "job_type";
@@ -596,8 +570,65 @@ function pickDiscriminatingQid(inf: IndustryInference): string | null {
 function nextQuestionAdaptive(inf: IndustryInference) {
   const qid = pickDiscriminatingQid(inf);
   if (!qid) return null;
-  const q = QUESTIONS.find((x) => x.qid === qid) ?? null;
-  return q;
+  return QUESTIONS.find((x) => x.qid === qid) ?? null;
+}
+
+function altFreeform(lastAskedQid: string | null) {
+  // rotate through different freeform prompts so the UX never looks “stuck”
+  if (lastAskedQid === "clarify_freeform") {
+    return {
+      qid: "clarify_freeform_not",
+      question: "Quick check — what do you NOT do?",
+      help: "Example: “We do detailing, but we don’t do mechanical repairs or collision work.”",
+    };
+  }
+  if (lastAskedQid === "clarify_freeform_not") {
+    return {
+      qid: "clarify_freeform_keywords",
+      question: "Give 3 keywords customers search for to find you.",
+      help: "Example: “ceramic coating, interior detail, paint correction”.",
+    };
+  }
+  return {
+    qid: "clarify_freeform",
+    question: "Describe your business in one sentence.",
+    help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
+  };
+}
+
+function avoidRepeatQuestion(args: {
+  inf: IndustryInference;
+  proposed: { qid: string; question: string; help?: string; options?: string[] } | null;
+  candidates: Candidate[];
+  conflicts: Conflict[];
+}) {
+  const lastAsked = safeTrim(args.inf?.meta?.lastAskedQid ?? "") || "";
+
+  if (!args.proposed) return null;
+
+  // If we’re about to ask the same qid again, pick something else.
+  if (lastAsked && normalizeKey(args.proposed.qid) === normalizeKey(lastAsked)) {
+    // If we have a top-two, prefer a targeted clarifier first.
+    if (args.candidates.length >= 2) {
+      const c = clarifierQuestionFrom(args.conflicts, args.candidates);
+      if (c && normalizeKey(c.qid) !== normalizeKey(lastAsked)) return c;
+    }
+
+    // Otherwise rotate to a different unanswered high-signal question.
+    const answered = new Set(args.inf.answers.map((a) => a.qid));
+    const fallbacks = ["specialty", "top_jobs", "materials", "job_type", "materials_objects", "who_for", "location"];
+    for (const qid of fallbacks) {
+      if (!answered.has(qid)) {
+        const q = QUESTIONS.find((x) => x.qid === qid);
+        if (q) return q;
+      }
+    }
+
+    // If all else fails: different freeform prompt with a different qid.
+    return altFreeform(lastAsked);
+  }
+
+  return args.proposed;
 }
 
 /* -------------------- schema -------------------- */
@@ -644,7 +675,7 @@ export async function POST(req: Request) {
         answers: [],
         candidates: [],
         conflicts: [],
-        meta: { updatedAt: now },
+        meta: { updatedAt: now, lastAskedQid: null },
       };
 
       ai.industryInference = inf;
@@ -657,22 +688,18 @@ export async function POST(req: Request) {
     }
 
     if (parsed.data.action === "start") {
-      // Start should always pick the best first question (adaptive), not just first in list.
-      // If we are already in conflict, ask clarifier, else use adaptive.
-      const q =
+      const proposed =
         hasBlockingConflict(inf.conflicts) && inf.candidates?.length
           ? clarifierQuestionFrom(inf.conflicts, inf.candidates)
           : nextQuestionAdaptive(inf) ?? QUESTIONS[0] ?? null;
 
-      inf.nextQuestion =
-        q ??
-        ({
-          qid: "freeform",
-          question: "Describe your business in one sentence.",
-          help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
-        } as any);
+      const q = avoidRepeatQuestion({ inf, proposed, candidates: inf.candidates ?? [], conflicts: inf.conflicts ?? [] }) ?? proposed;
 
-      ai.industryInference = { ...inf, meta: { updatedAt: now } };
+      inf.nextQuestion = q ?? altFreeform(safeTrim(inf.meta?.lastAskedQid ?? "") || null);
+
+      inf.meta = { ...(inf.meta ?? { updatedAt: now }), updatedAt: now, lastAskedQid: inf.nextQuestion?.qid ?? null };
+
+      ai.industryInference = { ...inf, meta: inf.meta };
       await writeAiAnalysis(tenantId, ai);
 
       return NextResponse.json({ ok: true, tenantId, industryInference: ai.industryInference }, { status: 200 });
@@ -692,9 +719,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Store answer with the REAL question text:
-    // - If user answered the current nextQuestion, trust that question text
-    // - Else fall back to the bank
     const qFromBank = QUESTIONS.find((x) => x.qid === qid);
     const qText =
       (inf.nextQuestion?.qid === qid ? safeTrim(inf.nextQuestion?.question) : "") || qFromBank?.question || qid;
@@ -702,11 +726,9 @@ export async function POST(req: Request) {
     const answers = Array.isArray(inf.answers) ? [...inf.answers] : [];
     answers.push({ qid, question: qText, answer: ans, createdAt: now });
 
-    // score + confidence
     const candidates = scoreCandidates(answers, canon);
     const confidenceScore = computeConfidence(candidates);
 
-    // detect conflicts vs previous inference
     const conflicts = detectConflicts(inf, candidates, confidenceScore);
 
     const topKeyRaw = candidates[0]?.key ? normalizeKey(candidates[0].key) : "";
@@ -715,22 +737,19 @@ export async function POST(req: Request) {
     const round = Math.min(MaxRounds, (Number(inf.round ?? 1) || 1) + 1);
     const exhausted = round >= MaxRounds;
 
-    // Only “ready” if target met AND no blocking conflicts
     const reachedTarget = confidenceScore >= ConfidenceTarget && !hasBlockingConflict(conflicts);
 
-    // Exhaustion behavior:
-    // - If exhausted AND no conflicts: allow force-suggest
-    // - If exhausted AND conflicts: remain collecting (so UI doesn't falsely lock)
-    const canForceSuggest = exhausted && ForceSuggestAtExhaustion && !hasBlockingConflict(conflicts) && (candidates[0]?.score ?? 0) > 0;
+    const canForceSuggest =
+      exhausted &&
+      ForceSuggestAtExhaustion &&
+      !hasBlockingConflict(conflicts) &&
+      (candidates[0]?.score ?? 0) > 0;
 
     const status: IndustryInference["status"] = reachedTarget || canForceSuggest ? "suggested" : "collecting";
 
-    // Choose next question:
-    // - If collecting and conflicts: ask clarifier NOW
-    // - Else: choose adaptive next generic question
     let nextQ: any = null;
     if (status === "collecting") {
-      nextQ = hasBlockingConflict(conflicts)
+      const proposed = hasBlockingConflict(conflicts)
         ? clarifierQuestionFrom(conflicts, candidates)
         : nextQuestionAdaptive({
             ...inf,
@@ -743,15 +762,13 @@ export async function POST(req: Request) {
             status,
             needsConfirmation: true,
             nextQuestion: null,
-            meta: { updatedAt: now },
+            meta: { ...(inf.meta ?? { updatedAt: now }), updatedAt: now },
           } as any);
 
+      nextQ = avoidRepeatQuestion({ inf, proposed, candidates, conflicts }) ?? proposed;
+
       if (!nextQ) {
-        nextQ = {
-          qid: "freeform",
-          question: "Describe your business in one sentence.",
-          help: "Example: “We do ceramic coatings + paint correction for cars and trucks.”",
-        };
+        nextQ = altFreeform(safeTrim(inf.meta?.lastAskedQid ?? "") || null);
       }
     }
 
@@ -766,7 +783,7 @@ export async function POST(req: Request) {
       answers,
       candidates,
       conflicts,
-      meta: { updatedAt: now },
+      meta: { ...(inf.meta ?? { updatedAt: now }), updatedAt: now, lastAskedQid: nextQ?.qid ?? null },
     };
 
     ai.industryInference = next;
