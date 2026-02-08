@@ -163,6 +163,34 @@ export const tenantSubIndustries = pgTable(
 );
 
 /**
+ * Tenant onboarding state + AI website analysis snapshot
+ */
+export const tenantOnboarding = pgTable(
+  "tenant_onboarding",
+  {
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    website: text("website"),
+
+    // stores your two-pass web intel + normalized JSON object
+    aiAnalysis: jsonb("ai_analysis").$type<any>(),
+
+    currentStep: integer("current_step").notNull().default(1),
+    completed: boolean("completed").notNull().default(false),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    completedIdx: index("tenant_onboarding_completed_idx").on(t.completed),
+    stepIdx: index("tenant_onboarding_step_idx").on(t.currentStep),
+  })
+);
+
+/**
  * Tenant members / RBAC
  *
  * IMPORTANT: table has NO id column in your DB.
@@ -233,8 +261,9 @@ export const tenantSettings = pgTable("tenant_settings", {
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
 
-  // ✅ PLAN (matches your real DB)
-  planTier: text("plan_tier").notNull().default("free"),
+  // ✅ PLAN: DB should store ONLY tier0|tier1|tier2
+  // "free" is UI alias for tier0
+  planTier: text("plan_tier").notNull().default("tier0"),
   monthlyQuoteLimit: integer("monthly_quote_limit"), // null => unlimited
   activationGraceCredits: integer("activation_grace_credits").notNull().default(0),
   activationGraceUsed: integer("activation_grace_used").notNull().default(0),
