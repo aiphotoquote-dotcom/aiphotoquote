@@ -163,33 +163,6 @@ export const tenantSubIndustries = pgTable(
 );
 
 /**
- * Tenant onboarding (wizard state + AI analysis snapshot)
- * (Matches your real DB table `tenant_onboarding`)
- */
-export const tenantOnboarding = pgTable(
-  "tenant_onboarding",
-  {
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .primaryKey()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-
-    website: text("website"),
-    aiAnalysis: jsonb("ai_analysis").$type<any>(),
-
-    currentStep: integer("current_step").notNull().default(1),
-    completed: boolean("completed").notNull().default(false),
-
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  },
-  (t) => ({
-    completedIdx: index("tenant_onboarding_completed_idx").on(t.completed),
-    stepIdx: index("tenant_onboarding_step_idx").on(t.currentStep),
-  })
-);
-
-/**
  * Tenant members / RBAC
  *
  * IMPORTANT: table has NO id column in your DB.
@@ -260,8 +233,8 @@ export const tenantSettings = pgTable("tenant_settings", {
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
 
-  // ✅ PLAN: DB stores only tier0|tier1|tier2 (never "free")
-  planTier: text("plan_tier").notNull().default("tier0"),
+  // ✅ PLAN (matches your real DB)
+  planTier: text("plan_tier").notNull().default("free"),
   monthlyQuoteLimit: integer("monthly_quote_limit"), // null => unlimited
   activationGraceCredits: integer("activation_grace_credits").notNull().default(0),
   activationGraceUsed: integer("activation_grace_used").notNull().default(0),
@@ -369,7 +342,7 @@ export const quoteLogs = pgTable("quote_logs", {
 });
 
 /**
- * Industries (canonical list)
+ * Industries
  */
 export const industries = pgTable(
   "industries",
@@ -382,5 +355,31 @@ export const industries = pgTable(
   },
   (t) => ({
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
+  })
+);
+
+/**
+ * Tenant onboarding (EXISTS IN PROD DB)
+ */
+export const tenantOnboarding = pgTable(
+  "tenant_onboarding",
+  {
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    website: text("website"),
+    aiAnalysis: jsonb("ai_analysis").$type<any>(),
+
+    currentStep: integer("current_step").notNull().default(1),
+    completed: boolean("completed").notNull().default(false),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    completedIdx: index("tenant_onboarding_completed_idx").on(t.completed),
+    stepIdx: index("tenant_onboarding_step_idx").on(t.currentStep),
   })
 );

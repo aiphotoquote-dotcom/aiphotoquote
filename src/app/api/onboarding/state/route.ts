@@ -219,6 +219,12 @@ async function readTenantOnboarding(tenantId: string) {
   const aiAnalysis = row?.ai_analysis ?? null;
   const derived = deriveAiMeta(aiAnalysis);
 
+  const website = row?.website ?? null;
+  const hasWebsite = Boolean(safeTrim(website));
+
+  // NEW: interview path reads a dedicated shape inside ai_analysis (we’ll write it next)
+  const industryInference = aiAnalysis?.industryInference ?? null;
+
   const planTierRaw = safeTrim(row?.plan_tier);
   const planTier = safePlan(planTierRaw);
 
@@ -226,8 +232,11 @@ async function readTenantOnboarding(tenantId: string) {
     tenantName: row?.tenant_name ?? null,
     currentStep: row?.current_step ?? 1,
     completed: row?.completed ?? false,
-    website: row?.website ?? null,
+    website,
+    hasWebsite,
+    onboardingPath: (hasWebsite ? "website" : "interview") as "website" | "interview",
     aiAnalysis: aiAnalysis ?? null,
+    industryInference,
     planTier: planTier ?? null,
     ...derived,
   };
@@ -250,7 +259,10 @@ export async function GET(req: Request) {
           currentStep: 1,
           completed: false,
           website: null,
+          hasWebsite: false,
+          onboardingPath: "interview",
           aiAnalysis: null,
+          industryInference: null,
           planTier: null,
           aiAnalysisStatus: "idle",
           aiAnalysisRound: 0,
@@ -297,7 +309,7 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => null);
     const step = Number(body?.step);
 
-    // ---------------- STEP 1 (unchanged) ----------------
+    // ---------------- STEP 1 ----------------
     if (step === 1) {
       const businessName = safeTrim(body?.businessName);
       const website = safeTrim(body?.website);
@@ -355,6 +367,7 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
+        // NOTE: leaving your placeholder industry_key for now
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -378,12 +391,15 @@ export async function POST(req: Request) {
         `);
       }
 
+      // ✅ NEW: if no website, skip analysis step and go to interview/industry step
+      const nextStep = website ? 2 : 3;
+
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
-        values (${tenantId}::uuid, ${website || null}, 2, false, now(), now())
+        values (${tenantId}::uuid, ${website || null}, ${nextStep}, false, now(), now())
         on conflict (tenant_id) do update
           set website = excluded.website,
-              current_step = greatest(tenant_onboarding.current_step, 2),
+              current_step = greatest(tenant_onboarding.current_step, excluded.current_step),
               updated_at = now()
       `);
 
@@ -461,16 +477,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, { status: 400 });
       }
 
-      // Business rules:
-      // tier0: 5 quotes/mo, platform key allowed via grace credits
-      // tier1: 50 quotes/mo
-      // tier2: unlimited (NULL)
       const monthlyLimit = plan === "tier0" ? 5 : plan === "tier1" ? 50 : null;
-
-      // FIX:
-      // tier0 MUST have grace credits or it will immediately TRIAL_EXHAUSTED.
-      // Keep tier0 aligned with your platform behavior (20 initial grace credits).
-      // Paid tiers get a larger temporary bucket until they add a tenant key.
       const graceCredits = plan === "tier0" ? 20 : 30;
 
       await db.execute(sql`

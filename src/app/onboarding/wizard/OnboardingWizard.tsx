@@ -17,8 +17,8 @@ import {
 import { Step1 } from "./steps/Step1";
 import { Step2 } from "./steps/Step2";
 import { Step3 } from "./steps/Step3";
-import { Step4QuickStart } from "./steps/Step4QuickStart";
 import { Step5Branding } from "./steps/Step5Branding";
+import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
 export default function OnboardingWizard() {
@@ -350,6 +350,7 @@ export default function OnboardingWizard() {
             <Step1 existingUser={existingUserContext} onSubmit={saveStep1} />
           ) : step === 2 ? (
             <Step2
+              tenantId={String(state?.tenantId ?? tenantId ?? "").trim() || null}
               website={state?.website || ""}
               aiAnalysis={state?.aiAnalysis}
               aiAnalysisStatus={String(state?.aiAnalysisStatus ?? "").trim() || getMetaStatus(state?.aiAnalysis)}
@@ -365,14 +366,18 @@ export default function OnboardingWizard() {
               tenantId={String(state?.tenantId ?? tenantId ?? "").trim() || null}
               aiAnalysis={state?.aiAnalysis}
               onBack={() => go(2)}
-              onSubmit={saveIndustrySelection}
+              onReInterview={() => go(2)}
+              onSubmit={async ({ industryKey }) => saveIndustrySelection({ industryKey })}
             />
           ) : step === 4 ? (
-            <Step4QuickStart
-              tenantId={String(state?.tenantId ?? tenantId ?? "").trim() || null}
-              onBack={() => go(3)}
+            <HandoffStep
+              title="AI & Pricing Policy"
+              desc="Reuse the full admin setup screen to configure AI mode, Live Q&A, and render policy."
+              primaryLabel="Open AI Policy setup"
               onPrimary={() => openSetup("/admin/setup/ai-policy").catch((e: any) => setErr(e?.message ?? String(e)))}
+              onBack={() => go(3)}
               onContinue={() => go(5)}
+              note="Tip: click Save Policy on that page, then come back here and continue."
             />
           ) : step === 5 ? (
             <Step5Branding
