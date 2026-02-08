@@ -52,6 +52,7 @@ async function listTenantsForUser(userId: string) {
       ON t.id = m.tenant_id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
+      AND COALESCE(t.status, 'active') = 'active'
     ORDER BY t.created_at ASC
   `);
 
@@ -64,12 +65,15 @@ async function listTenantsForUser(userId: string) {
 }
 
 async function hasTenantAccessById(userId: string, tenantId: string) {
+  // Important: join tenants so archived tenants are never selectable
   const r = await db.execute(sql`
     SELECT 1
-    FROM tenant_members
-    WHERE tenant_id = ${tenantId}::uuid
-      AND clerk_user_id = ${userId}
-      AND (status IS NULL OR status = 'active')
+    FROM tenant_members m
+    JOIN tenants t ON t.id = m.tenant_id
+    WHERE m.tenant_id = ${tenantId}::uuid
+      AND m.clerk_user_id = ${userId}
+      AND (m.status IS NULL OR m.status = 'active')
+      AND COALESCE(t.status, 'active') = 'active'
     LIMIT 1
   `);
   return rows(r).length > 0;
@@ -87,6 +91,7 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
       ON t.id = m.tenant_id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
+      AND COALESCE(t.status, 'active') = 'active'
       AND t.slug = ${tenantSlug}
     LIMIT 1
   `);
@@ -113,6 +118,7 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
     JOIN tenants t ON t.id = m.tenant_id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
+      AND COALESCE(t.status, 'active') = 'active'
       AND t.id = ${tenantId}::uuid
     LIMIT 1
   `);
@@ -162,7 +168,7 @@ export async function GET() {
         );
       }
 
-      // stale cookie
+      // stale cookie (or tenant became archived)
       const cleared = NextResponse.json({
         ok: true,
         activeTenantId: null,
