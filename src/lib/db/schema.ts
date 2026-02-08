@@ -163,7 +163,8 @@ export const tenantSubIndustries = pgTable(
 );
 
 /**
- * Tenant onboarding state + AI website analysis snapshot
+ * Tenant onboarding (wizard state + AI analysis snapshot)
+ * (Matches your real DB table `tenant_onboarding`)
  */
 export const tenantOnboarding = pgTable(
   "tenant_onboarding",
@@ -174,8 +175,6 @@ export const tenantOnboarding = pgTable(
       .references(() => tenants.id, { onDelete: "cascade" }),
 
     website: text("website"),
-
-    // stores your two-pass web intel + normalized JSON object
     aiAnalysis: jsonb("ai_analysis").$type<any>(),
 
     currentStep: integer("current_step").notNull().default(1),
@@ -261,8 +260,7 @@ export const tenantSettings = pgTable("tenant_settings", {
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
 
-  // ✅ PLAN: DB should store ONLY tier0|tier1|tier2
-  // "free" is UI alias for tier0
+  // ✅ PLAN: DB stores only tier0|tier1|tier2 (never "free")
   planTier: text("plan_tier").notNull().default("tier0"),
   monthlyQuoteLimit: integer("monthly_quote_limit"), // null => unlimited
   activationGraceCredits: integer("activation_grace_credits").notNull().default(0),
@@ -371,7 +369,7 @@ export const quoteLogs = pgTable("quote_logs", {
 });
 
 /**
- * Industries
+ * Industries (canonical list)
  */
 export const industries = pgTable(
   "industries",
