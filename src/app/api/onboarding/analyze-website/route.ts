@@ -32,7 +32,6 @@ function clamp(s: string, max: number) {
 }
 
 // Drizzle RowList is often array-like but may not expose `.rows` in typings.
-// This helper works for arrays, array-like objects, and `{ rows: [...] }`.
 function firstRow(r: any): any | null {
   if (!r) return null;
   if (Array.isArray(r)) return r[0] ?? null;
@@ -127,14 +126,77 @@ Return ONLY valid JSON.
 
 /* --------------------- model pick --------------------- */
 
-// NOTE: your current PlatformLlmConfig type doesn't include onboardingModel yet.
-// We still *read it* safely via `as any` so you can add it in PCC without breaking here.
 function pickOnboardingModel(cfg: any) {
   const m =
     String((cfg as any)?.models?.onboardingModel ?? "").trim() ||
     String(cfg?.models?.estimatorModel ?? "").trim() ||
     "gpt-4.1";
   return m;
+}
+
+/* --------------------- phases --------------------- */
+
+type Phase =
+  | "reachability"
+  | "discover"
+  | "extract"
+  | "classify"
+  | "questions"
+  | "finalize";
+
+function mergeMeta(priorAnalysis: any, patch: any) {
+  const prevMeta = priorAnalysis?.meta && typeof priorAnalysis.meta === "object" ? priorAnalysis.meta : {};
+  return { ...prevMeta, ...patch };
+}
+
+async function writeRunning(
+  tenantId: string,
+  priorAnalysis: any,
+  website: string,
+  nextRound: number,
+  phase: Phase,
+  lastAction: string,
+  extra: Record<string, any> = {}
+) {
+  const base = typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {};
+  const meta = mergeMeta(priorAnalysis, {
+    status: "running",
+    round: nextRound,
+    phase,
+    lastAction,
+    error: null,
+    ...extra,
+  });
+
+  const stub = {
+    ...base,
+    website,
+    meta,
+  };
+
+  await db.execute(sql`
+    insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
+    values (${tenantId}::uuid, ${JSON.stringify(stub)}::jsonb, 2, false, now(), now())
+    on conflict (tenant_id) do update
+    set ai_analysis = excluded.ai_analysis,
+        current_step = greatest(tenant_onboarding.current_step, 2),
+        updated_at = now()
+  `);
+
+  return stub;
+}
+
+async function writeUpdate(
+  tenantId: string,
+  analysis: any
+) {
+  await db.execute(sql`
+    update tenant_onboarding
+    set ai_analysis = ${JSON.stringify(analysis)}::jsonb,
+        current_step = greatest(current_step, 2),
+        updated_at = now()
+    where tenant_id = ${tenantId}::uuid
+  `);
 }
 
 /* --------------------- handler --------------------- */
@@ -175,37 +237,35 @@ export async function POST(req: Request) {
       );
     }
 
-    // Mark running immediately so UI has real status
     const prevMeta = priorAnalysis?.meta && typeof priorAnalysis.meta === "object" ? priorAnalysis.meta : {};
     const prevRound = Number(prevMeta?.round ?? 0) || 0;
     const nextRound = prevRound + 1;
 
-    const runningStub = {
-      ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
+    // Phase 1: reachability / kickoff
+    await writeRunning(
+      tenantId,
+      priorAnalysis,
       website,
-      meta: {
-        ...prevMeta,
-        status: "running",
-        round: nextRound,
-        lastAction: "Analyzing website with web tools…",
-        error: null,
-        startedAt: new Date().toISOString(),
-      },
-    };
-
-    await db.execute(sql`
-      insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-      values (${tenantId}::uuid, ${JSON.stringify(runningStub)}::jsonb, 2, false, now(), now())
-      on conflict (tenant_id) do update
-      set ai_analysis = excluded.ai_analysis,
-          current_step = greatest(tenant_onboarding.current_step, 2),
-          updated_at = now()
-    `);
+      nextRound,
+      "reachability",
+      "Checking that your website is reachable…",
+      { startedAt: new Date().toISOString() }
+    );
 
     const cfg = await loadPlatformLlmConfig();
     const model = pickOnboardingModel(cfg);
 
     const client = new OpenAI({ apiKey });
+
+    // Phase 2: discover (pass 1 starts)
+    await writeRunning(
+      tenantId,
+      priorAnalysis,
+      website,
+      nextRound,
+      "discover",
+      "Finding key pages (services, gallery, contact)…"
+    );
 
     /* ---------- PASS 1: web browsing (NO JSON MODE) ---------- */
     const intelResp = await client.responses.create({
@@ -218,33 +278,41 @@ export async function POST(req: Request) {
     const rawIntel = String(intelResp.output_text ?? "").trim();
     if (!rawIntel) throw new Error("EMPTY_WEB_RESULT");
 
-    // Update running meta between passes
-    const midStub = {
+    // Phase 3: extract (we got content, now extracting signals)
+    const mid = {
       ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
       website,
-      meta: {
-        ...prevMeta,
+      meta: mergeMeta(priorAnalysis, {
         status: "running",
         round: nextRound,
-        lastAction: "Website read complete. Normalizing to JSON…",
+        phase: "extract" as Phase,
+        lastAction: "Extracting services and billing signals…",
         error: null,
-      },
-      // helpful for debugging
+      }),
       rawWebIntelPreview: clamp(rawIntel, 1200),
     };
 
-    await db.execute(sql`
-      update tenant_onboarding
-      set ai_analysis = ${JSON.stringify(midStub)}::jsonb,
-          updated_at = now()
-      where tenant_id = ${tenantId}::uuid
-    `);
+    await writeUpdate(tenantId, mid);
+
+    // Phase 4: classify/questions (pass 2 normalization)
+    const preJson = {
+      ...mid,
+      meta: {
+        ...(mid.meta ?? {}),
+        status: "running",
+        round: nextRound,
+        phase: "classify" as Phase,
+        lastAction: "Converting website intel into structured onboarding data…",
+        error: null,
+      },
+    };
+
+    await writeUpdate(tenantId, preJson);
 
     /* ---------- PASS 2: JSON normalization (STRICT JSON) ---------- */
     const normalizedResp = await client.responses.create({
       model,
       temperature: 0.2,
-      // ✅ This is the supported way in Responses API (avoid `response_format` typing issue)
       text: { format: { type: "json_object" } },
       input: normalizePrompt(rawIntel),
     });
@@ -253,7 +321,6 @@ export async function POST(req: Request) {
     const json = safeJsonParse(jsonText);
     const parsed = json ? AnalysisSchema.safeParse(json) : null;
 
-    // Fallback if JSON pass fails (never return empty body)
     if (!parsed?.success) {
       const fallback = {
         businessGuess:
@@ -274,52 +341,41 @@ export async function POST(req: Request) {
         source: "web_tools_two_pass_parse_fail",
         modelUsed: model,
         website,
-        meta: {
+        meta: mergeMeta(priorAnalysis, {
           status: "complete",
           round: nextRound,
+          phase: "finalize" as Phase,
           lastAction: "AI analysis complete (needs confirmation).",
           error: null,
           finishedAt: new Date().toISOString(),
-        },
+        }),
         rawWebIntelPreview: clamp(rawIntel, 1200),
         rawModelJsonPreview: clamp(jsonText, 1200),
       };
 
-      await db.execute(sql`
-        update tenant_onboarding
-        set ai_analysis = ${JSON.stringify(fallback)}::jsonb,
-            current_step = greatest(current_step, 2),
-            updated_at = now()
-        where tenant_id = ${tenantId}::uuid
-      `);
-
+      await writeUpdate(tenantId, fallback);
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: fallback }, { status: 200 });
     }
 
+    // Phase 5: questions (we have structured data; we’re effectively finalizing questions+summary)
     const analysis = {
       ...parsed.data,
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
       modelUsed: model,
-      meta: {
+      meta: mergeMeta(priorAnalysis, {
         status: "complete",
         round: nextRound,
+        phase: "finalize" as Phase,
         lastAction: "AI analysis complete.",
         error: null,
         finishedAt: new Date().toISOString(),
-      },
-      // keep a short preview for debugging; remove later if you want
+      }),
       rawWebIntelPreview: clamp(rawIntel, 1200),
     };
 
-    await db.execute(sql`
-      update tenant_onboarding
-      set ai_analysis = ${JSON.stringify(analysis)}::jsonb,
-          current_step = greatest(current_step, 2),
-          updated_at = now()
-      where tenant_id = ${tenantId}::uuid
-    `);
+    await writeUpdate(tenantId, analysis);
 
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
@@ -346,6 +402,7 @@ export async function POST(req: Request) {
             ...prevMeta,
             status: "error",
             round: prevRound || 1,
+            phase: (prevMeta?.phase as any) || "finalize",
             lastAction: "AI analysis failed.",
             error: msg,
             failedAt: new Date().toISOString(),
