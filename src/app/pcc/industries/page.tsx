@@ -13,10 +13,6 @@ function rows(r: any): any[] {
   return (r as any)?.rows ?? (Array.isArray(r) ? r : []);
 }
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
 function titleFromKey(key: string) {
   // landscaping_hardscaping -> Landscaping Hardscaping
   const s = String(key ?? "").trim();
@@ -26,13 +22,6 @@ function titleFromKey(key: string) {
     .filter(Boolean)
     .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
     .join(" ");
-}
-
-function toBool(v: any) {
-  if (v === true) return true;
-  if (v === false) return false;
-  const s = String(v ?? "").toLowerCase().trim();
-  return s === "true" || s === "t" || s === "1" || s === "yes";
 }
 
 export default async function PccIndustriesPage() {
@@ -70,21 +59,22 @@ export default async function PccIndustriesPage() {
   }
 
   // Counts by AI suggested industry + needsConfirmation
+  // NOTE: don't use "to" as an alias (reserved-ish). Use "ob".
   const aiCountsR = await db.execute(sql`
     select
-      (to.ai_analysis->>'suggestedIndustryKey')::text as "key",
+      (ob.ai_analysis->>'suggestedIndustryKey')::text as "key",
       count(*)::int as "aiSuggestedCount",
       sum(
         case
-          when (to.ai_analysis->>'needsConfirmation')::text = 'true' then 1
-          when (to.ai_analysis->>'needsConfirmation')::text = 't' then 1
+          when (ob.ai_analysis->>'needsConfirmation')::text = 'true' then 1
+          when (ob.ai_analysis->>'needsConfirmation')::text = 't' then 1
           else 0
         end
       )::int as "needsConfirmCount"
-    from tenant_onboarding to
-    where (to.ai_analysis->>'suggestedIndustryKey') is not null
-      and (to.ai_analysis->>'suggestedIndustryKey') <> ''
-    group by (to.ai_analysis->>'suggestedIndustryKey')
+    from tenant_onboarding ob
+    where (ob.ai_analysis->>'suggestedIndustryKey') is not null
+      and (ob.ai_analysis->>'suggestedIndustryKey') <> ''
+    group by (ob.ai_analysis->>'suggestedIndustryKey')
   `);
 
   const aiSuggestedCounts = new Map<string, number>();
@@ -173,7 +163,12 @@ export default async function PccIndustriesPage() {
                           <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
                             AI suggested: {aiSuggested}
                           </span>
-                          {needsConfirm ? (
+
+                          {aiSuggested === 0 ? (
+                            <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                              no AI data
+                            </span>
+                          ) : needsConfirm ? (
                             <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
                               needs confirm: {needsConfirm}
                             </span>
