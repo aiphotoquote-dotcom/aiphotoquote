@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
+import OpenAI from "openai";
 
 import { db } from "@/lib/db/client";
 
@@ -69,33 +70,20 @@ type InterviewAnswer = {
   createdAt: string;
 };
 
-type Candidate = { key: string; label: string; score: number };
+type Candidate = { key: string; label: string; score: number }; // score 0..100
 
-type Conflict =
-  | {
-      type: "close_call";
-      between: [string, string];
-      scores: [number, number];
-      reason: string;
-    }
-  | {
-      type: "top_flipped";
-      from: string;
-      to: string;
-      reason: string;
-    }
-  | {
-      type: "confidence_plateau";
-      prev: number;
-      next: number;
-      reason: string;
-    };
+type ProposedIndustry = {
+  key: string; // snake_case
+  label: string; // human label
+  description?: string | null;
+  why: string; // short reasoning
+};
 
 type IndustryInference = {
   mode: "interview";
   status: "collecting" | "suggested";
   round: number;
-  confidenceScore: number;
+  confidenceScore: number; // 0..1
   suggestedIndustryKey: string | null;
   needsConfirmation: boolean;
 
@@ -104,172 +92,38 @@ type IndustryInference = {
   answers: InterviewAnswer[];
   candidates: Candidate[];
 
-  conflicts: Conflict[];
+  // ✅ AI can propose a new industry when none match well
+  proposedIndustry?: ProposedIndustry | null;
 
-  meta: { updatedAt: string; lastAskedQid?: string | null };
+  meta: { updatedAt: string; model?: string };
 };
 
 /* -------------------- tuning -------------------- */
 
-const ConfidenceTarget = 0.82;
 const MaxRounds = 8;
 
-const MinTopScoreForHighConfidence = 3;
-
-// Don’t “lock” just because we hit MaxRounds when still in conflict.
-// We can still suggest at exhaustion if there are no blocking conflicts.
-const ForceSuggestAtExhaustion = true;
-
-// conflict tuning (deterministic)
-const CloseCallMaxGap = 1; // top vs 2nd score <= 1 means ambiguity
-const ConfidencePlateauDelta = 0.05; // change < 5% between rounds is "not improving"
+// if AI says confidence >= target and it’s not asking another question, we mark suggested
+const ConfidenceTarget = 0.82;
 
 /**
- * Question bank (>= MaxRounds recommended).
- * Clarifiers are generated dynamically.
+ * Our “question slots” for the UI/UX.
+ * LLM chooses the next qid and can write a better question/options.
  */
-const QUESTIONS: Array<{
+const QID_SLOTS: Array<{
   qid: string;
-  question: string;
-  help?: string;
-  options?: string[];
+  intent: string;
+  example?: string;
 }> = [
-  {
-    qid: "services",
-    question: "What do you primarily do?",
-    help: "Pick the closest match.",
-    options: [
-      "Auto detailing / ceramic coating",
-      "Auto repair / mechanic",
-      "Auto body / collision",
-      "Upholstery / reupholstery",
-      "Paving / asphalt / concrete",
-      "Landscaping / hardscaping",
-      "HVAC",
-      "Plumbing",
-      "Electrical",
-      "Roofing / siding",
-      "Cleaning / janitorial",
-      "Other",
-    ],
-  },
-  {
-    qid: "materials_objects",
-    question: "What do you work on most often?",
-    help: "Pick the closest match.",
-    options: ["Cars/Trucks", "Boats", "Homes", "Businesses", "Roads/Parking lots", "Other"],
-  },
-  {
-    qid: "job_type",
-    question: "What type of work do you quote most?",
-    help: "Pick the closest match.",
-    options: ["Repairs", "Full replacement", "New installs", "Maintenance", "Mix of these"],
-  },
-  {
-    qid: "who_for",
-    question: "Who are your customers?",
-    help: "Pick the closest match.",
-    options: ["Residential", "Commercial", "Both"],
-  },
-  {
-    qid: "top_jobs",
-    question: "Name 2–3 common jobs you quote.",
-    help: "Example: “ceramic coating, paint correction, interior detail”.",
-  },
-  {
-    qid: "materials",
-    question: "What materials or surfaces do you work with most?",
-    help: "Example: “clear coat, paint, leather, vinyl, asphalt, pavers”.",
-  },
-  {
-    qid: "specialty",
-    question: "Any specialty keywords customers use to find you?",
-    help: "Example: “ceramic coating”, “paint correction”, “PPF”, “collision repair”.",
-  },
-  {
-    qid: "location",
-    question: "Where do you operate?",
-    help: "City/state or a rough service radius.",
-  },
+  { qid: "services", intent: "Primary service type in 3–7 words.", example: "ceramic coating / interior detail" },
+  { qid: "materials_objects", intent: "What they work on (cars, boats, homes, offices, etc.)." },
+  { qid: "job_type", intent: "Repair vs replace vs install vs maintenance." },
+  { qid: "who_for", intent: "Residential vs commercial vs both." },
+  { qid: "top_jobs", intent: "2–3 common jobs they quote.", example: "roller shades, plantation shutters, motorized blinds" },
+  { qid: "materials", intent: "Materials/surfaces they work with.", example: "fabric, vinyl, aluminum, wood" },
+  { qid: "specialty", intent: "Niche keywords customers search.", example: "motorized shades, blackout curtains" },
+  { qid: "location", intent: "City/state or radius." },
+  { qid: "freeform", intent: "One sentence describing the business.", example: "We sell and install blinds and shades for homes and offices." },
 ];
-
-/**
- * Keyword scoring rules (deterministic).
- */
-const KEYWORDS: Record<string, Array<string | RegExp>> = {
-  auto_detailing: [
-    /detail/i,
-    /detailing/i,
-    /ceramic/i,
-    /coating/i,
-    /paint correction/i,
-    /\bppf\b/i,
-    /polish/i,
-    /buff/i,
-    /wax/i,
-    /\bwash\b/i,
-    /\bcar wash\b/i,
-    /\binterior detail\b/i,
-  ],
-  auto_repair: [
-    /auto repair/i,
-    /mechanic/i,
-    /brake/i,
-    /engine/i,
-    /diagnostic/i,
-    /oil change/i,
-    /transmission/i,
-    /alternator/i,
-    /starter/i,
-  ],
-  auto_repair_collision: [
-    /collision/i,
-    /body shop/i,
-    /auto body/i,
-    /\bdent\b/i,
-    /bumper/i,
-    /panel/i,
-    /paint/i,
-    /fender/i,
-  ],
-  upholstery: [/upholster/i, /vinyl/i, /leather/i, /canvas/i, /headliner/i, /marine/i, /sew/i],
-  paving_contractor: [/asphalt/i, /pav(e|ing)/i, /sealcoat/i, /concrete/i, /driveway/i, /parking lot/i],
-  landscaping_hardscaping: [/landscap/i, /hardscap/i, /mulch/i, /pavers/i, /retaining wall/i, /lawn/i],
-  hvac: [/hvac/i, /air condition/i, /\bac\b/i, /furnace/i, /heat pump/i],
-  plumbing: [/plumb/i, /water heater/i, /drain/i, /sewer/i],
-  electrical: [/electric/i, /panel/i, /breaker/i, /wiring/i],
-  roofing: [/roof/i, /shingle/i, /gutter/i, /siding/i],
-  cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i, /deep clean/i, /move out/i],
-};
-
-/**
- * Strong mapping for option answers.
- */
-const OPTION_BOOST: Record<string, Array<{ match: RegExp; key: string; points: number }>> = {
-  services: [
-    { match: /detail|ceramic|coating/i, key: "auto_detailing", points: 6 },
-    { match: /auto repair|mechanic/i, key: "auto_repair", points: 6 },
-    { match: /collision|body/i, key: "auto_repair_collision", points: 6 },
-    { match: /upholstery/i, key: "upholstery", points: 6 },
-    { match: /paving|asphalt|concrete/i, key: "paving_contractor", points: 6 },
-    { match: /landscap|hardscap/i, key: "landscaping_hardscaping", points: 6 },
-    { match: /hvac/i, key: "hvac", points: 6 },
-    { match: /plumb/i, key: "plumbing", points: 6 },
-    { match: /electrical/i, key: "electrical", points: 6 },
-    { match: /roof|siding/i, key: "roofing", points: 6 },
-    { match: /clean|janitorial/i, key: "cleaning_services", points: 6 },
-  ],
-  materials_objects: [
-    { match: /cars\/trucks/i, key: "auto_detailing", points: 1 },
-    { match: /cars\/trucks/i, key: "auto_repair", points: 1 },
-    { match: /cars\/trucks/i, key: "auto_repair_collision", points: 1 },
-    { match: /boats/i, key: "upholstery", points: 2 },
-    { match: /roads|parking/i, key: "paving_contractor", points: 2 },
-    { match: /homes/i, key: "landscaping_hardscaping", points: 1 },
-    { match: /homes/i, key: "cleaning_services", points: 1 },
-    { match: /businesses/i, key: "cleaning_services", points: 1 },
-  ],
-};
 
 /* -------------------- db helpers -------------------- */
 
@@ -299,14 +153,18 @@ async function writeAiAnalysis(tenantId: string, ai: any) {
   `);
 }
 
-async function listCanonicalIndustries(): Promise<Array<{ key: string; label: string }>> {
+async function listCanonicalIndustries(): Promise<Array<{ key: string; label: string; description: string | null }>> {
   const r = await db.execute(sql`
-    select key::text as "key", label::text as "label"
+    select key::text as "key", label::text as "label", description::text as "description"
     from industries
     order by label asc
-    limit 1000
+    limit 2000
   `);
-  return rowsOf(r).map((x: any) => ({ key: String(x.key), label: String(x.label) }));
+  return rowsOf(r).map((x: any) => ({
+    key: String(x.key),
+    label: String(x.label),
+    description: x.description == null ? null : String(x.description),
+  }));
 }
 
 function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
@@ -330,8 +188,8 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
       nextQuestion: existing.nextQuestion ?? null,
       answers,
       candidates: Array.isArray(existing.candidates) ? existing.candidates : [],
-      conflicts: Array.isArray(existing.conflicts) ? existing.conflicts : [],
-      meta: { updatedAt: now, lastAskedQid: safeTrim(existing?.meta?.lastAskedQid) || null },
+      proposedIndustry: existing.proposedIndustry ?? null,
+      meta: { updatedAt: now, model: safeTrim(existing?.meta?.model) || undefined },
     };
 
     baseAi.industryInference = inf;
@@ -348,287 +206,162 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
     nextQuestion: null,
     answers: [],
     candidates: [],
-    conflicts: [],
-    meta: { updatedAt: now, lastAskedQid: null },
+    proposedIndustry: null,
+    meta: { updatedAt: now },
   };
 
   baseAi.industryInference = inf;
   return { ai: baseAi, inf };
 }
 
-/* -------------------- scoring -------------------- */
+/* -------------------- LLM -------------------- */
 
-function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string; label: string }>): Candidate[] {
-  const text = answers.map((a) => a.answer).join(" | ");
-  const scores = new Map<string, number>();
+const LlmOutSchema = z.object({
+  // top candidates ranked; can include a new industry key if proposing
+  candidates: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        label: z.string().min(1),
+        score: z.number().min(0).max(100),
+      })
+    )
+    .min(1)
+    .max(8),
 
-  for (const [k, patterns] of Object.entries(KEYWORDS)) {
-    let s = 0;
-    for (const p of patterns) {
-      if (typeof p === "string") {
-        if (text.toLowerCase().includes(p.toLowerCase())) s += 1;
-      } else {
-        if (p.test(text)) s += 1;
-      }
-    }
-    if (s > 0) scores.set(k, (scores.get(k) ?? 0) + s);
-  }
+  suggestedIndustryKey: z.string().nullable(),
+  confidenceScore: z.number().min(0).max(1),
+  status: z.enum(["collecting", "suggested"]),
 
-  for (const a of answers) {
-    const boosts = OPTION_BOOST[a.qid] ?? [];
-    for (const b of boosts) {
-      if (b.match.test(a.answer)) scores.set(b.key, (scores.get(b.key) ?? 0) + b.points);
-    }
-  }
+  // next question (only if collecting)
+  nextQuestion: z
+    .object({
+      qid: z.string().min(1),
+      question: z.string().min(1),
+      help: z.string().optional(),
+      options: z.array(z.string()).optional(),
+    })
+    .nullable(),
 
-  const canonKeys = new Set(canon.map((c) => c.key));
-  const candidates: Candidate[] = [];
+  // if the model believes none fit well, it can propose a new industry
+  proposedIndustry: z
+    .object({
+      key: z.string().min(3),
+      label: z.string().min(3),
+      description: z.string().nullable().optional(),
+      why: z.string().min(8),
+    })
+    .nullable()
+    .optional(),
+});
 
-  for (const [k, s] of scores.entries()) {
-    if (canonKeys.size === 0 || canonKeys.has(k)) {
-      const label = canon.find((c) => c.key === k)?.label ?? k;
-      candidates.push({ key: k, label, score: s });
-    }
-  }
-
-  if (!candidates.length) {
-    candidates.push({
-      key: "service",
-      label: canon.find((c) => c.key === "service")?.label ?? "Service",
-      score: 0,
-    });
-  }
-
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates.slice(0, 6);
+function pickNextQid(answers: InterviewAnswer[]) {
+  const answered = new Set(answers.map((a) => a.qid));
+  // pick first unasked slot; fallback freeform
+  const next = QID_SLOTS.find((s) => !answered.has(s.qid));
+  return next?.qid ?? "freeform";
 }
 
-function computeConfidence(cands: Candidate[]) {
-  const top = cands[0]?.score ?? 0;
-  const second = cands[1]?.score ?? 0;
-
-  if (top <= 0) return 0;
-
-  if (top < MinTopScoreForHighConfidence) {
-    return Math.max(0, Math.min(0.35, top / 8));
-  }
-
-  const mag = Math.min(1, top / 10);
-  const sep = top > 0 ? Math.max(0, Math.min(1, (top - second) / Math.max(1, top))) : 0;
-
-  const conf = 0.55 * mag + 0.45 * sep;
-  return Math.max(0, Math.min(1, conf));
-}
-
-/* -------------------- conflicts + clarifiers -------------------- */
-
-function detectConflicts(prev: IndustryInference, nextCandidates: Candidate[], nextConfidence: number): Conflict[] {
-  const out: Conflict[] = [];
-
-  const prevTop = prev.candidates?.[0]?.key ? normalizeKey(prev.candidates[0].key) : "";
-  const nextTop = nextCandidates?.[0]?.key ? normalizeKey(nextCandidates[0].key) : "";
-
-  if (prevTop && nextTop && prevTop !== nextTop) {
-    out.push({ type: "top_flipped", from: prevTop, to: nextTop, reason: "Top match changed after new answers." });
-  }
-
-  const top = nextCandidates?.[0];
-  const second = nextCandidates?.[1];
-  if (top && second) {
-    const gap = Math.abs((top.score ?? 0) - (second.score ?? 0));
-    if (gap <= CloseCallMaxGap && (top.score ?? 0) > 0) {
-      out.push({
-        type: "close_call",
-        between: [normalizeKey(top.key), normalizeKey(second.key)],
-        scores: [top.score, second.score],
-        reason: "Top two industries are very close.",
-      });
-    }
-  }
-
-  const prevConf = Number(prev.confidenceScore ?? 0) || 0;
-  if (prev.round >= 2 && Math.abs(nextConfidence - prevConf) < ConfidencePlateauDelta) {
-    out.push({
-      type: "confidence_plateau",
-      prev: prevConf,
-      next: nextConfidence,
-      reason: "Confidence is not improving — need a clarifying question.",
-    });
-  }
-
-  return out;
-}
-
-function hasBlockingConflict(conflicts: Conflict[]) {
-  return conflicts.some((c) => c.type === "close_call" || c.type === "top_flipped" || c.type === "confidence_plateau");
-}
-
-function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
-  const top = candidates[0];
-  const second = candidates[1];
-
-  if (top && second) {
-    const a = top.label || top.key;
-    const b = second.label || second.key;
-
-    const keyA = normalizeKey(top.key);
-    const keyB = normalizeKey(second.key);
-    const pair = [keyA, keyB].sort().join("|");
-
-    if (pair === ["auto_detailing", "auto_repair"].sort().join("|")) {
-      return {
-        qid: "clarify_detail_vs_repair",
-        question: "Quick clarification — which best describes you?",
-        help: "This prevents mixing ‘detailing’ with ‘mechanic/repair’ templates.",
-        options: ["Detailing (wash/polish/wax/coatings)", "Mechanical repair (brakes/engine/diagnostics)", "Both"],
-      };
-    }
-
-    if (pair === ["auto_detailing", "cleaning_services"].sort().join("|")) {
-      return {
-        qid: "clarify_detail_vs_cleaning",
-        question: "Quick clarification — what do customers usually hire you for?",
-        help: "These sound similar, but your starter templates differ a lot.",
-        options: [
-          "Car detailing (paint/interior + appearance)",
-          "General cleaning (homes/businesses/janitorial)",
-          "Both / not sure",
-        ],
-      };
-    }
-
-    if (pair === ["auto_repair", "auto_repair_collision"].sort().join("|")) {
-      return {
-        qid: "clarify_repair_vs_collision",
-        question: "Quick clarification — what type of auto work do you do most?",
-        help: "This sets the right photo requests and inspection prompts.",
-        options: ["Mechanical repair (brakes/engine)", "Collision/body (panels/paint/dents)", "Both"],
-      };
-    }
-
-    return {
-      qid: "clarify_top_two",
-      question: "Just to clarify — which is closer to your business?",
-      help: "Pick the closest match so we load the right starter pack.",
-      options: [a, b, "Something else"],
-    };
-  }
-
-  return {
-    qid: "clarify_freeform",
-    question: "Describe your business in one sentence.",
-    help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
-  };
-}
-
-/* -------------------- adaptive + anti-loop question picking -------------------- */
-
-function pickDiscriminatingQid(inf: IndustryInference): string | null {
-  const answered = new Set(inf.answers.map((a) => a.qid));
-
-  if (!answered.has("services")) return "services";
-
-  const top = normalizeKey(inf.candidates?.[0]?.key ?? "");
-  const second = normalizeKey(inf.candidates?.[1]?.key ?? "");
-
-  const pair = [top, second].filter(Boolean).sort().join("|");
-
-  if (pair.includes("auto_")) {
-    if (!answered.has("specialty")) return "specialty";
-    if (!answered.has("top_jobs")) return "top_jobs";
-    if (!answered.has("job_type")) return "job_type";
-    if (!answered.has("materials_objects")) return "materials_objects";
-    return null;
-  }
-
-  if (["hvac", "plumbing", "electrical", "roofing"].includes(top) || ["hvac", "plumbing", "electrical", "roofing"].includes(second)) {
-    if (!answered.has("job_type")) return "job_type";
-    if (!answered.has("materials")) return "materials";
-    if (!answered.has("who_for")) return "who_for";
-    if (!answered.has("top_jobs")) return "top_jobs";
-    return null;
-  }
-
-  if (top === "cleaning_services" || second === "cleaning_services") {
-    if (!answered.has("who_for")) return "who_for";
-    if (!answered.has("top_jobs")) return "top_jobs";
-    if (!answered.has("materials_objects")) return "materials_objects";
-    return null;
-  }
-
-  if (!answered.has("top_jobs")) return "top_jobs";
-  if (!answered.has("materials_objects")) return "materials_objects";
-  if (!answered.has("job_type")) return "job_type";
-  if (!answered.has("materials")) return "materials";
-  if (!answered.has("who_for")) return "who_for";
-  if (!answered.has("specialty")) return "specialty";
-  if (!answered.has("location")) return "location";
-
-  return null;
-}
-
-function nextQuestionAdaptive(inf: IndustryInference) {
-  const qid = pickDiscriminatingQid(inf);
-  if (!qid) return null;
-  return QUESTIONS.find((x) => x.qid === qid) ?? null;
-}
-
-function altFreeform(lastAskedQid: string | null) {
-  // rotate through different freeform prompts so the UX never looks “stuck”
-  if (lastAskedQid === "clarify_freeform") {
-    return {
-      qid: "clarify_freeform_not",
-      question: "Quick check — what do you NOT do?",
-      help: "Example: “We do detailing, but we don’t do mechanical repairs or collision work.”",
-    };
-  }
-  if (lastAskedQid === "clarify_freeform_not") {
-    return {
-      qid: "clarify_freeform_keywords",
-      question: "Give 3 keywords customers search for to find you.",
-      help: "Example: “ceramic coating, interior detail, paint correction”.",
-    };
-  }
-  return {
-    qid: "clarify_freeform",
-    question: "Describe your business in one sentence.",
-    help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
-  };
-}
-
-function avoidRepeatQuestion(args: {
-  inf: IndustryInference;
-  proposed: { qid: string; question: string; help?: string; options?: string[] } | null;
-  candidates: Candidate[];
-  conflicts: Conflict[];
+async function runLlm(args: {
+  canon: Array<{ key: string; label: string; description: string | null }>;
+  answers: InterviewAnswer[];
+  round: number;
 }) {
-  const lastAsked = safeTrim(args.inf?.meta?.lastAskedQid ?? "") || "";
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  if (!args.proposed) return null;
+  const askedQids = args.answers.map((a) => a.qid);
+  const nextQidHint = pickNextQid(args.answers);
 
-  // If we’re about to ask the same qid again, pick something else.
-  if (lastAsked && normalizeKey(args.proposed.qid) === normalizeKey(lastAsked)) {
-    // If we have a top-two, prefer a targeted clarifier first.
-    if (args.candidates.length >= 2) {
-      const c = clarifierQuestionFrom(args.conflicts, args.candidates);
-      if (c && normalizeKey(c.qid) !== normalizeKey(lastAsked)) return c;
+  const system = [
+    "You are AIPhotoQuote's onboarding interview brain.",
+    "Goal: infer the customer's industry from short answers and ask the best next question.",
+    "You MUST avoid repeating the same question in different words.",
+    "If none of the canonical industries fit well, propose a NEW industry (snake_case key + human label).",
+    "Output MUST be valid JSON matching the requested schema.",
+  ].join("\n");
+
+  const user = {
+    canonical_industries: args.canon,
+    interview: {
+      round: args.round,
+      asked_qids: askedQids,
+      answers: args.answers,
+      allowed_qid_slots: QID_SLOTS,
+      next_qid_hint: nextQidHint,
+      max_rounds: MaxRounds,
+      confidence_target: ConfidenceTarget,
+    },
+    output_rules: {
+      // Keep “real-feeling” UX
+      candidates_max: 6,
+      next_question_should_be_high_signal: true,
+      next_question_should_include_options_when_possible: true,
+      avoid_generic_example_text_unless_relevant: true,
+    },
+  };
+
+  // Use Responses API (modern OpenAI SDK); enforce JSON
+  const resp = await client.responses.create({
+    model: "gpt-4o-mini",
+    input: [
+      { role: "system", content: system },
+      { role: "user", content: JSON.stringify(user) },
+    ],
+    text: { format: { type: "json_object" } },
+  });
+
+  const text = resp.output_text ?? "";
+  const parsed = (() => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
     }
+  })();
 
-    // Otherwise rotate to a different unanswered high-signal question.
-    const answered = new Set(args.inf.answers.map((a) => a.qid));
-    const fallbacks = ["specialty", "top_jobs", "materials", "job_type", "materials_objects", "who_for", "location"];
-    for (const qid of fallbacks) {
-      if (!answered.has(qid)) {
-        const q = QUESTIONS.find((x) => x.qid === qid);
-        if (q) return q;
+  const out = LlmOutSchema.parse(parsed);
+
+  // normalize keys
+  const candidates = out.candidates
+    .map((c) => ({
+      key: normalizeKey(c.key),
+      label: safeTrim(c.label) || normalizeKey(c.key),
+      score: Number(c.score) || 0,
+    }))
+    .filter((c) => c.key);
+
+  const suggestedIndustryKey = out.suggestedIndustryKey ? normalizeKey(out.suggestedIndustryKey) : null;
+
+  const proposedIndustry = out.proposedIndustry
+    ? {
+        key: normalizeKey(out.proposedIndustry.key),
+        label: safeTrim(out.proposedIndustry.label),
+        description: out.proposedIndustry.description ?? null,
+        why: safeTrim(out.proposedIndustry.why),
       }
-    }
+    : null;
 
-    // If all else fails: different freeform prompt with a different qid.
-    return altFreeform(lastAsked);
-  }
+  const nextQuestion =
+    out.nextQuestion && out.status === "collecting"
+      ? {
+          qid: safeTrim(out.nextQuestion.qid) || nextQidHint,
+          question: safeTrim(out.nextQuestion.question),
+          help: safeTrim(out.nextQuestion.help) || undefined,
+          options: Array.isArray(out.nextQuestion.options)
+            ? out.nextQuestion.options.map((x) => safeTrim(x)).filter(Boolean).slice(0, 12)
+            : undefined,
+        }
+      : null;
 
-  return args.proposed;
+  return {
+    candidates: candidates.slice(0, 6),
+    suggestedIndustryKey,
+    confidenceScore: out.confidenceScore,
+    status: out.status,
+    nextQuestion,
+    proposedIndustry: proposedIndustry?.key ? proposedIndustry : null,
+    model: resp.model,
+  };
 }
 
 /* -------------------- schema -------------------- */
@@ -659,12 +392,11 @@ export async function POST(req: Request) {
     const { ai, inf: inf0 } = ensureInference(ai0);
 
     const canon = await listCanonicalIndustries();
-
-    let inf = { ...inf0 };
     const now = new Date().toISOString();
 
+    // reset
     if (parsed.data.action === "reset") {
-      inf = {
+      const inf: IndustryInference = {
         mode: "interview",
         status: "collecting",
         round: 1,
@@ -674,8 +406,8 @@ export async function POST(req: Request) {
         nextQuestion: null,
         answers: [],
         candidates: [],
-        conflicts: [],
-        meta: { updatedAt: now, lastAskedQid: null },
+        proposedIndustry: null,
+        meta: { updatedAt: now },
       };
 
       ai.industryInference = inf;
@@ -687,110 +419,57 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
     }
 
-    if (parsed.data.action === "start") {
-      const proposed =
-        hasBlockingConflict(inf.conflicts) && inf.candidates?.length
-          ? clarifierQuestionFrom(inf.conflicts, inf.candidates)
-          : nextQuestionAdaptive(inf) ?? QUESTIONS[0] ?? null;
+    // start or answer updates answers, then asks LLM what next
+    let answers: InterviewAnswer[] = Array.isArray(inf0.answers) ? [...inf0.answers] : [];
 
-      const q = avoidRepeatQuestion({ inf, proposed, candidates: inf.candidates ?? [], conflicts: inf.conflicts ?? [] }) ?? proposed;
+    if (parsed.data.action === "answer") {
+      const qid = safeTrim(parsed.data.qid);
+      const ansRaw = parsed.data.answer;
+      const ans = typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
 
-      inf.nextQuestion = q ?? altFreeform(safeTrim(inf.meta?.lastAskedQid ?? "") || null);
-
-      inf.meta = { ...(inf.meta ?? { updatedAt: now }), updatedAt: now, lastAskedQid: inf.nextQuestion?.qid ?? null };
-
-      ai.industryInference = { ...inf, meta: inf.meta };
-      await writeAiAnalysis(tenantId, ai);
-
-      return NextResponse.json({ ok: true, tenantId, industryInference: ai.industryInference }, { status: 200 });
-    }
-
-    // action === "answer"
-    const qid = safeTrim(parsed.data.qid);
-    const ansRaw = parsed.data.answer;
-
-    const ans =
-      typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
-
-    if (!qid || !ans) {
-      return NextResponse.json(
-        { ok: false, error: "ANSWER_REQUIRED", message: "qid and answer are required." },
-        { status: 400 }
-      );
-    }
-
-    const qFromBank = QUESTIONS.find((x) => x.qid === qid);
-    const qText =
-      (inf.nextQuestion?.qid === qid ? safeTrim(inf.nextQuestion?.question) : "") || qFromBank?.question || qid;
-
-    const answers = Array.isArray(inf.answers) ? [...inf.answers] : [];
-    answers.push({ qid, question: qText, answer: ans, createdAt: now });
-
-    const candidates = scoreCandidates(answers, canon);
-    const confidenceScore = computeConfidence(candidates);
-
-    const conflicts = detectConflicts(inf, candidates, confidenceScore);
-
-    const topKeyRaw = candidates[0]?.key ? normalizeKey(candidates[0].key) : "";
-    const suggestedIndustryKey = topKeyRaw || null;
-
-    const round = Math.min(MaxRounds, (Number(inf.round ?? 1) || 1) + 1);
-    const exhausted = round >= MaxRounds;
-
-    const reachedTarget = confidenceScore >= ConfidenceTarget && !hasBlockingConflict(conflicts);
-
-    const canForceSuggest =
-      exhausted &&
-      ForceSuggestAtExhaustion &&
-      !hasBlockingConflict(conflicts) &&
-      (candidates[0]?.score ?? 0) > 0;
-
-    const status: IndustryInference["status"] = reachedTarget || canForceSuggest ? "suggested" : "collecting";
-
-    let nextQ: any = null;
-    if (status === "collecting") {
-      const proposed = hasBlockingConflict(conflicts)
-        ? clarifierQuestionFrom(conflicts, candidates)
-        : nextQuestionAdaptive({
-            ...inf,
-            answers,
-            candidates,
-            confidenceScore,
-            conflicts,
-            round,
-            suggestedIndustryKey,
-            status,
-            needsConfirmation: true,
-            nextQuestion: null,
-            meta: { ...(inf.meta ?? { updatedAt: now }), updatedAt: now },
-          } as any);
-
-      nextQ = avoidRepeatQuestion({ inf, proposed, candidates, conflicts }) ?? proposed;
-
-      if (!nextQ) {
-        nextQ = altFreeform(safeTrim(inf.meta?.lastAskedQid ?? "") || null);
+      if (!qid || !ans) {
+        return NextResponse.json(
+          { ok: false, error: "ANSWER_REQUIRED", message: "qid and answer are required." },
+          { status: 400 }
+        );
       }
+
+      const qText = qid; // UI already stores question text; keep minimal here
+      answers.push({ qid, question: qText, answer: ans, createdAt: now });
     }
+
+    // cap rounds
+    const round = Math.min(MaxRounds, parsed.data.action === "start" ? Math.max(1, Number(inf0.round) || 1) : (Number(inf0.round) || 1) + 1);
+
+    // run the real AI
+    const llm = await runLlm({ canon, answers, round });
+
+    // If the model proposes a new industry, treat it as the suggestion.
+    const suggestedKey = llm.proposedIndustry?.key || llm.suggestedIndustryKey || null;
+
+    // suggested if LLM says suggested OR it reaches target and provides no nextQuestion
+    const status: IndustryInference["status"] =
+      llm.status === "suggested" || (llm.confidenceScore >= ConfidenceTarget && !llm.nextQuestion) ? "suggested" : "collecting";
 
     const next: IndustryInference = {
       mode: "interview",
       status,
       round,
-      confidenceScore,
-      suggestedIndustryKey,
+      confidenceScore: llm.confidenceScore,
+      suggestedIndustryKey: suggestedKey,
       needsConfirmation: true,
-      nextQuestion: nextQ ? { ...(nextQ as any) } : null,
+      nextQuestion: status === "collecting" ? llm.nextQuestion ?? { qid: "freeform", question: "Describe your business in one sentence." } : null,
       answers,
-      candidates,
-      conflicts,
-      meta: { ...(inf.meta ?? { updatedAt: now }), updatedAt: now, lastAskedQid: nextQ?.qid ?? null },
+      candidates: llm.candidates,
+      proposedIndustry: llm.proposedIndustry ?? null,
+      meta: { updatedAt: now, model: llm.model },
     };
 
     ai.industryInference = next;
 
-    // Mirror for Step3 + downstream
-    ai.suggestedIndustryKey = suggestedIndustryKey;
-    ai.confidenceScore = confidenceScore;
+    // mirror for Step3 expectations
+    ai.suggestedIndustryKey = suggestedKey;
+    ai.confidenceScore = llm.confidenceScore;
     ai.needsConfirmation = true;
 
     await writeAiAnalysis(tenantId, ai);
