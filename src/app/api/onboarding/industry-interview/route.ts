@@ -40,15 +40,6 @@ function rowsOf(r: any): any[] {
   return [];
 }
 
-function safeJsonStringify(v: any): string {
-  try {
-    // Avoid passing [object Object] into SQL params: always serialize explicitly.
-    return JSON.stringify(v ?? {});
-  } catch {
-    return "{}";
-  }
-}
-
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -92,12 +83,20 @@ type IndustryInference = {
   meta: { updatedAt: string };
 };
 
+/* -------------------- tuning -------------------- */
+
 const ConfidenceTarget = 0.82;
 const MaxRounds = 8;
 
+// Prevent “63% confidence” from a single flimsy keyword hit.
+const MinTopScoreForHighConfidence = 3;
+
+// If we have no strong signals by the end, we still return best guess but keep needsConfirmation true.
+const ForceSuggestAtExhaustion = true;
+
 /**
- * Question bank (ordered). We stop once confidence is high.
- * Keep short, high-signal, and easy to answer on mobile.
+ * Question bank (>= MaxRounds recommended).
+ * Keep short, high-signal, mobile-friendly.
  */
 const QUESTIONS: Array<{
   qid: string;
@@ -108,17 +107,31 @@ const QUESTIONS: Array<{
   {
     qid: "services",
     question: "What do you primarily do?",
-    help: "A short phrase is fine. Example: “custom boat upholstery, vinyl repairs”",
+    help: "Pick the closest match.",
     options: [
       "Upholstery / reupholstery",
       "Paving / asphalt / concrete",
       "Landscaping / hardscaping",
-      "HVAC / plumbing / electrical",
+      "HVAC",
+      "Plumbing",
+      "Electrical",
       "Auto repair / body",
       "Roofing / siding",
       "Cleaning / janitorial",
       "Other",
     ],
+  },
+  {
+    qid: "materials_objects",
+    question: "What do you work on most often?",
+    help: "Pick the closest match.",
+    options: ["Boats", "Cars/Trucks", "Homes", "Businesses", "Roads/Parking lots", "Other"],
+  },
+  {
+    qid: "job_type",
+    question: "What type of work do you quote most?",
+    help: "Pick the closest match.",
+    options: ["Repairs", "Full replacement", "New installs", "Maintenance", "Mix of these"],
   },
   {
     qid: "who_for",
@@ -127,15 +140,19 @@ const QUESTIONS: Array<{
     options: ["Residential", "Commercial", "Both"],
   },
   {
-    qid: "materials_objects",
-    question: "What do you work on most often?",
-    help: "Example: “boats, cars, RVs” or “driveways, parking lots”.",
-    options: ["Boats", "Cars/Trucks", "Homes", "Businesses", "Roads/Parking lots", "Other"],
-  },
-  {
     qid: "top_jobs",
     question: "Name 2–3 common jobs you quote.",
     help: "Example: “boat seats, headliners, custom covers”.",
+  },
+  {
+    qid: "materials",
+    question: "What materials do you work with most?",
+    help: "Example: “vinyl, leather, asphalt, pavers, shingles”.",
+  },
+  {
+    qid: "specialty",
+    question: "Any specialty keywords customers use to find you?",
+    help: "Example: “marine vinyl”, “collision repair”, “sealcoating”, “retaining walls”.",
   },
   {
     qid: "location",
@@ -145,19 +162,43 @@ const QUESTIONS: Array<{
 ];
 
 /**
- * Simple scoring rules (deterministic).
- * We’ll swap this to OpenAI later, but this is enough to get the recursion + UI + state right.
+ * Keyword scoring rules (deterministic).
  */
 const KEYWORDS: Record<string, Array<string | RegExp>> = {
-  upholstery: [/upholster/i, /vinyl/i, /canvas/i, /headliner/i, /sew/i, /marine upholstery/i],
+  upholstery: [/upholster/i, /vinyl/i, /leather/i, /canvas/i, /headliner/i, /marine/i, /sew/i],
   paving_contractor: [/asphalt/i, /pav(e|ing)/i, /sealcoat/i, /concrete/i, /driveway/i, /parking lot/i],
   landscaping_hardscaping: [/landscap/i, /hardscap/i, /mulch/i, /pavers/i, /retaining wall/i, /lawn/i],
-  hvac: [/hvac/i, /air condition/i, /furnace/i, /heat pump/i],
+  hvac: [/hvac/i, /air condition/i, /ac\b/i, /furnace/i, /heat pump/i],
   plumbing: [/plumb/i, /water heater/i, /drain/i, /sewer/i],
   electrical: [/electric/i, /panel/i, /breaker/i, /wiring/i],
-  auto_repair: [/auto repair/i, /mechanic/i, /brake/i, /engine/i],
+  auto_repair: [/auto repair/i, /collision/i, /body shop/i, /mechanic/i, /brake/i, /engine/i],
   roofing: [/roof/i, /shingle/i, /gutter/i, /siding/i],
   cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i],
+};
+
+/**
+ * Strong mapping for option answers.
+ * (These answers should dominate over weak keyword matches.)
+ */
+const OPTION_BOOST: Record<string, Array<{ match: RegExp; key: string; points: number }>> = {
+  services: [
+    { match: /upholstery/i, key: "upholstery", points: 5 },
+    { match: /paving|asphalt|concrete/i, key: "paving_contractor", points: 5 },
+    { match: /landscap|hardscap/i, key: "landscaping_hardscaping", points: 5 },
+    { match: /hvac/i, key: "hvac", points: 5 },
+    { match: /plumb/i, key: "plumbing", points: 5 },
+    { match: /electrical/i, key: "electrical", points: 5 },
+    { match: /auto repair|body/i, key: "auto_repair", points: 5 },
+    { match: /roof|siding/i, key: "roofing", points: 5 },
+    { match: /clean|janitorial/i, key: "cleaning_services", points: 5 },
+  ],
+  materials_objects: [
+    // Boats can imply marine upholstery, detailing, repairs — we bias toward upholstery in v1.
+    { match: /boats/i, key: "upholstery", points: 2 },
+    { match: /cars\/trucks/i, key: "auto_repair", points: 2 },
+    { match: /roads|parking/i, key: "paving_contractor", points: 2 },
+    { match: /homes/i, key: "landscaping_hardscaping", points: 1 },
+  ],
 };
 
 /* -------------------- db helpers -------------------- */
@@ -173,14 +214,15 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
   return row?.ai_analysis ?? null;
 }
 
+/**
+ * IMPORTANT:
+ * New tenants might not have a tenant_onboarding row yet in some edge paths.
+ * Use UPSERT so interview never crashes.
+ */
 async function writeAiAnalysis(tenantId: string, ai: any) {
-  // ✅ Critical fix: serialize JS object to JSON for jsonb param
-  const aiJson = safeJsonStringify(ai);
-
-  // ✅ Make resilient: onboarding row might not exist yet -> upsert
   await db.execute(sql`
-    insert into tenant_onboarding (tenant_id, ai_analysis, created_at, updated_at)
-    values (${tenantId}::uuid, ${aiJson}::jsonb, now(), now())
+    insert into tenant_onboarding (tenant_id, ai_analysis, updated_at, created_at)
+    values (${tenantId}::uuid, ${ai}::jsonb, now(), now())
     on conflict (tenant_id) do update
       set ai_analysis = excluded.ai_analysis,
           updated_at = now()
@@ -253,6 +295,8 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
   const text = answers.map((a) => a.answer).join(" | ");
 
   const scores = new Map<string, number>();
+
+  // 1) Keyword scoring (weak to medium)
   for (const [k, patterns] of Object.entries(KEYWORDS)) {
     let s = 0;
     for (const p of patterns) {
@@ -262,7 +306,17 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
         if (p.test(text)) s += 1;
       }
     }
-    if (s > 0) scores.set(k, s);
+    if (s > 0) scores.set(k, (scores.get(k) ?? 0) + s);
+  }
+
+  // 2) Option boosts (strong)
+  for (const a of answers) {
+    const boosts = OPTION_BOOST[a.qid] ?? [];
+    for (const b of boosts) {
+      if (b.match.test(a.answer)) {
+        scores.set(b.key, (scores.get(b.key) ?? 0) + b.points);
+      }
+    }
   }
 
   const canonKeys = new Set(canon.map((c) => c.key));
@@ -276,11 +330,11 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
   }
 
   if (!candidates.length) {
-    candidates.push({ key: "service", label: canon.find((c) => c.key === "service")?.label ?? "Service", score: 1 });
+    candidates.push({ key: "service", label: canon.find((c) => c.key === "service")?.label ?? "Service", score: 0 });
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  return candidates.slice(0, 6).map((c) => ({ ...c, score: c.score }));
+  return candidates.slice(0, 6);
 }
 
 function computeConfidence(cands: Candidate[]) {
@@ -289,10 +343,17 @@ function computeConfidence(cands: Candidate[]) {
 
   if (top <= 0) return 0;
 
-  const mag = Math.min(1, top / 6);
+  // If top signal is too weak, cap confidence hard.
+  if (top < MinTopScoreForHighConfidence) {
+    // Grows slowly with weak evidence: top=1 => ~0.12, top=2 => ~0.24
+    return Math.max(0, Math.min(0.35, top / 8));
+  }
+
+  // For stronger signals, combine magnitude + separation.
+  const mag = Math.min(1, top / 10);
   const sep = top > 0 ? Math.max(0, Math.min(1, (top - second) / Math.max(1, top))) : 0;
 
-  const conf = 0.45 * mag + 0.55 * sep;
+  const conf = 0.55 * mag + 0.45 * sep;
   return Math.max(0, Math.min(1, conf));
 }
 
@@ -302,7 +363,7 @@ const PostSchema = z.object({
   tenantId: z.string().min(1),
   action: z.enum(["start", "answer", "reset"]),
   qid: z.string().optional(),
-  answer: z.string().optional(),
+  answer: z.any().optional(),
 });
 
 /* -------------------- handlers -------------------- */
@@ -343,14 +404,27 @@ export async function POST(req: Request) {
       };
 
       ai.industryInference = inf;
-      await writeAiAnalysis(tenantId, ai);
+      // mirror for downstream
+      ai.suggestedIndustryKey = null;
+      ai.confidenceScore = 0;
+      ai.needsConfirmation = true;
 
+      await writeAiAnalysis(tenantId, ai);
       return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
     }
 
     if (parsed.data.action === "start") {
       const nq = nextQuestionFor(inf);
       inf.nextQuestion = nq ? { ...nq } : null;
+
+      // If we somehow have no question but we’re still collecting, force a freeform question.
+      if (!inf.nextQuestion) {
+        inf.nextQuestion = {
+          qid: "freeform",
+          question: "Describe your business in one sentence.",
+          help: "Example: “We do collision repair + paint for cars and trucks.”",
+        };
+      }
 
       ai.industryInference = { ...inf, meta: { updatedAt: now } };
       await writeAiAnalysis(tenantId, ai);
@@ -360,7 +434,12 @@ export async function POST(req: Request) {
 
     // action === "answer"
     const qid = safeTrim(parsed.data.qid);
-    const ans = safeTrim(parsed.data.answer);
+    const ansRaw = parsed.data.answer;
+
+    const ans =
+      typeof ansRaw === "string"
+        ? safeTrim(ansRaw)
+        : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
 
     if (!qid || !ans) {
       return NextResponse.json(
@@ -386,10 +465,20 @@ export async function POST(req: Request) {
     const reachedTarget = confidenceScore >= ConfidenceTarget;
     const exhausted = round >= MaxRounds;
 
-    const status: IndustryInference["status"] = reachedTarget || exhausted ? "suggested" : "collecting";
+    const status: IndustryInference["status"] =
+      reachedTarget || (exhausted && ForceSuggestAtExhaustion) ? "suggested" : "collecting";
+
     const needsConfirmation = true;
 
-    const nextQ = status === "collecting" ? nextQuestionFor({ ...inf, answers }) : null;
+    // If still collecting, continue asking. If we run out, force a freeform question.
+    let nextQ = status === "collecting" ? nextQuestionFor({ ...inf, answers }) : null;
+    if (status === "collecting" && !nextQ) {
+      nextQ = {
+        qid: "freeform",
+        question: "Describe your business in one sentence.",
+        help: "Example: “We do collision repair + paint for cars and trucks.”",
+      };
+    }
 
     const next: IndustryInference = {
       mode: "interview",
@@ -398,7 +487,7 @@ export async function POST(req: Request) {
       confidenceScore,
       suggestedIndustryKey,
       needsConfirmation,
-      nextQuestion: nextQ ? { ...nextQ } : null,
+      nextQuestion: nextQ ? { ...(nextQ as any) } : null,
       answers,
       candidates,
       meta: { updatedAt: now },
@@ -406,7 +495,7 @@ export async function POST(req: Request) {
 
     ai.industryInference = next;
 
-    // keep compatibility with downstream (Step3 reads these)
+    // Mirror for your Step3 + other downstream logic
     ai.suggestedIndustryKey = suggestedIndustryKey;
     ai.confidenceScore = confidenceScore;
     ai.needsConfirmation = true;
