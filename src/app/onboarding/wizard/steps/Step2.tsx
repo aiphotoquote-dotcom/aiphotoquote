@@ -21,9 +21,43 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function safeText(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 function pct(n: number) {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(100, Math.round(n * 100)));
+}
+
+/**
+ * Product-aware “why we ask” lines.
+ * Keeps it conversational and ties directly to AIPhotoQuote configuration.
+ */
+function whyForQid(qid: string) {
+  switch (qid) {
+    case "services":
+      return "This picks your starter quote template + default services.";
+    case "materials_objects":
+      return "This loads the right photo checklist (what we ask customers to upload).";
+    case "job_type":
+      return "This tunes how we scope estimates (repair vs replacement vs install).";
+    case "who_for":
+      return "This tailors your intake language + typical job mix.";
+    case "top_jobs":
+      return "This helps us name your common jobs and question prompts.";
+    case "materials":
+      return "This improves fit accuracy and helps us choose the right terminology.";
+    case "specialty":
+      return "This catches niche signals (e.g., collision vs detailing vs restoration).";
+    case "location":
+      return "This is optional—helps with your service area phrasing.";
+    case "freeform":
+      return "This is the fastest way to confirm the right experience.";
+    default:
+      return "This helps us tailor your setup.";
+  }
 }
 
 export function Step2(props: {
@@ -49,17 +83,15 @@ export function Step2(props: {
   const [ivAnswer, setIvAnswer] = useState("");
   const [inf, setInf] = useState<IndustryInference | null>(null);
 
-  const tenantId = String(props.tenantId ?? "").trim();
-  const websiteTrim = String(props.website ?? "").trim();
+  const tenantId = safeText(props.tenantId);
+  const websiteTrim = safeText(props.website);
   const hasWebsite = websiteTrim.length > 0;
 
   // Website analysis meta
   const conf = getConfidence(props.aiAnalysis);
   const mustConfirm = needsConfirmation(props.aiAnalysis);
-
-  const businessGuess = String(props.aiAnalysis?.businessGuess ?? "").trim();
+  const businessGuess = safeText(props.aiAnalysis?.businessGuess);
   const questions: string[] = Array.isArray(props.aiAnalysis?.questions) ? props.aiAnalysis.questions : [];
-
   const preview = getPreviewText(props.aiAnalysis);
   const fetchSummary = summarizeFetchDebug(props.aiAnalysis);
 
@@ -76,10 +108,29 @@ export function Step2(props: {
 
   const ivSuggested = safeText(inf?.suggestedIndustryKey);
   const ivStatus = safeText(inf?.status);
+  const ivAnsweredCount = inf?.answers?.length ?? 0;
+  const ivRound = Number(inf?.round ?? 1) || 1;
 
-  function safeText(v: any) {
-    const s = String(v ?? "").trim();
-    return s ? s : "";
+  // Progress should feel real (not hard-coded to 5)
+  // We can’t know API MaxRounds here, so we use a soft cap that matches your server intent.
+  const IV_SOFT_MAX = 8;
+  const ivProgressPct = Math.max(
+    8,
+    Math.min(100, Math.round(((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (ivStatus === "suggested" ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100))
+  );
+
+  const showInterview = !hasWebsite;
+  const canContinueInterview = ivStatus === "suggested" && Boolean(ivSuggested);
+
+  function topMatchLine() {
+    const top = inf?.candidates?.[0];
+    if (!top) return "Tell us a bit about your business and we’ll pick the best-fit setup.";
+    if (canContinueInterview) return `Best match found: ${top.label}. Next you’ll confirm it.`;
+    if ((inf?.candidates?.length ?? 0) > 1) {
+      const second = inf?.candidates?.[1];
+      if (second && top.score === second.score) return `We’re torn between ${top.label} and ${second.label}. One more question.`;
+    }
+    return `Leaning toward ${top.label}. A couple more answers will lock it in.`;
   }
 
   async function ivPost(payload: any) {
@@ -109,13 +160,12 @@ export function Step2(props: {
     }
   }
 
-  // ✅ Only auto-run website scan if a website exists
+  // ✅ Only auto-run website scan if a website exists; otherwise start interview
   useEffect(() => {
     if (autoRanRef.current) return;
+    autoRanRef.current = true;
 
     const hasAnalysis = Boolean(props.aiAnalysis);
-
-    autoRanRef.current = true;
 
     if (hasWebsite) {
       if (hasAnalysis) return;
@@ -134,14 +184,12 @@ export function Step2(props: {
       };
     }
 
-    // ✅ No website -> start interview
-    if (!hasWebsite) {
-      ivPost({ action: "start" }).catch((e: any) => props.onError(e?.message ?? String(e)));
-    }
+    // no website -> start interview
+    ivPost({ action: "start" }).catch((e: any) => props.onError(e?.message ?? String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props]);
 
-  // If server already has interview state inside aiAnalysis, hydrate UI
+  // Hydrate interview state from aiAnalysis (server-sourced)
   useEffect(() => {
     if (hasWebsite) return;
     const fromAi = props.aiAnalysis?.industryInference ?? null;
@@ -151,30 +199,25 @@ export function Step2(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasWebsite, props.aiAnalysis]);
 
-  // Progress bar for interview (based on answered count / question bank size)
-  const ivAnsweredCount = inf?.answers?.length ?? 0;
-  const ivProgressPct = Math.min(100, Math.round((ivAnsweredCount / 5) * 100));
-
-  const showInterview = !hasWebsite;
-
-  const canContinueInterview = ivStatus === "suggested" && Boolean(ivSuggested);
-
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">
         {hasWebsite ? "AI fit check" : "Quick setup interview"}
       </div>
+
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
         {hasWebsite
           ? "We’ll scan your website to understand what you do, then confirm it with you."
-          : "No website needed — answer a few questions and we’ll confidently match your business to the best industry experience."}
+          : "No website needed — we’ll ask a few smart questions to load the right templates, photos, and defaults."}
       </div>
 
-      {/* Website card always shown */}
-      <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
-        <div className="mt-1 break-words text-gray-700 dark:text-gray-300">{websiteTrim || "(none provided)"}</div>
-      </div>
+      {/* ✅ Website card only when a website exists */}
+      {hasWebsite ? (
+        <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
+          <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
+          <div className="mt-1 break-words text-gray-700 dark:text-gray-300">{websiteTrim}</div>
+        </div>
+      ) : null}
 
       {/* ---------------- INTERVIEW MODE (NO WEBSITE) ---------------- */}
       {showInterview ? (
@@ -183,17 +226,18 @@ export function Step2(props: {
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="font-semibold">We’re building your best-fit experience</div>
+                <div className="font-semibold">We’re setting up your AIPhotoQuote experience</div>
                 <div className="mt-1 text-xs opacity-90">
-                  Answer a few high-signal questions. We’ll keep asking until confidence is strong.
+                  We’ll stop early once we’re confident. You’ll confirm the final industry on the next step.
                 </div>
+                <div className="mt-2 text-xs font-semibold opacity-95">{topMatchLine()}</div>
               </div>
 
               <div className="shrink-0 text-right">
                 <div className="text-xs">
                   Confidence: <span className="font-mono">{pct(ivConfidence)}%</span>
                 </div>
-                <div className="text-[11px] opacity-90">Round {inf?.round ?? 1}</div>
+                <div className="text-[11px] opacity-90">Round {ivRound}</div>
               </div>
             </div>
 
@@ -212,12 +256,19 @@ export function Step2(props: {
           <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-xs text-gray-500 dark:text-gray-400">Question</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">Next</div>
                 <div className="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
                   {inf?.nextQuestion?.question ?? (ivLoading ? "Loading…" : "We have enough information.")}
                 </div>
+
+                {inf?.nextQuestion?.qid ? (
+                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                    {whyForQid(inf.nextQuestion.qid)}
+                  </div>
+                ) : null}
+
                 {inf?.nextQuestion?.help ? (
-                  <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{inf.nextQuestion.help}</div>
+                  <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{inf.nextQuestion.help}</div>
                 ) : null}
               </div>
 
@@ -279,20 +330,20 @@ export function Step2(props: {
                   }).catch((e: any) => props.onError(e?.message ?? String(e)))
                 }
               >
-                {ivLoading ? "Saving…" : "Submit answer"}
+                {ivLoading ? "Saving…" : "Submit"}
               </button>
 
               <div className="text-xs text-gray-500 dark:text-gray-400">
-                We’ll keep this quick — fewer questions once confidence is high.
+                Tip: short answers are fine — we’re looking for high-signal keywords.
               </div>
             </div>
           </div>
 
-          {/* Candidate preview (once we have at least 1 answer) */}
+          {/* Candidate preview */}
           {inf?.candidates?.length ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Current best matches</div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Best matches so far</div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">live ranking</div>
               </div>
 
@@ -322,15 +373,15 @@ export function Step2(props: {
 
               {canContinueInterview ? (
                 <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-                  <div className="font-semibold">Looking good</div>
+                  <div className="font-semibold">Ready</div>
                   <div className="mt-1">
-                    We’re confident enough to suggest:{" "}
-                    <span className="font-mono text-xs">{ivSuggested}</span>. Next you’ll confirm the industry.
+                    We’ll preload the <span className="font-semibold">{inf.candidates?.[0]?.label ?? ivSuggested}</span> starter pack.
+                    Next you’ll confirm the industry.
                   </div>
                 </div>
               ) : (
                 <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                  Not enough signal yet — keep answering a couple more questions.
+                  We’ll stop once the top match is clear (usually 3–4 answers).
                 </div>
               )}
             </div>
@@ -343,12 +394,19 @@ export function Step2(props: {
                 Review your answers ({inf.answers.length})
               </summary>
               <div className="mt-3 grid gap-2">
-                {inf.answers.slice().reverse().slice(0, 8).map((a, idx) => (
-                  <div key={`${a.qid}:${idx}`} className="rounded-2xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-black">
-                    <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{a.question}</div>
-                    <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">{a.answer}</div>
-                  </div>
-                ))}
+                {inf.answers
+                  .slice()
+                  .reverse()
+                  .slice(0, 8)
+                  .map((a, idx) => (
+                    <div
+                      key={`${a.qid}:${idx}`}
+                      className="rounded-2xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-black"
+                    >
+                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{a.question}</div>
+                      <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">{a.answer}</div>
+                    </div>
+                  ))}
               </div>
             </details>
           ) : null}
@@ -542,7 +600,7 @@ export function Step2(props: {
             Continue
           </button>
 
-          {/* “Escape hatch” for support/testing */}
+          {/* Escape hatch for support/testing */}
           <button
             type="button"
             className="rounded-2xl border border-gray-200 bg-white py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
