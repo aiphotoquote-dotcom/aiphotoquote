@@ -1,7 +1,53 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Field } from "./Field";
+
+function toTitleCase(raw: string) {
+  const s = String(raw ?? "");
+
+  // Preserve multiple spaces while typing, but normalize weird whitespace.
+  const parts = s.split(/(\s+)/); // keep separators
+  const keepUpper = new Set([
+    "llc",
+    "inc",
+    "ltd",
+    "co",
+    "usa",
+    "us",
+    "ai",
+    "hvac",
+    "rv",
+    "atv",
+    "utv",
+    "bbb",
+  ]);
+
+  return parts
+    .map((p) => {
+      if (/^\s+$/.test(p)) return p; // keep whitespace chunks
+      const w = p.trim();
+      if (!w) return p;
+
+      // If word is already all-caps and short-ish, keep it (acronyms)
+      if (w.length <= 5 && w === w.toUpperCase() && /[A-Z]/.test(w)) return w;
+
+      const low = w.toLowerCase();
+      if (keepUpper.has(low)) return low.toUpperCase();
+
+      // Handle words like "joe's" -> "Joe's"
+      const first = w.slice(0, 1).toUpperCase();
+      const rest = w.slice(1).toLowerCase();
+      return first + rest;
+    })
+    .join("");
+}
+
+function normalizeWebsiteInputLive(raw: string) {
+  // Remove spaces as user types (iOS can insert them)
+  // Keep everything else as-is; final normalization happens server-side.
+  return String(raw ?? "").replace(/\s+/g, "");
+}
 
 export function Step1(props: {
   existingUser: boolean;
@@ -13,9 +59,12 @@ export function Step1(props: {
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const can =
-    businessName.trim().length >= 2 &&
-    (props.existingUser ? true : ownerName.trim().length >= 2 && ownerEmail.trim().includes("@"));
+  const can = useMemo(() => {
+    const bnOk = businessName.trim().length >= 2;
+    if (!bnOk) return false;
+    if (props.existingUser) return true;
+    return ownerName.trim().length >= 2 && ownerEmail.trim().includes("@");
+  }, [businessName, ownerName, ownerEmail, props.existingUser]);
 
   return (
     <div>
@@ -25,7 +74,13 @@ export function Step1(props: {
       </div>
 
       <div className="mt-6 grid gap-4">
-        <Field label="Business name" value={businessName} onChange={setBusinessName} placeholder="Maggio Upholstery" />
+        <Field
+          label="Business name"
+          value={businessName}
+          onChange={(v) => setBusinessName(toTitleCase(v))}
+          placeholder="Maggio Upholstery"
+          autoCapitalize="words"
+        />
 
         {props.existingUser ? (
           <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
@@ -33,12 +88,28 @@ export function Step1(props: {
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Your name" value={ownerName} onChange={setOwnerName} placeholder="Joe Maggio" />
+            <Field
+              label="Your name"
+              value={ownerName}
+              onChange={(v) => setOwnerName(toTitleCase(v))}
+              placeholder="Joe Maggio"
+              autoCapitalize="words"
+            />
             <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
           </div>
         )}
 
-        <Field label="Website (optional)" value={website} onChange={setWebsite} placeholder="https://yourshop.com" />
+        <Field
+          label="Website (optional)"
+          value={website}
+          onChange={(v) => setWebsite(normalizeWebsiteInputLive(v))}
+          placeholder="https://yourshop.com"
+          type="url"
+          inputMode="url"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
+        />
       </div>
 
       <button
@@ -49,9 +120,9 @@ export function Step1(props: {
           setSaving(true);
           try {
             await props.onSubmit({
-              businessName: businessName.trim(),
-              website: website.trim() || undefined,
-              ownerName: props.existingUser ? undefined : ownerName.trim(),
+              businessName: toTitleCase(businessName).trim(),
+              website: normalizeWebsiteInputLive(website).trim() || undefined,
+              ownerName: props.existingUser ? undefined : toTitleCase(ownerName).trim(),
               ownerEmail: props.existingUser ? undefined : ownerEmail.trim(),
             });
           } finally {
