@@ -11,42 +11,73 @@ export const dynamic = "force-dynamic";
 type PreviewResp =
   | {
       ok: true;
-      tenant: { id: string; name: string; slug: string | null };
-      counts: Array<{ key: string; label: string; count: number }>;
+      mode?: "archive" | "delete";
+      expectedConfirm?: string;
+      tenant: { id: string; name: string; slug: string | null; status?: string | null };
+      counts:
+        | Array<{ key: string; label: string; count: number }>
+        | Record<string, number>;
       notes?: string[];
     }
-  | { ok: false; error: string; message?: string };
+  | { ok: false; error: string; message?: string; issues?: any };
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function normalizeCounts(
+  counts: PreviewResp extends { ok: true } ? any : any
+): Array<{ key: string; label: string; count: number }> {
+  if (!counts) return [];
+
+  // If API already returns the UI-friendly array
+  if (Array.isArray(counts)) {
+    return counts.map((c) => ({
+      key: String(c.key),
+      label: String(c.label ?? c.key),
+      count: Number(c.count ?? 0),
+    }));
+  }
+
+  // If API returns a record of counts (current archive route does this)
+  const labelMap: Record<string, string> = {
+    tenantMembers: "Tenant members",
+    tenantSettings: "Tenant settings",
+    tenantSecrets: "Tenant secrets",
+    tenantPricingRules: "Pricing rules",
+    tenantEmailIdentities: "Email identities",
+    tenantSubIndustries: "Sub-industries",
+    quoteLogs: "Quote logs",
+  };
+
+  return Object.entries(counts).map(([key, val]) => ({
+    key,
+    label: labelMap[key] ?? key,
+    count: Number(val ?? 0),
+  }));
+}
+
 async function getPreview(tenantId: string): Promise<PreviewResp> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/pcc/tenants/${encodeURIComponent(tenantId)}/delete`, {
+  // Prefer relative URL in Server Components so cookies/session behave as expected on Vercel
+  const res = await fetch(`/api/pcc/tenants/${encodeURIComponent(tenantId)}/delete`, {
     method: "GET",
     cache: "no-store",
-    credentials: "include",
   }).catch(() => null);
 
-  // In server components, fetch() may not include cookies w/ absolute URL.
-  // Fall back to relative URL if needed.
-  if (!res || !res.ok) {
-    const res2 = await fetch(`/api/pcc/tenants/${encodeURIComponent(tenantId)}/delete`, {
-      method: "GET",
-      cache: "no-store",
-    }).catch(() => null);
-    if (!res2) return { ok: false, error: "PREVIEW_FETCH_FAILED" };
-    return (await res2.json().catch(() => ({ ok: false, error: "BAD_JSON" }))) as PreviewResp;
-  }
+  if (!res) return { ok: false, error: "PREVIEW_FETCH_FAILED" };
 
   return (await res.json().catch(() => ({ ok: false, error: "BAD_JSON" }))) as PreviewResp;
 }
 
-export default async function PccTenantDeletePage({ params }: { params: Promise<{ id: string }> | { id: string } }) {
+export default async function PccTenantArchivePage({
+  params,
+}: {
+  params: Promise<{ tenantId: string }> | { tenantId: string };
+}) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
   const p = await params;
-  const tenantId = String((p as any)?.id ?? "").trim();
+  const tenantId = String((p as any)?.tenantId ?? "").trim();
   if (!tenantId) redirect("/pcc/tenants");
 
   const preview = await getPreview(tenantId);
@@ -54,9 +85,9 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
     return (
       <div className="space-y-4">
         <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-          <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Delete tenant</h1>
+          <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Archive tenant</h1>
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            Could not load delete preview: <span className="font-mono">{preview.error}</span>{" "}
+            Could not load archive preview: <span className="font-mono">{preview.error}</span>{" "}
             {preview.message ? `— ${preview.message}` : ""}
           </p>
           <div className="mt-4">
@@ -70,31 +101,40 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
   }
 
   const slug = preview.tenant.slug ?? "(unknown)";
-  const confirmPhrase = `DELETE ${slug}`;
+  const expectedConfirm = String(preview.expectedConfirm ?? `ARCHIVE ${slug}`);
+  const confirmPhrase = expectedConfirm;
 
-  async function doDelete(formData: FormData) {
+  const countsList = normalizeCounts((preview as any).counts);
+
+  async function doArchive(formData: FormData) {
     "use server";
 
     const typed = String(formData.get("confirm") ?? "").trim();
     const tid = String(formData.get("tenantId") ?? "").trim();
+    const expected = String(formData.get("expected") ?? "").trim();
+    const reason = String(formData.get("reason") ?? "").trim();
 
     if (!tid) redirect("/pcc/tenants");
 
     // Server-side safety: require exact phrase
-    if (typed !== confirmPhrase) {
+    if (!expected || typed !== expected) {
       redirect(`/pcc/tenants/${encodeURIComponent(tid)}/delete?err=confirm`);
     }
 
     const res = await fetch(`/api/pcc/tenants/${encodeURIComponent(tid)}/delete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirm: typed }),
+      body: JSON.stringify({
+        confirm: typed,
+        expected,
+        reason: reason || undefined,
+      }),
       cache: "no-store",
     });
 
     const data = (await res.json().catch(() => null)) as any;
     if (!data?.ok) {
-      const msg = encodeURIComponent(String(data?.message ?? data?.error ?? "Delete failed"));
+      const msg = encodeURIComponent(String(data?.message ?? data?.error ?? "Archive failed"));
       redirect(`/pcc/tenants/${encodeURIComponent(tid)}/delete?err=${msg}`);
     }
 
@@ -106,9 +146,10 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Delete tenant</h1>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Archive tenant</h1>
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              This will delete the tenant and all associated data. This cannot be undone.
+              This will <span className="font-semibold">disable</span> the tenant and preserve all historical data.
+              No records are deleted.
             </p>
           </div>
 
@@ -118,23 +159,25 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
         </div>
       </div>
 
-      <div className="rounded-2xl border border-red-200 bg-red-50 p-5 dark:border-red-900/40 dark:bg-red-950/30">
-        <div className="text-sm font-semibold text-red-900 dark:text-red-100">You are deleting:</div>
-        <div className="mt-2 text-lg font-semibold text-red-900 dark:text-red-100">
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900/40 dark:bg-amber-950/30">
+        <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">You are archiving:</div>
+        <div className="mt-2 text-lg font-semibold text-amber-900 dark:text-amber-100">
           {preview.tenant.name}{" "}
-          <span className="ml-2 rounded-full border border-red-300 bg-white/60 px-2.5 py-1 text-xs font-mono text-red-900 dark:border-red-900/60 dark:bg-black/20 dark:text-red-100">
+          <span className="ml-2 rounded-full border border-amber-300 bg-white/60 px-2.5 py-1 text-xs font-mono text-amber-900 dark:border-amber-900/60 dark:bg-black/20 dark:text-amber-100">
             {slug}
           </span>
         </div>
-        <div className="mt-2 text-xs font-mono text-red-800/80 dark:text-red-100/80">{preview.tenant.id}</div>
+        <div className="mt-2 text-xs font-mono text-amber-800/80 dark:text-amber-100/80">{preview.tenant.id}</div>
       </div>
 
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Deletion preview</div>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Counts that will be removed.</p>
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Archive preview</div>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          These records remain stored, but the tenant will be marked archived.
+        </p>
 
         <div className="mt-4 grid gap-2">
-          {preview.counts.map((c) => (
+          {countsList.map((c) => (
             <div
               key={c.key}
               className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm dark:border-gray-800 dark:bg-black"
@@ -163,8 +206,10 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
           Type <span className="font-mono">{confirmPhrase}</span> to confirm.
         </p>
 
-        <form action={doDelete} className="mt-4 space-y-3">
+        <form action={doArchive} className="mt-4 space-y-3">
           <input type="hidden" name="tenantId" value={preview.tenant.id} />
+          <input type="hidden" name="expected" value={confirmPhrase} />
+
           <input
             name="confirm"
             placeholder={confirmPhrase}
@@ -175,11 +220,22 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
             )}
           />
 
+          <textarea
+            name="reason"
+            placeholder="Optional reason (stored in audit log)"
+            className={cn(
+              "w-full rounded-xl border px-4 py-3 text-sm",
+              "border-gray-200 bg-white text-gray-900 placeholder:text-gray-400",
+              "dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:placeholder:text-gray-600"
+            )}
+            rows={3}
+          />
+
           <button
             type="submit"
-            className="w-full rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
+            className="w-full rounded-xl bg-amber-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
           >
-            Yes, delete this tenant and all data
+            Yes, archive this tenant
           </button>
 
           <Link
@@ -189,6 +245,10 @@ export default async function PccTenantDeletePage({ params }: { params: Promise<
             Cancel
           </Link>
         </form>
+
+        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Archive is reversible (we’ll add restore + purge later). History stays intact.
+        </div>
       </div>
     </div>
   );
