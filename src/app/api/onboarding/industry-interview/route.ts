@@ -104,7 +104,6 @@ type IndustryInference = {
   answers: InterviewAnswer[];
   candidates: Candidate[];
 
-  // ✅ new
   conflicts: Conflict[];
 
   meta: { updatedAt: string };
@@ -116,6 +115,10 @@ const ConfidenceTarget = 0.82;
 const MaxRounds = 8;
 
 const MinTopScoreForHighConfidence = 3;
+
+// IMPORTANT UX RULE:
+// We may "suggest" at exhaustion only if we are NOT in a conflict state.
+// Otherwise keep collecting (even if round hits MaxRounds) and let UI "Continue anyway".
 const ForceSuggestAtExhaustion = true;
 
 // conflict tuning (deterministic)
@@ -124,7 +127,7 @@ const ConfidencePlateauDelta = 0.05; // change < 5% between rounds is "not impro
 
 /**
  * Question bank (>= MaxRounds recommended).
- * Keep short, high-signal, mobile-friendly.
+ * These are your generic questions. Clarifiers are generated dynamically.
  */
 const QUESTIONS: Array<{
   qid: string;
@@ -205,10 +208,31 @@ const KEYWORDS: Record<string, Array<string | RegExp>> = {
     /polish/i,
     /buff/i,
     /wax/i,
-    /wash/i,
+    /\bwash\b/i,
+    /\bcar wash\b/i,
+    /\binterior detail\b/i,
   ],
-  auto_repair: [/auto repair/i, /mechanic/i, /brake/i, /engine/i, /diagnostic/i, /oil change/i],
-  auto_repair_collision: [/collision/i, /body shop/i, /auto body/i, /\bdent\b/i, /bumper/i, /panel/i],
+  auto_repair: [
+    /auto repair/i,
+    /mechanic/i,
+    /brake/i,
+    /engine/i,
+    /diagnostic/i,
+    /oil change/i,
+    /transmission/i,
+    /alternator/i,
+    /starter/i,
+  ],
+  auto_repair_collision: [
+    /collision/i,
+    /body shop/i,
+    /auto body/i,
+    /\bdent\b/i,
+    /bumper/i,
+    /panel/i,
+    /paint/i,
+    /fender/i,
+  ],
   upholstery: [/upholster/i, /vinyl/i, /leather/i, /canvas/i, /headliner/i, /marine/i, /sew/i],
   paving_contractor: [/asphalt/i, /pav(e|ing)/i, /sealcoat/i, /concrete/i, /driveway/i, /parking lot/i],
   landscaping_hardscaping: [/landscap/i, /hardscap/i, /mulch/i, /pavers/i, /retaining wall/i, /lawn/i],
@@ -216,7 +240,7 @@ const KEYWORDS: Record<string, Array<string | RegExp>> = {
   plumbing: [/plumb/i, /water heater/i, /drain/i, /sewer/i],
   electrical: [/electric/i, /panel/i, /breaker/i, /wiring/i],
   roofing: [/roof/i, /shingle/i, /gutter/i, /siding/i],
-  cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i, /deep clean/i],
+  cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i, /deep clean/i, /move out/i],
 };
 
 /**
@@ -239,9 +263,12 @@ const OPTION_BOOST: Record<string, Array<{ match: RegExp; key: string; points: n
   materials_objects: [
     { match: /cars\/trucks/i, key: "auto_detailing", points: 1 },
     { match: /cars\/trucks/i, key: "auto_repair", points: 1 },
-    { match: /boats/i, key: "upholstery", points: 1 },
+    { match: /cars\/trucks/i, key: "auto_repair_collision", points: 1 },
+    { match: /boats/i, key: "upholstery", points: 2 },
     { match: /roads|parking/i, key: "paving_contractor", points: 2 },
     { match: /homes/i, key: "landscaping_hardscaping", points: 1 },
+    { match: /homes/i, key: "cleaning_services", points: 1 },
+    { match: /businesses/i, key: "cleaning_services", points: 1 },
   ],
 };
 
@@ -334,11 +361,7 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
   return { ai: baseAi, inf };
 }
 
-function nextQuestionFor(inf: IndustryInference) {
-  const answered = new Set(inf.answers.map((a) => a.qid));
-  const q = QUESTIONS.find((x) => !answered.has(x.qid));
-  return q ?? null;
-}
+/* -------------------- scoring -------------------- */
 
 function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string; label: string }>): Candidate[] {
   const text = answers.map((a) => a.answer).join(" | ");
@@ -365,6 +388,7 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
     }
   }
 
+  // Keep only industries that exist (if canon present)
   const canonKeys = new Set(canon.map((c) => c.key));
   const candidates: Candidate[] = [];
 
@@ -404,7 +428,7 @@ function computeConfidence(cands: Candidate[]) {
   return Math.max(0, Math.min(1, conf));
 }
 
-/* -------------------- NEW: conflict detection + clarifiers -------------------- */
+/* -------------------- conflict detection + clarifiers -------------------- */
 
 function detectConflicts(prev: IndustryInference, nextCandidates: Candidate[], nextConfidence: number): Conflict[] {
   const out: Conflict[] = [];
@@ -449,30 +473,30 @@ function detectConflicts(prev: IndustryInference, nextCandidates: Candidate[], n
 }
 
 function hasBlockingConflict(conflicts: Conflict[]) {
-  // “blocking” means we should ask a clarifier before claiming “ready”
   return conflicts.some((c) => c.type === "close_call" || c.type === "top_flipped" || c.type === "confidence_plateau");
 }
 
+/**
+ * Generated clarifiers when top-two are known.
+ * These are the “feels intelligent” questions.
+ */
 function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
   const top = candidates[0];
   const second = candidates[1];
 
-  // If we know the two likely winners, ask a direct disambiguation question.
   if (top && second) {
     const a = top.label || top.key;
     const b = second.label || second.key;
 
-    // Special-case common confusion for your product
     const keyA = normalizeKey(top.key);
     const keyB = normalizeKey(second.key);
     const pair = [keyA, keyB].sort().join("|");
 
-    // Targeted clarifiers (deterministic)
     if (pair === ["auto_detailing", "auto_repair"].sort().join("|")) {
       return {
         qid: "clarify_detail_vs_repair",
         question: "Quick clarification — which best describes you?",
-        help: "This helps us avoid mixing ‘detailing’ with ‘mechanic/repair’ work.",
+        help: "This prevents mixing ‘detailing’ with ‘mechanic/repair’ templates.",
         options: ["Detailing (wash/polish/wax/coatings)", "Mechanical repair (brakes/engine/diagnostics)", "Both"],
       };
     }
@@ -499,7 +523,6 @@ function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
       };
     }
 
-    // Generic “A vs B”
     return {
       qid: "clarify_top_two",
       question: "Just to clarify — which is closer to your business?",
@@ -508,12 +531,73 @@ function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
     };
   }
 
-  // Fallback
   return {
     qid: "clarify_freeform",
     question: "Describe your business in one sentence.",
     help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
   };
+}
+
+/* -------------------- NEW: adaptive question selection -------------------- */
+
+/**
+ * Decide which generic question is most discriminating NEXT,
+ * based on the current top contenders.
+ */
+function pickDiscriminatingQid(inf: IndustryInference): string | null {
+  const answered = new Set(inf.answers.map((a) => a.qid));
+
+  // If we haven't asked "services" yet, always ask it first.
+  if (!answered.has("services")) return "services";
+
+  const top = normalizeKey(inf.candidates?.[0]?.key ?? "");
+  const second = normalizeKey(inf.candidates?.[1]?.key ?? "");
+
+  const pair = [top, second].filter(Boolean).sort().join("|");
+
+  // Auto cluster: specialty + top_jobs disambiguate faster than "who_for"
+  if (pair.includes("auto_")) {
+    if (!answered.has("specialty")) return "specialty";
+    if (!answered.has("top_jobs")) return "top_jobs";
+    if (!answered.has("job_type")) return "job_type";
+    if (!answered.has("materials_objects")) return "materials_objects";
+    return null;
+  }
+
+  // Home services: materials + job_type help early
+  if (["hvac", "plumbing", "electrical", "roofing"].includes(top) || ["hvac", "plumbing", "electrical", "roofing"].includes(second)) {
+    if (!answered.has("job_type")) return "job_type";
+    if (!answered.has("materials")) return "materials";
+    if (!answered.has("who_for")) return "who_for";
+    if (!answered.has("top_jobs")) return "top_jobs";
+    return null;
+  }
+
+  // Cleaning vs anything: who_for + top_jobs helps
+  if (top === "cleaning_services" || second === "cleaning_services") {
+    if (!answered.has("who_for")) return "who_for";
+    if (!answered.has("top_jobs")) return "top_jobs";
+    if (!answered.has("materials_objects")) return "materials_objects";
+    return null;
+  }
+
+  // Default: ask top_jobs early (highest signal freeform)
+  if (!answered.has("top_jobs")) return "top_jobs";
+  if (!answered.has("materials_objects")) return "materials_objects";
+  if (!answered.has("job_type")) return "job_type";
+  if (!answered.has("materials")) return "materials";
+  if (!answered.has("who_for")) return "who_for";
+  if (!answered.has("specialty")) return "specialty";
+  if (!answered.has("location")) return "location";
+
+  return null;
+}
+
+function nextQuestionAdaptive(inf: IndustryInference) {
+  const qid = pickDiscriminatingQid(inf);
+  if (!qid) return null;
+  const q = QUESTIONS.find((x) => x.qid === qid) ?? null;
+  return q;
 }
 
 /* -------------------- schema -------------------- */
@@ -573,19 +657,20 @@ export async function POST(req: Request) {
     }
 
     if (parsed.data.action === "start") {
-      // if we already have blocking conflicts, ask a clarifier first
+      // Start should always pick the best first question (adaptive), not just first in list.
+      // If we are already in conflict, ask clarifier, else use adaptive.
       const q =
         hasBlockingConflict(inf.conflicts) && inf.candidates?.length
           ? clarifierQuestionFrom(inf.conflicts, inf.candidates)
-          : nextQuestionFor(inf);
+          : nextQuestionAdaptive(inf) ?? QUESTIONS[0] ?? null;
 
-      inf.nextQuestion = q
-        ? { ...q }
-        : {
-            qid: "freeform",
-            question: "Describe your business in one sentence.",
-            help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
-          };
+      inf.nextQuestion =
+        q ??
+        ({
+          qid: "freeform",
+          question: "Describe your business in one sentence.",
+          help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
+        } as any);
 
       ai.industryInference = { ...inf, meta: { updatedAt: now } };
       await writeAiAnalysis(tenantId, ai);
@@ -607,9 +692,12 @@ export async function POST(req: Request) {
       );
     }
 
-    // store answer
-    const q = QUESTIONS.find((x) => x.qid === qid);
-    const qText = q?.question ?? qid;
+    // Store answer with the REAL question text:
+    // - If user answered the current nextQuestion, trust that question text
+    // - Else fall back to the bank
+    const qFromBank = QUESTIONS.find((x) => x.qid === qid);
+    const qText =
+      (inf.nextQuestion?.qid === qid ? safeTrim(inf.nextQuestion?.question) : "") || qFromBank?.question || qid;
 
     const answers = Array.isArray(inf.answers) ? [...inf.answers] : [];
     answers.push({ qid, question: qText, answer: ans, createdAt: now });
@@ -625,23 +713,38 @@ export async function POST(req: Request) {
     const suggestedIndustryKey = topKeyRaw || null;
 
     const round = Math.min(MaxRounds, (Number(inf.round ?? 1) || 1) + 1);
-
     const exhausted = round >= MaxRounds;
 
     // Only “ready” if target met AND no blocking conflicts
     const reachedTarget = confidenceScore >= ConfidenceTarget && !hasBlockingConflict(conflicts);
 
-    const status: IndustryInference["status"] =
-      reachedTarget || (exhausted && ForceSuggestAtExhaustion) ? "suggested" : "collecting";
+    // Exhaustion behavior:
+    // - If exhausted AND no conflicts: allow force-suggest
+    // - If exhausted AND conflicts: remain collecting (so UI doesn't falsely lock)
+    const canForceSuggest = exhausted && ForceSuggestAtExhaustion && !hasBlockingConflict(conflicts) && (candidates[0]?.score ?? 0) > 0;
+
+    const status: IndustryInference["status"] = reachedTarget || canForceSuggest ? "suggested" : "collecting";
 
     // Choose next question:
-    // - If collecting and we have conflicts: ask clarifier NOW
-    // - Else: standard next question
+    // - If collecting and conflicts: ask clarifier NOW
+    // - Else: choose adaptive next generic question
     let nextQ: any = null;
     if (status === "collecting") {
       nextQ = hasBlockingConflict(conflicts)
         ? clarifierQuestionFrom(conflicts, candidates)
-        : nextQuestionFor({ ...inf, answers, candidates, confidenceScore, conflicts } as any);
+        : nextQuestionAdaptive({
+            ...inf,
+            answers,
+            candidates,
+            confidenceScore,
+            conflicts,
+            round,
+            suggestedIndustryKey,
+            status,
+            needsConfirmation: true,
+            nextQuestion: null,
+            meta: { updatedAt: now },
+          } as any);
 
       if (!nextQ) {
         nextQ = {
