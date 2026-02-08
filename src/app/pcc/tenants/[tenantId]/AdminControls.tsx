@@ -28,8 +28,18 @@ function toIntOrNull(v: string): number | null {
   return Math.trunc(n);
 }
 
+type PlanTier = "tier0" | "tier1" | "tier2";
+
+function normalizeTier(v: unknown): PlanTier {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "free" || s === "tier0") return "tier0";
+  if (s === "tier1") return "tier1";
+  if (s === "tier2") return "tier2";
+  return "tier0";
+}
+
 export default function AdminControls({ tenantId, isArchived, initial }: Props) {
-  const [planTier, setPlanTier] = useState(initial.planTier ?? "free");
+  const [planTier, setPlanTier] = useState<PlanTier>(normalizeTier(initial.planTier));
   const [monthlyQuoteLimit, setMonthlyQuoteLimit] = useState<string>(
     initial.monthlyQuoteLimit === null ? "" : String(initial.monthlyQuoteLimit)
   );
@@ -54,8 +64,9 @@ export default function AdminControls({ tenantId, isArchived, initial }: Props) 
     setSaving(true);
 
     try {
+      // ✅ DB standard: tier0/tier1/tier2 only
       const body = {
-        planTier: String(planTier || "free").trim(),
+        planTier: normalizeTier(planTier),
         monthlyQuoteLimit: toIntOrNull(monthlyQuoteLimit),
         activationGraceCredits: Math.max(0, Number(graceCredits || 0)),
         activationGraceUsed: Math.max(0, Number(graceUsed || 0)),
@@ -86,7 +97,7 @@ export default function AdminControls({ tenantId, isArchived, initial }: Props) 
         <div>
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Admin controls</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Update plan + credits for demos/testing. Changes are audited.
+            Update plan + credits for demos/testing. Changes are audited (if audit table exists).
           </div>
         </div>
         <div
@@ -122,17 +133,17 @@ export default function AdminControls({ tenantId, isArchived, initial }: Props) 
               "border-gray-200 bg-white text-gray-900 dark:border-gray-800 dark:bg-black dark:text-gray-100"
             )}
             value={planTier}
-            onChange={(e) => setPlanTier(e.target.value)}
+            onChange={(e) => setPlanTier(normalizeTier(e.target.value))}
             disabled={saving}
           >
-            <option value="free">free</option>
-            <option value="tier0">tier0</option>
+            {/* ✅ standard tiers only */}
+            <option value="tier0">tier0 (Free)</option>
             <option value="tier1">tier1</option>
             <option value="tier2">tier2</option>
           </select>
 
           <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            (We keep this flexible because your DB uses <span className="font-mono">free</span> today.)
+            “Free” is a friendly label for <span className="font-mono">tier0</span> (we never store “free” in DB).
           </div>
         </div>
 
