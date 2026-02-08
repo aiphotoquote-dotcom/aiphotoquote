@@ -85,19 +85,18 @@ type IndustryInference = {
 
 /* -------------------- tuning -------------------- */
 
+// We want this to feel fast. If we have a strong signal, stop early.
 const ConfidenceTarget = 0.82;
 const MaxRounds = 8;
 
-// Prevent “63% confidence” from a single flimsy keyword hit.
-const MinTopScoreForHighConfidence = 3;
+// If top two are close, ask a disambiguation question rather than generic ones.
+const CloseScoreDelta = 2;
 
-// If we have no strong signals by the end, we still return best guess but keep needsConfirmation true.
-const ForceSuggestAtExhaustion = true;
+// If the user keeps giving “Other” / vague answers, jump to freeform sooner.
+const VagueAnswerThreshold = 2;
 
-/**
- * Question bank (>= MaxRounds recommended).
- * Keep short, high-signal, mobile-friendly.
- */
+/* -------------------- question bank -------------------- */
+
 const QUESTIONS: Array<{
   qid: string;
   question: string;
@@ -116,6 +115,7 @@ const QUESTIONS: Array<{
       "Plumbing",
       "Electrical",
       "Auto repair / body",
+      "Car detailing / ceramic coating",
       "Roofing / siding",
       "Cleaning / janitorial",
       "Other",
@@ -142,17 +142,17 @@ const QUESTIONS: Array<{
   {
     qid: "top_jobs",
     question: "Name 2–3 common jobs you quote.",
-    help: "Example: “boat seats, headliners, custom covers”.",
+    help: "Example: “ceramic coating, paint correction, interior detail” or “brakes, collision repair”.",
   },
   {
     qid: "materials",
-    question: "What materials do you work with most?",
-    help: "Example: “vinyl, leather, asphalt, pavers, shingles”.",
+    question: "What materials/products do you work with most?",
+    help: "Example: “vinyl/leather”, “asphalt”, “pavers”, “clear coat”, “ceramic coating”.",
   },
   {
     qid: "specialty",
     question: "Any specialty keywords customers use to find you?",
-    help: "Example: “marine vinyl”, “collision repair”, “sealcoating”, “retaining walls”.",
+    help: "Example: “paint correction”, “PPF”, “marine vinyl”, “sealcoating”, “retaining walls”.",
   },
   {
     qid: "location",
@@ -161,8 +161,11 @@ const QUESTIONS: Array<{
   },
 ];
 
+/* -------------------- scoring rules -------------------- */
+
 /**
- * Keyword scoring rules (deterministic).
+ * Keyword scoring (deterministic).
+ * IMPORTANT: We intentionally include “detailing” signals; those were missing before.
  */
 const KEYWORDS: Record<string, Array<string | RegExp>> = {
   upholstery: [/upholster/i, /vinyl/i, /leather/i, /canvas/i, /headliner/i, /marine/i, /sew/i],
@@ -171,33 +174,37 @@ const KEYWORDS: Record<string, Array<string | RegExp>> = {
   hvac: [/hvac/i, /air condition/i, /\bac\b/i, /furnace/i, /heat pump/i],
   plumbing: [/plumb/i, /water heater/i, /drain/i, /sewer/i],
   electrical: [/electric/i, /panel/i, /breaker/i, /wiring/i],
-  auto_repair: [/auto repair/i, /collision/i, /body shop/i, /mechanic/i, /brake/i, /engine/i],
+  auto_repair: [/auto repair/i, /collision/i, /body shop/i, /mechanic/i, /brake/i, /engine/i, /transmission/i],
+  // We don't assume an "auto_detailing" industry exists in your DB yet.
+  // So we map detailing signals into auto_repair for now (best-fit experience bucket).
+  auto_detailing_like: [/detail(ing)?/i, /ceramic/i, /paint correction/i, /\bppf\b/i, /polish/i, /buff/i, /wax/i, /interior detail/i],
   roofing: [/roof/i, /shingle/i, /gutter/i, /siding/i],
   cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i],
 };
 
 /**
  * Strong mapping for option answers.
- * (These answers should dominate over weak keyword matches.)
+ * These should dominate over weak keyword matches.
  */
 const OPTION_BOOST: Record<string, Array<{ match: RegExp; key: string; points: number }>> = {
   services: [
-    { match: /upholstery/i, key: "upholstery", points: 5 },
-    { match: /paving|asphalt|concrete/i, key: "paving_contractor", points: 5 },
-    { match: /landscap|hardscap/i, key: "landscaping_hardscaping", points: 5 },
-    { match: /hvac/i, key: "hvac", points: 5 },
-    { match: /plumb/i, key: "plumbing", points: 5 },
-    { match: /electrical/i, key: "electrical", points: 5 },
-    { match: /auto repair|body/i, key: "auto_repair", points: 5 },
-    { match: /roof|siding/i, key: "roofing", points: 5 },
-    { match: /clean|janitorial/i, key: "cleaning_services", points: 5 },
+    { match: /upholstery/i, key: "upholstery", points: 7 },
+    { match: /paving|asphalt|concrete/i, key: "paving_contractor", points: 7 },
+    { match: /landscap|hardscap/i, key: "landscaping_hardscaping", points: 7 },
+    { match: /\bhvac\b/i, key: "hvac", points: 7 },
+    { match: /plumb/i, key: "plumbing", points: 7 },
+    { match: /electrical/i, key: "electrical", points: 7 },
+    { match: /auto repair|body/i, key: "auto_repair", points: 7 },
+    { match: /detailing|ceramic/i, key: "auto_repair", points: 6 }, // map detailing into auto_repair bucket for now
+    { match: /roof|siding/i, key: "roofing", points: 7 },
+    { match: /clean|janitorial/i, key: "cleaning_services", points: 7 },
   ],
   materials_objects: [
-    // Boats can imply marine upholstery, detailing, repairs — we bias toward upholstery in v1.
-    { match: /boats/i, key: "upholstery", points: 2 },
-    { match: /cars\/trucks/i, key: "auto_repair", points: 2 },
-    { match: /roads|parking/i, key: "paving_contractor", points: 2 },
-    { match: /homes/i, key: "landscaping_hardscaping", points: 1 },
+    { match: /boats/i, key: "upholstery", points: 3 },
+    { match: /cars\/trucks/i, key: "auto_repair", points: 3 },
+    { match: /roads|parking/i, key: "paving_contractor", points: 3 },
+    { match: /homes/i, key: "landscaping_hardscaping", points: 2 },
+    { match: /businesses/i, key: "cleaning_services", points: 1 },
   ],
 };
 
@@ -215,29 +222,12 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
 }
 
 /**
- * ✅ FIX:
- * - Always JSON.stringify the object before casting to jsonb.
- *   (Passing a raw JS object becomes "[object Object]" in SQL params -> jsonb cast fails.)
- * - Update-first (post-step1 rule). If a row doesn't exist (edge path), fall back to insert.
+ * Use UPSERT so the interview never crashes even if tenant_onboarding row doesn't exist yet.
  */
 async function writeAiAnalysis(tenantId: string, ai: any) {
-  const aiJson = JSON.stringify(ai ?? {});
-
-  const updated = await db.execute(sql`
-    update tenant_onboarding
-    set ai_analysis = ${aiJson}::jsonb,
-        updated_at = now()
-    where tenant_id = ${tenantId}::uuid
-    returning tenant_id
-  `);
-
-  const row = firstRow(updated);
-  if (row?.tenant_id) return;
-
-  // Edge-path fallback: create row if missing.
   await db.execute(sql`
     insert into tenant_onboarding (tenant_id, ai_analysis, updated_at, created_at)
-    values (${tenantId}::uuid, ${aiJson}::jsonb, now(), now())
+    values (${tenantId}::uuid, ${ai}::jsonb, now(), now())
     on conflict (tenant_id) do update
       set ai_analysis = excluded.ai_analysis,
           updated_at = now()
@@ -253,6 +243,8 @@ async function listCanonicalIndustries(): Promise<Array<{ key: string; label: st
   `);
   return rowsOf(r).map((x: any) => ({ key: String(x.key), label: String(x.label) }));
 }
+
+/* -------------------- inference helpers -------------------- */
 
 function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
   const now = new Date().toISOString();
@@ -300,18 +292,22 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
   return { ai: baseAi, inf };
 }
 
-function nextQuestionFor(inf: IndustryInference) {
-  const answered = new Set(inf.answers.map((a) => a.qid));
-  const q = QUESTIONS.find((x) => !answered.has(x.qid));
-  return q ?? null;
+function countVague(answers: InterviewAnswer[]) {
+  // treat "Other" or very short answers as vague signals
+  let n = 0;
+  for (const a of answers) {
+    const s = safeTrim(a.answer).toLowerCase();
+    if (s === "other") n++;
+    if (s.length > 0 && s.length < 3) n++;
+  }
+  return n;
 }
 
 function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string; label: string }>): Candidate[] {
   const text = answers.map((a) => a.answer).join(" | ");
-
   const scores = new Map<string, number>();
 
-  // 1) Keyword scoring (weak to medium)
+  // 1) Keyword scoring
   for (const [k, patterns] of Object.entries(KEYWORDS)) {
     let s = 0;
     for (const p of patterns) {
@@ -324,13 +320,18 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
     if (s > 0) scores.set(k, (scores.get(k) ?? 0) + s);
   }
 
-  // 2) Option boosts (strong)
+  // Fold “auto_detailing_like” into auto_repair bucket (until we add a canonical industry for detailing)
+  if ((scores.get("auto_detailing_like") ?? 0) > 0) {
+    const add = scores.get("auto_detailing_like") ?? 0;
+    scores.delete("auto_detailing_like");
+    scores.set("auto_repair", (scores.get("auto_repair") ?? 0) + add);
+  }
+
+  // 2) Option boosts
   for (const a of answers) {
     const boosts = OPTION_BOOST[a.qid] ?? [];
     for (const b of boosts) {
-      if (b.match.test(a.answer)) {
-        scores.set(b.key, (scores.get(b.key) ?? 0) + b.points);
-      }
+      if (b.match.test(a.answer)) scores.set(b.key, (scores.get(b.key) ?? 0) + b.points);
     }
   }
 
@@ -338,14 +339,17 @@ function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string;
   const candidates: Candidate[] = [];
 
   for (const [k, s] of scores.entries()) {
-    if (canonKeys.size === 0 || canonKeys.has(k)) {
+    // Only keep keys that exist in canonical industries (prevents phantom candidates)
+    if (canonKeys.has(k)) {
       const label = canon.find((c) => c.key === k)?.label ?? k;
       candidates.push({ key: k, label, score: s });
     }
   }
 
+  // fallback
   if (!candidates.length) {
-    candidates.push({ key: "service", label: canon.find((c) => c.key === "service")?.label ?? "Service", score: 0 });
+    const serviceLabel = canon.find((c) => c.key === "service")?.label ?? "Service";
+    candidates.push({ key: "service", label: serviceLabel, score: 0 });
   }
 
   candidates.sort((a, b) => b.score - a.score);
@@ -358,18 +362,100 @@ function computeConfidence(cands: Candidate[]) {
 
   if (top <= 0) return 0;
 
-  // If top signal is too weak, cap confidence hard.
-  if (top < MinTopScoreForHighConfidence) {
-    // Grows slowly with weak evidence: top=1 => ~0.12, top=2 => ~0.24
-    return Math.max(0, Math.min(0.35, top / 8));
-  }
+  // Magnitude grows quickly early and then saturates (feels more “alive” than hard caps)
+  // Example: top=2 -> ~0.33, top=5 -> ~0.63, top=8 -> ~0.80
+  const mag = 1 - Math.exp(-top / 5);
 
-  // For stronger signals, combine magnitude + separation.
-  const mag = Math.min(1, top / 10);
+  // Separation: if top is clearly above second, confidence rises
   const sep = top > 0 ? Math.max(0, Math.min(1, (top - second) / Math.max(1, top))) : 0;
 
-  const conf = 0.55 * mag + 0.45 * sep;
+  // Combine, biased slightly toward separation once mag is decent
+  const conf = 0.6 * mag + 0.4 * sep;
   return Math.max(0, Math.min(1, conf));
+}
+
+/**
+ * Adaptive next question:
+ * - If we’re vague: jump to freeform.
+ * - If top two are close: ask a targeted disambiguation question.
+ * - Otherwise: ask the next unanswered high-signal question.
+ */
+function pickNextQuestion(answers: InterviewAnswer[], candidates: Candidate[], round: number) {
+  const answered = new Set(answers.map((a) => a.qid));
+
+  // If we already suggested, no next question.
+  if (round >= MaxRounds) return null;
+
+  // Too vague? go freeform.
+  if (!answered.has("freeform") && countVague(answers) >= VagueAnswerThreshold) {
+    return {
+      qid: "freeform",
+      question: "Describe your business in one sentence.",
+      help: "Example: “We do car detailing + ceramic coating and paint correction.”",
+    };
+  }
+
+  // Close race? disambiguate.
+  const top = candidates[0];
+  const second = candidates[1];
+  if (top && second && Math.abs((top.score ?? 0) - (second.score ?? 0)) <= CloseScoreDelta && !answered.has("disambiguate")) {
+    // Lightweight targeted options based on the top keys
+    const pair = `${top.key}__${second.key}`;
+
+    // Simple targeted option sets (expand over time)
+    const optionMap: Record<string, { question: string; options: string[]; help?: string }> = {
+      "auto_repair__cleaning_services": {
+        question: "Which is closer to what customers hire you for?",
+        options: ["Fix/repair vehicles (mechanical/body)", "Clean/detail vehicles (appearance)", "Both"],
+        help: "This helps us choose the right customer photo checklist + estimate style.",
+      },
+      "cleaning_services__auto_repair": {
+        question: "Which is closer to what customers hire you for?",
+        options: ["Clean/detail vehicles (appearance)", "Fix/repair vehicles (mechanical/body)", "Both"],
+        help: "This helps us choose the right customer photo checklist + estimate style.",
+      },
+      "upholstery__auto_repair": {
+        question: "Which describes you better?",
+        options: ["Upholstery/interiors", "Mechanical/body repair", "Both"],
+        help: "We’ll load the right templates and photo requests.",
+      },
+      "auto_repair__upholstery": {
+        question: "Which describes you better?",
+        options: ["Mechanical/body repair", "Upholstery/interiors", "Both"],
+        help: "We’ll load the right templates and photo requests.",
+      },
+    };
+
+    const hit = optionMap[pair];
+    return {
+      qid: "disambiguate",
+      question: hit?.question ?? "Quick clarification: what’s closest to your work?",
+      help: hit?.help ?? "This makes the setup more accurate.",
+      options: hit?.options ?? ["Option 1", "Option 2", "Both"],
+    };
+  }
+
+  // Otherwise pick the next unanswered question, but skip stuff we already know
+  // If services answered and is strong, we prioritize objects and top_jobs next.
+  const preferredOrder = ["services", "materials_objects", "top_jobs", "specialty", "materials", "job_type", "who_for", "location"];
+
+  for (const qid of preferredOrder) {
+    if (!answered.has(qid)) {
+      const q = QUESTIONS.find((x) => x.qid === qid);
+      if (q) return q;
+    }
+  }
+
+  // If nothing left, freeform if not answered
+  if (!answered.has("freeform")) {
+    return {
+      qid: "freeform",
+      question: "Describe your business in one sentence.",
+      help: "Example: “We do collision repair + paint for cars and trucks.”",
+    };
+  }
+
+  return null;
 }
 
 /* -------------------- schema -------------------- */
@@ -419,32 +505,52 @@ export async function POST(req: Request) {
       };
 
       ai.industryInference = inf;
-      // mirror for downstream
       ai.suggestedIndustryKey = null;
       ai.confidenceScore = 0;
       ai.needsConfirmation = true;
 
+      // Seed the first question immediately so the UI never shows “enough info” on first paint
+      const nq = pickNextQuestion(inf.answers, inf.candidates, inf.round);
+      ai.industryInference.nextQuestion = nq ? { ...nq } : null;
+
       await writeAiAnalysis(tenantId, ai);
-      return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
+      return NextResponse.json({ ok: true, tenantId, industryInference: ai.industryInference }, { status: 200 });
     }
 
     if (parsed.data.action === "start") {
-      const nq = nextQuestionFor(inf);
-      inf.nextQuestion = nq ? { ...nq } : null;
+      // Keep existing answers; just ensure nextQuestion exists
+      const candidates = scoreCandidates(inf.answers ?? [], canon);
+      const confidenceScore = computeConfidence(candidates);
 
-      // If we somehow have no question but we’re still collecting, force a freeform question.
-      if (!inf.nextQuestion) {
-        inf.nextQuestion = {
-          qid: "freeform",
-          question: "Describe your business in one sentence.",
-          help: "Example: “We do collision repair + paint for cars and trucks.”",
-        };
-      }
+      const topKey = candidates[0]?.key ? normalizeKey(candidates[0].key) : "";
+      const suggestedIndustryKey = topKey || null;
 
-      ai.industryInference = { ...inf, meta: { updatedAt: now } };
+      const reachedTarget = confidenceScore >= ConfidenceTarget;
+
+      const status: IndustryInference["status"] = reachedTarget ? "suggested" : "collecting";
+
+      const nextQ = status === "collecting" ? pickNextQuestion(inf.answers ?? [], candidates, inf.round ?? 1) : null;
+
+      const next: IndustryInference = {
+        mode: "interview",
+        status,
+        round: Number(inf.round ?? 1) || 1,
+        confidenceScore,
+        suggestedIndustryKey,
+        needsConfirmation: true,
+        nextQuestion: nextQ ? { ...(nextQ as any) } : null,
+        answers: Array.isArray(inf.answers) ? inf.answers : [],
+        candidates,
+        meta: { updatedAt: now },
+      };
+
+      ai.industryInference = next;
+      ai.suggestedIndustryKey = suggestedIndustryKey;
+      ai.confidenceScore = confidenceScore;
+      ai.needsConfirmation = true;
+
       await writeAiAnalysis(tenantId, ai);
-
-      return NextResponse.json({ ok: true, tenantId, industryInference: ai.industryInference }, { status: 200 });
+      return NextResponse.json({ ok: true, tenantId, industryInference: next }, { status: 200 });
     }
 
     // action === "answer"
@@ -478,20 +584,9 @@ export async function POST(req: Request) {
     const reachedTarget = confidenceScore >= ConfidenceTarget;
     const exhausted = round >= MaxRounds;
 
-    const status: IndustryInference["status"] =
-      reachedTarget || (exhausted && ForceSuggestAtExhaustion) ? "suggested" : "collecting";
+    const status: IndustryInference["status"] = reachedTarget || exhausted ? "suggested" : "collecting";
 
-    const needsConfirmation = true;
-
-    // If still collecting, continue asking. If we run out, force a freeform question.
-    let nextQ = status === "collecting" ? nextQuestionFor({ ...inf, answers }) : null;
-    if (status === "collecting" && !nextQ) {
-      nextQ = {
-        qid: "freeform",
-        question: "Describe your business in one sentence.",
-        help: "Example: “We do collision repair + paint for cars and trucks.”",
-      };
-    }
+    const nextQ = status === "collecting" ? pickNextQuestion(answers, candidates, round) : null;
 
     const next: IndustryInference = {
       mode: "interview",
@@ -499,7 +594,7 @@ export async function POST(req: Request) {
       round,
       confidenceScore,
       suggestedIndustryKey,
-      needsConfirmation,
+      needsConfirmation: true,
       nextQuestion: nextQ ? { ...(nextQ as any) } : null,
       answers,
       candidates,
@@ -507,8 +602,6 @@ export async function POST(req: Request) {
     };
 
     ai.industryInference = next;
-
-    // Mirror for your Step3 + other downstream logic
     ai.suggestedIndustryKey = suggestedIndustryKey;
     ai.confidenceScore = confidenceScore;
     ai.needsConfirmation = true;
