@@ -45,22 +45,17 @@ export type IndustriesResponse = {
   ok: boolean;
   tenantId: string;
 
-  // what Step3 uses today
+  // existing
   selectedKey: string | null;
   selectedLabel?: string | null;
 
-  // platform industries
   industries: IndustryItem[];
 
-  // ✅ NEW (additive; safe for existing callers)
-  // AI hint (ensured in industries table, but still helpful to show "suggested")
+  // ✅ new (additive; safe if missing)
   suggestedKey?: string | null;
-
-  // tenant-scoped sub-industries
   subIndustries?: SubIndustryItem[];
-
-  // AI hint for sub-industry label (do NOT assume it's already created)
   suggestedSubIndustryLabel?: string | null;
+  selectedSubIndustryKey?: string | null;
 
   error?: string;
   message?: string;

@@ -55,30 +55,28 @@ export function Step3(props: {
   // navigation
   onBack: () => void;
 
-  // ✅ go back to interview mode (Step2)
+  // go back to interview mode (Step2)
   onReInterview: () => void;
 
-  // ✅ save industry + optional subIndustry label
+  // ✅ save industry + optional sub-industry label
   onSubmit: (args: { industryKey: string; subIndustryLabel?: string }) => Promise<void>;
 }) {
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<IndustryItem[]>([]);
   const [selectedKey, setSelectedKey] = useState<string>("");
-
-  // ✅ tenant sub-industries
-  const [subItems, setSubItems] = useState<SubIndustryItem[]>([]);
-  const [subSelectedKey, setSubSelectedKey] = useState<string>(""); // dropdown choice
-  const [subNewLabel, setSubNewLabel] = useState<string>(""); // "Add as new"
-
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // ✅ sub-industries (tenant scoped)
+  const [subItems, setSubItems] = useState<SubIndustryItem[]>([]);
+  const [subLabelInput, setSubLabelInput] = useState<string>("");
 
   // defaults preview
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
-  // AI suggestion + candidates (from Step2 analysis)
-  const suggestedKeyFromAi = safeTrim(props.aiAnalysis?.suggestedIndustryKey);
+  // AI suggestion + candidates
+  const suggestedKey = safeTrim(props.aiAnalysis?.suggestedIndustryKey);
   const suggestedConfidence =
     props.aiAnalysis?.confidenceScore !== null && props.aiAnalysis?.confidenceScore !== undefined
       ? toNum(props.aiAnalysis?.confidenceScore, 0)
@@ -94,34 +92,18 @@ export function Step3(props: {
     score: toNum(c?.score, 0),
   }));
 
-  // ✅ server hints (authoritative for what exists in DB)
-  const [serverSuggestedKey, setServerSuggestedKey] = useState<string>("");
-  const [serverSuggestedSubLabel, setServerSuggestedSubLabel] = useState<string>("");
-
   const selectedLabel = useMemo(() => {
     const hit = items.find((x) => x.key === selectedKey);
     return hit?.label ?? "";
   }, [items, selectedKey]);
 
-  const suggestedKey = serverSuggestedKey || suggestedKeyFromAi;
   const suggestedLabel = useMemo(() => {
     if (!suggestedKey) return "";
     const hit = items.find((x) => x.key === suggestedKey);
     return hit?.label ?? "";
   }, [items, suggestedKey]);
 
-  const selectedSubLabel = useMemo(() => {
-    if (!subSelectedKey) return "";
-    const hit = subItems.find((x) => x.key === subSelectedKey);
-    return hit?.label ?? "";
-  }, [subItems, subSelectedKey]);
-
-  const subEffectiveLabel = safeTrim(subNewLabel) || selectedSubLabel; // what we will save
-
-  function clearSubSelection() {
-    setSubSelectedKey("");
-    setSubNewLabel("");
-  }
+  const canSave = Boolean(selectedKey);
 
   async function loadIndustries() {
     setErr(null);
@@ -137,15 +119,18 @@ export function Step3(props: {
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      const subList = Array.isArray(j.subIndustries) ? j.subIndustries : [];
-      setSubItems(subList);
+      // ✅ tenant sub-industries returned by API (safe if absent)
+      const subs = Array.isArray(j.subIndustries) ? j.subIndustries : [];
+      setSubItems(subs);
 
-      setServerSuggestedKey(safeTrim(j.suggestedKey));
-      setServerSuggestedSubLabel(safeTrim(j.suggestedSubIndustryLabel));
+      // Seed input with AI hint if present AND user hasn't typed anything yet
+      const aiSubHint = safeTrim(j.suggestedSubIndustryLabel);
+      if (!subLabelInput.trim() && aiSubHint) {
+        setSubLabelInput(aiSubHint);
+      }
 
-      // Prefer: server suggested -> ai suggested -> server selected -> first item
+      // Prefer: AI suggested -> server selected -> first item
       const serverSel = safeTrim(j.selectedKey);
-      const suggestedKey = safeTrim(j.suggestedKey) || suggestedKeyFromAi;
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
 
       const next =
@@ -154,24 +139,6 @@ export function Step3(props: {
         (list[0]?.key ?? "");
 
       setSelectedKey(next);
-
-      // ✅ prefill sub-industry suggestion into "Add new" (tenant-scoped)
-      // Only do this if the tenant doesn’t already have that exact label.
-      const ss = safeTrim(j.suggestedSubIndustryLabel);
-      if (ss) {
-        const exists = subList.some((s) => safeTrim(s.label).toLowerCase() === ss.toLowerCase());
-        if (!exists) {
-          setSubNewLabel(ss);
-          setSubSelectedKey("");
-        } else {
-          // if it exists, select it
-          const hit = subList.find((s) => safeTrim(s.label).toLowerCase() === ss.toLowerCase());
-          if (hit) {
-            setSubSelectedKey(hit.key);
-            setSubNewLabel("");
-          }
-        }
-      }
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
@@ -179,7 +146,7 @@ export function Step3(props: {
     }
   }
 
-  // Load industries
+  // Load industries + sub-industries
   useEffect(() => {
     loadIndustries();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -216,14 +183,13 @@ export function Step3(props: {
     };
   }, [props.tenantId, selectedKey]);
 
-  const canSave = Boolean(selectedKey);
   const showAiCard = Boolean(suggestedKey);
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Confirm your industry</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        This sets your default templates (services, photo checklist, and customer questions). You can fine-tune with a sub-industry.
+        This locks in your default prompts, customer questions, and photo requests.
       </div>
 
       {/* AI suggestion header */}
@@ -245,13 +211,6 @@ export function Step3(props: {
                 )}
               </div>
 
-              {serverSuggestedSubLabel ? (
-                <div className="mt-1 text-xs opacity-90">
-                  Suggested sub-industry: <span className="font-semibold">{serverSuggestedSubLabel}</span>
-                </div>
-              ) : null}
-
-              {/* Top candidate quick chips (if available) */}
               {topCandidates.length ? (
                 <div className="mt-3">
                   <div className="text-xs font-semibold opacity-90">Other close matches</div>
@@ -326,10 +285,10 @@ export function Step3(props: {
       ) : null}
 
       <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        {/* LEFT: selector */}
+        {/* LEFT: Industry + Sub-industry */}
         <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Choose what fits best</div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Choose your category</div>
             <button
               type="button"
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
@@ -344,8 +303,8 @@ export function Step3(props: {
           {loading ? (
             <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading…</div>
           ) : (
-            <div className="mt-4 grid gap-3">
-              {/* Industry */}
+            <div className="mt-4 grid gap-4">
+              {/* Industry dropdown */}
               <label className="block">
                 <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Industry</div>
                 <select
@@ -361,88 +320,67 @@ export function Step3(props: {
                 </select>
               </label>
 
-              {/* Sub-industry (tenant) */}
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Sub-industry (optional)</div>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-[11px] font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    disabled={saving}
-                    onClick={clearSubSelection}
-                    title="Clear sub-industry selection"
-                  >
-                    Clear
-                  </button>
-                </div>
-
-                <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-                  This fine-tunes your defaults without forcing you into a generic bucket.
-                </div>
-
-                {subItems.length ? (
-                  <label className="mt-3 block">
-                    <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Pick an existing sub-industry</div>
-                    <select
-                      value={subSelectedKey}
-                      onChange={(e) => {
-                        setSubSelectedKey(e.target.value);
-                        setSubNewLabel("");
-                      }}
-                      className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    >
-                      <option value="">(none)</option>
-                      {subItems.map((s) => (
-                        <option key={s.id} value={s.key}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-                    No sub-industries yet for this tenant — you can add one below.
-                  </div>
-                )}
-
-                <div className="mt-3">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Or add a new one</div>
-                  <input
-                    value={subNewLabel}
-                    onChange={(e) => {
-                      setSubNewLabel(e.target.value);
-                      if (e.target.value.trim().length) setSubSelectedKey("");
-                    }}
-                    placeholder="Example: Car detailing, Marine upholstery, Fence installs…"
-                    className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  />
-                  <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-                    We’ll store this as a tenant sub-industry so your prompts and defaults feel specific.
-                  </div>
-                </div>
-
-                {subEffectiveLabel ? (
-                  <div className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-xs text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
-                    Sub-industry to save: <span className="font-semibold">{subEffectiveLabel}</span>
-                  </div>
-                ) : null}
-              </div>
-
               {/* Selected summary */}
               {selectedKey ? (
-                <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
                   <div className="font-semibold text-gray-900 dark:text-gray-100">Selected</div>
                   <div className="mt-1">
                     <span className="font-semibold">{selectedLabel || selectedKey}</span>{" "}
                     <span className="font-mono text-xs opacity-80">({selectedKey})</span>
                   </div>
-                  {subEffectiveLabel ? (
-                    <div className="mt-1 text-xs">
-                      Sub-industry: <span className="font-semibold">{subEffectiveLabel}</span>
-                    </div>
-                  ) : null}
                 </div>
               ) : null}
+
+              {/* ✅ Sub-industry */}
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Sub-industry</div>
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400">optional</div>
+                </div>
+
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  This makes your setup feel “right” (services, photo checklist, customer language).
+                </div>
+
+                {/* existing sub-industry chips */}
+                {subItems.length ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {subItems.slice(0, 10).map((s) => (
+                      <button
+                        key={s.id}
+                        type="button"
+                        className={cn(
+                          "rounded-full border px-3 py-1.5 text-xs font-semibold",
+                          "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100",
+                          "dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900",
+                          safeTrim(subLabelInput).toLowerCase() === safeTrim(s.label).toLowerCase() &&
+                            "border-emerald-300 bg-emerald-50 dark:border-emerald-900/40 dark:bg-emerald-950/30"
+                        )}
+                        onClick={() => setSubLabelInput(s.label)}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                    No sub-industries saved yet for this tenant.
+                  </div>
+                )}
+
+                {/* free text input */}
+                <textarea
+                  value={subLabelInput}
+                  onChange={(e) => setSubLabelInput(e.target.value)}
+                  rows={2}
+                  placeholder='Example: "Auto detailing", "Ceramic coating", "Marine upholstery", "Asphalt sealcoating"'
+                  className="mt-3 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                />
+
+                <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
+                  Tip: keep it short (2–4 words). We’ll normalize the key automatically.
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -464,7 +402,7 @@ export function Step3(props: {
             <div className="mt-4 grid gap-3">
               {defaults.subIndustries?.length ? (
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Common sub-industries (platform)</div>
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Common sub-industries</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {defaults.subIndustries.slice(0, 10).map((s) => (
                       <span
@@ -542,12 +480,8 @@ export function Step3(props: {
               const key = safeTrim(selectedKey);
               if (!key) throw new Error("Choose an industry.");
 
-              const sub = safeTrim(subEffectiveLabel);
-
-              await props.onSubmit({
-                industryKey: key,
-                subIndustryLabel: sub || undefined,
-              });
+              const subLabel = safeTrim(subLabelInput);
+              await props.onSubmit({ industryKey: key, subIndustryLabel: subLabel || undefined });
             } catch (e: any) {
               setErr(e?.message ?? String(e));
             } finally {
@@ -555,7 +489,7 @@ export function Step3(props: {
             }
           }}
         >
-          {saving ? "Saving…" : "Yes — use this industry"}
+          {saving ? "Saving…" : "Save & continue"}
         </button>
       </div>
     </div>
