@@ -1,6 +1,5 @@
 // src/app/api/onboarding/industry-interview/route.ts
 
-
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
@@ -72,18 +71,25 @@ type InterviewAnswer = {
 
 type Candidate = { key: string; label: string; score: number };
 
-type BeliefSignals = {
-  // per-industry accumulated score
-  scores: Record<string, number>;
-  // explicit “not this” signals
-  exclusions: Record<string, number>;
-  // extracted facts for future prompting / explainability
-  entities: string[];
-  services: string[];
-  surfacesMaterials: string[];
-  notes: string[];
-  updatedAt: string;
-};
+type Conflict =
+  | {
+      type: "close_call";
+      between: [string, string];
+      scores: [number, number];
+      reason: string;
+    }
+  | {
+      type: "top_flipped";
+      from: string;
+      to: string;
+      reason: string;
+    }
+  | {
+      type: "confidence_plateau";
+      prev: number;
+      next: number;
+      reason: string;
+    };
 
 type IndustryInference = {
   mode: "interview";
@@ -92,10 +98,15 @@ type IndustryInference = {
   confidenceScore: number;
   suggestedIndustryKey: string | null;
   needsConfirmation: boolean;
+
   nextQuestion: { qid: string; question: string; help?: string; options?: string[] } | null;
+
   answers: InterviewAnswer[];
   candidates: Candidate[];
-  belief: BeliefSignals;
+
+  // ✅ new
+  conflicts: Conflict[];
+
   meta: { updatedAt: string };
 };
 
@@ -104,10 +115,12 @@ type IndustryInference = {
 const ConfidenceTarget = 0.82;
 const MaxRounds = 8;
 
-// When the user contradicts the current top category, we stop “locking in”
-// and force more questioning even at round exhaustion unless super confident.
-const ContradictionPenalty = 4; // points subtracted from a category when contradicted
-const ContradictionHoldThreshold = 0.70; // if confidence < this and contradiction occurred, don’t suggest
+const MinTopScoreForHighConfidence = 3;
+const ForceSuggestAtExhaustion = true;
+
+// conflict tuning (deterministic)
+const CloseCallMaxGap = 1; // top vs 2nd score <= 1 means ambiguity
+const ConfidencePlateauDelta = 0.05; // change < 5% between rounds is "not improving"
 
 /**
  * Question bank (>= MaxRounds recommended).
@@ -178,17 +191,24 @@ const QUESTIONS: Array<{
   },
 ];
 
-/* -------------------- scoring rules -------------------- */
-
 /**
- * Keyword rules.
- * NOTE: These keys can be created dynamically later via /api/onboarding/industries,
- * but we still keep a “starter ontology” so onboarding feels smart.
+ * Keyword scoring rules (deterministic).
  */
 const KEYWORDS: Record<string, Array<string | RegExp>> = {
-  auto_detailing: [/detail/i, /detailing/i, /ceramic/i, /coating/i, /paint correction/i, /\bppf\b/i, /polish/i, /buff/i, /wax/i],
+  auto_detailing: [
+    /detail/i,
+    /detailing/i,
+    /ceramic/i,
+    /coating/i,
+    /paint correction/i,
+    /\bppf\b/i,
+    /polish/i,
+    /buff/i,
+    /wax/i,
+    /wash/i,
+  ],
   auto_repair: [/auto repair/i, /mechanic/i, /brake/i, /engine/i, /diagnostic/i, /oil change/i],
-  auto_repair_collision: [/collision/i, /body shop/i, /auto body/i, /\bdent\b/i, /bumper/i, /\bpanel\b/i, /spray/i],
+  auto_repair_collision: [/collision/i, /body shop/i, /auto body/i, /\bdent\b/i, /bumper/i, /panel/i],
   upholstery: [/upholster/i, /vinyl/i, /leather/i, /canvas/i, /headliner/i, /marine/i, /sew/i],
   paving_contractor: [/asphalt/i, /pav(e|ing)/i, /sealcoat/i, /concrete/i, /driveway/i, /parking lot/i],
   landscaping_hardscaping: [/landscap/i, /hardscap/i, /mulch/i, /pavers/i, /retaining wall/i, /lawn/i],
@@ -196,9 +216,12 @@ const KEYWORDS: Record<string, Array<string | RegExp>> = {
   plumbing: [/plumb/i, /water heater/i, /drain/i, /sewer/i],
   electrical: [/electric/i, /panel/i, /breaker/i, /wiring/i],
   roofing: [/roof/i, /shingle/i, /gutter/i, /siding/i],
-  cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i],
+  cleaning_services: [/clean/i, /janitor/i, /maid/i, /pressure wash/i, /deep clean/i],
 };
 
+/**
+ * Strong mapping for option answers.
+ */
 const OPTION_BOOST: Record<string, Array<{ match: RegExp; key: string; points: number }>> = {
   services: [
     { match: /detail|ceramic|coating/i, key: "auto_detailing", points: 6 },
@@ -222,25 +245,6 @@ const OPTION_BOOST: Record<string, Array<{ match: RegExp; key: string; points: n
   ],
 };
 
-function detectContradictions(answer: string) {
-  const a = answer.toLowerCase();
-
-  // very cheap but effective:
-  const neg = /\b(no|not|don't|do not|never|isn't|aren't|without)\b/i.test(a);
-
-  // categories that often get contradicted in your tests
-  const contradictsRepair = neg && (/\brepair\b/i.test(a) || /\bmechanic\b/i.test(a) || /\bauto repair\b/i.test(a));
-  const contradictsCollision = neg && (/\bcollision\b/i.test(a) || /\bbody\b/i.test(a) || /\bdent\b/i.test(a));
-  const contradictsDetailing = neg && (/\bdetail\b/i.test(a) || /\bdetailing\b/i.test(a) || /\bwax\b/i.test(a) || /\bceramic\b/i.test(a));
-
-  return {
-    neg,
-    contradictsRepair,
-    contradictsCollision,
-    contradictsDetailing,
-  };
-}
-
 /* -------------------- db helpers -------------------- */
 
 async function readAiAnalysis(tenantId: string): Promise<any | null> {
@@ -254,6 +258,10 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
   return row?.ai_analysis ?? null;
 }
 
+/**
+ * ✅ CRITICAL:
+ * MUST stringify objects to jsonb
+ */
 async function writeAiAnalysis(tenantId: string, ai: any) {
   await db.execute(sql`
     insert into tenant_onboarding (tenant_id, ai_analysis, updated_at, created_at)
@@ -269,45 +277,26 @@ async function writeAiAnalysis(tenantId: string, ai: any) {
   `);
 }
 
-/**
- * IMPORTANT:
- * We do NOT require canonical industries to exist to function.
- * If industries table is empty, we still score and return candidate keys.
- */
 async function listCanonicalIndustries(): Promise<Array<{ key: string; label: string }>> {
   const r = await db.execute(sql`
     select key::text as "key", label::text as "label"
     from industries
     order by label asc
-    limit 2000
+    limit 1000
   `);
   return rowsOf(r).map((x: any) => ({ key: String(x.key), label: String(x.label) }));
 }
-
-/* -------------------- inference state -------------------- */
 
 function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
   const now = new Date().toISOString();
   const baseAi = ai && typeof ai === "object" ? ai : {};
   const existing = baseAi?.industryInference;
 
-  const defaultBelief: BeliefSignals = {
-    scores: {},
-    exclusions: {},
-    entities: [],
-    services: [],
-    surfacesMaterials: [],
-    notes: [],
-    updatedAt: now,
-  };
-
   if (existing && typeof existing === "object" && existing?.mode === "interview") {
     const answers = Array.isArray(existing.answers) ? existing.answers : [];
     const round = Number(existing.round ?? 1);
     const confidenceScore = Number(existing.confidenceScore ?? 0) || 0;
     const suggestedIndustryKey = safeTrim(existing.suggestedIndustryKey) || null;
-
-    const belief = existing.belief && typeof existing.belief === "object" ? existing.belief : defaultBelief;
 
     const inf: IndustryInference = {
       mode: "interview",
@@ -319,17 +308,7 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
       nextQuestion: existing.nextQuestion ?? null,
       answers,
       candidates: Array.isArray(existing.candidates) ? existing.candidates : [],
-      belief: {
-        ...defaultBelief,
-        ...belief,
-        scores: { ...(belief.scores ?? {}) },
-        exclusions: { ...(belief.exclusions ?? {}) },
-        entities: Array.isArray(belief.entities) ? belief.entities : [],
-        services: Array.isArray(belief.services) ? belief.services : [],
-        surfacesMaterials: Array.isArray(belief.surfacesMaterials) ? belief.surfacesMaterials : [],
-        notes: Array.isArray(belief.notes) ? belief.notes : [],
-        updatedAt: now,
-      },
+      conflicts: Array.isArray(existing.conflicts) ? existing.conflicts : [],
       meta: { updatedAt: now },
     };
 
@@ -347,7 +326,7 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
     nextQuestion: null,
     answers: [],
     candidates: [],
-    belief: defaultBelief,
+    conflicts: [],
     meta: { updatedAt: now },
   };
 
@@ -361,110 +340,47 @@ function nextQuestionFor(inf: IndustryInference) {
   return q ?? null;
 }
 
-function ingestAnswerIntoBelief(belief: BeliefSignals, qid: string, answer: string) {
-  const text = answer;
-
-  // quick extractors (cheap + useful)
-  if (qid === "materials_objects") belief.entities = uniq([...belief.entities, answer]);
-  if (qid === "top_jobs") belief.services = uniq([...belief.services, ...splitCsvish(answer)]);
-  if (qid === "materials") belief.surfacesMaterials = uniq([...belief.surfacesMaterials, ...splitCsvish(answer)]);
-  if (qid === "specialty") belief.notes = uniq([...belief.notes, ...splitCsvish(answer)]);
-
-  // contradictions (explicit “not this”)
-  const c = detectContradictions(answer);
-  if (c.contradictsRepair) belief.exclusions["auto_repair"] = (belief.exclusions["auto_repair"] ?? 0) + 1;
-  if (c.contradictsCollision) belief.exclusions["auto_repair_collision"] = (belief.exclusions["auto_repair_collision"] ?? 0) + 1;
-  if (c.contradictsDetailing) belief.exclusions["auto_detailing"] = (belief.exclusions["auto_detailing"] ?? 0) + 1;
-
-  return { belief, contradiction: c.neg };
-}
-
-function splitCsvish(s: string) {
-  return s
-    .split(/,|\/|\||;|\n/i)
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .slice(0, 24);
-}
-
-function uniq(xs: string[]) {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const x of xs) {
-    const k = x.toLowerCase();
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(x);
-  }
-  return out;
-}
-
-function scoreCandidatesFromAnswersAndBelief(
-  answers: InterviewAnswer[],
-  canon: Array<{ key: string; label: string }>,
-  belief: BeliefSignals
-): Candidate[] {
-  const combinedText = answers.map((a) => a.answer).join(" | ");
-
+function scoreCandidates(answers: InterviewAnswer[], canon: Array<{ key: string; label: string }>): Candidate[] {
+  const text = answers.map((a) => a.answer).join(" | ");
   const scores = new Map<string, number>();
 
-  // Start from belief scores (this is what makes it “stateful”)
-  for (const [k, v] of Object.entries(belief.scores ?? {})) {
-    scores.set(k, (scores.get(k) ?? 0) + (Number(v) || 0));
-  }
-
-  // Keyword scoring
+  // 1) Keyword scoring
   for (const [k, patterns] of Object.entries(KEYWORDS)) {
     let s = 0;
     for (const p of patterns) {
       if (typeof p === "string") {
-        if (combinedText.toLowerCase().includes(p.toLowerCase())) s += 1;
+        if (text.toLowerCase().includes(p.toLowerCase())) s += 1;
       } else {
-        if (p.test(combinedText)) s += 1;
+        if (p.test(text)) s += 1;
       }
     }
     if (s > 0) scores.set(k, (scores.get(k) ?? 0) + s);
   }
 
-  // Option boosts
+  // 2) Option boosts
   for (const a of answers) {
     const boosts = OPTION_BOOST[a.qid] ?? [];
     for (const b of boosts) {
-      if (b.match.test(a.answer)) {
-        scores.set(b.key, (scores.get(b.key) ?? 0) + b.points);
-      }
+      if (b.match.test(a.answer)) scores.set(b.key, (scores.get(b.key) ?? 0) + b.points);
     }
   }
 
-  // Apply exclusions as penalties
-  for (const [k, count] of Object.entries(belief.exclusions ?? {})) {
-    const n = Number(count) || 0;
-    if (n <= 0) continue;
-    scores.set(k, (scores.get(k) ?? 0) - ContradictionPenalty * n);
-  }
-
-  // Canon labels if known; otherwise title-case key
-  const canonMap = new Map(canon.map((c) => [c.key, c.label]));
+  const canonKeys = new Set(canon.map((c) => c.key));
   const candidates: Candidate[] = [];
 
   for (const [k, s] of scores.entries()) {
-    const key = normalizeKey(k);
-    if (!key) continue;
-
-    const label =
-      canonMap.get(key) ??
-      key
-        .replace(/_+/g, " ")
-        .split(" ")
-        .filter(Boolean)
-        .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-        .join(" ");
-
-    candidates.push({ key, label, score: s });
+    if (canonKeys.size === 0 || canonKeys.has(k)) {
+      const label = canon.find((c) => c.key === k)?.label ?? k;
+      candidates.push({ key: k, label, score: s });
+    }
   }
 
   if (!candidates.length) {
-    candidates.push({ key: "service", label: "Service", score: 0 });
+    candidates.push({
+      key: "service",
+      label: canon.find((c) => c.key === "service")?.label ?? "Service",
+      score: 0,
+    });
   }
 
   candidates.sort((a, b) => b.score - a.score);
@@ -474,15 +390,130 @@ function scoreCandidatesFromAnswersAndBelief(
 function computeConfidence(cands: Candidate[]) {
   const top = cands[0]?.score ?? 0;
   const second = cands[1]?.score ?? 0;
+
   if (top <= 0) return 0;
 
-  // magnitude
-  const mag = Math.max(0, Math.min(1, top / 10));
-  // separation
-  const sep = Math.max(0, Math.min(1, (top - second) / Math.max(1, Math.abs(top))));
-  // blend
+  if (top < MinTopScoreForHighConfidence) {
+    return Math.max(0, Math.min(0.35, top / 8));
+  }
+
+  const mag = Math.min(1, top / 10);
+  const sep = top > 0 ? Math.max(0, Math.min(1, (top - second) / Math.max(1, top))) : 0;
+
   const conf = 0.55 * mag + 0.45 * sep;
   return Math.max(0, Math.min(1, conf));
+}
+
+/* -------------------- NEW: conflict detection + clarifiers -------------------- */
+
+function detectConflicts(prev: IndustryInference, nextCandidates: Candidate[], nextConfidence: number): Conflict[] {
+  const out: Conflict[] = [];
+
+  const prevTop = prev.candidates?.[0]?.key ? normalizeKey(prev.candidates[0].key) : "";
+  const nextTop = nextCandidates?.[0]?.key ? normalizeKey(nextCandidates[0].key) : "";
+
+  if (prevTop && nextTop && prevTop !== nextTop) {
+    out.push({
+      type: "top_flipped",
+      from: prevTop,
+      to: nextTop,
+      reason: "Top match changed after new answers.",
+    });
+  }
+
+  const top = nextCandidates?.[0];
+  const second = nextCandidates?.[1];
+  if (top && second) {
+    const gap = Math.abs((top.score ?? 0) - (second.score ?? 0));
+    if (gap <= CloseCallMaxGap && (top.score ?? 0) > 0) {
+      out.push({
+        type: "close_call",
+        between: [normalizeKey(top.key), normalizeKey(second.key)],
+        scores: [top.score, second.score],
+        reason: "Top two industries are very close.",
+      });
+    }
+  }
+
+  const prevConf = Number(prev.confidenceScore ?? 0) || 0;
+  if (prev.round >= 2 && Math.abs(nextConfidence - prevConf) < ConfidencePlateauDelta) {
+    out.push({
+      type: "confidence_plateau",
+      prev: prevConf,
+      next: nextConfidence,
+      reason: "Confidence is not improving — need a clarifying question.",
+    });
+  }
+
+  return out;
+}
+
+function hasBlockingConflict(conflicts: Conflict[]) {
+  // “blocking” means we should ask a clarifier before claiming “ready”
+  return conflicts.some((c) => c.type === "close_call" || c.type === "top_flipped" || c.type === "confidence_plateau");
+}
+
+function clarifierQuestionFrom(conflicts: Conflict[], candidates: Candidate[]) {
+  const top = candidates[0];
+  const second = candidates[1];
+
+  // If we know the two likely winners, ask a direct disambiguation question.
+  if (top && second) {
+    const a = top.label || top.key;
+    const b = second.label || second.key;
+
+    // Special-case common confusion for your product
+    const keyA = normalizeKey(top.key);
+    const keyB = normalizeKey(second.key);
+    const pair = [keyA, keyB].sort().join("|");
+
+    // Targeted clarifiers (deterministic)
+    if (pair === ["auto_detailing", "auto_repair"].sort().join("|")) {
+      return {
+        qid: "clarify_detail_vs_repair",
+        question: "Quick clarification — which best describes you?",
+        help: "This helps us avoid mixing ‘detailing’ with ‘mechanic/repair’ work.",
+        options: ["Detailing (wash/polish/wax/coatings)", "Mechanical repair (brakes/engine/diagnostics)", "Both"],
+      };
+    }
+
+    if (pair === ["auto_detailing", "cleaning_services"].sort().join("|")) {
+      return {
+        qid: "clarify_detail_vs_cleaning",
+        question: "Quick clarification — what do customers usually hire you for?",
+        help: "These can sound similar, but your quote templates differ a lot.",
+        options: [
+          "Car detailing (paint/interior + appearance)",
+          "General cleaning (homes/businesses/janitorial)",
+          "Both / not sure",
+        ],
+      };
+    }
+
+    if (pair === ["auto_repair", "auto_repair_collision"].sort().join("|")) {
+      return {
+        qid: "clarify_repair_vs_collision",
+        question: "Quick clarification — what type of auto work do you do most?",
+        help: "This sets the right photo requests and inspection prompts.",
+        options: ["Mechanical repair (brakes/engine)", "Collision/body (panels/paint/dents)", "Both"],
+      };
+    }
+
+    // Generic “A vs B”
+    return {
+      qid: "clarify_top_two",
+      question: "Just to clarify — which is closer to your business?",
+      help: "Pick the closest match so we load the right starter pack.",
+      options: [a, b, "Something else"],
+    };
+  }
+
+  // Fallback
+  return {
+    qid: "clarify_freeform",
+    question: "Describe your business in one sentence.",
+    help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
+  };
 }
 
 /* -------------------- schema -------------------- */
@@ -511,6 +542,7 @@ export async function POST(req: Request) {
 
     const ai0 = await readAiAnalysis(tenantId);
     const { ai, inf: inf0 } = ensureInference(ai0);
+
     const canon = await listCanonicalIndustries();
 
     let inf = { ...inf0 };
@@ -527,15 +559,7 @@ export async function POST(req: Request) {
         nextQuestion: null,
         answers: [],
         candidates: [],
-        belief: {
-          scores: {},
-          exclusions: {},
-          entities: [],
-          services: [],
-          surfacesMaterials: [],
-          notes: [],
-          updatedAt: now,
-        },
+        conflicts: [],
         meta: { updatedAt: now },
       };
 
@@ -544,22 +568,24 @@ export async function POST(req: Request) {
       ai.confidenceScore = 0;
       ai.needsConfirmation = true;
 
-      // IMPORTANT: interview route does NOT write tenant_sub_industries or industries.
       await writeAiAnalysis(tenantId, ai);
       return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
     }
 
     if (parsed.data.action === "start") {
-      const nq = nextQuestionFor(inf);
-      inf.nextQuestion = nq ? { ...nq } : null;
+      // if we already have blocking conflicts, ask a clarifier first
+      const q =
+        hasBlockingConflict(inf.conflicts) && inf.candidates?.length
+          ? clarifierQuestionFrom(inf.conflicts, inf.candidates)
+          : nextQuestionFor(inf);
 
-      if (!inf.nextQuestion) {
-        inf.nextQuestion = {
-          qid: "freeform",
-          question: "Describe your business in one sentence.",
-          help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
-        };
-      }
+      inf.nextQuestion = q
+        ? { ...q }
+        : {
+            qid: "freeform",
+            question: "Describe your business in one sentence.",
+            help: "Example: “We do ceramic coatings + interior detailing for cars and trucks.”",
+          };
 
       ai.industryInference = { ...inf, meta: { updatedAt: now } };
       await writeAiAnalysis(tenantId, ai);
@@ -572,9 +598,7 @@ export async function POST(req: Request) {
     const ansRaw = parsed.data.answer;
 
     const ans =
-      typeof ansRaw === "string"
-        ? safeTrim(ansRaw)
-        : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
+      typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
 
     if (!qid || !ans) {
       return NextResponse.json(
@@ -583,45 +607,49 @@ export async function POST(req: Request) {
       );
     }
 
+    // store answer
     const q = QUESTIONS.find((x) => x.qid === qid);
     const qText = q?.question ?? qid;
 
     const answers = Array.isArray(inf.answers) ? [...inf.answers] : [];
     answers.push({ qid, question: qText, answer: ans, createdAt: now });
 
-    // belief update
-    const belief = { ...(inf.belief ?? { scores: {}, exclusions: {}, entities: [], services: [], surfacesMaterials: [], notes: [], updatedAt: now }) };
-    const { belief: belief2, contradiction } = ingestAnswerIntoBelief(belief, qid, ans);
-    belief2.updatedAt = now;
-
-    // score with belief
-    const candidates = scoreCandidatesFromAnswersAndBelief(answers, canon, belief2);
+    // score + confidence
+    const candidates = scoreCandidates(answers, canon);
     const confidenceScore = computeConfidence(candidates);
 
-    const topKey = candidates[0]?.key ? normalizeKey(candidates[0].key) : "";
-    const suggestedIndustryKey = topKey || null;
+    // detect conflicts vs previous inference
+    const conflicts = detectConflicts(inf, candidates, confidenceScore);
+
+    const topKeyRaw = candidates[0]?.key ? normalizeKey(candidates[0].key) : "";
+    const suggestedIndustryKey = topKeyRaw || null;
 
     const round = Math.min(MaxRounds, (Number(inf.round ?? 1) || 1) + 1);
 
-    const reachedTarget = confidenceScore >= ConfidenceTarget;
-
-    // “Don’t push categories” rule:
-    // If the user contradicted and we’re not yet highly confident, keep collecting.
-    const holdBecauseContradiction = contradiction && confidenceScore < ContradictionHoldThreshold;
-
     const exhausted = round >= MaxRounds;
-    const shouldSuggest = reachedTarget || (exhausted && !holdBecauseContradiction);
 
-    const status: IndustryInference["status"] = shouldSuggest ? "suggested" : "collecting";
-    const needsConfirmation = true;
+    // Only “ready” if target met AND no blocking conflicts
+    const reachedTarget = confidenceScore >= ConfidenceTarget && !hasBlockingConflict(conflicts);
 
-    let nextQ = status === "collecting" ? nextQuestionFor({ ...inf, answers }) : null;
-    if (status === "collecting" && !nextQ) {
-      nextQ = {
-        qid: "freeform",
-        question: "Describe your business in one sentence.",
-        help: "Example: “We do ceramic coatings + paint correction for cars and trucks.”",
-      };
+    const status: IndustryInference["status"] =
+      reachedTarget || (exhausted && ForceSuggestAtExhaustion) ? "suggested" : "collecting";
+
+    // Choose next question:
+    // - If collecting and we have conflicts: ask clarifier NOW
+    // - Else: standard next question
+    let nextQ: any = null;
+    if (status === "collecting") {
+      nextQ = hasBlockingConflict(conflicts)
+        ? clarifierQuestionFrom(conflicts, candidates)
+        : nextQuestionFor({ ...inf, answers, candidates, confidenceScore, conflicts } as any);
+
+      if (!nextQ) {
+        nextQ = {
+          qid: "freeform",
+          question: "Describe your business in one sentence.",
+          help: "Example: “We do ceramic coatings + paint correction for cars and trucks.”",
+        };
+      }
     }
 
     const next: IndustryInference = {
@@ -630,11 +658,11 @@ export async function POST(req: Request) {
       round,
       confidenceScore,
       suggestedIndustryKey,
-      needsConfirmation,
+      needsConfirmation: true,
       nextQuestion: nextQ ? { ...(nextQ as any) } : null,
       answers,
       candidates,
-      belief: belief2,
+      conflicts,
       meta: { updatedAt: now },
     };
 
@@ -645,8 +673,6 @@ export async function POST(req: Request) {
     ai.confidenceScore = confidenceScore;
     ai.needsConfirmation = true;
 
-    // IMPORTANT: interview route does NOT write industries table or subindustries table.
-    // That happens only in /api/onboarding/industries when user confirms in Step3.
     await writeAiAnalysis(tenantId, ai);
 
     return NextResponse.json({ ok: true, tenantId, industryInference: next }, { status: 200 });
