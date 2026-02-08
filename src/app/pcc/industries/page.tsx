@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
+import IndustriesSearchBar from "./IndustriesSearchBar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +15,6 @@ function rows(r: any): any[] {
 }
 
 function titleFromKey(key: string) {
-  // landscaping_hardscaping -> Landscaping Hardscaping
   const s = String(key ?? "").trim();
   if (!s) return "";
   return s
@@ -32,14 +32,16 @@ function safeTrim(v: unknown) {
 type SortKey = "label" | "confirmed" | "needsConfirm" | "aiSuggested";
 type FilterKey = "all" | "needsConfirm" | "aiOnly" | "confirmedOnly";
 
-function buildHref(base: string, next: Record<string, string | undefined | null>, current: Record<string, string | undefined>) {
+function buildHref(
+  base: string,
+  next: Record<string, string | undefined | null>,
+  current: Record<string, string | undefined>
+) {
   const p = new URLSearchParams();
-  // keep current
   for (const [k, v] of Object.entries(current)) {
     if (!v) continue;
     p.set(k, v);
   }
-  // apply next
   for (const [k, v] of Object.entries(next)) {
     if (v === null || v === undefined || String(v).trim() === "") p.delete(k);
     else p.set(k, String(v));
@@ -64,13 +66,15 @@ export default async function PccIndustriesPage(props: {
   const rawFilter = Array.isArray(sp.filter) ? sp.filter[0] : sp.filter;
   const rawQ = Array.isArray(sp.q) ? sp.q[0] : sp.q;
 
-  const sort: SortKey = (rawSort === "confirmed" || rawSort === "needsConfirm" || rawSort === "aiSuggested" || rawSort === "label")
-    ? rawSort
-    : "label";
+  const sort: SortKey =
+    rawSort === "confirmed" || rawSort === "needsConfirm" || rawSort === "aiSuggested" || rawSort === "label"
+      ? rawSort
+      : "label";
 
-  const filter: FilterKey = (rawFilter === "needsConfirm" || rawFilter === "aiOnly" || rawFilter === "confirmedOnly" || rawFilter === "all")
-    ? rawFilter
-    : "all";
+  const filter: FilterKey =
+    rawFilter === "needsConfirm" || rawFilter === "aiOnly" || rawFilter === "confirmedOnly" || rawFilter === "all"
+      ? rawFilter
+      : "all";
 
   const q = safeTrim(rawQ).toLowerCase();
 
@@ -112,7 +116,6 @@ export default async function PccIndustriesPage(props: {
   }
 
   // Counts by AI suggested industry + needsConfirmation
-  // NOTE: don't use "to" as an alias. Use "ob".
   const aiCountsR = await db.execute(sql`
     select
       (ob.ai_analysis->>'suggestedIndustryKey')::text as "key",
@@ -138,7 +141,7 @@ export default async function PccIndustriesPage(props: {
     needsConfirmCounts.set(k, Number(r.needsConfirmCount || 0));
   }
 
-  // If canonical is empty, build a discovered list from tenant_settings + tenant_onboarding
+  // Fallback list if industries table is empty
   let list: Array<{ key: string; label: string; description: string | null }> = canonical;
 
   if (!list.length) {
@@ -152,7 +155,7 @@ export default async function PccIndustriesPage(props: {
       .map((k) => ({ key: k, label: titleFromKey(k) || k, description: null }));
   }
 
-  // Build augmented rows so we can sort/filter/search
+  // Augment rows for sorting/filter/search
   const augmented = list.map((it) => {
     const confirmed = confirmedCounts.get(it.key) ?? 0;
     const aiSuggested = aiSuggestedCounts.get(it.key) ?? 0;
@@ -183,9 +186,9 @@ export default async function PccIndustriesPage(props: {
   // Sort
   filtered.sort((a, b) => {
     if (sort === "label") return a.label.localeCompare(b.label);
-    if (sort === "confirmed") return (b.confirmed - a.confirmed) || a.label.localeCompare(b.label);
-    if (sort === "needsConfirm") return (b.needsConfirm - a.needsConfirm) || a.label.localeCompare(b.label);
-    if (sort === "aiSuggested") return (b.aiSuggested - a.aiSuggested) || a.label.localeCompare(b.label);
+    if (sort === "confirmed") return b.confirmed - a.confirmed || a.label.localeCompare(b.label);
+    if (sort === "needsConfirm") return b.needsConfirm - a.needsConfirm || a.label.localeCompare(b.label);
+    if (sort === "aiSuggested") return b.aiSuggested - a.aiSuggested || a.label.localeCompare(b.label);
     return a.label.localeCompare(b.label);
   });
 
@@ -212,38 +215,34 @@ export default async function PccIndustriesPage(props: {
             {/* Controls */}
             <div className="mt-4 grid gap-3 lg:grid-cols-3">
               <div className="lg:col-span-1">
-                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Search</div>
-                <div className="mt-2 flex gap-2">
-                  <div className="flex-1 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                    <span className="text-xs text-gray-500 dark:text-gray-400">q=</span>{" "}
-                    <span className="font-mono text-xs">{q || "(none)"}</span>
-                  </div>
-                  <Link
-                    href={buildHref("/pcc/industries", { q: null }, currentParams)}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(!q)}`}
-                    title="Clear search"
-                  >
-                    Clear
-                  </Link>
-                </div>
-                <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">
-                  Tip: type directly in URL, ex: <span className="font-mono">?q=upholstery</span>
-                </div>
+                <IndustriesSearchBar />
               </div>
 
               <div className="lg:col-span-1">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Filter</div>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  <Link href={buildHref("/pcc/industries", { filter: "all" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "all")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { filter: "all" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "all")}`}
+                  >
                     All
                   </Link>
-                  <Link href={buildHref("/pcc/industries", { filter: "needsConfirm" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "needsConfirm")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { filter: "needsConfirm" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "needsConfirm")}`}
+                  >
                     Needs confirm
                   </Link>
-                  <Link href={buildHref("/pcc/industries", { filter: "aiOnly" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "aiOnly")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { filter: "aiOnly" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "aiOnly")}`}
+                  >
                     AI-only
                   </Link>
-                  <Link href={buildHref("/pcc/industries", { filter: "confirmedOnly" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "confirmedOnly")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { filter: "confirmedOnly" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "confirmedOnly")}`}
+                  >
                     Confirmed only
                   </Link>
                 </div>
@@ -252,16 +251,28 @@ export default async function PccIndustriesPage(props: {
               <div className="lg:col-span-1">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Sort</div>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  <Link href={buildHref("/pcc/industries", { sort: "label" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "label")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { sort: "label" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "label")}`}
+                  >
                     Label
                   </Link>
-                  <Link href={buildHref("/pcc/industries", { sort: "confirmed" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "confirmed")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { sort: "confirmed" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "confirmed")}`}
+                  >
                     Confirmed
                   </Link>
-                  <Link href={buildHref("/pcc/industries", { sort: "needsConfirm" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "needsConfirm")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { sort: "needsConfirm" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "needsConfirm")}`}
+                  >
                     Needs confirm
                   </Link>
-                  <Link href={buildHref("/pcc/industries", { sort: "aiSuggested" }, currentParams)} className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "aiSuggested")}`}>
+                  <Link
+                    href={buildHref("/pcc/industries", { sort: "aiSuggested" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "aiSuggested")}`}
+                  >
                     AI suggested
                   </Link>
                 </div>
