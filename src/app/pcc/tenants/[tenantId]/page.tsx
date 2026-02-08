@@ -42,6 +42,19 @@ function fmtDate(d: any) {
   }
 }
 
+function clamp01(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function toPct(v: unknown): string | null {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  // ai_analysis confidenceScore is 0..1 (per your sample: 0.9)
+  const pct = Math.round(clamp01(n) * 100);
+  return `${pct}%`;
+}
+
 type MemberRow = {
   tenantId: string;
   clerkUserId: string;
@@ -134,7 +147,8 @@ async function loadSettings(tenantId: string): Promise<SettingsRow | null> {
 
   return {
     planTier: String(row.planTier ?? "tier0"),
-    monthlyQuoteLimit: row.monthlyQuoteLimit === null || row.monthlyQuoteLimit === undefined ? null : Number(row.monthlyQuoteLimit),
+    monthlyQuoteLimit:
+      row.monthlyQuoteLimit === null || row.monthlyQuoteLimit === undefined ? null : Number(row.monthlyQuoteLimit),
     activationGraceCredits: Number(row.activationGraceCredits ?? 0),
     activationGraceUsed: Number(row.activationGraceUsed ?? 0),
     brandLogoUrl: row.brandLogoUrl ? String(row.brandLogoUrl) : null,
@@ -200,6 +214,11 @@ function pick(obj: any, paths: string[]): any {
   return null;
 }
 
+function asStringArray(v: any): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+}
+
 export default async function TenantDetailPage(props: { params: Promise<{ tenantId: string }> }) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
@@ -241,19 +260,26 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
   const graceUsed = settings?.activationGraceUsed ?? 0;
   const graceRemaining = Math.max(0, graceTotal - graceUsed);
 
-  // Onboarding AI fields (best-effort, since json shape may evolve)
-  const whatTheyDo =
-    pick(onboarding, ["business_summary", "summary", "what_it_does", "analysis.summary", "analysis.business_summary"]) ??
-    null;
+  // ✅ Match your real ai_analysis shape
+  const businessGuess = pick(onboarding, ["businessGuess", "business_guess", "analysis.businessGuess"]) ?? null;
+  const confidenceScore = pick(onboarding, ["confidenceScore", "confidence_score"]) ?? null;
+  const confidencePct = toPct(confidenceScore);
 
-  const confidence =
-    pick(onboarding, ["confidence", "analysis.confidence", "classification.confidence"]) ?? null;
+  const fit = pick(onboarding, ["fit"]) ?? null;
+  const fitReason = pick(onboarding, ["fitReason", "fit_reason"]) ?? null;
 
-  const website =
-    pick(onboarding, ["website", "site", "url", "analysis.website", "analysis.url"]) ?? null;
+  const website = pick(onboarding, ["website", "url", "site"]) ?? null;
+  const suggestedIndustryKey = pick(onboarding, ["suggestedIndustryKey", "suggested_industry_key"]) ?? null;
 
-  const industries =
-    pick(onboarding, ["industry", "industry_key", "analysis.industry", "analysis.industry_key"]) ?? null;
+  const detectedServices = asStringArray(pick(onboarding, ["detectedServices", "detected_services"]));
+  const billingSignals = asStringArray(pick(onboarding, ["billingSignals", "billing_signals"]));
+
+  const analyzedAt = pick(onboarding, ["analyzedAt", "meta.finishedAt", "meta.updatedAt"]) ?? null;
+  const modelUsed = pick(onboarding, ["modelUsed", "model_used"]) ?? null;
+  const source = pick(onboarding, ["source"]) ?? null;
+  const lastAction = pick(onboarding, ["meta.lastAction"]) ?? null;
+
+  const rawPreview = pick(onboarding, ["rawWebIntelPreview"]) ?? null;
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10 space-y-4">
@@ -362,9 +388,8 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
             <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Grace credits</div>
             <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">
-              Total <span className="font-mono">{graceTotal}</span> · Used{" "}
-              <span className="font-mono">{graceUsed}</span> · Remaining{" "}
-              <span className="font-mono">{graceRemaining}</span>
+              Total <span className="font-mono">{graceTotal}</span> · Used <span className="font-mono">{graceUsed}</span>{" "}
+              · Remaining <span className="font-mono">{graceRemaining}</span>
             </div>
           </div>
         </div>
@@ -376,29 +401,46 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Onboarding AI analysis</div>
             <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Snapshot captured during onboarding (tenant_onboarding.ai_analysis).
+              Snapshot captured during onboarding (<span className="font-mono">tenant_onboarding.ai_analysis</span>).
             </div>
           </div>
-          {confidence ? (
-            <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-              confidence: {String(confidence)}
-            </span>
-          ) : null}
+
+          <div className="flex items-center gap-2">
+            {confidencePct ? (
+              <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                confidence {confidencePct}
+              </span>
+            ) : null}
+            {fit ? (
+              <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                fit: {String(fit)}
+              </span>
+            ) : null}
+          </div>
         </div>
 
         <div className="mt-4 grid gap-3">
           {website ? (
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Website</div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Website analyzed</div>
               <div className="mt-1 font-mono text-xs text-gray-700 dark:text-gray-200 break-all">{String(website)}</div>
             </div>
           ) : null}
 
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-            <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">What the business does</div>
+            <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Business summary</div>
             <div className="mt-1 text-sm text-gray-800 dark:text-gray-200">
-              {whatTheyDo ? String(whatTheyDo) : <span className="text-gray-500">No summary found in ai_analysis.</span>}
+              {businessGuess ? (
+                String(businessGuess)
+              ) : (
+                <span className="text-gray-500 dark:text-gray-400">No businessGuess found in ai_analysis.</span>
+              )}
             </div>
+            {fitReason ? (
+              <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+                <span className="font-semibold">Fit reason:</span> {String(fitReason)}
+              </div>
+            ) : null}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -410,12 +452,70 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
             </div>
 
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Industry (AI guess)</div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Industry (AI suggested)</div>
               <div className="mt-1 font-mono text-xs text-gray-700 dark:text-gray-200">
-                {industries ? String(industries) : "—"}
+                {suggestedIndustryKey ? String(suggestedIndustryKey) : "—"}
               </div>
             </div>
           </div>
+
+          {(detectedServices.length || billingSignals.length) ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Detected services</div>
+                {detectedServices.length ? (
+                  <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-gray-800 dark:text-gray-200">
+                    {detectedServices.slice(0, 10).map((s) => (
+                      <li key={s}>{s}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">—</div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Billing signals</div>
+                {billingSignals.length ? (
+                  <ul className="mt-2 list-disc pl-5 space-y-1 text-sm text-gray-800 dark:text-gray-200">
+                    {billingSignals.slice(0, 10).map((s) => (
+                      <li key={s}>{s}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">—</div>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {(analyzedAt || modelUsed || source || lastAction) ? (
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+              <div className="font-semibold text-gray-700 dark:text-gray-200">Analysis metadata</div>
+              <div className="mt-2 grid gap-1">
+                {analyzedAt ? <div>Analyzed: <span className="font-mono">{String(analyzedAt)}</span></div> : null}
+                {source ? <div>Source: <span className="font-mono">{String(source)}</span></div> : null}
+                {modelUsed ? <div>Model: <span className="font-mono">{String(modelUsed)}</span></div> : null}
+                {lastAction ? <div>Last action: <span className="font-mono">{String(lastAction)}</span></div> : null}
+              </div>
+            </div>
+          ) : null}
+
+          <details className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+            <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-200">
+              View raw ai_analysis JSON
+            </summary>
+            <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-white p-3 text-[11px] leading-snug text-gray-900 dark:border-gray-800 dark:bg-black dark:text-gray-100">
+              {JSON.stringify(onboarding ?? {}, null, 2)}
+            </pre>
+
+            {rawPreview ? (
+              <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+                <div className="font-semibold">rawWebIntelPreview</div>
+                <pre className="mt-2 whitespace-pre-wrap text-[11px] leading-snug">{String(rawPreview)}</pre>
+              </div>
+            ) : null}
+          </details>
         </div>
       </div>
 
