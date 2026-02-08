@@ -17,8 +17,8 @@ import {
 import { Step1 } from "./steps/Step1";
 import { Step2 } from "./steps/Step2";
 import { Step3 } from "./steps/Step3";
+import { Step4QuickStart } from "./steps/Step4QuickStart";
 import { Step5Branding } from "./steps/Step5Branding";
-import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
 export default function OnboardingWizard() {
@@ -368,14 +368,11 @@ export default function OnboardingWizard() {
               onSubmit={saveIndustrySelection}
             />
           ) : step === 4 ? (
-            <HandoffStep
-              title="AI & Pricing Policy"
-              desc="Reuse the full admin setup screen to configure AI mode, Live Q&A, and render policy."
-              primaryLabel="Open AI Policy setup"
-              onPrimary={() => openSetup("/admin/setup/ai-policy").catch((e: any) => setErr(e?.message ?? String(e)))}
+            <Step4QuickStart
+              tenantId={String(state?.tenantId ?? tenantId ?? "").trim() || null}
               onBack={() => go(3)}
+              onPrimary={() => openSetup("/admin/setup/ai-policy").catch((e: any) => setErr(e?.message ?? String(e)))}
               onContinue={() => go(5)}
-              note="Tip: click Save Policy on that page, then come back here and continue."
             />
           ) : step === 5 ? (
             <Step5Branding
