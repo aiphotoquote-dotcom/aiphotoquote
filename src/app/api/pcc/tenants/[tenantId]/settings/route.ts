@@ -25,9 +25,15 @@ function normalizeTier(v: unknown): "tier0" | "tier1" | "tier2" {
   return "tier0";
 }
 
+function defaultMonthlyLimit(tier: "tier0" | "tier1" | "tier2"): number | null {
+  if (tier === "tier0") return 5;
+  if (tier === "tier1") return 50;
+  return null; // tier2 => unlimited
+}
+
 const BodySchema = z.object({
   planTier: z.string().optional(), // we normalize
-  monthlyQuoteLimit: z.number().int().min(0).nullable().optional(),
+  monthlyQuoteLimit: z.number().int().min(0).nullable().optional(), // null means "unlimited" (only allowed for tier2)
   graceCreditsTotal: z.number().int().min(0).optional(),
   graceUsed: z.number().int().min(0).optional(),
 });
@@ -54,9 +60,11 @@ async function getSettings(tenantId: string) {
   const row = rows(r)[0] ?? null;
   if (!row?.tenantId) return null;
 
+  const tier = normalizeTier(row.planTier);
+
   return {
     tenantId: String(row.tenantId),
-    planTier: normalizeTier(row.planTier),
+    planTier: tier,
     monthlyQuoteLimit:
       row.monthlyQuoteLimit === null || row.monthlyQuoteLimit === undefined
         ? null
@@ -65,6 +73,12 @@ async function getSettings(tenantId: string) {
     graceUsed: Number(row.graceUsed ?? 0),
     planSelectedAt: row.planSelectedAt ?? null,
     updatedAt: row.updatedAt ?? null,
+    // Helpful derived display values (doesn't change DB)
+    derived: {
+      defaultMonthlyQuoteLimit: defaultMonthlyLimit(tier),
+      isUnlimited: tier === "tier2",
+      freeAlias: tier === "tier0",
+    },
   };
 }
 
@@ -110,7 +124,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ tenant
     return NextResponse.json({ ok: false, error: "INVALID_BODY", issues: body.error.issues }, { status: 400 });
   }
 
-  // Load current so we can detect tier change w/o the $5 typing issue
+  // Load current so we can detect tier change safely
   const current = await getSettings(tenantId);
   if (!current) {
     return NextResponse.json({ ok: false, error: "TENANT_SETTINGS_NOT_FOUND" }, { status: 404 });
@@ -119,8 +133,33 @@ export async function POST(req: NextRequest, context: { params: Promise<{ tenant
   const nextTier =
     body.data.planTier === undefined ? current.planTier : normalizeTier(body.data.planTier);
 
-  const nextMonthlyLimit =
-    body.data.monthlyQuoteLimit === undefined ? current.monthlyQuoteLimit : body.data.monthlyQuoteLimit;
+  const tierChanged = nextTier !== current.planTier;
+
+  // Detect whether client explicitly tried to set the monthly limit
+  const monthlyProvided = body.data.monthlyQuoteLimit !== undefined;
+
+  // Start from current
+  let nextMonthlyLimit: number | null =
+    monthlyProvided ? (body.data.monthlyQuoteLimit ?? null) : (current.monthlyQuoteLimit ?? null);
+
+  // Enforce tier semantics:
+  // - tier2 => unlimited => NULL always
+  // - tier0/tier1 => never allow NULL; use defaults when NULL is sent
+  if (nextTier === "tier2") {
+    nextMonthlyLimit = null;
+  } else {
+    const def = defaultMonthlyLimit(nextTier);
+    if (nextMonthlyLimit === null) {
+      // If client sent null (or current was null), normalize back to tier default.
+      nextMonthlyLimit = def;
+    }
+  }
+
+  // If tier changed AND client didn't explicitly set a monthly limit,
+  // snap the monthly limit to the new tier default (so tier change "does the right thing").
+  if (tierChanged && !monthlyProvided) {
+    nextMonthlyLimit = defaultMonthlyLimit(nextTier);
+  }
 
   const nextGraceTotal =
     body.data.graceCreditsTotal === undefined ? current.graceCreditsTotal : body.data.graceCreditsTotal;
@@ -128,7 +167,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ tenant
   const nextGraceUsed =
     body.data.graceUsed === undefined ? current.graceUsed : body.data.graceUsed;
 
-  // sanity: used cannot exceed total (keep it strict to avoid weird UI states)
+  // sanity: used cannot exceed total
   if (nextGraceUsed > nextGraceTotal) {
     return NextResponse.json(
       { ok: false, error: "INVALID_CREDITS", message: "Grace used cannot exceed grace total." },
@@ -136,9 +175,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ tenant
     );
   }
 
-  const tierChanged = nextTier !== current.planTier;
-
-  // ✅ No more “could not determine data type of parameter $5”
+  // ✅ Avoids “could not determine data type of parameter …”
   await db.execute(sql`
     UPDATE tenant_settings
     SET
