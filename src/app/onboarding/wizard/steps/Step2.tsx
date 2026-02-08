@@ -1,27 +1,20 @@
+// src/app/onboarding/wizard/steps/Step2.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getConfidence, getPreviewText, needsConfirmation, summarizeFetchDebug } from "../utils";
 
-type Candidate = { key: string; label: string; score: number };
-
-type Conflict =
-  | { type: "close_call"; between: [string, string]; scores: [number, number]; reason: string }
-  | { type: "top_flipped"; from: string; to: string; reason: string }
-  | { type: "confidence_plateau"; prev: number; next: number; reason: string };
-
 type IndustryInference = {
   mode: "interview";
   status: "collecting" | "suggested";
   round: number;
-  confidenceScore: number;
+  confidenceScore: number; // 0..1
   suggestedIndustryKey: string | null;
   needsConfirmation: boolean;
   nextQuestion: { qid: string; question: string; help?: string; options?: string[] } | null;
   answers: Array<{ qid: string; question: string; answer: string; createdAt: string }>;
-  candidates: Candidate[];
-  conflicts?: Conflict[];
-  meta: { updatedAt: string };
+  candidates: Array<{ key: string; label: string; score: number }>;
+  meta?: { updatedAt?: string; model?: string };
 };
 
 function cn(...xs: Array<string | false | null | undefined>) {
@@ -33,83 +26,51 @@ function safeText(v: any) {
   return s ? s : "";
 }
 
-function pct(n: number) {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(100, Math.round(n * 100)));
+function pct(n01: number) {
+  if (!Number.isFinite(n01)) return 0;
+  const n = Math.max(0, Math.min(1, n01));
+  return Math.round(n * 100);
+}
+
+function formatErrHuman(e: any) {
+  const msg = safeText(e?.message ?? e);
+  if (!msg) return "Something went wrong.";
+  // Hide noisy JSON array dumps (like zod issues)
+  if (msg.startsWith("[{") || msg.startsWith("[{\"")) {
+    return "We hit a validation issue while saving. Please refresh and try again.";
+  }
+  // A couple common ones
+  if (msg.includes("UNAUTHENTICATED")) return "Please sign in again.";
+  if (msg.includes("FORBIDDEN_TENANT")) return "You don’t have access to this tenant.";
+  if (msg.includes("MISSING_OPENAI_API_KEY")) return "Server is missing OPENAI_API_KEY.";
+  if (msg.includes("LLM_NON_JSON_RESPONSE")) return "AI returned an unexpected format. Try again.";
+  return msg;
 }
 
 /**
  * Product-aware “why we ask” lines.
- * Keeps it conversational and ties directly to AIPhotoQuote configuration.
  */
 function whyForQid(qid: string) {
   switch (qid) {
     case "services":
       return "This picks your starter quote template + default services.";
+    case "objects":
     case "materials_objects":
       return "This loads the right photo checklist (what we ask customers to upload).";
     case "job_type":
       return "This tunes how we scope estimates (repair vs replacement vs install).";
+    case "customer_type":
     case "who_for":
       return "This tailors your intake language + typical job mix.";
     case "top_jobs":
       return "This helps us name your common jobs and question prompts.";
     case "materials":
       return "This improves fit accuracy and helps us choose the right terminology.";
-    case "specialty":
-      return "This catches niche signals (e.g., collision vs detailing vs restoration).";
-    case "location":
-      return "This is optional—helps with your service area phrasing.";
-    case "clarify_detail_vs_repair":
-    case "clarify_detail_vs_cleaning":
-    case "clarify_repair_vs_collision":
-    case "clarify_top_two":
-    case "clarify_freeform":
-      return "We saw conflicting signals — this quick clarifier prevents the wrong starter pack.";
     case "freeform":
       return "This is the fastest way to confirm the right experience.";
     default:
       return "This helps us tailor your setup.";
   }
-}
-
-function conflictHeadline(conflicts: Conflict[]) {
-  if (!conflicts?.length) return "";
-  // prioritize strongest perceived “intelligence”
-  const topFlipped = conflicts.find((c) => c.type === "top_flipped");
-  if (topFlipped) return "Conflicting signals detected";
-  const close = conflicts.find((c) => c.type === "close_call");
-  if (close) return "We’re down to two close matches";
-  const plateau = conflicts.find((c) => c.type === "confidence_plateau");
-  if (plateau) return "We need one clarifying answer";
-  return "We need one clarifying answer";
-}
-
-function conflictBody(conflicts: Conflict[], candidates: Candidate[]) {
-  if (!conflicts?.length) return "";
-
-  const parts: string[] = [];
-
-  for (const c of conflicts) {
-    if (c.type === "top_flipped") {
-      const from = candidates.find((x) => x.key === c.from)?.label ?? c.from;
-      const to = candidates.find((x) => x.key === c.to)?.label ?? c.to;
-      parts.push(`Your last answer shifted the best match from “${from}” to “${to}”.`);
-      continue;
-    }
-    if (c.type === "close_call") {
-      const a = candidates.find((x) => x.key === c.between[0])?.label ?? c.between[0];
-      const b = candidates.find((x) => x.key === c.between[1])?.label ?? c.between[1];
-      parts.push(`We’re very close between “${a}” and “${b}”.`);
-      continue;
-    }
-    if (c.type === "confidence_plateau") {
-      parts.push("Confidence stopped improving — we’ll ask one targeted question to break the tie.");
-      continue;
-    }
-  }
-
-  return parts.filter(Boolean).join(" ");
 }
 
 export function Step2(props: {
@@ -134,6 +95,10 @@ export function Step2(props: {
   const [ivErr, setIvErr] = useState<string | null>(null);
   const [ivAnswer, setIvAnswer] = useState("");
   const [inf, setInf] = useState<IndustryInference | null>(null);
+  const askedQidsRef = useRef<Set<string>>(new Set());
+
+  // extra debug / “new industry created”
+  const [ivDebug, setIvDebug] = useState<any | null>(null);
 
   const tenantId = safeText(props.tenantId);
   const websiteTrim = safeText(props.website);
@@ -149,7 +114,6 @@ export function Step2(props: {
 
   const serverSaysAnalyzing = String(props.aiAnalysisStatus ?? "").toLowerCase() === "running";
   const showAnalyzing = running || serverSaysAnalyzing;
-
   const canContinueWebsite = Boolean(props.aiAnalysis) && !mustConfirm;
 
   // Interview derived values
@@ -163,17 +127,11 @@ export function Step2(props: {
   const ivAnsweredCount = inf?.answers?.length ?? 0;
   const ivRound = Number(inf?.round ?? 1) || 1;
 
-  const ivConflicts: Conflict[] = Array.isArray(inf?.conflicts) ? (inf?.conflicts as any) : [];
-
-  // ✅ Locked state: ONLY when backend truly says “suggested”
   const isLocked = ivStatus === "suggested" && Boolean(ivSuggested);
+  const showInterview = !hasWebsite;
+  const canContinueInterview = isLocked;
 
-  // Copy thresholds (UI-only)
-  const isLow = ivConfidence < 0.55;
-  const isMedium = ivConfidence >= 0.55 && ivConfidence < 0.82;
-
-  // Soft progress cap to feel real
-  const IV_SOFT_MAX = 8;
+  const IV_SOFT_MAX = 10;
   const ivProgressPct = Math.max(
     8,
     Math.min(
@@ -182,29 +140,15 @@ export function Step2(props: {
     )
   );
 
-  const showInterview = !hasWebsite;
-  const canContinueInterview = isLocked;
-
   function topMatchLine() {
     const top = inf?.candidates?.[0];
-    const second = inf?.candidates?.[1];
-
     if (!top) return "Tell us a bit about your business and we’ll pick the best-fit setup.";
-
     if (isLocked) return `Locked in: ${top.label}. Next you’ll confirm it.`;
 
-    if (ivConflicts.length) {
-      const h = conflictHeadline(ivConflicts);
-      return h || "We need one clarifying answer.";
+    if ((inf?.candidates?.length ?? 0) > 1) {
+      const second = inf?.candidates?.[1];
+      if (second && top.score === second.score) return `We’re torn between ${top.label} and ${second.label}. One more question.`;
     }
-
-    if (second && top.score === second.score) {
-      return `We’re torn between ${top.label} and ${second.label}. One more question.`;
-    }
-
-    if (isLow) return `Still learning — a couple more answers will make this much smarter.`;
-    if (isMedium) return `Leaning toward ${top.label}. One or two more answers should lock it in.`;
-
     return `Leaning toward ${top.label}. A couple more answers will lock it in.`;
   }
 
@@ -212,25 +156,6 @@ export function Step2(props: {
     const last = inf?.answers?.[inf.answers.length - 1];
     if (!last?.answer) return "";
     return `Last answer: ${String(last.answer)}`;
-  }
-
-  function summaryTitle() {
-    if (isLocked) return "Your setup is ready";
-    if (ivConflicts.length) return "We’re actively resolving a mismatch";
-    return "We’re setting up your AIPhotoQuote experience";
-  }
-
-  function summarySubtext() {
-    if (isLocked) {
-      return "We’ve confidently picked the best-fit starter pack. You’ll confirm the final industry on the next step.";
-    }
-    if (ivConflicts.length) {
-      return "Your answers include conflicting signals. We’ll ask one targeted question to make sure we don’t preload the wrong templates.";
-    }
-    if (isLow) {
-      return "We’re building signal. Short, specific answers help a lot (services + what you work on + common jobs).";
-    }
-    return "We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step.";
   }
 
   async function ivPost(payload: any) {
@@ -249,18 +174,48 @@ export function Step2(props: {
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
       const next = (j?.industryInference ?? null) as IndustryInference | null;
-      setInf(next);
+
+      // guard against undefined fields
+      if (!next || typeof next !== "object") throw new Error("Interview returned no state.");
+
+      // Client-side anti-repeat guard: if server returns a qid we already asked, request a start again.
+      const qid = safeText(next?.nextQuestion?.qid);
+      if (payload?.action === "start" && qid && askedQidsRef.current.has(qid)) {
+        // one retry
+        const res2 = await fetch("/api/onboarding/industry-interview", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tenantId, action: "start" }),
+        });
+        const j2 = await res2.json().catch(() => null);
+        const next2 = (j2?.industryInference ?? null) as IndustryInference | null;
+        if (res2.ok && j2?.ok && next2?.nextQuestion?.qid && !askedQidsRef.current.has(next2.nextQuestion.qid)) {
+          setInf(next2);
+        } else {
+          setInf(next);
+        }
+      } else {
+        setInf(next);
+      }
+
+      // track asked qids (both next question + answered qids)
+      if (next?.nextQuestion?.qid) askedQidsRef.current.add(next.nextQuestion.qid);
+      (next?.answers ?? []).forEach((a) => {
+        if (a?.qid) askedQidsRef.current.add(a.qid);
+      });
+
+      setIvDebug(j?.debug ?? null);
       setIvAnswer("");
       return next;
     } catch (e: any) {
-      setIvErr(e?.message ?? String(e));
+      setIvErr(formatErrHuman(e));
       throw e;
     } finally {
       setIvLoading(false);
     }
   }
 
-  // ✅ Only auto-run website scan if a website exists; otherwise start interview
+  // Auto-run: website scan if website exists; otherwise start interview
   useEffect(() => {
     if (autoRanRef.current) return;
     autoRanRef.current = true;
@@ -274,7 +229,7 @@ export function Step2(props: {
       setRunning(true);
       props
         .onRun()
-        .catch((e: any) => props.onError(e?.message ?? String(e)))
+        .catch((e: any) => props.onError(formatErrHuman(e)))
         .finally(() => {
           if (alive) setRunning(false);
         });
@@ -285,7 +240,8 @@ export function Step2(props: {
     }
 
     // no website -> start interview
-    ivPost({ action: "start" }).catch((e: any) => props.onError(e?.message ?? String(e)));
+    askedQidsRef.current = new Set();
+    ivPost({ action: "start" }).catch((e: any) => props.onError(formatErrHuman(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props]);
 
@@ -294,7 +250,14 @@ export function Step2(props: {
     if (hasWebsite) return;
     const fromAi = props.aiAnalysis?.industryInference ?? null;
     if (fromAi && typeof fromAi === "object" && fromAi.mode === "interview") {
-      setInf(fromAi as IndustryInference);
+      const next = fromAi as IndustryInference;
+      setInf(next);
+
+      // hydrate asked set
+      const s = new Set<string>();
+      (next?.answers ?? []).forEach((a) => a?.qid && s.add(a.qid));
+      if (next?.nextQuestion?.qid) s.add(next.nextQuestion.qid);
+      askedQidsRef.current = s;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasWebsite, props.aiAnalysis]);
@@ -311,7 +274,7 @@ export function Step2(props: {
           : "No website needed — we’ll ask a few smart questions to load the right templates, photos, and defaults."}
       </div>
 
-      {/* ✅ Website card only when a website exists */}
+      {/* Website card only when a website exists */}
       {hasWebsite ? (
         <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
           <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
@@ -320,25 +283,36 @@ export function Step2(props: {
       ) : null}
 
       {/* ---------------- INTERVIEW MODE (NO WEBSITE) ---------------- */}
-      {!hasWebsite ? (
+      {showInterview ? (
         <div className="mt-4 space-y-4">
           {/* Top summary row */}
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="font-semibold">{summaryTitle()}</div>
-                <div className="mt-1 text-xs opacity-90">{summarySubtext()}</div>
-
+                <div className="font-semibold">
+                  {isLocked ? "Your setup is ready" : "We’re setting up your AIPhotoQuote experience"}
+                </div>
+                <div className="mt-1 text-xs opacity-90">
+                  {isLocked
+                    ? "We’ve confidently picked the best-fit starter pack. You’ll confirm the final industry on the next step."
+                    : "We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step."}
+                </div>
                 <div className="mt-2 text-xs font-semibold opacity-95">{topMatchLine()}</div>
+                {lastAnswerLine() ? <div className="mt-1 text-xs opacity-90">{lastAnswerLine()}</div> : null}
 
-                {ivConflicts.length ? (
-                  <div className="mt-2 rounded-xl border border-indigo-200/60 bg-white/60 p-3 text-xs text-indigo-950 dark:border-indigo-900/40 dark:bg-black/20 dark:text-indigo-100">
-                    <div className="font-semibold">{conflictHeadline(ivConflicts) || "Mismatch detected"}</div>
-                    <div className="mt-1 opacity-90">{conflictBody(ivConflicts, inf?.candidates ?? [])}</div>
+                {/* If backend created/proposed a new industry, show it (during testing this is super useful) */}
+                {ivDebug?.proposedNewIndustry?.label ? (
+                  <div className="mt-2 text-xs rounded-lg border border-indigo-200 bg-white/60 p-2 dark:bg-black/20">
+                    <span className="font-semibold">New industry detected:</span>{" "}
+                    <span className="font-semibold">{String(ivDebug.proposedNewIndustry.label)}</span>
+                    {ivDebug.proposedNewIndustry.key ? (
+                      <>
+                        {" "}
+                        <span className="font-mono text-[11px] opacity-80">({String(ivDebug.proposedNewIndustry.key)})</span>
+                      </>
+                    ) : null}
                   </div>
                 ) : null}
-
-                {lastAnswerLine() ? <div className="mt-2 text-xs opacity-90">{lastAnswerLine()}</div> : null}
               </div>
 
               <div className="shrink-0 text-right">
@@ -346,7 +320,6 @@ export function Step2(props: {
                   Match strength: <span className="font-mono">{pct(ivConfidence)}%</span>
                 </div>
                 <div className="text-[11px] opacity-90">Round {ivRound}</div>
-                <div className="text-[11px] opacity-80">backend: {pct(ivConfidence)}%</div>
               </div>
             </div>
 
@@ -361,20 +334,18 @@ export function Step2(props: {
             ) : null}
           </div>
 
-          {/* ✅ Question card */}
+          {/* Question card (hidden once locked) */}
           {!isLocked ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-xs text-gray-500 dark:text-gray-400">Next</div>
                   <div className="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
-                    {inf?.nextQuestion?.question ?? (ivLoading ? "Loading…" : "We have enough information.")}
+                    {inf?.nextQuestion?.question ?? (ivLoading ? "Loading…" : "Loading next question…")}
                   </div>
 
                   {inf?.nextQuestion?.qid ? (
-                    <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                      {whyForQid(inf.nextQuestion.qid)}
-                    </div>
+                    <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{whyForQid(inf.nextQuestion.qid)}</div>
                   ) : null}
 
                   {inf?.nextQuestion?.help ? (
@@ -386,7 +357,10 @@ export function Step2(props: {
                   type="button"
                   className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 disabled:opacity-50"
                   disabled={ivLoading}
-                  onClick={() => ivPost({ action: "reset" }).catch(() => null)}
+                  onClick={() => {
+                    askedQidsRef.current = new Set();
+                    ivPost({ action: "reset" }).catch(() => null);
+                  }}
                   title="Start interview over"
                 >
                   Reset
@@ -437,7 +411,7 @@ export function Step2(props: {
                       action: "answer",
                       qid: inf?.nextQuestion?.qid,
                       answer: ivAnswer.trim(),
-                    }).catch((e: any) => props.onError(e?.message ?? String(e)))
+                    }).catch((e: any) => props.onError(formatErrHuman(e)))
                   }
                 >
                   {ivLoading ? "Saving…" : "Submit"}
@@ -450,7 +424,7 @@ export function Step2(props: {
             </div>
           ) : null}
 
-          {/* ✅ Best matches list */}
+          {/* Best matches list (hidden once locked) */}
           {!isLocked && inf?.candidates?.length ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-center justify-between gap-3">
@@ -459,7 +433,7 @@ export function Step2(props: {
               </div>
 
               <div className="mt-3 grid gap-2">
-                {inf.candidates.slice(0, 4).map((c) => (
+                {inf.candidates.slice(0, 5).map((c) => (
                   <div
                     key={c.key}
                     className={cn(
@@ -483,20 +457,20 @@ export function Step2(props: {
               </div>
 
               <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                We’ll stop once the top match is clear — or ask a clarifier if answers conflict.
+                We’ll stop once the top match is clear.
               </div>
             </div>
           ) : null}
 
-          {/* ✅ Ready panel */}
+          {/* Ready panel (shown once locked) */}
           {isLocked ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
                 <div className="font-semibold">Ready</div>
                 <div className="mt-1">
                   We’ll preload the{" "}
-                  <span className="font-semibold">{inf?.candidates?.[0]?.label ?? ivSuggested}</span> starter pack.
-                  Next you’ll confirm the industry.
+                  <span className="font-semibold">{inf?.candidates?.[0]?.label ?? ivSuggested}</span>{" "}
+                  starter pack. Next you’ll confirm the industry.
                 </div>
               </div>
             </div>
@@ -531,7 +505,7 @@ export function Step2(props: {
       {/* ---------------- WEBSITE MODE (HAS WEBSITE) ---------------- */}
       {props.aiAnalysisError ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-          {props.aiAnalysisError}
+          {formatErrHuman(props.aiAnalysisError)}
         </div>
       ) : null}
 
@@ -546,7 +520,7 @@ export function Step2(props: {
               try {
                 await props.onRun();
               } catch (e: any) {
-                props.onError(e?.message ?? String(e));
+                props.onError(formatErrHuman(e));
               } finally {
                 setRunning(false);
               }
@@ -591,7 +565,7 @@ export function Step2(props: {
                         await props.onConfirm({ answer: "yes" });
                         setFeedback("");
                       } catch (e: any) {
-                        props.onError(e?.message ?? String(e));
+                        props.onError(formatErrHuman(e));
                       } finally {
                         setConfirming(false);
                       }
@@ -609,7 +583,7 @@ export function Step2(props: {
                       try {
                         await props.onConfirm({ answer: "no", feedback: feedback.trim() || undefined });
                       } catch (e: any) {
-                        props.onError(e?.message ?? String(e));
+                        props.onError(formatErrHuman(e));
                       } finally {
                         setConfirming(false);
                       }
@@ -627,7 +601,7 @@ export function Step2(props: {
                     value={feedback}
                     onChange={(e) => setFeedback(e.target.value)}
                     rows={4}
-                    placeholder="Example: We do custom automotive upholstery (seats + door panels), headliners, and marine vinyl repairs. We do not do painting."
+                    placeholder="Example: We do custom automotive upholstery (seats + door panels), headliners, and marine vinyl repairs."
                     className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none dark:border-emerald-900/40 dark:bg-gray-950 dark:text-gray-100"
                   />
                 </div>
@@ -656,19 +630,6 @@ export function Step2(props: {
                       {" • "}
                       Base attempts: <span className="font-mono">{fetchSummary.attemptedCount}</span>
                     </div>
-                    {fetchSummary.pagesUsed.length ? (
-                      <div className="mt-1 break-words">
-                        Used:
-                        <ul className="mt-1 list-disc pl-5">
-                          {fetchSummary.pagesUsed.slice(0, 4).map((u, i) => (
-                            <li key={i} className="break-all">
-                              {u}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {fetchSummary.hint ? <div className="mt-2 italic opacity-90">{fetchSummary.hint}</div> : null}
                   </div>
                 ) : null}
 
@@ -708,14 +669,13 @@ export function Step2(props: {
                   ? "Please confirm/correct the website analysis first."
                   : ""
                 : !canContinueInterview
-                    ? "Answer a couple more questions to reach a confident match."
-                    : ""
+                  ? "Answer a couple more questions to reach a confident match."
+                  : ""
             }
           >
             Continue
           </button>
 
-          {/* Escape hatch for support/testing */}
           <button
             type="button"
             className="rounded-2xl border border-gray-200 bg-white py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
