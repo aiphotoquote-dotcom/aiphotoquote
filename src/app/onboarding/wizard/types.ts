@@ -44,18 +44,14 @@ export type SubIndustryItem = {
 export type IndustriesResponse = {
   ok: boolean;
   tenantId: string;
-
-  // existing
   selectedKey: string | null;
   selectedLabel?: string | null;
-
   industries: IndustryItem[];
 
-  // ✅ new (additive; safe if missing)
+  // ✅ new additive fields from your updated API
   suggestedKey?: string | null;
   subIndustries?: SubIndustryItem[];
   suggestedSubIndustryLabel?: string | null;
-  selectedSubIndustryKey?: string | null;
 
   error?: string;
   message?: string;

@@ -1,4 +1,5 @@
 // src/app/onboarding/wizard/OnboardingWizard.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -209,8 +210,11 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
-  // ✅ Updated to accept tenant sub-industry label
-  async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string }) {
+  async function saveIndustrySelection(args: {
+    industryKey?: string;
+    industryLabel?: string;
+    subIndustryLabel?: string | null;
+  }) {
     setErr(null);
     setLastAction(null);
 
@@ -231,7 +235,6 @@ export default function OnboardingWizard() {
     go(4);
   }
 
-  // ✅ ensure admin pages land on the correct tenant (active-tenant cookie)
   async function ensureActiveTenant(tid: string) {
     const tenantIdClean = String(tid ?? "").trim();
     if (!tenantIdClean) return;
@@ -240,7 +243,7 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tenantId: tenantIdClean }),
-      credentials: "include", // ✅ critical on iOS Safari
+      credentials: "include",
       cache: "no-store",
     });
 
@@ -314,7 +317,9 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              We’ll tailor your quoting experience in just a few steps.
+            </div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -367,7 +372,7 @@ export default function OnboardingWizard() {
               onBack={() => go(2)}
               onReInterview={() => go(2)}
               onSubmit={async ({ industryKey, subIndustryLabel }) =>
-                saveIndustrySelection({ industryKey, subIndustryLabel })
+                saveIndustrySelection({ industryKey, subIndustryLabel: subIndustryLabel ?? null })
               }
             />
           ) : step === 4 ? (
