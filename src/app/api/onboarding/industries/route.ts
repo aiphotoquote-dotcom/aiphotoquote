@@ -19,6 +19,12 @@ type ApiIndustryItem = {
   source: "platform";
 };
 
+type ApiSubIndustryItem = {
+  id: string;
+  key: string;
+  label: string;
+};
+
 /* --------------------- utils --------------------- */
 
 function safeTrim(v: unknown) {
@@ -52,6 +58,7 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
     from tenant_members
     where tenant_id = ${tenantId}::uuid
       and clerk_user_id = ${clerkUserId}
+      and status = 'active'
     limit 1
   `);
   const row = firstRow(r);
@@ -69,21 +76,56 @@ function titleFromKey(key: string) {
 }
 
 // Normalize keys from AI or user into a stable snake_case key.
-// NOTE: do NOT require it to start with a letter; keep permissive but safe.
-function normalizeIndustryKey(raw: string) {
+function normalizeKey(raw: string) {
   const s = safeTrim(raw).toLowerCase();
   if (!s) return "";
-  const key = s
+  return s
     .replace(/&/g, "and")
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 64);
-  return key;
+}
+
+/**
+ * Try to discover any sub-industry label hint from ai_analysis without hard-coding a single shape.
+ * (We can tighten this later when you lock the ai_analysis schema.)
+ */
+function getSuggestedSubIndustryLabel(ai: any): string {
+  if (!ai || typeof ai !== "object") return "";
+
+  const direct =
+    safeTrim((ai as any).suggestedSubIndustryLabel) ||
+    safeTrim((ai as any).subIndustryLabel) ||
+    safeTrim((ai as any).subIndustryGuess);
+
+  if (direct) return direct;
+
+  const inf = (ai as any).industryInference;
+  if (inf && typeof inf === "object") {
+    return (
+      safeTrim((inf as any).suggestedSubIndustryLabel) ||
+      safeTrim((inf as any).subIndustryLabel) ||
+      safeTrim((inf as any).subIndustryGuess)
+    );
+  }
+
+  return "";
 }
 
 /* --------------------- db helpers --------------------- */
 
-async function getSuggestedIndustryKey(tenantId: string): Promise<string> {
+async function readTenantSelection(tenantId: string): Promise<string> {
+  const r = await db.execute(sql`
+    select industry_key
+    from tenant_settings
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+  const row = firstRow(r);
+  return normalizeKey(row?.industry_key ?? "");
+}
+
+async function getSuggestedIndustryKeyFromAi(tenantId: string): Promise<string> {
   const r = await db.execute(sql`
     select ai_analysis
     from tenant_onboarding
@@ -92,7 +134,19 @@ async function getSuggestedIndustryKey(tenantId: string): Promise<string> {
   `);
   const row = firstRow(r);
   const ai = row?.ai_analysis ?? null;
-  return normalizeIndustryKey(ai?.suggestedIndustryKey ?? "");
+  return normalizeKey(ai?.suggestedIndustryKey ?? "");
+}
+
+async function getSuggestedSubIndustryLabelFromAi(tenantId: string): Promise<string> {
+  const r = await db.execute(sql`
+    select ai_analysis
+    from tenant_onboarding
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+  const row = firstRow(r);
+  const ai = row?.ai_analysis ?? null;
+  return getSuggestedSubIndustryLabel(ai);
 }
 
 async function listIndustries(): Promise<ApiIndustryItem[]> {
@@ -113,33 +167,68 @@ async function listIndustries(): Promise<ApiIndustryItem[]> {
   }));
 }
 
-async function ensureIndustryExists(industryKeyRaw: string): Promise<string> {
-  const key = normalizeIndustryKey(industryKeyRaw);
+async function ensureIndustryExists(industryKeyOrLabelRaw: string, explicitLabel?: string): Promise<string> {
+  const key = normalizeKey(industryKeyOrLabelRaw);
   if (!key) return "";
 
-  const label = titleFromKey(key);
+  const label = safeTrim(explicitLabel) || titleFromKey(key);
 
-  // ✅ safe regardless of whether industries.id has a default
+  // ✅ create if missing; keep label fresh
   await db.execute(sql`
     insert into industries (id, key, label, description)
     values (gen_random_uuid(), ${key}, ${label}, null)
     on conflict (key) do update
-    set label = excluded.label
+      set label = excluded.label
   `);
 
   return key;
 }
 
 async function upsertTenantIndustryKey(tenantId: string, industryKeyRaw: string): Promise<string> {
-  const key = normalizeIndustryKey(industryKeyRaw);
+  const key = normalizeKey(industryKeyRaw);
   if (!key) return "";
 
   await db.execute(sql`
     insert into tenant_settings (tenant_id, industry_key, updated_at)
     values (${tenantId}::uuid, ${key}, now())
     on conflict (tenant_id) do update
-    set industry_key = excluded.industry_key,
-        updated_at = now()
+      set industry_key = excluded.industry_key,
+          updated_at = now()
+  `);
+
+  return key;
+}
+
+async function listTenantSubIndustries(tenantId: string): Promise<ApiSubIndustryItem[]> {
+  // NOTE: your tenant_sub_industries sample shows: id, tenant_id, key, label, updated_at
+  const r = await db.execute(sql`
+    select id, key, label
+    from tenant_sub_industries
+    where tenant_id = ${tenantId}::uuid
+    order by label asc
+  `);
+
+  return rowsOf(r).map((x: any) => ({
+    id: String(x.id),
+    key: String(x.key),
+    label: String(x.label),
+  }));
+}
+
+async function upsertTenantSubIndustry(args: { tenantId: string; label?: string; key?: string }): Promise<string> {
+  const label = safeTrim(args.label);
+  const key = normalizeKey(args.key || label);
+
+  if (!label || !key) return "";
+
+  // We assume a uniqueness constraint like (tenant_id, key).
+  // If yours differs, we can adjust after you paste schema.
+  await db.execute(sql`
+    insert into tenant_sub_industries (id, tenant_id, key, label, updated_at)
+    values (gen_random_uuid(), ${args.tenantId}::uuid, ${key}, ${label}, now())
+    on conflict (tenant_id, key) do update
+      set label = excluded.label,
+          updated_at = now()
   `);
 
   return key;
@@ -153,8 +242,14 @@ const GetSchema = z.object({
 
 const PostSchema = z.object({
   tenantId: z.string().min(1),
+
+  // Industry selection (existing behavior)
   industryKey: z.string().optional(),
   industryLabel: z.string().optional(),
+
+  // ✅ Sub-industry: allow onboarding to create/select without pre-pop
+  subIndustryKey: z.string().optional(),
+  subIndustryLabel: z.string().optional(),
 });
 
 /* --------------------- handlers --------------------- */
@@ -172,32 +267,48 @@ export async function GET(req: Request) {
     const tenantId = parsed.data.tenantId;
     await requireMembership(clerkUserId, tenantId);
 
-    // 1) Read suggested key from ai_analysis
-    const suggestedKey = await getSuggestedIndustryKey(tenantId);
+    // 1) Read current saved selection (do NOT mutate on GET)
+    const savedKey = await readTenantSelection(tenantId);
 
-    // 2) Ensure it exists globally (your desired UX)
+    // 2) Read AI suggested key and ensure it exists globally (so dropdown can show it)
+    const suggestedKey = await getSuggestedIndustryKeyFromAi(tenantId);
     let ensuredSuggestedKey = "";
-    if (suggestedKey) {
-      ensuredSuggestedKey = await ensureIndustryExists(suggestedKey);
-    }
+    if (suggestedKey) ensuredSuggestedKey = await ensureIndustryExists(suggestedKey);
 
-    // 3) Load list after ensure
+    // 3) Load industries after ensure
     const industries = await listIndustries();
 
-    // 4) Pick default selected key
+    // 4) Decide "selectedKey" for UI default (still not persisted unless POST)
     const selectedKey =
-      (ensuredSuggestedKey && industries.some((x) => x.key === ensuredSuggestedKey) ? ensuredSuggestedKey : null) ??
-      (industries[0]?.key ?? null);
+      (savedKey && industries.some((x) => x.key === savedKey) ? savedKey : "") ||
+      (ensuredSuggestedKey && industries.some((x) => x.key === ensuredSuggestedKey) ? ensuredSuggestedKey : "") ||
+      (industries[0]?.key ?? "");
 
-    // 5) ✅ Persist selection into tenant_settings automatically (so UX can continue without extra click)
-    if (selectedKey) {
-      await upsertTenantIndustryKey(tenantId, selectedKey);
-    }
+    const selectedLabel = selectedKey ? industries.find((x) => x.key === selectedKey)?.label ?? null : null;
 
-    const selectedLabel =
-      (selectedKey ? industries.find((x) => x.key === selectedKey)?.label ?? null : null) ?? null;
+    // 5) Sub-industries (tenant scoped)
+    const subIndustries = await listTenantSubIndustries(tenantId);
 
-    return NextResponse.json({ ok: true, tenantId, selectedKey, selectedLabel, industries }, { status: 200 });
+    // Optional AI hint (don’t auto-create on GET — just return hint)
+    const suggestedSubIndustryLabel = await getSuggestedSubIndustryLabelFromAi(tenantId);
+
+    return NextResponse.json(
+      {
+        ok: true,
+        tenantId,
+        selectedKey: selectedKey || null,
+        selectedLabel,
+
+        // Step3 expects this
+        industries,
+
+        // ✅ new fields (safe additive)
+        suggestedKey: ensuredSuggestedKey || null,
+        subIndustries,
+        suggestedSubIndustryLabel: suggestedSubIndustryLabel || null,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -221,47 +332,55 @@ export async function POST(req: Request) {
     const industryKeyRaw = safeTrim(parsed.data.industryKey);
     const industryLabelRaw = safeTrim(parsed.data.industryLabel);
 
-    // Create-new path (tenant typed label)
+    const subIndustryKeyRaw = safeTrim(parsed.data.subIndustryKey);
+    const subIndustryLabelRaw = safeTrim(parsed.data.subIndustryLabel);
+
+    // --- Industry: create-or-select ---
+    let ensuredIndustryKey = "";
+
+    // Create-from-label path
     if (industryLabelRaw && !industryKeyRaw) {
-      const key = normalizeIndustryKey(industryLabelRaw);
-      if (!key) {
-        return NextResponse.json(
-          { ok: false, error: "BAD_REQUEST", message: "Industry label is invalid." },
-          { status: 400 }
-        );
-      }
-
-      // ✅ safe regardless of industries.id default
-      await db.execute(sql`
-        insert into industries (id, key, label, description)
-        values (gen_random_uuid(), ${key}, ${industryLabelRaw}, null)
-        on conflict (key) do update
-        set label = excluded.label
-      `);
-
-      const savedKey = await upsertTenantIndustryKey(tenantId, key);
-      return NextResponse.json({ ok: true, tenantId, selectedKey: savedKey }, { status: 200 });
-    }
-
-    // Select-existing path
-    if (!industryKeyRaw) {
+      ensuredIndustryKey = await ensureIndustryExists(industryLabelRaw, industryLabelRaw);
+    } else if (industryKeyRaw) {
+      ensuredIndustryKey = await ensureIndustryExists(industryKeyRaw, industryLabelRaw || undefined);
+    } else {
       return NextResponse.json(
         { ok: false, error: "INDUSTRY_REQUIRED", message: "Choose an industry." },
         { status: 400 }
       );
     }
 
-    // Ensure key exists (safety) + normalize it
-    const ensuredKey = await ensureIndustryExists(industryKeyRaw);
-    if (!ensuredKey) {
+    if (!ensuredIndustryKey) {
       return NextResponse.json(
-        { ok: false, error: "BAD_REQUEST", message: "Industry key is invalid." },
+        { ok: false, error: "BAD_REQUEST", message: "Industry is invalid." },
         { status: 400 }
       );
     }
 
-    const savedKey = await upsertTenantIndustryKey(tenantId, ensuredKey);
-    return NextResponse.json({ ok: true, tenantId, selectedKey: savedKey }, { status: 200 });
+    const savedKey = await upsertTenantIndustryKey(tenantId, ensuredIndustryKey);
+
+    // --- Sub-industry: tenant-scoped create/select (optional) ---
+    let savedSubIndustryKey = "";
+    if (subIndustryLabelRaw || subIndustryKeyRaw) {
+      savedSubIndustryKey = await upsertTenantSubIndustry({
+        tenantId,
+        label: subIndustryLabelRaw || subIndustryKeyRaw,
+        key: subIndustryKeyRaw || undefined,
+      });
+    }
+
+    const subIndustries = await listTenantSubIndustries(tenantId);
+
+    return NextResponse.json(
+      {
+        ok: true,
+        tenantId,
+        selectedKey: savedKey,
+        selectedSubIndustryKey: savedSubIndustryKey || null,
+        subIndustries,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
