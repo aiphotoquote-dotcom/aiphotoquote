@@ -44,42 +44,20 @@ function whyForQid(qid: string) {
     case "job_type":
       return "This tunes how we scope estimates (repair vs replacement vs install).";
     case "who_for":
-      return "This tailors intake wording + common job mix.";
+      return "This tailors your intake language + typical job mix.";
     case "top_jobs":
-      return "This helps us name your common jobs and default customer questions.";
+      return "This helps us name your common jobs and question prompts.";
     case "materials":
-      return "This improves terminology and photo-requests (materials drive what we need to see).";
+      return "This improves fit accuracy and helps us choose the right terminology.";
     case "specialty":
       return "This catches niche signals (e.g., collision vs detailing vs restoration).";
     case "location":
-      return "Optional—helps your service-area phrasing.";
+      return "This is optional—helps with your service area phrasing.";
     case "freeform":
-      return "Fastest way to lock the right experience in one shot.";
-    case "disambiguate":
-      return "This resolves the last remaining ambiguity so we can stop early.";
+      return "This is the fastest way to confirm the right experience.";
     default:
       return "This helps us tailor your setup.";
   }
-}
-
-/**
- * UI-only “match strength” metric derived from candidate dominance.
- * This is NOT the backend confidenceScore — it’s a UX progress signal.
- */
-function matchStrengthFromCandidates(cands: Array<{ score: number }>) {
-  const top = Number(cands?.[0]?.score ?? 0);
-  const second = Number(cands?.[1]?.score ?? 0);
-
-  if (!Number.isFinite(top) || top <= 0) return 0;
-
-  // Dominance grows as top pulls away from second and as top increases.
-  // Smooth curve, capped.
-  const sep = Math.max(0, top - second);
-  const mag = Math.min(1, top / 10);
-  const dom = Math.min(1, sep / 6);
-
-  const v = 0.55 * mag + 0.45 * dom;
-  return Math.max(0, Math.min(1, v));
 }
 
 export function Step2(props: {
@@ -102,11 +80,7 @@ export function Step2(props: {
   // Interview state
   const [ivLoading, setIvLoading] = useState(false);
   const [ivErr, setIvErr] = useState<string | null>(null);
-
-  // For free-text (optional detail)
-  const [ivDetail, setIvDetail] = useState("");
-
-  // For option-based answers that require a tap (we’ll submit immediately)
+  const [ivAnswer, setIvAnswer] = useState("");
   const [inf, setInf] = useState<IndustryInference | null>(null);
 
   const tenantId = safeText(props.tenantId);
@@ -127,7 +101,7 @@ export function Step2(props: {
   const canContinueWebsite = Boolean(props.aiAnalysis) && !mustConfirm;
 
   // Interview derived values
-  const ivConfidenceBackend = useMemo(() => {
+  const ivConfidence = useMemo(() => {
     const v = Number(inf?.confidenceScore ?? 0);
     return Number.isFinite(v) ? v : 0;
   }, [inf?.confidenceScore]);
@@ -137,44 +111,40 @@ export function Step2(props: {
   const ivAnsweredCount = inf?.answers?.length ?? 0;
   const ivRound = Number(inf?.round ?? 1) || 1;
 
-  const top = inf?.candidates?.[0] ?? null;
-  const second = inf?.candidates?.[1] ?? null;
+  // ✅ Locked state: when backend says we’ve confidently suggested an industry
+  const isLocked = ivStatus === "suggested" && Boolean(ivSuggested);
 
-  const matchStrength = useMemo(() => matchStrengthFromCandidates(inf?.candidates ?? []), [inf?.candidates]);
-
-  // Soft progress bar (feels real even if backend confidence is conservative)
-  const IV_SOFT_MAX = 7;
+  // Progress should feel real (not hard-coded to 5)
+  // We can’t know API MaxRounds here, so we use a soft cap that matches server intent.
+  const IV_SOFT_MAX = 8;
   const ivProgressPct = Math.max(
-    10,
+    8,
     Math.min(
       100,
       Math.round(
-        ((Math.min(ivAnsweredCount, IV_SOFT_MAX) +
-          (ivStatus === "suggested" ? 1 : 0) +
-          Math.min(1, matchStrength)) /
-          (IV_SOFT_MAX + 2)) *
-          100
+        ((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (isLocked ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100
       )
     )
   );
 
   const showInterview = !hasWebsite;
-  const canContinueInterview = ivStatus === "suggested" && Boolean(ivSuggested);
-
-  const lastAnswer = inf?.answers?.length ? inf.answers[inf.answers.length - 1] : null;
+  const canContinueInterview = isLocked;
 
   function topMatchLine() {
+    const top = inf?.candidates?.[0];
     if (!top) return "Tell us a bit about your business and we’ll pick the best-fit setup.";
-    if (canContinueInterview) return `Locked in: ${top.label}. Next you’ll confirm it.`;
-    if (second && top.score === second.score) return `We’re split between ${top.label} and ${second.label}. One more question will decide.`;
-    return `Leaning toward ${top.label}. One or two more answers should lock it in.`;
+    if (isLocked) return `Locked in: ${top.label}. Next you’ll confirm it.`;
+    if ((inf?.candidates?.length ?? 0) > 1) {
+      const second = inf?.candidates?.[1];
+      if (second && top.score === second.score) return `We’re torn between ${top.label} and ${second.label}. One more question.`;
+    }
+    return `Leaning toward ${top.label}. A couple more answers will lock it in.`;
   }
 
-  function nextQuestionIntro() {
-    if (!inf?.nextQuestion?.qid) return "";
-    if (!top) return "Quick check:";
-    // Make it feel like it’s learning: “Based on X, next we ask Y”
-    return `Based on "${top.label}", next:`;
+  function lastAnswerLine() {
+    const last = inf?.answers?.[inf.answers.length - 1];
+    if (!last?.answer) return "";
+    return `Last answer: ${String(last.answer)}`;
   }
 
   async function ivPost(payload: any) {
@@ -194,9 +164,7 @@ export function Step2(props: {
 
       const next = (j?.industryInference ?? null) as IndustryInference | null;
       setInf(next);
-
-      // reset the optional detail box each turn (keeps it feeling fresh)
-      setIvDetail("");
+      setIvAnswer("");
       return next;
     } catch (e: any) {
       setIvErr(e?.message ?? String(e));
@@ -204,17 +172,6 @@ export function Step2(props: {
     } finally {
       setIvLoading(false);
     }
-  }
-
-  async function submitAnswer(answer: string) {
-    const qid = inf?.nextQuestion?.qid;
-    if (!qid) return;
-
-    await ivPost({
-      action: "answer",
-      qid,
-      answer,
-    });
   }
 
   // ✅ Only auto-run website scan if a website exists; otherwise start interview
@@ -256,9 +213,6 @@ export function Step2(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasWebsite, props.aiAnalysis]);
 
-  const qid = inf?.nextQuestion?.qid ?? "";
-  const hasOptions = Boolean(inf?.nextQuestion?.options?.length);
-
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">
@@ -282,34 +236,27 @@ export function Step2(props: {
       {/* ---------------- INTERVIEW MODE (NO WEBSITE) ---------------- */}
       {showInterview ? (
         <div className="mt-4 space-y-4">
-          {/* Summary */}
+          {/* Top summary row */}
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="font-semibold">We’re setting up your AIPhotoQuote experience</div>
+                <div className="font-semibold">{isLocked ? "Your setup is ready" : "We’re setting up your AIPhotoQuote experience"}</div>
                 <div className="mt-1 text-xs opacity-90">
-                  We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step.
+                  {isLocked
+                    ? "We’ve confidently picked the best-fit starter pack. You’ll confirm the final industry on the next step."
+                    : "We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step."}
                 </div>
-
                 <div className="mt-2 text-xs font-semibold opacity-95">{topMatchLine()}</div>
-
-                {lastAnswer ? (
-                  <div className="mt-2 text-xs opacity-90">
-                    Last answer: <span className="font-semibold">{lastAnswer.answer}</span>
-                  </div>
-                ) : null}
+                {lastAnswerLine() ? <div className="mt-1 text-xs opacity-90">{lastAnswerLine()}</div> : null}
               </div>
 
               <div className="shrink-0 text-right">
                 <div className="text-xs">
-                  Match strength: <span className="font-mono">{pct(matchStrength)}%</span>
+                  Match strength: <span className="font-mono">{pct(ivConfidence)}%</span>
                 </div>
                 <div className="text-[11px] opacity-90">Round {ivRound}</div>
-
-                {/* Keep backend confidence visible but deemphasized */}
-                <div className="mt-1 text-[11px] opacity-80">
-                  backend: <span className="font-mono">{pct(ivConfidenceBackend)}%</span>
-                </div>
+                {/* keep your “backend” line if you want; otherwise remove */}
+                <div className="text-[11px] opacity-80">backend: {pct(ivConfidence)}%</div>
               </div>
             </div>
 
@@ -324,117 +271,95 @@ export function Step2(props: {
             ) : null}
           </div>
 
-          {/* Next question */}
-          <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-xs text-gray-500 dark:text-gray-400">{nextQuestionIntro() || "Next"}</div>
-                <div className="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
-                  {inf?.nextQuestion?.question ?? (ivLoading ? "Loading…" : "We have enough information.")}
+          {/* ✅ Question card (HIDDEN once locked) */}
+          {!isLocked ? (
+            <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs text-gray-500 dark:text-gray-400">Next</div>
+                  <div className="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
+                    {inf?.nextQuestion?.question ?? (ivLoading ? "Loading…" : "We have enough information.")}
+                  </div>
+
+                  {inf?.nextQuestion?.qid ? (
+                    <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{whyForQid(inf.nextQuestion.qid)}</div>
+                  ) : null}
+
+                  {inf?.nextQuestion?.help ? (
+                    <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{inf.nextQuestion.help}</div>
+                  ) : null}
                 </div>
 
-                {qid ? (
-                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{whyForQid(qid)}</div>
-                ) : null}
-
-                {inf?.nextQuestion?.help ? (
-                  <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{inf.nextQuestion.help}</div>
-                ) : null}
+                <button
+                  type="button"
+                  className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 disabled:opacity-50"
+                  disabled={ivLoading}
+                  onClick={() => ivPost({ action: "reset" }).catch(() => null)}
+                  title="Start interview over"
+                >
+                  Reset
+                </button>
               </div>
 
-              <button
-                type="button"
-                className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 disabled:opacity-50"
-                disabled={ivLoading}
-                onClick={() => ivPost({ action: "reset" }).catch(() => null)}
-                title="Start interview over"
-              >
-                Reset
-              </button>
-            </div>
+              {/* Options chips (if provided) */}
+              {inf?.nextQuestion?.options?.length ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {inf.nextQuestion.options.map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      className={cn(
+                        "rounded-full border px-3 py-1.5 text-xs font-semibold",
+                        "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100",
+                        "dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900",
+                        ivAnswer === opt && "border-indigo-300 bg-indigo-50 dark:border-indigo-900/40 dark:bg-indigo-950/30"
+                      )}
+                      onClick={() => setIvAnswer(opt)}
+                      disabled={ivLoading}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
 
-            {/* Options = tap to answer (no redundant textarea) */}
-            {hasOptions ? (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {inf!.nextQuestion!.options!.map((opt) => (
-                  <button
-                    key={opt}
-                    type="button"
-                    className={cn(
-                      "rounded-full border px-3 py-1.5 text-xs font-semibold",
-                      "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100",
-                      "dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-                    )}
-                    disabled={ivLoading}
-                    onClick={() => submitAnswer(opt).catch((e: any) => props.onError(e?.message ?? String(e)))}
-                    title="Tap to answer"
-                  >
-                    {opt}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              // No options -> single primary input
+              {/* Free text input */}
               <div className="mt-4">
                 <textarea
-                  value={ivDetail}
-                  onChange={(e) => setIvDetail(e.target.value)}
+                  value={ivAnswer}
+                  onChange={(e) => setIvAnswer(e.target.value)}
                   rows={3}
                   placeholder="Type your answer…"
                   className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                   disabled={ivLoading || !inf?.nextQuestion}
                 />
+              </div>
 
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    className="rounded-2xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                    disabled={ivLoading || !inf?.nextQuestion || ivDetail.trim().length < 1}
-                    onClick={() => submitAnswer(ivDetail.trim()).catch((e: any) => props.onError(e?.message ?? String(e)))}
-                  >
-                    {ivLoading ? "Saving…" : "Submit"}
-                  </button>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-2xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  disabled={ivLoading || !inf?.nextQuestion || ivAnswer.trim().length < 1}
+                  onClick={() =>
+                    ivPost({
+                      action: "answer",
+                      qid: inf?.nextQuestion?.qid,
+                      answer: ivAnswer.trim(),
+                    }).catch((e: any) => props.onError(e?.message ?? String(e)))
+                  }
+                >
+                  {ivLoading ? "Saving…" : "Submit"}
+                </button>
 
-                  <div className="text-xs text-gray-500 dark:text-gray-400">
-                    Tip: short answers are fine — we’re looking for high-signal keywords.
-                  </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  Tip: short answers are fine — we’re looking for high-signal keywords.
                 </div>
               </div>
-            )}
+            </div>
+          ) : null}
 
-            {/* Optional detail input even when options exist */}
-            {hasOptions ? (
-              <details className="mt-4">
-                <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-200">
-                  Add a quick detail (optional)
-                </summary>
-                <div className="mt-2">
-                  <textarea
-                    value={ivDetail}
-                    onChange={(e) => setIvDetail(e.target.value)}
-                    rows={3}
-                    placeholder='Example: "Ceramic coating + paint correction + interior detail"'
-                    className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    disabled={ivLoading || !inf?.nextQuestion}
-                  />
-                  <div className="mt-2 flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="rounded-2xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                      disabled={ivLoading || !inf?.nextQuestion || ivDetail.trim().length < 1}
-                      onClick={() => submitAnswer(ivDetail.trim()).catch((e: any) => props.onError(e?.message ?? String(e)))}
-                    >
-                      {ivLoading ? "Saving…" : "Submit detail"}
-                    </button>
-                    <div className="text-xs text-gray-500 dark:text-gray-400">Only needed if “Other” or mixed services.</div>
-                  </div>
-                </div>
-              </details>
-            ) : null}
-          </div>
-
-          {/* Candidate preview */}
-          {inf?.candidates?.length ? (
+          {/* ✅ Best matches list (HIDDEN once locked) */}
+          {!isLocked && inf?.candidates?.length ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Best matches so far</div>
@@ -465,23 +390,27 @@ export function Step2(props: {
                 ))}
               </div>
 
-              {canContinueInterview ? (
-                <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-                  <div className="font-semibold">Ready</div>
-                  <div className="mt-1">
-                    We’ll preload the <span className="font-semibold">{top?.label ?? ivSuggested}</span> starter pack.
-                    Next you’ll confirm the industry.
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                  We’ll stop once the top match is clearly ahead (usually 3–4 answers).
-                </div>
-              )}
+              <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                We’ll stop once the top match is clear (usually 2–4 answers).
+              </div>
             </div>
           ) : null}
 
-          {/* Answer history */}
+          {/* ✅ Ready panel (SHOWN once locked) */}
+          {isLocked ? (
+            <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                <div className="font-semibold">Ready</div>
+                <div className="mt-1">
+                  We’ll preload the{" "}
+                  <span className="font-semibold">{inf?.candidates?.[0]?.label ?? ivSuggested}</span>{" "}
+                  starter pack. Next you’ll confirm the industry.
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {/* Answer history (collapsed) */}
           {inf?.answers?.length ? (
             <details className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
