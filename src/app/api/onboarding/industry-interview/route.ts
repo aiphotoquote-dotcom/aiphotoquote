@@ -168,7 +168,7 @@ const KEYWORDS: Record<string, Array<string | RegExp>> = {
   upholstery: [/upholster/i, /vinyl/i, /leather/i, /canvas/i, /headliner/i, /marine/i, /sew/i],
   paving_contractor: [/asphalt/i, /pav(e|ing)/i, /sealcoat/i, /concrete/i, /driveway/i, /parking lot/i],
   landscaping_hardscaping: [/landscap/i, /hardscap/i, /mulch/i, /pavers/i, /retaining wall/i, /lawn/i],
-  hvac: [/hvac/i, /air condition/i, /ac\b/i, /furnace/i, /heat pump/i],
+  hvac: [/hvac/i, /air condition/i, /\bac\b/i, /furnace/i, /heat pump/i],
   plumbing: [/plumb/i, /water heater/i, /drain/i, /sewer/i],
   electrical: [/electric/i, /panel/i, /breaker/i, /wiring/i],
   auto_repair: [/auto repair/i, /collision/i, /body shop/i, /mechanic/i, /brake/i, /engine/i],
@@ -215,14 +215,29 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
 }
 
 /**
- * IMPORTANT:
- * New tenants might not have a tenant_onboarding row yet in some edge paths.
- * Use UPSERT so interview never crashes.
+ * ✅ FIX:
+ * - Always JSON.stringify the object before casting to jsonb.
+ *   (Passing a raw JS object becomes "[object Object]" in SQL params -> jsonb cast fails.)
+ * - Update-first (post-step1 rule). If a row doesn't exist (edge path), fall back to insert.
  */
 async function writeAiAnalysis(tenantId: string, ai: any) {
+  const aiJson = JSON.stringify(ai ?? {});
+
+  const updated = await db.execute(sql`
+    update tenant_onboarding
+    set ai_analysis = ${aiJson}::jsonb,
+        updated_at = now()
+    where tenant_id = ${tenantId}::uuid
+    returning tenant_id
+  `);
+
+  const row = firstRow(updated);
+  if (row?.tenant_id) return;
+
+  // Edge-path fallback: create row if missing.
   await db.execute(sql`
     insert into tenant_onboarding (tenant_id, ai_analysis, updated_at, created_at)
-    values (${tenantId}::uuid, ${ai}::jsonb, now(), now())
+    values (${tenantId}::uuid, ${aiJson}::jsonb, now(), now())
     on conflict (tenant_id) do update
       set ai_analysis = excluded.ai_analysis,
           updated_at = now()
@@ -437,9 +452,7 @@ export async function POST(req: Request) {
     const ansRaw = parsed.data.answer;
 
     const ans =
-      typeof ansRaw === "string"
-        ? safeTrim(ansRaw)
-        : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
+      typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
 
     if (!qid || !ans) {
       return NextResponse.json(
