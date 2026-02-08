@@ -85,10 +85,59 @@ export const tenants = pgTable(
     // BACK-COMPAT
     ownerClerkUserId: text("owner_clerk_user_id"),
 
+    /**
+     * ARCHIVE PLAN
+     * - active: normal tenant
+     * - archived: soft-disabled + hidden from normal UI, but data retained
+     * - deleted: reserved for future purge pipeline (optional later)
+     */
+    status: text("status").notNull().default("active"),
+
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archivedBy: text("archived_by"), // clerk user id (portable enough for now)
+    archivedReason: text("archived_reason"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     slugIdx: uniqueIndex("tenants_slug_idx").on(t.slug),
+    statusIdx: index("tenants_status_idx").on(t.status),
+  })
+);
+
+/**
+ * Tenant audit log (append-only)
+ * - Stores: who/what/when + small JSON snapshot for forensics
+ */
+export const tenantAuditLog = pgTable(
+  "tenant_audit_log",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    // e.g. tenant.archived | tenant.restored | tenant.purged | plan.changed | key.added
+    action: text("action").notNull(),
+
+    actorClerkUserId: text("actor_clerk_user_id"),
+    actorEmail: text("actor_email"),
+    actorIp: text("actor_ip"),
+
+    // optional free text reason (esp. archive/purge)
+    reason: text("reason"),
+
+    // tiny “what changed” snapshot (safe, no secrets)
+    meta: jsonb("meta").$type<any>(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantIdx: index("tenant_audit_log_tenant_id_idx").on(t.tenantId),
+    actionIdx: index("tenant_audit_log_action_idx").on(t.action),
+    createdIdx: index("tenant_audit_log_created_at_idx").on(t.createdAt),
   })
 );
 

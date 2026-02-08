@@ -1,4 +1,4 @@
-// src/app/pcc/tenants/[id]/delete/page.tsx
+// src/app/pcc/tenants/[tenantId]/delete/page.tsx
 import React from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
