@@ -119,9 +119,10 @@ async function ensureIndustryExists(industryKeyRaw: string): Promise<string> {
 
   const label = titleFromKey(key);
 
+  // ✅ safe regardless of whether industries.id has a default
   await db.execute(sql`
-    insert into industries (key, label, description)
-    values (${key}, ${label}, null)
+    insert into industries (id, key, label, description)
+    values (gen_random_uuid(), ${key}, ${label}, null)
     on conflict (key) do update
     set label = excluded.label
   `);
@@ -193,7 +194,10 @@ export async function GET(req: Request) {
       await upsertTenantIndustryKey(tenantId, selectedKey);
     }
 
-    return NextResponse.json({ ok: true, tenantId, selectedKey, industries }, { status: 200 });
+    const selectedLabel =
+      (selectedKey ? industries.find((x) => x.key === selectedKey)?.label ?? null : null) ?? null;
+
+    return NextResponse.json({ ok: true, tenantId, selectedKey, selectedLabel, industries }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -227,31 +231,36 @@ export async function POST(req: Request) {
         );
       }
 
+      // ✅ safe regardless of industries.id default
       await db.execute(sql`
-        insert into industries (key, label, description)
-        values (${key}, ${industryLabelRaw}, null)
+        insert into industries (id, key, label, description)
+        values (gen_random_uuid(), ${key}, ${industryLabelRaw}, null)
         on conflict (key) do update
         set label = excluded.label
       `);
 
       const savedKey = await upsertTenantIndustryKey(tenantId, key);
-
       return NextResponse.json({ ok: true, tenantId, selectedKey: savedKey }, { status: 200 });
     }
 
     // Select-existing path
     if (!industryKeyRaw) {
-      return NextResponse.json({ ok: false, error: "INDUSTRY_REQUIRED", message: "Choose an industry." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "INDUSTRY_REQUIRED", message: "Choose an industry." },
+        { status: 400 }
+      );
     }
 
     // Ensure key exists (safety) + normalize it
     const ensuredKey = await ensureIndustryExists(industryKeyRaw);
     if (!ensuredKey) {
-      return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "Industry key is invalid." }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: "BAD_REQUEST", message: "Industry key is invalid." },
+        { status: 400 }
+      );
     }
 
     const savedKey = await upsertTenantIndustryKey(tenantId, ensuredKey);
-
     return NextResponse.json({ ok: true, tenantId, selectedKey: savedKey }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
