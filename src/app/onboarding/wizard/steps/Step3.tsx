@@ -33,16 +33,9 @@ type ModeA_Interview = {
   meta?: any;
 };
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
 async function fetchIndustryDefaults(args: { tenantId: string; industryKey: string }): Promise<IndustryDefaults | null> {
   const qs = new URLSearchParams({ tenantId: args.tenantId, industryKey: args.industryKey });
-  const res = await fetch(`/api/onboarding/industry-defaults?${qs.toString()}`, {
-    method: "GET",
-    cache: "no-store",
-  });
+  const res = await fetch(`/api/onboarding/industry-defaults?${qs.toString()}`, { method: "GET", cache: "no-store" });
 
   if (res.status === 404 || res.status === 405) return null;
 
@@ -82,8 +75,9 @@ export function Step3(props: {
   onBack: () => void;
   onReInterview: () => void;
 
-  // ✅ Mode A only: Step3 commits industry selection only.
-  onSubmit: (args: { industryKey: string }) => Promise<void>;
+  // Step3 commits industry selection only.
+  // If refineSubIndustry is true, Wizard routes to Step3b.
+  onSubmit: (args: { industryKey: string; refineSubIndustry?: boolean }) => Promise<void>;
 }) {
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<IndustryItem[]>([]);
@@ -91,17 +85,12 @@ export function Step3(props: {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // defaults preview
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
-  // UX state for the “Yes / Not quite” flow
   const [showDisagree, setShowDisagree] = useState(false);
 
-  /* -------------------------
-   * AI Signal (Mode A + legacy fallback)
-   * ------------------------- */
-
+  // Mode A interview (preferred)
   const interview: ModeA_Interview | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
     if (!x || typeof x !== "object") return null;
@@ -109,30 +98,18 @@ export function Step3(props: {
     return x as ModeA_Interview;
   }, [props.aiAnalysis]);
 
+  // Legacy fallback (defensive)
   const legacyInference = useMemo(() => props.aiAnalysis?.industryInference ?? null, [props.aiAnalysis]);
 
   const usingModeA = Boolean(interview);
-
-  const aiStatus = useMemo(() => {
-    return safeTrim(interview?.status) || safeTrim(legacyInference?.status) || "";
-  }, [interview, legacyInference]);
-
-  const isLocked = useMemo(() => {
-    // Mode A "locked" is the real lock.
-    if (usingModeA) return safeTrim(interview?.status) === "locked";
-    return false;
-  }, [usingModeA, interview]);
+  const isLocked = usingModeA && safeTrim(interview?.status) === "locked";
 
   const suggestedKey = useMemo(() => {
-    if (usingModeA) {
-      return normalizeKey(safeTrim(interview?.proposedIndustry?.key ?? ""));
-    }
-
+    if (usingModeA) return normalizeKey(interview?.proposedIndustry?.key ?? "");
     const k =
       safeTrim(legacyInference?.suggestedIndustryKey) ||
       safeTrim(props.aiAnalysis?.suggestedIndustryKey) ||
       safeTrim(props.aiAnalysis?.industryInference?.suggestedIndustryKey);
-
     return normalizeKey(k);
   }, [usingModeA, interview?.proposedIndustry?.key, legacyInference, props.aiAnalysis]);
 
@@ -143,13 +120,11 @@ export function Step3(props: {
         ? legacyInference?.confidenceScore
         : props.aiAnalysis?.confidenceScore;
     return raw !== null && raw !== undefined ? toNum(raw, 0) : null;
-  }, [usingModeA, interview, legacyInference, props.aiAnalysis]);
+  }, [usingModeA, interview?.confidenceScore, legacyInference, props.aiAnalysis]);
 
-  const fitScore = useMemo(() => {
-    if (!usingModeA) return null;
-    const n = toNum(interview?.fitScore, 0);
-    return Number.isFinite(n) ? n : null;
-  }, [usingModeA, interview]);
+  const fitScore = useMemo(() => (usingModeA ? toNum(interview?.fitScore, 0) : null), [usingModeA, interview?.fitScore]);
+
+  const aiStatus = useMemo(() => safeTrim(interview?.status) || safeTrim(legacyInference?.status) || "", [interview, legacyInference]);
 
   const debugReason = useMemo(() => {
     return (
@@ -168,46 +143,28 @@ export function Step3(props: {
   }, [usingModeA, interview?.candidates, legacyInference, props.aiAnalysis]);
 
   const topCandidates = useMemo(() => {
-    return candidates.slice(0, 6).map((c: any) => ({
+    return candidates.slice(0, 10).map((c: any) => ({
       key: normalizeKey(safeTrim(c?.key ?? "")),
       label: safeTrim(c?.label ?? ""),
       score: toNum(c?.score, 0),
     }));
   }, [candidates]);
 
-  const hasAnyAiSignal = useMemo(() => {
-    // Treat any of these as "signal" so we don't show the amber warning incorrectly:
-    // - suggestedKey present
-    // - candidates present
-    // - Mode A has confidence/fit/status even if proposedIndustry.key missing (edge case)
-    const hasCandidates = topCandidates.some((c) => Boolean(c.key));
-    const hasModeAStats = usingModeA && (Number.isFinite(suggestedConfidence as any) || Number.isFinite(fitScore as any) || Boolean(aiStatus));
-    return Boolean(suggestedKey) || hasCandidates || hasModeAStats;
-  }, [suggestedKey, topCandidates, usingModeA, suggestedConfidence, fitScore, aiStatus]);
-
-  const showAiCard = hasAnyAiSignal;
-  const showNeedSignal = !hasAnyAiSignal; // now truly "no signal"
-
-  const showConfirmButtons = isLocked && Boolean(suggestedKey);
-
-  /* -------------------------
-   * Labels
-   * ------------------------- */
-
-  const selectedLabel = useMemo(() => {
-    const hit = items.find((x) => x.key === selectedKey);
-    return hit?.label ?? "";
-  }, [items, selectedKey]);
+  const selectedLabel = useMemo(() => items.find((x) => x.key === selectedKey)?.label ?? "", [items, selectedKey]);
 
   const suggestedLabel = useMemo(() => {
     if (!suggestedKey) return "";
-    const hit = items.find((x) => x.key === suggestedKey);
-    return hit?.label ?? "";
+    return items.find((x) => x.key === suggestedKey)?.label ?? "";
   }, [items, suggestedKey]);
 
-  /* -------------------------
-   * Load industries
-   * ------------------------- */
+  const hasAnyAiSignal = useMemo(() => {
+    const hasCandidates = topCandidates.some((c) => Boolean(c.key));
+    const hasModeAStats = usingModeA && (Boolean(aiStatus) || Number.isFinite(suggestedConfidence as any) || Number.isFinite(fitScore as any));
+    return Boolean(suggestedKey) || hasCandidates || hasModeAStats;
+  }, [topCandidates, usingModeA, aiStatus, suggestedConfidence, fitScore, suggestedKey]);
+
+  const showAiCard = hasAnyAiSignal;
+  const showNeedSignal = !hasAnyAiSignal;
 
   async function loadIndustries() {
     setErr(null);
@@ -223,7 +180,6 @@ export function Step3(props: {
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      // Prefer: AI suggested -> server selected -> first item
       const serverSel = normalizeKey(safeTrim(j.selectedKey));
       const hasSuggested = Boolean(suggestedKey) && list.some((x) => x.key === suggestedKey);
 
@@ -245,13 +201,11 @@ export function Step3(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tenantId]);
 
-  // If AI suggestion arrives AFTER industries load, adopt it (esp when locked).
+  // If interview arrives after industries load, adopt suggestion
   useEffect(() => {
     if (!items.length) return;
     if (!suggestedKey) return;
-
-    const exists = items.some((x) => x.key === suggestedKey);
-    if (!exists) return;
+    if (!items.some((x) => x.key === suggestedKey)) return;
 
     const cur = normalizeKey(safeTrim(selectedKey));
     const isGeneric = !cur || cur === "service";
@@ -263,10 +217,6 @@ export function Step3(props: {
     if (isGeneric) setSelectedKey(suggestedKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suggestedKey, items.length, isLocked]);
-
-  /* -------------------------
-   * Defaults preview
-   * ------------------------- */
 
   useEffect(() => {
     const tid = safeTrim(props.tenantId);
@@ -280,18 +230,9 @@ export function Step3(props: {
     setDefaultsLoading(true);
 
     fetchIndustryDefaults({ tenantId: tid, industryKey: selectedKey })
-      .then((d) => {
-        if (!alive) return;
-        setDefaults(d);
-      })
-      .catch(() => {
-        if (!alive) return;
-        setDefaults(null);
-      })
-      .finally(() => {
-        if (!alive) return;
-        setDefaultsLoading(false);
-      });
+      .then((d) => alive && setDefaults(d))
+      .catch(() => alive && setDefaults(null))
+      .finally(() => alive && setDefaultsLoading(false));
 
     return () => {
       alive = false;
@@ -299,6 +240,28 @@ export function Step3(props: {
   }, [props.tenantId, selectedKey]);
 
   const canSave = Boolean(selectedKey);
+
+  const altCandidates = useMemo(() => {
+    const cur = normalizeKey(safeTrim(selectedKey));
+    const sug = normalizeKey(safeTrim(suggestedKey));
+    return topCandidates
+      .filter((c) => c.key && c.key !== cur && c.key !== sug)
+      .slice(0, 5);
+  }, [topCandidates, selectedKey, suggestedKey]);
+
+  async function commit(refineSubIndustry: boolean) {
+    setSaving(true);
+    setErr(null);
+    try {
+      const key = safeTrim(selectedKey);
+      if (!key) throw new Error("Choose an industry.");
+      await props.onSubmit({ industryKey: key, refineSubIndustry });
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <div>
@@ -326,38 +289,9 @@ export function Step3(props: {
                     </>
                   )
                 ) : (
-                  <span className="opacity-90">
-                    We have some signal, but no single clear suggestion yet — pick from the dropdown or click “Improve match”.
-                  </span>
+                  <span className="opacity-90">We have a few close matches — pick one below or click “Improve match”.</span>
                 )}
               </div>
-
-              {topCandidates.length ? (
-                <div className="mt-3">
-                  <div className="text-xs font-semibold opacity-90">Close matches</div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {topCandidates
-                      .filter((c) => c.key && c.key !== normalizeKey(selectedKey))
-                      .slice(0, 4)
-                      .map((c) => (
-                        <button
-                          key={c.key}
-                          type="button"
-                          className="inline-flex items-center rounded-full border border-emerald-300/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-emerald-950 hover:bg-white dark:bg-black/20 dark:text-emerald-100"
-                          onClick={() => {
-                            setSelectedKey(c.key);
-                            setShowDisagree(true);
-                          }}
-                        >
-                          {c.label || c.key}
-                          {Number.isFinite(c.score as any) ? (
-                            <span className="ml-2 font-mono opacity-70">{pct(c.score || 0)}%</span>
-                          ) : null}
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              ) : null}
 
               {debugReason ? (
                 <div className="mt-3 text-[11px] opacity-80">
@@ -386,22 +320,23 @@ export function Step3(props: {
             </div>
           </div>
 
-          {showConfirmButtons ? (
+          {/* LOCKED: three options */}
+          {isLocked && suggestedKey ? (
             <div className="mt-4">
               <div className="text-sm opacity-90">
                 Based on your answers, this looks like{" "}
-                <span className="font-semibold">{suggestedLabel || suggestedKey}</span>. Want to lock that in?
+                <span className="font-semibold">{suggestedLabel || suggestedKey}</span>. What do you want to do?
               </div>
 
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-3 grid gap-2">
                 <button
                   type="button"
-                  className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
-                  disabled={saving || !suggestedKey}
+                  className="w-full rounded-2xl bg-black px-4 py-3 text-left text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  disabled={saving}
                   onClick={() => {
-                    if (!suggestedKey) return;
                     setSelectedKey(suggestedKey);
                     setShowDisagree(false);
+                    commit(false);
                   }}
                 >
                   Yes — use {suggestedLabel || "this industry"}
@@ -409,7 +344,21 @@ export function Step3(props: {
 
                 <button
                   type="button"
-                  className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
+                  className="w-full rounded-2xl border border-emerald-300/50 bg-white/60 px-4 py-3 text-left text-sm font-semibold text-emerald-950 disabled:opacity-50 dark:bg-black/20 dark:text-emerald-100"
+                  disabled={saving}
+                  onClick={() => {
+                    setSelectedKey(suggestedKey);
+                    setShowDisagree(false);
+                    commit(true);
+                  }}
+                >
+                  Yes — use {suggestedLabel || "this industry"}, but I’m more specific
+                  <div className="mt-1 text-xs opacity-80">We’ll ask 1–3 quick questions to nail the sub-industry.</div>
+                </button>
+
+                <button
+                  type="button"
+                  className="w-full rounded-2xl border border-emerald-300/50 bg-transparent px-4 py-3 text-left text-sm font-semibold text-emerald-950 disabled:opacity-50 dark:text-emerald-100"
                   disabled={saving}
                   onClick={() => setShowDisagree((v) => !v)}
                 >
@@ -421,8 +370,29 @@ export function Step3(props: {
                 <div className="mt-3 rounded-2xl border border-emerald-300/40 bg-white/50 p-3 text-xs text-emerald-950 dark:bg-black/20 dark:text-emerald-100">
                   <div className="font-semibold">No problem.</div>
                   <div className="mt-1 opacity-90">
-                    Pick a close match above, choose from the dropdown below, or restart the interview so we can ask better questions.
+                    Pick an alternative, choose from the dropdown below, or restart the interview so we can ask better questions.
                   </div>
+
+                  {altCandidates.length ? (
+                    <div className="mt-3">
+                      <div className="text-[11px] font-semibold opacity-90">Alternative industries</div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {altCandidates.map((c) => (
+                          <button
+                            key={c.key}
+                            type="button"
+                            className="inline-flex items-center rounded-full border border-emerald-300/50 bg-white/70 px-2 py-1 text-[11px] font-semibold hover:bg-white dark:bg-black/30"
+                            onClick={() => setSelectedKey(c.key)}
+                            disabled={saving}
+                          >
+                            {c.label || c.key}
+                            <span className="ml-2 font-mono opacity-70">{pct(c.score || 0)}%</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -443,7 +413,6 @@ export function Step3(props: {
                 className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
                 disabled={saving}
                 onClick={props.onReInterview}
-                title="Go back to the interview so we can improve the match"
               >
                 Improve match →
               </button>
@@ -453,9 +422,7 @@ export function Step3(props: {
       ) : showNeedSignal ? (
         <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
           <div className="font-semibold">We need a bit more signal</div>
-          <div className="mt-1">
-            We couldn’t confidently suggest an industry yet. Go back and answer a couple more questions.
-          </div>
+          <div className="mt-1">We couldn’t confidently suggest an industry yet. Go back and answer a couple more questions.</div>
           <div className="mt-3">
             <button
               type="button"
@@ -484,7 +451,6 @@ export function Step3(props: {
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
               onClick={props.onReInterview}
               disabled={saving}
-              title="If you don’t see the right fit, we’ll ask more questions and refine."
             >
               Improve match
             </button>
@@ -521,7 +487,7 @@ export function Step3(props: {
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4 text-xs text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
                 <div className="font-semibold text-gray-900 dark:text-gray-100">How we stay flexible</div>
-                <div className="mt-1">We keep Step 3 focused on choosing the right industry first.</div>
+                <div className="mt-1">Step 3 picks your industry. Step 3b optionally narrows you into a sub-industry.</div>
               </div>
             </div>
           )}
@@ -530,9 +496,7 @@ export function Step3(props: {
         {/* RIGHT */}
         <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
-          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            This is the “instant experience” we can provide even with no website.
-          </div>
+          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This is the “instant experience” we can provide even with no website.</div>
 
           {!selectedKey ? (
             <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
@@ -577,7 +541,7 @@ export function Step3(props: {
             </div>
           ) : (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-              Defaults aren’t available yet for this industry. That’s okay — next step is adding the defaults table + API.
+              Defaults aren’t available yet for this industry.
             </div>
           )}
         </div>
@@ -597,19 +561,7 @@ export function Step3(props: {
           type="button"
           className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
           disabled={!canSave || saving}
-          onClick={async () => {
-            setSaving(true);
-            setErr(null);
-            try {
-              const key = safeTrim(selectedKey);
-              if (!key) throw new Error("Choose an industry.");
-              await props.onSubmit({ industryKey: key });
-            } catch (e: any) {
-              setErr(e?.message ?? String(e));
-            } finally {
-              setSaving(false);
-            }
-          }}
+          onClick={() => commit(false)}
         >
           {saving ? "Saving…" : "Yes — use this setup"}
         </button>
