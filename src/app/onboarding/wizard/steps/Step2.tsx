@@ -60,9 +60,13 @@ async function postInterview(payload: any) {
     method: "POST",
     headers: { "content-type": "application/json" },
     cache: "no-store",
+    credentials: "include",
     body: JSON.stringify(payload),
   });
-  const j = await res.json().catch(() => null);
+
+  const txt = await res.text().catch(() => "");
+  const j = txt ? JSON.parse(txt) : null;
+
   if (!res.ok || !j?.ok) {
     throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
   }
@@ -79,18 +83,17 @@ export function Step2(props: {
   website: string;
   aiAnalysis: any | null | undefined;
 
-  aiAnalysisStatus?: string | null; // unused for Mode A, but kept for compatibility
+  aiAnalysisStatus?: string | null;
   aiAnalysisError?: string | null;
 
-  onRun: () => Promise<void>; // legacy website analysis
-  onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>; // legacy
+  onRun: () => Promise<void>;
+  onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
   onNext: () => void;
   onBack: () => void;
   onError: (m: string) => void;
 }) {
   const tid = safeTrim(props.tenantId);
 
-  // Pull Mode A interview from aiAnalysis (if present)
   const interviewFromProps: IndustryInterviewA | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
     if (!x || typeof x !== "object") return null;
@@ -98,14 +101,11 @@ export function Step2(props: {
     return x as IndustryInterviewA;
   }, [props.aiAnalysis]);
 
-  // ✅ Local interview state so we don’t “hang” waiting for parent refresh()
   const [interviewState, setInterviewState] = useState<IndustryInterviewA | null>(interviewFromProps);
 
-  // If parent later provides a newer interview (e.g. refresh), adopt it.
   useEffect(() => {
     if (!interviewFromProps) return;
     setInterviewState((prev) => {
-      // Prefer the most recent (by round or updated timestamp if present)
       const prevRound = Number(prev?.round ?? 0) || 0;
       const nextRound = Number(interviewFromProps.round ?? 0) || 0;
       return nextRound >= prevRound ? interviewFromProps : prev;
@@ -132,14 +132,23 @@ export function Step2(props: {
   const [err, setErr] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
-  // current answer UI state
+  // Debug support on mobile: add ?debug=1
+  const debugOn = useMemo(() => {
+    try {
+      const u = new URL(window.location.href);
+      return u.searchParams.get("debug") === "1";
+    } catch {
+      return false;
+    }
+  }, []);
+  const [lastApi, setLastApi] = useState<any>(null);
+
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
   const [multiAnswer, setMultiAnswer] = useState<Record<string, boolean>>({});
 
   const lastSubmitRef = useRef<string>("");
 
-  // reset inputs whenever the question changes
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -150,16 +159,14 @@ export function Step2(props: {
 
   async function startIfNeeded() {
     if (!tid) return;
-
-    // Already have a next question? We’re started.
     if (nextQ?.id) return;
 
     setWorking(true);
     setErr(null);
     try {
       const out = await postInterview({ tenantId: tid, action: "start" });
-      // ✅ update local state immediately
       setInterviewState(out.industryInterview);
+      if (debugOn) setLastApi(out);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -169,7 +176,6 @@ export function Step2(props: {
     }
   }
 
-  // Auto-start when step loads (prevents blank state)
   useEffect(() => {
     startIfNeeded().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -184,9 +190,7 @@ export function Step2(props: {
       return v;
     }
 
-    if (nextQ.inputType === "single_choice") {
-      return safeTrim(choiceAnswer);
-    }
+    if (nextQ.inputType === "single_choice") return safeTrim(choiceAnswer);
 
     if (nextQ.inputType === "multi_choice") {
       const picked = Object.entries(multiAnswer)
@@ -199,22 +203,12 @@ export function Step2(props: {
   }
 
   async function submitAnswer() {
-    if (!tid) {
-      setErr("Missing tenantId.");
-      return;
-    }
-    if (!nextQ?.id) {
-      setErr("No active question yet. Tap ‘Start interview’.");
-      return;
-    }
+    if (!tid) return setErr("Missing tenantId.");
+    if (!nextQ?.id) return setErr("No active question yet. Tap ‘Start interview’.");
 
     const ans = buildAnswerPayload();
-    if (!ans) {
-      setErr("Please answer the question to continue.");
-      return;
-    }
+    if (!ans) return setErr("Please answer the question to continue.");
 
-    // UI-level anti-double-submit
     const dupeKey = `${tid}:${nextQ.id}:${ans}`;
     if (lastSubmitRef.current === dupeKey) return;
     lastSubmitRef.current = dupeKey;
@@ -226,14 +220,27 @@ export function Step2(props: {
       const out = await postInterview({
         tenantId: tid,
         action: "answer",
-        // ✅ API expects questionText + answer
-        questionId: nextQ.id, // harmless if the API ignores it
+
+        // 🔒 “belt + suspenders” payload for whatever your API expects:
+        turnId: nextQ.id,
+        questionId: nextQ.id,
         questionText: nextQ.question,
+
         answer: ans,
+        answerText: ans,
       });
 
-      // ✅ update local state immediately
+      if (debugOn) setLastApi(out);
+
+      const returnedNextId = safeTrim(out?.industryInterview?.nextQuestion?.id);
+      const currentId = safeTrim(nextQ.id);
+
       setInterviewState(out.industryInterview);
+
+      // If server returns the *same* question again, surface it loudly.
+      if (returnedNextId && returnedNextId === currentId) {
+        setErr("Server returned the same question again (no progression). Check debug output (?debug=1).");
+      }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -253,7 +260,17 @@ export function Step2(props: {
         We’ll ask a few smart questions to understand what you do — then we’ll build the best-fit industry starter pack.
       </div>
 
-      {/* Live AI card */}
+      {debugOn ? (
+        <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+          <div className="font-semibold">Debug</div>
+          <div className="mt-1">tenantId: <span className="font-mono">{tid || "(none)"}</span></div>
+          <div className="mt-1">nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span></div>
+          <div className="mt-2 font-mono whitespace-pre-wrap break-words">
+            {lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}
+          </div>
+        </div>
+      ) : null}
+
       <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -306,7 +323,6 @@ export function Step2(props: {
         </div>
       ) : null}
 
-      {/* Question */}
       <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Question</div>
@@ -316,7 +332,6 @@ export function Step2(props: {
             className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
             onClick={() => startIfNeeded().catch(() => null)}
             disabled={working || !tid}
-            title="Starts the interview if it hasn’t started yet."
           >
             {nextQ?.id ? "Interview running" : "Start interview"}
           </button>
