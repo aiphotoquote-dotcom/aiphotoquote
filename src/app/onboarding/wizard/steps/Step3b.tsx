@@ -159,7 +159,7 @@ export function Step3b(props: {
 
   const isLocked = status === "locked";
 
-  // ✅ FIX: do not TS-narrow wantsSub by JSX wrapper; use boolean
+  // Show prompt only while unchosen
   const showPrompt = wantsSub === "";
 
   useEffect(() => {
@@ -203,7 +203,7 @@ export function Step3b(props: {
     }
   }
 
-  // ✅ Hydrate Step3 intent once
+  // Hydrate intent from Step3 once
   useEffect(() => {
     if (didHydrateIntentRef.current) return;
     didHydrateIntentRef.current = true;
@@ -217,13 +217,12 @@ export function Step3b(props: {
     }
 
     if (intent === "skip") {
-      // Defer until tid/industryKey exist
       setWantsSub("no");
       return;
     }
   }, []);
 
-  // ✅ If Step3 asked to skip, persist null once we have tid + industryKey
+  // If Step3 asked to skip, persist null once we have tid + industryKey
   useEffect(() => {
     if (!didHydrateIntentRef.current) return;
     if (intentRef.current !== "skip") return;
@@ -232,14 +231,13 @@ export function Step3b(props: {
     if (!tid || !industryKey) return;
     if (nextQ?.id || isLocked) return;
 
-    // Only auto-continue if we haven't already started an interview
     if (!state) {
       saveAndContinue(null).catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, industryKey, wantsSub, nextQ?.id, isLocked, state]);
 
-  // ✅ Auto-start interview when wantsSub yes (including refine intent)
+  // Auto-start interview when wantsSub yes (including refine intent)
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !industryKey) return;
@@ -331,7 +329,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt (only when they haven't chosen yet AND no intent forced state) */}
+      {/* Prompt */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -345,10 +343,8 @@ export function Step3b(props: {
                 key={v}
                 type="button"
                 className={cn(
-                  "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                  wantsSub === v
-                    ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                    : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  "w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50",
+                  "dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                 )}
                 onClick={() => setWantsSub(v)}
                 disabled={working}
@@ -360,7 +356,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* If they chose "no" manually (not the auto-skip), show action buttons */}
+      {/* If they chose "no" manually (not auto-skip), show action buttons */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
@@ -403,7 +399,11 @@ export function Step3b(props: {
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Live understanding</div>
                 <div className="mt-1 text-sm text-gray-900 dark:text-gray-100">
-                  {proposed ? <span className="font-semibold">{proposed}</span> : <span className="opacity-80">Building context…</span>}
+                  {proposed ? (
+                    <span className="font-semibold">{proposed}</span>
+                  ) : (
+                    <span className="opacity-80">Building context…</span>
+                  )}
                 </div>
 
                 {candidates.length ? (
