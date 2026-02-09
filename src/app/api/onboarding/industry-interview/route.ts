@@ -5,7 +5,6 @@ import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
 import OpenAI from "openai";
-
 import { db } from "@/lib/db/client";
 
 export const runtime = "nodejs";
@@ -35,6 +34,25 @@ function firstRow(r: any): any | null {
   return null;
 }
 
+function rowsOf(r: any): any[] {
+  if (!r) return [];
+  if (Array.isArray(r)) return r;
+  if (Array.isArray((r as any).rows)) return (r as any).rows;
+  return [];
+}
+
+function noCacheJson(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+      "Surrogate-Control": "no-store",
+    },
+  });
+}
+
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -54,8 +72,17 @@ async function requireMembership(clerkUserId: string, tenantId: string) {
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
+function titleFromKey(key: string) {
+  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
+  if (!s) return "Service";
+  return s
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 function jsonExtract(s: string): any | null {
-  // Try to extract a JSON object from a response even if extra text leaks.
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
@@ -67,57 +94,44 @@ function jsonExtract(s: string): any | null {
   }
 }
 
-function normPrompt(s: string) {
-  return safeTrim(s)
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[^\w\s?]/g, "")
-    .trim();
-}
+/* -------------------- Mode A shapes -------------------- */
 
-function clamp01(n: any) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
-  return Math.max(0, Math.min(1, x));
-}
-
-/* -------------------- shapes -------------------- */
-
-type InterviewTurn = {
-  id: string; // question id
+type InterviewAnswer = {
+  id: string;
   question: string;
-  inputType: "text" | "yes_no" | "single_choice" | "multi_choice";
-  options?: string[];
-  answer?: string | null;
+  answer: string;
   createdAt: string;
 };
 
-type Candidate = { label: string; score: number };
+type Candidate = { key: string; label: string; score: number; exists?: boolean };
 
-type NextQuestion = {
-  id: string;
-  question: string;
-  help?: string | null;
-  inputType: InterviewTurn["inputType"];
-  options?: string[];
-};
-
-type ModeAState = {
+type IndustryInterviewA = {
   mode: "A";
-  status: "collecting" | "ready";
+  status: "collecting" | "locked";
   round: number;
 
-  hypothesisLabel: string | null; // human-readable
-  proposedIndustry: { key: string; label: string } | null; // not persisted globally here
-  confidenceScore: number; // 0-1
+  confidenceScore: number; // 0..1
+  fitScore: number; // 0..1
 
-  fitScore: number; // 0-1
-  fitReason: string | null;
+  proposedIndustry: {
+    key: string;
+    label: string;
+    description?: string | null;
+    exists: boolean;
+    shouldCreate: boolean;
+  } | null;
 
   candidates: Candidate[];
-  nextQuestion: NextQuestion | null;
 
-  turns: InterviewTurn[];
+  nextQuestion: {
+    id: string;
+    question: string;
+    help?: string;
+    inputType?: "text" | "select";
+    options?: string[];
+  } | null;
+
+  answers: InterviewAnswer[];
 
   meta: {
     updatedAt: string;
@@ -125,6 +139,10 @@ type ModeAState = {
     debug?: { reason?: string };
   };
 };
+
+const CONF_TARGET = 0.82;
+const FIT_TARGET = 0.55;
+const MAX_ROUNDS = 10;
 
 /* -------------------- db helpers -------------------- */
 
@@ -136,7 +154,17 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
     limit 1
   `);
   const row = firstRow(r);
-  return row?.ai_analysis ?? null;
+  const ai = row?.ai_analysis ?? null;
+
+  // in case adapter returns json as string
+  if (typeof ai === "string") {
+    try {
+      return JSON.parse(ai);
+    } catch {
+      return null;
+    }
+  }
+  return ai && typeof ai === "object" ? ai : null;
 }
 
 async function writeAiAnalysis(tenantId: string, ai: any) {
@@ -154,258 +182,185 @@ async function writeAiAnalysis(tenantId: string, ai: any) {
   `);
 }
 
-/* -------------------- state init -------------------- */
+async function industryExistsByKey(key: string): Promise<boolean> {
+  const k = normalizeKey(key);
+  if (!k) return false;
+  const r = await db.execute(sql`
+    select 1 as ok
+    from industries
+    where key = ${k}
+    limit 1
+  `);
+  const row = firstRow(r);
+  return Boolean(row?.ok);
+}
 
-function ensureModeA(ai0: any | null): { ai: any; st: ModeAState } {
+async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
+  const keys = Array.from(
+    new Set(
+      cands
+        .map((c) => normalizeKey(c.key))
+        .filter(Boolean)
+        .slice(0, 10)
+    )
+  );
+  if (!keys.length) return cands;
+
+  const r = await db.execute(sql`
+    select key::text as key
+    from industries
+    where key = any(${keys}::text[])
+  `);
+  const found = new Set(rowsOf(r).map((x: any) => String(x.key)));
+
+  return cands.map((c) => ({ ...c, exists: found.has(normalizeKey(c.key)) }));
+}
+
+async function ensureIndustryExists(args: { key: string; label?: string; description?: string | null }) {
+  const key = normalizeKey(args.key);
+  if (!key) return "";
+
+  const label = safeTrim(args.label) || titleFromKey(key);
+  const description = args.description == null ? null : String(args.description);
+
+  await db.execute(sql`
+    insert into industries (id, key, label, description)
+    values (gen_random_uuid(), ${key}, ${label}, ${description})
+    on conflict (key) do update
+      set label = excluded.label
+  `);
+
+  return key;
+}
+
+/* -------------------- inference state -------------------- */
+
+function ensureModeA(ai: any | null): { ai: any; st: IndustryInterviewA } {
   const now = new Date().toISOString();
-  const ai = ai0 && typeof ai0 === "object" ? ai0 : {};
+  const baseAi = ai && typeof ai === "object" ? ai : {};
 
-  const existing = ai?.industryInterview;
+  const existing = baseAi?.industryInterview;
   if (existing && typeof existing === "object" && existing?.mode === "A") {
-    const turns: InterviewTurn[] = Array.isArray(existing.turns) ? existing.turns : [];
-    const st: ModeAState = {
+    const answers = Array.isArray(existing.answers) ? existing.answers : [];
+    const round = Number(existing.round ?? 1);
+    const confidenceScore = Number(existing.confidenceScore ?? 0) || 0;
+    const fitScore = Number(existing.fitScore ?? 0) || 0;
+
+    const st: IndustryInterviewA = {
       mode: "A",
-      status: existing.status === "ready" ? "ready" : "collecting",
-      round: Number(existing.round ?? turns.length + 1) || 1,
-      hypothesisLabel: safeTrim(existing.hypothesisLabel) || null,
-      proposedIndustry:
-        existing.proposedIndustry && typeof existing.proposedIndustry === "object"
-          ? {
-              key: normalizeKey(existing.proposedIndustry.key ?? existing.proposedIndustry.label ?? ""),
-              label: safeTrim(existing.proposedIndustry.label ?? ""),
-            }
-          : null,
-      confidenceScore: clamp01(existing.confidenceScore),
-      fitScore: clamp01(existing.fitScore),
-      fitReason: safeTrim(existing.fitReason) || null,
-      candidates: Array.isArray(existing.candidates)
-        ? existing.candidates
-            .map((c: any) => ({ label: safeTrim(c?.label), score: clamp01(c?.score) }))
-            .filter((c: Candidate) => c.label)
-            .slice(0, 6)
-        : [],
-      nextQuestion:
-        existing.nextQuestion && typeof existing.nextQuestion === "object"
-          ? {
-              id: safeTrim(existing.nextQuestion.id) || "q_next",
-              question: safeTrim(existing.nextQuestion.question),
-              help: existing.nextQuestion.help ?? null,
-              inputType: existing.nextQuestion.inputType ?? "text",
-              options: Array.isArray(existing.nextQuestion.options)
-                ? existing.nextQuestion.options.map((x: any) => safeTrim(x)).filter(Boolean)
-                : undefined,
-            }
-          : null,
-      turns,
+      status: existing.status === "locked" ? "locked" : "collecting",
+      round: Number.isFinite(round) && round > 0 ? round : 1,
+      confidenceScore: Number.isFinite(confidenceScore) ? confidenceScore : 0,
+      fitScore: Number.isFinite(fitScore) ? fitScore : 0,
+      proposedIndustry: existing.proposedIndustry ?? null,
+      candidates: Array.isArray(existing.candidates) ? existing.candidates : [],
+      nextQuestion: existing.nextQuestion ?? null,
+      answers,
       meta: { updatedAt: now, ...(existing.meta ?? {}) },
     };
 
-    ai.industryInterview = st;
-    return { ai, st };
+    baseAi.industryInterview = st;
+    return { ai: baseAi, st };
   }
 
-  const st: ModeAState = {
+  const st: IndustryInterviewA = {
     mode: "A",
     status: "collecting",
     round: 1,
-    hypothesisLabel: null,
-    proposedIndustry: null,
     confidenceScore: 0,
     fitScore: 0,
-    fitReason: null,
+    proposedIndustry: null,
     candidates: [],
     nextQuestion: null,
-    turns: [],
+    answers: [],
     meta: { updatedAt: now },
   };
 
-  ai.industryInterview = st;
-  return { ai, st };
+  baseAi.industryInterview = st;
+  return { ai: baseAi, st };
 }
 
-/* -------------------- fallback question toolbelt -------------------- */
-/**
- * This is NOT an industry bank.
- * These are universal disambiguators to prevent dead-ends / repeats.
- * No lists of industries; no “what category are you” suggestions.
- */
-const FALLBACKS: NextQuestion[] = [
-  {
-    id: "one_sentence",
-    question: "In one sentence, what do you do and who is it for?",
-    help: "Example: “We pressure wash homes and small commercial buildings.”",
-    inputType: "text",
-  },
-  {
-    id: "typical_jobs",
-    question: "Name 2–3 common jobs you quote.",
-    help: "Short phrases are perfect.",
-    inputType: "text",
-  },
-  {
-    id: "what_work_on",
-    question: "What do you work on most often?",
-    help: "Pick the closest match.",
-    inputType: "single_choice",
-    options: ["Homes", "Vehicles", "Boats", "Businesses", "Outdoor property", "Other"],
-  },
-  {
-    id: "res_com",
-    question: "Is your work mostly residential, commercial, or both?",
-    inputType: "single_choice",
-    options: ["Residential", "Commercial", "Both"],
-  },
-  {
-    id: "keywords",
-    question: "What keywords would customers search to find you?",
-    help: "Comma separated is fine.",
-    inputType: "text",
-  },
-  {
-    id: "install_vs_repair",
-    question: "Is this mostly install, repair, cleaning/maintenance, or build/custom work?",
-    inputType: "single_choice",
-    options: ["Install", "Repair", "Cleaning / maintenance", "Build / custom", "Mix of these"],
-  },
-  {
-    id: "photo_quote_fit",
-    question: "Can you usually estimate price from photos plus a few questions?",
-    inputType: "yes_no",
-  },
-  {
-    id: "photos_needed",
-    question: "When you quote, what photos are most useful?",
-    help: "Example: wide shot + close-ups + measurements.",
-    inputType: "text",
-  },
-];
+function buildTranscript(st: IndustryInterviewA) {
+  return st.answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
+}
 
-function pickFallbackNext(st: ModeAState): NextQuestion {
-  const asked = new Set(st.turns.map((t) => t.id));
-  const q = FALLBACKS.find((x) => !asked.has(x.id)) ?? FALLBACKS[0];
-  return q;
+function firstQuestionFallback() {
+  return {
+    id: "q_start",
+    question: "In one sentence, what do you do and what do you work on most often?",
+    help: "Example: “We build and repair in-ground pools for residential customers.”",
+    inputType: "text" as const,
+  };
 }
 
 /* -------------------- LLM -------------------- */
 
-const LlmOutSchema = z.object({
-  hypothesisLabel: z.string().nullable().optional(),
-  proposedIndustry: z
-    .object({
-      key: z.string().optional(),
-      label: z.string().optional(),
-    })
-    .nullable()
-    .optional(),
-  confidenceScore: z.number().min(0).max(1).optional(),
-  fitScore: z.number().min(0).max(1).optional(),
-  fitReason: z.string().nullable().optional(),
-  candidates: z
-    .array(
-      z.object({
-        label: z.string().min(1),
-        score: z.number().min(0).max(1),
-      })
-    )
-    .optional(),
-  nextQuestion: z
-    .object({
-      id: z.string().min(1),
-      question: z.string().min(1),
-      help: z.string().nullable().optional(),
-      inputType: z.enum(["text", "yes_no", "single_choice", "multi_choice"]),
-      options: z.array(z.string()).optional(),
-    })
-    .nullable()
-    .optional(),
-  status: z.enum(["collecting", "ready"]).optional(),
-  debugReason: z.string().optional(),
-});
-
-function buildTranscript(st: ModeAState) {
-  return st.turns
-    .map((t, i) => {
-      const a = safeTrim(t.answer);
-      return [
-        `Turn ${i + 1}`,
-        `Q(${t.id}) [${t.inputType}]: ${t.question}`,
-        a ? `A: ${a}` : `A: (no answer yet)`,
-      ].join("\n");
-    })
-    .join("\n\n");
-}
-
-async function runLLM(args: { st: ModeAState; action: "start" | "answer" }) {
+async function runLLM_ModeA(args: {
+  st: IndustryInterviewA;
+  action: "start" | "answer";
+}): Promise<{
+  confidenceScore: number;
+  fitScore: number;
+  proposedIndustry: { key: string; label: string; description?: string | null; shouldCreate: boolean } | null;
+  candidates: Candidate[];
+  nextQuestion: IndustryInterviewA["nextQuestion"];
+  debugReason?: string;
+}> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is missing in the environment.");
 
   const client = new OpenAI({ apiKey });
   const model = process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini";
 
-  const askedIds = args.st.turns.map((t) => t.id);
-  const askedPrompts = args.st.turns.map((t) => t.question);
-
-  const lastTurn = args.st.turns[args.st.turns.length - 1] ?? null;
+  const askedQuestions = new Set(args.st.answers.map((a) => safeTrim(a.question).toLowerCase()).filter(Boolean));
+  const transcript = buildTranscript(args.st);
 
   const system = [
-    "You are the onboarding interviewer for AIPhotoQuote.",
-    "You must behave like a great human interviewer: ask ONE high-signal next question, based on the conversation so far.",
+    "You are the onboarding interviewer for a platform called AIPhotoQuote.",
+    "Your job is to: (1) identify the customer's industry, (2) decide if AIPhotoQuote is a good fit, (3) ask the next best question.",
     "",
     "CRITICAL RULES:",
-    "- Do NOT assume you know what industries exist. Do NOT reference a platform taxonomy. No dropdown lists of industries.",
-    "- Your job is to infer what the business does, then propose an industry that best represents it (create it if needed).",
-    "- Ask only questions that reduce uncertainty and move toward a confident industry + a product-fit decision.",
-    "- Never repeat the same question. Never reuse a question id already used.",
-    "- Keep questions short, natural, and “alive” — like a real conversation.",
-    "- Output ONLY valid JSON. No markdown, no extra text.",
+    "- Do NOT assume you know what industries exist in the platform.",
+    "- You may propose a new industry if needed.",
+    "- Never repeat a question that has already been asked (even paraphrased).",
+    "- Output ONLY valid JSON. No markdown, no prose.",
     "",
-    "OUTPUT FIELDS:",
-    "- hypothesisLabel: human readable guess (e.g., “Pressure Washing” or “Custom Window Coverings”).",
-    "- proposedIndustry: { key, label } where key is snake_case and label is readable. If unsure, still propose your best label.",
-    "- confidenceScore: 0-1 confidence in proposedIndustry.",
-    "- fitScore: 0-1 confidence that AIPhotoQuote can generate useful estimates for this business (photos + a few questions).",
-    "- fitReason: one sentence explaining fitScore.",
-    "- candidates: 2-5 alternate hypotheses with scores (0-1).",
-    "- nextQuestion: ONE renderable question object or null if status=ready.",
-    "- status: collecting | ready (ready means: enough signal to proceed to industry confirmation).",
+    "Scoring:",
+    "- confidenceScore: how confident you are about the industry (0..1).",
+    "- fitScore: how suitable AIPhotoQuote is for this business (0..1).",
     "",
-    "QUESTION OBJECT RULES:",
-    "- inputType must be one of: text | yes_no | single_choice | multi_choice.",
-    "- options required only for single_choice/multi_choice; keep options generic (no industry lists).",
-    "- id must be a short stable id (snake_case) unique within this interview.",
+    "When confidenceScore is high (>=0.82) and fitScore is at least moderate (>=0.55), propose an industry clearly.",
+    "Otherwise keep collecting signal with a targeted question.",
   ].join("\n");
 
   const user = [
     `Action: ${args.action}`,
     "",
-    "Conversation so far:",
-    buildTranscript(args.st) || "(none yet)",
+    "Already asked questions (do not repeat):",
+    Array.from(askedQuestions).slice(0, 50).join(" | ") || "(none)",
     "",
-    "Already used question ids:",
-    askedIds.join(", ") || "(none)",
+    "Transcript so far:",
+    transcript || "(none)",
     "",
-    "Already asked question prompts (avoid repeats):",
-    askedPrompts.length ? askedPrompts.map((p) => `- ${p}`).join("\n") : "(none)",
-    "",
-    lastTurn?.answer ? `Most recent answer: ${lastTurn.answer}` : "",
-    "",
-    "Return JSON in this exact shape:",
+    "Return JSON with this shape:",
     JSON.stringify(
       {
-        hypothesisLabel: "string or null",
-        proposedIndustry: { key: "snake_case", label: "Label" },
         confidenceScore: 0.0,
         fitScore: 0.0,
-        fitReason: "string",
-        candidates: [{ label: "Alt label", score: 0.0 }],
-        nextQuestion: {
-          id: "snake_case",
-          question: "string",
-          help: "string or null",
-          inputType: "text | yes_no | single_choice | multi_choice",
-          options: ["optional", "strings"],
+        proposedIndustry: {
+          key: "snake_case_key",
+          label: "Human label",
+          description: "optional short",
+          shouldCreate: true,
         },
-        status: "collecting | ready",
+        candidates: [{ key: "snake_case", label: "Label", score: 0.0 }],
+        nextQuestion: {
+          id: "short_id",
+          question: "string",
+          help: "optional",
+          inputType: "text",
+          options: ["optional"],
+        },
         debugReason: "short reason",
       },
       null,
@@ -423,71 +378,84 @@ async function runLLM(args: { st: ModeAState; action: "start" | "answer" }) {
   });
 
   const content = resp.choices?.[0]?.message?.content ?? "";
-  const raw = jsonExtract(content);
-  const parsed = LlmOutSchema.safeParse(raw);
+  const parsed = jsonExtract(content);
+  if (!parsed || typeof parsed !== "object") throw new Error("LLM returned non-JSON output.");
 
-  if (!parsed.success) {
-    throw new Error("LLM returned invalid JSON shape.");
+  const confidence = Number(parsed.confidenceScore ?? 0);
+  const fit = Number(parsed.fitScore ?? 0);
+
+  const confidenceScore = Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0;
+  const fitScore = Number.isFinite(fit) ? Math.max(0, Math.min(1, fit)) : 0;
+
+  // proposedIndustry
+  let proposedIndustry: any = null;
+  if (parsed.proposedIndustry && typeof parsed.proposedIndustry === "object") {
+    const key = normalizeKey(parsed.proposedIndustry.key ?? "");
+    const label = safeTrim(parsed.proposedIndustry.label ?? "");
+    if (key && label) {
+      proposedIndustry = {
+        key,
+        label,
+        description: parsed.proposedIndustry.description == null ? null : String(parsed.proposedIndustry.description),
+        shouldCreate: Boolean(parsed.proposedIndustry.shouldCreate ?? false),
+      };
+    }
   }
 
-  const out = parsed.data;
+  // candidates
+  const candRaw = Array.isArray(parsed.candidates) ? parsed.candidates : [];
+  const candidates: Candidate[] = candRaw
+    .map((c: any) => ({
+      key: normalizeKey(c?.key ?? ""),
+      label: safeTrim(c?.label ?? ""),
+      score: Number(c?.score ?? 0) || 0,
+    }))
+    .filter((c) => c.key)
+    .slice(0, 6);
 
-  const proposedLabel = safeTrim(out.proposedIndustry?.label ?? out.hypothesisLabel ?? "");
-  const proposedKey = normalizeKey(out.proposedIndustry?.key ?? proposedLabel);
-
-  const candidates =
-    out.candidates && Array.isArray(out.candidates)
-      ? out.candidates
-          .map((c) => ({ label: safeTrim(c.label), score: clamp01(c.score) }))
-          .filter((c) => c.label)
-          .slice(0, 6)
-      : [];
+  // nextQuestion
+  let nextQuestion: any = parsed.nextQuestion ?? null;
+  if (nextQuestion && typeof nextQuestion === "object") {
+    const q = safeTrim(nextQuestion.question);
+    const qLower = q.toLowerCase();
+    if (!q || askedQuestions.has(qLower)) {
+      nextQuestion = null;
+    } else {
+      nextQuestion = {
+        id: safeTrim(nextQuestion.id) || `q_${Date.now()}`,
+        question: q,
+        help: safeTrim(nextQuestion.help) || undefined,
+        inputType: nextQuestion.inputType === "select" ? "select" : "text",
+        options: Array.isArray(nextQuestion.options)
+          ? nextQuestion.options.map((x: any) => safeTrim(x)).filter(Boolean).slice(0, 12)
+          : undefined,
+      };
+    }
+  } else {
+    nextQuestion = null;
+  }
 
   return {
-    status: out.status === "ready" ? ("ready" as const) : ("collecting" as const),
-    hypothesisLabel: safeTrim(out.hypothesisLabel ?? proposedLabel) || null,
-    proposedIndustry: proposedLabel ? { key: proposedKey || normalizeKey(proposedLabel), label: proposedLabel } : null,
-    confidenceScore: clamp01(out.confidenceScore),
-    fitScore: clamp01(out.fitScore),
-    fitReason: safeTrim(out.fitReason) || null,
-    candidates,
-    nextQuestion: out.nextQuestion ?? null,
-    debugReason: safeTrim(out.debugReason),
-    modelName: model,
+    confidenceScore,
+    fitScore,
+    proposedIndustry,
+    candidates: candidates.length
+      ? candidates
+      : proposedIndustry
+        ? [{ key: proposedIndustry.key, label: proposedIndustry.label, score: confidenceScore }]
+        : [],
+    nextQuestion,
+    debugReason: safeTrim(parsed.debugReason ?? ""),
   };
 }
 
-function validateOrFallbackNext(st: ModeAState, proposed: NextQuestion | null): NextQuestion | null {
-  if (!proposed) return null;
-
-  const askedIds = new Set(st.turns.map((t) => t.id));
-  if (askedIds.has(proposed.id)) return pickFallbackNext(st);
-
-  const askedPrompts = new Set(st.turns.map((t) => normPrompt(t.question)));
-  const pNorm = normPrompt(proposed.question);
-  if (!pNorm) return pickFallbackNext(st);
-  if (askedPrompts.has(pNorm)) return pickFallbackNext(st);
-
-  // If choice types, ensure options exist and are reasonable
-  if ((proposed.inputType === "single_choice" || proposed.inputType === "multi_choice") && (!proposed.options || proposed.options.length < 2)) {
-    return pickFallbackNext(st);
-  }
-
-  return {
-    id: normalizeKey(proposed.id) || "q_next",
-    question: safeTrim(proposed.question),
-    help: proposed.help ?? null,
-    inputType: proposed.inputType,
-    options: proposed.options?.map((x) => safeTrim(x)).filter(Boolean),
-  };
-}
-
-/* -------------------- request schema -------------------- */
+/* -------------------- schema -------------------- */
 
 const PostSchema = z.object({
   tenantId: z.string().min(1),
   action: z.enum(["start", "answer", "reset"]),
-  questionId: z.string().optional(), // the question being answered
+  questionId: z.string().optional(),
+  questionText: z.string().optional(),
   answer: z.any().optional(),
 });
 
@@ -500,7 +468,7 @@ export async function POST(req: Request) {
     const bodyRaw = await req.json().catch(() => null);
     const parsed = PostSchema.safeParse(bodyRaw);
     if (!parsed.success) {
-      return NextResponse.json({ ok: false, error: "BAD_REQUEST", message: "Invalid request body." }, { status: 400 });
+      return noCacheJson({ ok: false, error: "BAD_REQUEST", message: "Invalid request body." }, 400);
     }
 
     const tenantId = safeTrim(parsed.data.tenantId);
@@ -510,210 +478,229 @@ export async function POST(req: Request) {
     const { ai, st: st0 } = ensureModeA(ai0);
 
     const now = new Date().toISOString();
+    let st: IndustryInterviewA = { ...st0, meta: { ...(st0.meta ?? {}), updatedAt: now } };
 
     if (parsed.data.action === "reset") {
-      const st: ModeAState = {
+      st = {
         mode: "A",
         status: "collecting",
         round: 1,
-        hypothesisLabel: null,
-        proposedIndustry: null,
         confidenceScore: 0,
         fitScore: 0,
-        fitReason: null,
+        proposedIndustry: null,
         candidates: [],
-        nextQuestion: null,
-        turns: [],
+        nextQuestion: firstQuestionFallback(),
+        answers: [],
         meta: { updatedAt: now, model: { status: "ok" } },
       };
 
       ai.industryInterview = st;
 
-      // Back-compat mirrors (Step3/other code may read these)
+      // compat mirror for Step3 (optional)
       ai.suggestedIndustryKey = null;
       ai.confidenceScore = 0;
       ai.needsConfirmation = true;
 
       await writeAiAnalysis(tenantId, ai);
-
-      return NextResponse.json(
-        {
-          ok: true,
-          tenantId,
-          industryInterview: st,
-        },
-        { status: 200 }
-      );
+      return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
     }
 
-    // START
     if (parsed.data.action === "start") {
-      let st = { ...st0, meta: { ...(st0.meta ?? {}), updatedAt: now } };
-
-      // If already has nextQuestion and no turns yet, keep it; otherwise generate fresh
-      if (!st.turns.length && st.nextQuestion) {
-        ai.industryInterview = st;
-        await writeAiAnalysis(tenantId, ai);
-        return NextResponse.json({ ok: true, tenantId, industryInterview: st }, { status: 200 });
-      }
-
+      // Always start with a question; never hang.
       try {
-        const out = await runLLM({ st, action: "start" });
+        const out = await runLLM_ModeA({ st, action: "start" });
 
-        const nextQ = validateOrFallbackNext(st, out.nextQuestion) ?? pickFallbackNext(st);
+        // candidates existence marking (no leaking canon list to model)
+        const candidates = await markCandidatesExist(out.candidates ?? []);
+
+        // determine proposed industry existence + optional create (guarded)
+        let proposed: IndustryInterviewA["proposedIndustry"] = null;
+        if (out.proposedIndustry?.key) {
+          const exists = await industryExistsByKey(out.proposedIndustry.key);
+          const shouldCreate =
+            Boolean(out.proposedIndustry.shouldCreate) &&
+            !exists &&
+            out.confidenceScore >= CONF_TARGET &&
+            out.fitScore >= FIT_TARGET;
+
+          proposed = {
+            key: out.proposedIndustry.key,
+            label: out.proposedIndustry.label,
+            description: out.proposedIndustry.description ?? null,
+            exists,
+            shouldCreate,
+          };
+
+          if (shouldCreate) {
+            await ensureIndustryExists({
+              key: proposed.key,
+              label: proposed.label,
+              description: proposed.description ?? null,
+            });
+            proposed.exists = true;
+          }
+        }
+
+        const nextQ = out.nextQuestion ?? firstQuestionFallback();
 
         st = {
           ...st,
           status: "collecting",
           round: 1,
-          hypothesisLabel: out.hypothesisLabel,
-          proposedIndustry: out.proposedIndustry,
           confidenceScore: out.confidenceScore,
           fitScore: out.fitScore,
-          fitReason: out.fitReason,
-          candidates: out.candidates,
+          proposedIndustry: proposed,
+          candidates,
           nextQuestion: nextQ,
           meta: {
             updatedAt: now,
-            model: { name: out.modelName, status: "ok" },
+            model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "ok" },
             debug: { reason: out.debugReason || undefined },
           },
         };
 
         ai.industryInterview = st;
 
-        // Back-compat mirrors (best-effort)
-        ai.suggestedIndustryKey = st.proposedIndustry?.key ?? null;
-        ai.confidenceScore = st.confidenceScore ?? 0;
+        // compat mirror for Step3
+        if (proposed?.key) ai.suggestedIndustryKey = proposed.key;
+        ai.confidenceScore = st.confidenceScore;
         ai.needsConfirmation = true;
 
         await writeAiAnalysis(tenantId, ai);
-
-        return NextResponse.json({ ok: true, tenantId, industryInterview: st }, { status: 200 });
+        return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
       } catch (e: any) {
-        const fallback = pickFallbackNext(st);
-
-        const stErr: ModeAState = {
+        st = {
           ...st,
           status: "collecting",
-          nextQuestion: fallback,
+          round: 1,
+          confidenceScore: 0,
+          fitScore: 0,
+          proposedIndustry: null,
+          candidates: [],
+          nextQuestion: firstQuestionFallback(),
           meta: {
             updatedAt: now,
             model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "llm_error", error: e?.message ?? String(e) },
           },
         };
 
-        ai.industryInterview = stErr;
-        await writeAiAnalysis(tenantId, ai);
+        ai.industryInterview = st;
+        ai.needsConfirmation = true;
 
-        return NextResponse.json({ ok: true, tenantId, industryInterview: stErr }, { status: 200 });
+        await writeAiAnalysis(tenantId, ai);
+        return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
       }
     }
 
-    // ANSWER
-    const questionId = safeTrim(parsed.data.questionId);
+    // action === "answer"
+    const qText = safeTrim(parsed.data.questionText);
     const ansRaw = parsed.data.answer;
-    const answer =
-      typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
+    const ans = typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
 
-    if (!questionId || !answer) {
-      return NextResponse.json({ ok: false, error: "ANSWER_REQUIRED", message: "questionId and answer are required." }, { status: 400 });
+    if (!qText || !ans) {
+      return noCacheJson(
+        { ok: false, error: "ANSWER_REQUIRED", message: "questionText and answer are required." },
+        400
+      );
     }
 
-    let st: ModeAState = { ...st0, meta: { ...(st0.meta ?? {}), updatedAt: now } };
-
-    // Attach answer to the last asked question if it matches; otherwise create a turn from st.nextQuestion
-    const nextQ = st.nextQuestion;
-    const qText = nextQ?.question && nextQ?.id === questionId ? nextQ.question : safeTrim(questionId);
-
-    // Prevent duplicate answers for same questionId
-    const alreadyAnswered = st.turns.some((t) => t.id === questionId && safeTrim(t.answer));
-    if (alreadyAnswered) {
-      // If the UI double-submits, just return current state without changing anything.
-      return NextResponse.json({ ok: true, tenantId, industryInterview: st }, { status: 200 });
-    }
-
-    // Create / append turn
-    const turn: InterviewTurn = {
-      id: questionId,
-      question: qText || (nextQ?.question ?? questionId),
-      inputType: nextQ?.id === questionId ? nextQ.inputType : "text",
-      options: nextQ?.id === questionId ? nextQ.options : undefined,
-      answer,
+    // store answer
+    const answers = Array.isArray(st.answers) ? [...st.answers] : [];
+    answers.push({
+      id: safeTrim(parsed.data.questionId) || `a_${Date.now()}`,
+      question: qText,
+      answer: ans,
       createdAt: now,
-    };
+    });
 
     st = {
       ...st,
-      turns: [...(Array.isArray(st.turns) ? st.turns : []), turn],
-      round: Math.max(1, (Number(st.round ?? 1) || 1) + 1),
-      nextQuestion: null, // will be replaced by LLM or fallback
-      status: "collecting",
+      answers,
+      round: Math.min(MAX_ROUNDS, (Number(st.round ?? 1) || 1) + 1),
+      meta: { ...(st.meta ?? {}), updatedAt: now },
     };
 
+    // run model
     try {
-      const out = await runLLM({ st, action: "answer" });
+      const out = await runLLM_ModeA({ st, action: "answer" });
 
-      const status = out.status;
+      const candidates = await markCandidatesExist(out.candidates ?? []);
 
-      const validatedNext =
-        status === "ready" ? null : validateOrFallbackNext(st, out.nextQuestion) ?? pickFallbackNext(st);
+      let proposed: IndustryInterviewA["proposedIndustry"] = null;
+      if (out.proposedIndustry?.key) {
+        const exists = await industryExistsByKey(out.proposedIndustry.key);
+        const shouldCreate =
+          Boolean(out.proposedIndustry.shouldCreate) &&
+          !exists &&
+          out.confidenceScore >= CONF_TARGET &&
+          out.fitScore >= FIT_TARGET;
+
+        proposed = {
+          key: out.proposedIndustry.key,
+          label: out.proposedIndustry.label,
+          description: out.proposedIndustry.description ?? null,
+          exists,
+          shouldCreate,
+        };
+
+        if (shouldCreate) {
+          await ensureIndustryExists({
+            key: proposed.key,
+            label: proposed.label,
+            description: proposed.description ?? null,
+          });
+          proposed.exists = true;
+        }
+      }
+
+      const reached = out.confidenceScore >= CONF_TARGET && out.fitScore >= FIT_TARGET;
+      const status: IndustryInterviewA["status"] = reached ? "locked" : "collecting";
 
       st = {
         ...st,
         status,
-        hypothesisLabel: out.hypothesisLabel,
-        proposedIndustry: out.proposedIndustry,
         confidenceScore: out.confidenceScore,
         fitScore: out.fitScore,
-        fitReason: out.fitReason,
-        candidates: out.candidates,
-        nextQuestion: validatedNext,
+        proposedIndustry: proposed,
+        candidates,
+        nextQuestion: status === "collecting" ? (out.nextQuestion ?? firstQuestionFallback()) : null,
         meta: {
           updatedAt: now,
-          model: { name: out.modelName, status: "ok" },
+          model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "ok" },
           debug: { reason: out.debugReason || undefined },
         },
       };
 
       ai.industryInterview = st;
 
-      // Back-compat mirrors (best-effort)
-      ai.suggestedIndustryKey = st.proposedIndustry?.key ?? null;
-      ai.confidenceScore = st.confidenceScore ?? 0;
+      // compat mirror for Step3
+      if (proposed?.key) ai.suggestedIndustryKey = proposed.key;
+      ai.confidenceScore = st.confidenceScore;
       ai.needsConfirmation = true;
 
       await writeAiAnalysis(tenantId, ai);
-
-      return NextResponse.json({ ok: true, tenantId, industryInterview: st }, { status: 200 });
+      return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
     } catch (e: any) {
-      // Hard fallback: pick next toolbelt question that hasn't been asked
-      const fallback = pickFallbackNext(st);
-
-      const stErr: ModeAState = {
+      // even on error, never dead-end
+      st = {
         ...st,
         status: "collecting",
-        nextQuestion: fallback,
+        nextQuestion: firstQuestionFallback(),
         meta: {
           updatedAt: now,
           model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "llm_error", error: e?.message ?? String(e) },
         },
       };
 
-      ai.industryInterview = stErr;
-
-      // Back-compat mirrors (still keep what we have)
-      ai.suggestedIndustryKey = stErr.proposedIndustry?.key ?? ai.suggestedIndustryKey ?? null;
-      ai.confidenceScore = stErr.confidenceScore ?? ai.confidenceScore ?? 0;
+      ai.industryInterview = st;
       ai.needsConfirmation = true;
 
       await writeAiAnalysis(tenantId, ai);
-
-      return NextResponse.json({ ok: true, tenantId, industryInterview: stErr }, { status: 200 });
+      return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
     }
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
+    return noCacheJson({ ok: false, error: "INTERNAL", message: msg }, status);
   }
 }
