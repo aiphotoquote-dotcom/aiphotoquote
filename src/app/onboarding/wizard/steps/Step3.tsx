@@ -110,6 +110,9 @@ export function Step3(props: {
     return x as ModeA_Interview;
   }, [props.aiAnalysis]);
 
+  // ✅ Mode A itself is "signal" even if proposedIndustry is not set yet.
+  const usingModeA = Boolean(interview && interview.mode === "A");
+
   const isLocked = safeTrim(interview?.status) === "locked";
 
   const suggestedKey = useMemo(() => {
@@ -236,7 +239,12 @@ export function Step3(props: {
 
   const canSave = Boolean(selectedKey);
 
-  const hasAnyAiSignal = Boolean(suggestedKey) || topCandidates.some((c) => Boolean(c.key));
+  /**
+   * ✅ FIX:
+   * - Mode A itself is signal, even if proposedIndustry is null.
+   * - Therefore we never show the “need more signal” card once Mode A exists.
+   */
+  const hasAnyAiSignal = usingModeA || Boolean(suggestedKey) || topCandidates.some((c) => Boolean(c.key));
   const showAiCard = hasAnyAiSignal;
 
   const showConfirmButtons = isLocked && Boolean(suggestedKey);
