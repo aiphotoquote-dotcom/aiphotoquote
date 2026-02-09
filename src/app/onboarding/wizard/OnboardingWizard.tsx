@@ -11,13 +11,13 @@ import {
   getMetaStatus,
   getUrlParams,
   normalizeWebsiteInput,
-  safeStep,
   setUrlParams,
 } from "./utils";
 
 import { Step1 } from "./steps/Step1";
 import { Step2 } from "./steps/Step2";
 import { Step3 } from "./steps/Step3";
+import { Step3b } from "./steps/Step3b";
 import { Step5Branding } from "./steps/Step5Branding";
 import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
@@ -25,7 +25,7 @@ import { Step6Plan } from "./steps/Step6Plan";
 /**
  * Some of our API routes may return AI analysis under different keys/shapes
  * depending on which table/view they read from (tenant_onboarding.ai_analysis vs state.aiAnalysis).
- * Step2/Step3 must receive a stable aiAnalysis object or Step3 will say "no signal".
+ * Step2/Step3/Step3b must receive a stable aiAnalysis object.
  */
 function getAiAnalysis(state: OnboardingState | null): any | null {
   if (!state) return null;
@@ -43,8 +43,23 @@ function getAiAnalysis(state: OnboardingState | null): any | null {
   if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
   if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
 
-  // Last resort: nothing
   return null;
+}
+
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+/**
+ * ✅ IMPORTANT:
+ * We now have 7 steps (Step3b added). Do NOT rely on utils.safeStep()
+ * if it still clamps to 6 (older wizard).
+ */
+function clampStep(n: any) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 1;
+  return Math.max(1, Math.min(7, Math.floor(x)));
 }
 
 export default function OnboardingWizard() {
@@ -56,6 +71,10 @@ export default function OnboardingWizard() {
 
   const [lastAction, setLastAction] = useState<string | null>(null);
 
+  // ✅ Step3 -> Step3b handoff state (local, non-persisted)
+  const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
+  const [pendingSubIndustryLabel, setPendingSubIndustryLabel] = useState<string | null>(null);
+
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -65,27 +84,27 @@ export default function OnboardingWizard() {
   }, []);
 
   const pct = useMemo(() => {
-    const total = 6;
+    const total = 7;
     return Math.round(((Math.min(step, total) - 1) / (total - 1)) * 100);
   }, [step]);
 
   const displayTenantId = useMemo(() => {
-    const a = String((state as any)?.tenantId ?? "").trim();
+    const a = safeTrim((state as any)?.tenantId);
     if (a) return a;
-    const b = String(tenantId ?? "").trim();
+    const b = safeTrim(tenantId);
     if (b) return b;
     return "(none)";
   }, [state, tenantId]);
 
   const displayTenantName = useMemo(() => {
-    const n = String((state as any)?.tenantName ?? "").trim();
+    const n = safeTrim((state as any)?.tenantName);
     return n || "New tenant";
   }, [state]);
 
   const normalizedAiAnalysis = useMemo(() => getAiAnalysis(state), [state]);
 
   const serverLastAction = useMemo(() => {
-    const a = String((state as any)?.aiAnalysisLastAction ?? "").trim();
+    const a = safeTrim((state as any)?.aiAnalysisLastAction);
     if (a) return a;
 
     const b = getMetaLastAction(normalizedAiAnalysis);
@@ -93,13 +112,13 @@ export default function OnboardingWizard() {
   }, [state, normalizedAiAnalysis]);
 
   function go(nextStep: number) {
-    const s = safeStep(nextStep);
+    const s = clampStep(nextStep);
     setUrlParams({ step: s });
     setNav((p) => ({ ...p, step: s }));
   }
 
   function setTenantInNav(tid: string) {
-    const clean = String(tid ?? "").trim();
+    const clean = safeTrim(tid);
     setUrlParams({ tenantId: clean });
     setNav((p) => ({ ...p, tenantId: clean }));
   }
@@ -108,7 +127,7 @@ export default function OnboardingWizard() {
     setErr(null);
     try {
       const navMode = explicit?.mode ?? mode;
-      const navTenantId = String(explicit?.tenantId ?? tenantId ?? "").trim();
+      const navTenantId = safeTrim(explicit?.tenantId ?? tenantId);
 
       const res = await fetch(buildStateUrl(navMode, navTenantId), { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
@@ -117,13 +136,13 @@ export default function OnboardingWizard() {
 
       if (mountedRef.current) setState(j);
 
-      const serverTenantId = String((j as any)?.tenantId ?? "").trim();
+      const serverTenantId = safeTrim((j as any)?.tenantId);
       if (serverTenantId && serverTenantId !== navTenantId) {
         setTenantInNav(serverTenantId);
       }
 
       const urlStep = getUrlParams().step;
-      const nextStep = urlStep || safeStep(((j as any)?.currentStep as any) || 1);
+      const nextStep = clampStep(urlStep || ((j as any)?.currentStep as any) || 1);
 
       if (nextStep !== step) {
         setUrlParams({ step: nextStep });
@@ -160,9 +179,7 @@ export default function OnboardingWizard() {
 
       // Normalize status from either state fields or aiAnalysis.meta.status
       const aj = getAiAnalysis(j as any);
-      const status =
-        String((j as any)?.aiAnalysisStatus ?? "").trim() ||
-        String(aj?.meta?.status ?? "").trim();
+      const status = safeTrim((j as any)?.aiAnalysisStatus) || safeTrim(aj?.meta?.status);
 
       if (status && status.toLowerCase() !== "running") return;
 
@@ -174,7 +191,7 @@ export default function OnboardingWizard() {
     setErr(null);
     setLastAction(null);
 
-    const res = await fetch(buildStateUrl(mode, String(tenantId ?? "").trim()), {
+    const res = await fetch(buildStateUrl(mode, safeTrim(tenantId)), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -187,10 +204,10 @@ export default function OnboardingWizard() {
     const j = await res.json().catch(() => null);
     if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
 
-    const newTenantId = String(j.tenantId ?? "").trim();
+    const newTenantId = safeTrim(j.tenantId);
     if (newTenantId) setTenantInNav(newTenantId);
 
-    await refresh({ tenantId: newTenantId || tenantId });
+    await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
     setLastAction("Saved business identity.");
     go(2);
   }
@@ -199,7 +216,7 @@ export default function OnboardingWizard() {
     setErr(null);
     setLastAction(null);
 
-    const tid = String((state as any)?.tenantId ?? tenantId ?? "").trim();
+    const tid = safeTrim((state as any)?.tenantId ?? tenantId);
     if (!tid) throw new Error("NO_TENANT: missing tenantId for analysis.");
 
     const req = fetch("/api/onboarding/analyze-website", {
@@ -223,7 +240,7 @@ export default function OnboardingWizard() {
     setErr(null);
     setLastAction(null);
 
-    const tid = String((state as any)?.tenantId ?? tenantId ?? "").trim();
+    const tid = safeTrim((state as any)?.tenantId ?? tenantId);
     if (!tid) throw new Error("NO_TENANT: missing tenantId for confirmation.");
 
     const req = fetch("/api/onboarding/confirm-website", {
@@ -251,7 +268,7 @@ export default function OnboardingWizard() {
     setErr(null);
     setLastAction(null);
 
-    const tid = String((state as any)?.tenantId ?? tenantId ?? "").trim();
+    const tid = safeTrim((state as any)?.tenantId ?? tenantId);
     if (!tid) throw new Error("NO_TENANT: missing tenantId for industry save.");
 
     const res = await fetch("/api/onboarding/industries", {
@@ -265,11 +282,11 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Industry saved.");
-    go(4);
+    go(5); // ✅ next is now step 5 (AI & Pricing Policy)
   }
 
   async function ensureActiveTenant(tid: string) {
-    const tenantIdClean = String(tid ?? "").trim();
+    const tenantIdClean = safeTrim(tid);
     if (!tenantIdClean) return;
 
     const res = await fetch("/api/tenant/context", {
@@ -289,7 +306,7 @@ export default function OnboardingWizard() {
   async function openSetup(path: string) {
     setErr(null);
 
-    const tid = String((state as any)?.tenantId ?? tenantId ?? "").trim();
+    const tid = safeTrim((state as any)?.tenantId ?? tenantId);
     if (!tid) throw new Error("NO_TENANT: missing tenantId for setup handoff.");
 
     await ensureActiveTenant(tid);
@@ -307,7 +324,7 @@ export default function OnboardingWizard() {
     setErr(null);
     setLastAction(null);
 
-    const tid = String((state as any)?.tenantId ?? tenantId ?? "").trim();
+    const tid = safeTrim((state as any)?.tenantId ?? tenantId);
     if (!tid) throw new Error("NO_TENANT: missing tenantId for branding save.");
 
     await ensureActiveTenant(tid);
@@ -316,10 +333,10 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 5,
+        step: 6, // ✅ branding is now step 6
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
-        brand_logo_url: (payload.brandLogoUrl ?? "").trim() ? (payload.brandLogoUrl ?? "").trim() : null,
+        brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
       }),
     });
 
@@ -328,7 +345,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Saved branding & lead routing.");
-    go(6);
+    go(7); // ✅ plan is now step 7
   }
 
   if (loading) {
@@ -343,9 +360,18 @@ export default function OnboardingWizard() {
 
   const existingUserContext = Boolean((state as any)?.isAuthenticated ?? true);
 
-  const aiStatus =
-    String((state as any)?.aiAnalysisStatus ?? "").trim() ||
-    getMetaStatus(normalizedAiAnalysis);
+  const aiStatus = safeTrim((state as any)?.aiAnalysisStatus) || getMetaStatus(normalizedAiAnalysis);
+
+  // If Step3b is entered directly (URL), but we don’t have a pending industry key,
+  // fall back to whatever the server already has (best-effort).
+  const fallbackIndustryKey =
+    safeTrim((state as any)?.industryKey) ||
+    safeTrim((state as any)?.selectedIndustryKey) ||
+    safeTrim((state as any)?.tenantIndustryKey) ||
+    safeTrim((normalizedAiAnalysis as any)?.industryInterview?.proposedIndustry?.key) ||
+    safeTrim((normalizedAiAnalysis as any)?.suggestedIndustryKey);
+
+  const effectiveIndustryKey = safeTrim(pendingIndustryKey) || safeTrim(fallbackIndustryKey);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -354,9 +380,7 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              We’ll tailor your quoting experience in just a few steps.
-            </div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -371,7 +395,7 @@ export default function OnboardingWizard() {
           </div>
 
           <div className="shrink-0 text-right">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 6</div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Step {step} / 7</div>
             <div className="text-xs text-gray-600 dark:text-gray-300">{displayTenantName}</div>
           </div>
         </div>
@@ -391,11 +415,11 @@ export default function OnboardingWizard() {
             <Step1 existingUser={existingUserContext} onSubmit={saveStep1} />
           ) : step === 2 ? (
             <Step2
-              tenantId={String((state as any)?.tenantId ?? tenantId ?? "").trim() || null}
+              tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               website={(state as any)?.website || ""}
               aiAnalysis={normalizedAiAnalysis}
               aiAnalysisStatus={aiStatus}
-              aiAnalysisError={String((state as any)?.aiAnalysisError ?? "").trim()}
+              aiAnalysisError={safeTrim((state as any)?.aiAnalysisError)}
               onRun={runWebsiteAnalysis}
               onConfirm={confirmWebsiteAnalysis}
               onNext={() => go(3)}
@@ -404,40 +428,81 @@ export default function OnboardingWizard() {
             />
           ) : step === 3 ? (
             <Step3
-              tenantId={String((state as any)?.tenantId ?? tenantId ?? "").trim() || null}
+              tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               aiAnalysis={normalizedAiAnalysis}
               onBack={() => go(2)}
               onReInterview={() => go(2)}
-              onSubmit={async ({ industryKey, subIndustryLabel }) =>
-                saveIndustrySelection({ industryKey, subIndustryLabel: subIndustryLabel ?? null })
-              }
+              onSubmit={async ({ industryKey, subIndustryLabel }) => {
+                // ✅ Do NOT save to server yet. Hand off to Step3b.
+                const key = safeTrim(industryKey);
+                if (!key) throw new Error("Choose an industry.");
+
+                setPendingIndustryKey(key);
+                setPendingSubIndustryLabel(subIndustryLabel ?? null);
+
+                setLastAction("Industry selected — refining focus…");
+                go(4); // ✅ Step3b
+              }}
             />
           ) : step === 4 ? (
+            <Step3b
+              tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
+              industryKey={effectiveIndustryKey}
+              aiAnalysis={normalizedAiAnalysis}
+              onBack={() => go(3)}
+              onSkip={async () => {
+                // ✅ If you ever use onSkip, it MUST still persist the industry
+                const key = safeTrim(effectiveIndustryKey);
+                if (!key) throw new Error("Missing industry selection.");
+
+                const finalSub = safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
+
+                await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
+
+                setPendingIndustryKey("");
+                setPendingSubIndustryLabel(null);
+              }}
+              onSubmit={async ({ subIndustryLabel }) => {
+                const key = safeTrim(effectiveIndustryKey);
+                if (!key) throw new Error("Missing industry selection.");
+
+                // Prefer Step3b label, else keep what Step3 captured (if any)
+                const finalSub =
+                  safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
+
+                await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
+
+                setPendingIndustryKey("");
+                setPendingSubIndustryLabel(null);
+              }}
+              onError={(m) => setErr(m)}
+            />
+          ) : step === 5 ? (
             <HandoffStep
               title="AI & Pricing Policy"
               desc="Reuse the full admin setup screen to configure AI mode, Live Q&A, and render policy."
               primaryLabel="Open AI Policy setup"
               onPrimary={() => openSetup("/admin/setup/ai-policy").catch((e: any) => setErr(e?.message ?? String(e)))}
-              onBack={() => go(3)}
-              onContinue={() => go(5)}
+              onBack={() => go(4)}
+              onContinue={() => go(6)}
               note="Tip: click Save Policy on that page, then come back here and continue."
             />
-          ) : step === 5 ? (
+          ) : step === 6 ? (
             <Step5Branding
-              tenantId={String((state as any)?.tenantId ?? tenantId ?? "").trim() || null}
+              tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               aiAnalysis={normalizedAiAnalysis}
               ensureActiveTenant={ensureActiveTenant}
-              onBack={() => go(4)}
+              onBack={() => go(5)}
               onSubmit={saveBrandingStep}
             />
           ) : (
             <Step6Plan
-              tenantId={String((state as any)?.tenantId ?? tenantId ?? "").trim() || null}
+              tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               currentPlan={((state as any)?.planTier as any) ?? null}
-              onBack={() => go(5)}
+              onBack={() => go(6)}
               onSaved={(p) => {
                 setLastAction(`Plan saved: ${p}`);
-                refresh({ tenantId: String((state as any)?.tenantId ?? tenantId ?? "").trim() }).catch(() => null);
+                refresh({ tenantId: safeTrim((state as any)?.tenantId ?? tenantId) }).catch(() => null);
               }}
               openWidgetSetup={() => openSetup("/admin/setup/widget").catch((e: any) => setErr(e?.message ?? String(e)))}
             />
