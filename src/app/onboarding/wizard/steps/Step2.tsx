@@ -4,6 +4,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getConfidence, getPreviewText, needsConfirmation, summarizeFetchDebug } from "../utils";
 
+/**
+ * Industry interview state returned by /api/onboarding/industry-interview
+ * (real-AI version: confidenceScore is 0..1, candidate.score is 0..10)
+ */
 type IndustryInference = {
   mode: "interview";
   status: "collecting" | "suggested";
@@ -17,6 +21,11 @@ type IndustryInference = {
   meta?: { updatedAt?: string; model?: string };
 };
 
+type InterviewDebug = {
+  proposedNewIndustry?: { key: string; label: string; description?: string | null } | null;
+  reason?: string | null;
+} | null;
+
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
@@ -26,48 +35,54 @@ function safeText(v: any) {
   return s ? s : "";
 }
 
-function pct(n01: number) {
-  if (!Number.isFinite(n01)) return 0;
-  const n = Math.max(0, Math.min(1, n01));
-  return Math.round(n * 100);
+function clamp(n: number, lo: number, hi: number) {
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
 }
 
-function formatErrHuman(e: any) {
-  const msg = safeText(e?.message ?? e);
-  if (!msg) return "Something went wrong.";
-  // Hide noisy JSON array dumps (like zod issues)
-  if (msg.startsWith("[{") || msg.startsWith("[{\"")) {
-    return "We hit a validation issue while saving. Please refresh and try again.";
-  }
-  // A couple common ones
-  if (msg.includes("UNAUTHENTICATED")) return "Please sign in again.";
-  if (msg.includes("FORBIDDEN_TENANT")) return "You don’t have access to this tenant.";
-  if (msg.includes("MISSING_OPENAI_API_KEY")) return "Server is missing OPENAI_API_KEY.";
-  if (msg.includes("LLM_NON_JSON_RESPONSE")) return "AI returned an unexpected format. Try again.";
-  return msg;
+function pct01(n01: number) {
+  return Math.round(clamp(n01, 0, 1) * 100);
+}
+
+function looksLikeZodIssues(msg: string) {
+  const s = safeText(msg);
+  return s.startsWith("[{") && s.includes(`"code"`) && s.includes(`"path"`) && s.includes(`"message"`);
+}
+
+function friendlyInterviewError(msg: string) {
+  const s = safeText(msg);
+  if (!s) return "Interview failed.";
+  if (s === "MISSING_OPENAI_API_KEY") return "OpenAI API key is not configured on the server.";
+  if (s === "LLM_NON_JSON_RESPONSE") return "AI returned an invalid response. Please retry.";
+  if (looksLikeZodIssues(s)) return "Interview state validation failed. Hit Reset and try again.";
+  return s;
 }
 
 /**
  * Product-aware “why we ask” lines.
+ * Keeps it conversational and ties directly to AIPhotoQuote configuration.
  */
 function whyForQid(qid: string) {
   switch (qid) {
     case "services":
       return "This picks your starter quote template + default services.";
-    case "objects":
     case "materials_objects":
       return "This loads the right photo checklist (what we ask customers to upload).";
     case "job_type":
       return "This tunes how we scope estimates (repair vs replacement vs install).";
-    case "customer_type":
     case "who_for":
       return "This tailors your intake language + typical job mix.";
     case "top_jobs":
       return "This helps us name your common jobs and question prompts.";
     case "materials":
       return "This improves fit accuracy and helps us choose the right terminology.";
+    case "specialty":
+      return "This catches niche signals (e.g., collision vs detailing vs wraps vs restoration).";
+    case "location":
+      return "Optional — helps with service area phrasing.";
     case "freeform":
-      return "This is the fastest way to confirm the right experience.";
+    case "clarify_freeform":
+      return "Fastest way to confirm the right experience.";
     default:
       return "This helps us tailor your setup.";
   }
@@ -95,10 +110,7 @@ export function Step2(props: {
   const [ivErr, setIvErr] = useState<string | null>(null);
   const [ivAnswer, setIvAnswer] = useState("");
   const [inf, setInf] = useState<IndustryInference | null>(null);
-  const askedQidsRef = useRef<Set<string>>(new Set());
-
-  // extra debug / “new industry created”
-  const [ivDebug, setIvDebug] = useState<any | null>(null);
+  const [ivDebug, setIvDebug] = useState<InterviewDebug>(null);
 
   const tenantId = safeText(props.tenantId);
   const websiteTrim = safeText(props.website);
@@ -114,6 +126,7 @@ export function Step2(props: {
 
   const serverSaysAnalyzing = String(props.aiAnalysisStatus ?? "").toLowerCase() === "running";
   const showAnalyzing = running || serverSaysAnalyzing;
+
   const canContinueWebsite = Boolean(props.aiAnalysis) && !mustConfirm;
 
   // Interview derived values
@@ -125,30 +138,27 @@ export function Step2(props: {
   const ivSuggested = safeText(inf?.suggestedIndustryKey);
   const ivStatus = safeText(inf?.status);
   const ivAnsweredCount = inf?.answers?.length ?? 0;
-  const ivRound = Number(inf?.round ?? 1) || 1;
+  const ivRound = Number(inf?.round ?? Math.max(1, ivAnsweredCount)) || 1;
 
+  // Locked state: when backend says we've confidently suggested an industry
   const isLocked = ivStatus === "suggested" && Boolean(ivSuggested);
-  const showInterview = !hasWebsite;
-  const canContinueInterview = isLocked;
 
-  const IV_SOFT_MAX = 10;
+  // Progress: answers / soft max
+  const IV_SOFT_MAX = 8;
   const ivProgressPct = Math.max(
     8,
-    Math.min(
-      100,
-      Math.round(((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (isLocked ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100)
-    )
+    Math.min(100, Math.round(((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (isLocked ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100))
   );
+
+  const showInterview = !hasWebsite;
+  const canContinueInterview = isLocked;
 
   function topMatchLine() {
     const top = inf?.candidates?.[0];
     if (!top) return "Tell us a bit about your business and we’ll pick the best-fit setup.";
     if (isLocked) return `Locked in: ${top.label}. Next you’ll confirm it.`;
-
-    if ((inf?.candidates?.length ?? 0) > 1) {
-      const second = inf?.candidates?.[1];
-      if (second && top.score === second.score) return `We’re torn between ${top.label} and ${second.label}. One more question.`;
-    }
+    const second = inf?.candidates?.[1];
+    if (second && top.score === second.score) return `We’re torn between ${top.label} and ${second.label}. One more question.`;
     return `Leaning toward ${top.label}. A couple more answers will lock it in.`;
   }
 
@@ -161,6 +171,7 @@ export function Step2(props: {
   async function ivPost(payload: any) {
     setIvErr(null);
     setIvLoading(true);
+
     try {
       if (!tenantId) throw new Error("NO_TENANT: missing tenantId for interview.");
 
@@ -174,48 +185,26 @@ export function Step2(props: {
       if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
       const next = (j?.industryInference ?? null) as IndustryInference | null;
+      const dbg = (j?.debug ?? null) as InterviewDebug;
 
-      // guard against undefined fields
-      if (!next || typeof next !== "object") throw new Error("Interview returned no state.");
-
-      // Client-side anti-repeat guard: if server returns a qid we already asked, request a start again.
-      const qid = safeText(next?.nextQuestion?.qid);
-      if (payload?.action === "start" && qid && askedQidsRef.current.has(qid)) {
-        // one retry
-        const res2 = await fetch("/api/onboarding/industry-interview", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ tenantId, action: "start" }),
-        });
-        const j2 = await res2.json().catch(() => null);
-        const next2 = (j2?.industryInference ?? null) as IndustryInference | null;
-        if (res2.ok && j2?.ok && next2?.nextQuestion?.qid && !askedQidsRef.current.has(next2.nextQuestion.qid)) {
-          setInf(next2);
-        } else {
-          setInf(next);
-        }
-      } else {
+      // Defensive: don’t smash state with null/undefined (this is what creates “undefined” Zod-looking errors elsewhere)
+      if (next && typeof next === "object") {
         setInf(next);
       }
 
-      // track asked qids (both next question + answered qids)
-      if (next?.nextQuestion?.qid) askedQidsRef.current.add(next.nextQuestion.qid);
-      (next?.answers ?? []).forEach((a) => {
-        if (a?.qid) askedQidsRef.current.add(a.qid);
-      });
-
-      setIvDebug(j?.debug ?? null);
+      setIvDebug(dbg);
       setIvAnswer("");
       return next;
     } catch (e: any) {
-      setIvErr(formatErrHuman(e));
+      const msg = friendlyInterviewError(e?.message ?? String(e));
+      setIvErr(msg);
       throw e;
     } finally {
       setIvLoading(false);
     }
   }
 
-  // Auto-run: website scan if website exists; otherwise start interview
+  // Only auto-run website scan if a website exists; otherwise start interview
   useEffect(() => {
     if (autoRanRef.current) return;
     autoRanRef.current = true;
@@ -229,7 +218,7 @@ export function Step2(props: {
       setRunning(true);
       props
         .onRun()
-        .catch((e: any) => props.onError(formatErrHuman(e)))
+        .catch((e: any) => props.onError(e?.message ?? String(e)))
         .finally(() => {
           if (alive) setRunning(false);
         });
@@ -240,24 +229,20 @@ export function Step2(props: {
     }
 
     // no website -> start interview
-    askedQidsRef.current = new Set();
-    ivPost({ action: "start" }).catch((e: any) => props.onError(formatErrHuman(e)));
+    ivPost({ action: "start" }).catch((e: any) => props.onError(e?.message ?? String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props]);
 
-  // Hydrate interview state from aiAnalysis (server-sourced)
+  // Hydrate interview state from aiAnalysis (server-sourced) ONCE if present
+  const hydratedRef = useRef(false);
   useEffect(() => {
     if (hasWebsite) return;
+    if (hydratedRef.current) return;
+
     const fromAi = props.aiAnalysis?.industryInference ?? null;
     if (fromAi && typeof fromAi === "object" && fromAi.mode === "interview") {
-      const next = fromAi as IndustryInference;
-      setInf(next);
-
-      // hydrate asked set
-      const s = new Set<string>();
-      (next?.answers ?? []).forEach((a) => a?.qid && s.add(a.qid));
-      if (next?.nextQuestion?.qid) s.add(next.nextQuestion.qid);
-      askedQidsRef.current = s;
+      hydratedRef.current = true;
+      setInf(fromAi as IndustryInference);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasWebsite, props.aiAnalysis]);
@@ -289,37 +274,38 @@ export function Step2(props: {
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="font-semibold">
-                  {isLocked ? "Your setup is ready" : "We’re setting up your AIPhotoQuote experience"}
-                </div>
+                <div className="font-semibold">{isLocked ? "Your setup is ready" : "We’re setting up your AIPhotoQuote experience"}</div>
                 <div className="mt-1 text-xs opacity-90">
                   {isLocked
                     ? "We’ve confidently picked the best-fit starter pack. You’ll confirm the final industry on the next step."
                     : "We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step."}
                 </div>
+
                 <div className="mt-2 text-xs font-semibold opacity-95">{topMatchLine()}</div>
                 {lastAnswerLine() ? <div className="mt-1 text-xs opacity-90">{lastAnswerLine()}</div> : null}
 
-                {/* If backend created/proposed a new industry, show it (during testing this is super useful) */}
-                {ivDebug?.proposedNewIndustry?.label ? (
-                  <div className="mt-2 text-xs rounded-lg border border-indigo-200 bg-white/60 p-2 dark:bg-black/20">
-                    <span className="font-semibold">New industry detected:</span>{" "}
-                    <span className="font-semibold">{String(ivDebug.proposedNewIndustry.label)}</span>
-                    {ivDebug.proposedNewIndustry.key ? (
-                      <>
-                        {" "}
-                        <span className="font-mono text-[11px] opacity-80">({String(ivDebug.proposedNewIndustry.key)})</span>
-                      </>
+                {/* ✅ show “new industry created/proposed” as a living AI signal */}
+                {ivDebug?.proposedNewIndustry ? (
+                  <div className="mt-3 rounded-xl border border-indigo-300/40 bg-white/60 p-3 text-xs dark:bg-black/20">
+                    <div className="font-semibold">New industry detected</div>
+                    <div className="mt-1">
+                      <span className="font-semibold">{ivDebug.proposedNewIndustry.label}</span>{" "}
+                      <span className="font-mono opacity-80">({ivDebug.proposedNewIndustry.key})</span>
+                    </div>
+                    {ivDebug.proposedNewIndustry.description ? (
+                      <div className="mt-1 opacity-90">{ivDebug.proposedNewIndustry.description}</div>
                     ) : null}
+                    {ivDebug.reason ? <div className="mt-2 italic opacity-80">{ivDebug.reason}</div> : null}
                   </div>
                 ) : null}
               </div>
 
               <div className="shrink-0 text-right">
                 <div className="text-xs">
-                  Match strength: <span className="font-mono">{pct(ivConfidence)}%</span>
+                  Match strength: <span className="font-mono">{pct01(ivConfidence)}%</span>
                 </div>
                 <div className="text-[11px] opacity-90">Round {ivRound}</div>
+                {inf?.meta?.model ? <div className="text-[11px] opacity-80">model: {inf.meta.model}</div> : null}
               </div>
             </div>
 
@@ -329,7 +315,8 @@ export function Step2(props: {
 
             {ivErr ? (
               <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                {ivErr}
+                <div className="font-semibold">Interview error</div>
+                <div className="mt-1">{ivErr}</div>
               </div>
             ) : null}
           </div>
@@ -357,17 +344,14 @@ export function Step2(props: {
                   type="button"
                   className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 disabled:opacity-50"
                   disabled={ivLoading}
-                  onClick={() => {
-                    askedQidsRef.current = new Set();
-                    ivPost({ action: "reset" }).catch(() => null);
-                  }}
+                  onClick={() => ivPost({ action: "reset" }).catch(() => null)}
                   title="Start interview over"
                 >
                   Reset
                 </button>
               </div>
 
-              {/* Options chips (if provided) */}
+              {/* Options chips */}
               {inf?.nextQuestion?.options?.length ? (
                 <div className="mt-4 flex flex-wrap gap-2">
                   {inf.nextQuestion.options.map((opt) => (
@@ -411,7 +395,7 @@ export function Step2(props: {
                       action: "answer",
                       qid: inf?.nextQuestion?.qid,
                       answer: ivAnswer.trim(),
-                    }).catch((e: any) => props.onError(formatErrHuman(e)))
+                    }).catch((e: any) => props.onError(e?.message ?? String(e)))
                   }
                 >
                   {ivLoading ? "Saving…" : "Submit"}
@@ -457,7 +441,7 @@ export function Step2(props: {
               </div>
 
               <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                We’ll stop once the top match is clear.
+                We’ll stop once the top match is clear (usually 2–4 answers).
               </div>
             </div>
           ) : null}
@@ -476,7 +460,7 @@ export function Step2(props: {
             </div>
           ) : null}
 
-          {/* Answer history */}
+          {/* Answer history (collapsed) */}
           {inf?.answers?.length ? (
             <details className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
@@ -486,7 +470,7 @@ export function Step2(props: {
                 {inf.answers
                   .slice()
                   .reverse()
-                  .slice(0, 8)
+                  .slice(0, 10)
                   .map((a, idx) => (
                     <div
                       key={`${a.qid}:${idx}`}
@@ -505,7 +489,7 @@ export function Step2(props: {
       {/* ---------------- WEBSITE MODE (HAS WEBSITE) ---------------- */}
       {props.aiAnalysisError ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-          {formatErrHuman(props.aiAnalysisError)}
+          {props.aiAnalysisError}
         </div>
       ) : null}
 
@@ -520,7 +504,7 @@ export function Step2(props: {
               try {
                 await props.onRun();
               } catch (e: any) {
-                props.onError(formatErrHuman(e));
+                props.onError(e?.message ?? String(e));
               } finally {
                 setRunning(false);
               }
@@ -565,7 +549,7 @@ export function Step2(props: {
                         await props.onConfirm({ answer: "yes" });
                         setFeedback("");
                       } catch (e: any) {
-                        props.onError(formatErrHuman(e));
+                        props.onError(e?.message ?? String(e));
                       } finally {
                         setConfirming(false);
                       }
@@ -583,7 +567,7 @@ export function Step2(props: {
                       try {
                         await props.onConfirm({ answer: "no", feedback: feedback.trim() || undefined });
                       } catch (e: any) {
-                        props.onError(formatErrHuman(e));
+                        props.onError(e?.message ?? String(e));
                       } finally {
                         setConfirming(false);
                       }
@@ -601,7 +585,7 @@ export function Step2(props: {
                     value={feedback}
                     onChange={(e) => setFeedback(e.target.value)}
                     rows={4}
-                    placeholder="Example: We do custom automotive upholstery (seats + door panels), headliners, and marine vinyl repairs."
+                    placeholder="Example: We do custom automotive upholstery (seats + door panels), headliners, and marine vinyl repairs. We do not do painting."
                     className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none dark:border-emerald-900/40 dark:bg-gray-950 dark:text-gray-100"
                   />
                 </div>
@@ -630,6 +614,19 @@ export function Step2(props: {
                       {" • "}
                       Base attempts: <span className="font-mono">{fetchSummary.attemptedCount}</span>
                     </div>
+                    {fetchSummary.pagesUsed.length ? (
+                      <div className="mt-1 break-words">
+                        Used:
+                        <ul className="mt-1 list-disc pl-5">
+                          {fetchSummary.pagesUsed.slice(0, 4).map((u, i) => (
+                            <li key={i} className="break-all">
+                              {u}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {fetchSummary.hint ? <div className="mt-2 italic opacity-90">{fetchSummary.hint}</div> : null}
                   </div>
                 ) : null}
 
@@ -676,6 +673,7 @@ export function Step2(props: {
             Continue
           </button>
 
+          {/* Escape hatch for support/testing */}
           <button
             type="button"
             className="rounded-2xl border border-gray-200 bg-white py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
