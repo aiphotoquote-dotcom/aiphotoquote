@@ -5,7 +5,7 @@ import type { Mode } from "./types";
 export function safeStep(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return 1;
-  return Math.max(1, Math.min(7, Math.floor(n))); // ✅ was 6
+  return Math.max(1, Math.min(7, Math.floor(n)));
 }
 
 export function safeMode(v: any): Mode {

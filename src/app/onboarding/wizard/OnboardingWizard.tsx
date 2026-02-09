@@ -39,7 +39,7 @@ function getAiAnalysis(state: OnboardingState | null): any | null {
   if (s.ai_analysis && typeof s.ai_analysis === "object") return s.ai_analysis;
   if (s.aiAnalysisJson && typeof s.aiAnalysisJson === "object") return s.aiAnalysisJson;
 
-  // Nested alternates (if state endpoint returns tenant_onboarding row as nested object)
+  // Nested alternates
   if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
   if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
 
@@ -73,7 +73,6 @@ export default function OnboardingWizard() {
 
   // ✅ Step3 -> Step3b handoff state (local, non-persisted)
   const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
-  const [pendingSubIndustryLabel, setPendingSubIndustryLabel] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -177,7 +176,6 @@ export default function OnboardingWizard() {
     while (mountedRef.current && Date.now() - start < maxMs) {
       const j = await refresh({ tenantId: tid });
 
-      // Normalize status from either state fields or aiAnalysis.meta.status
       const aj = getAiAnalysis(j as any);
       const status = safeTrim((j as any)?.aiAnalysisStatus) || safeTrim(aj?.meta?.status);
 
@@ -260,11 +258,7 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
-  async function saveIndustrySelection(args: {
-    industryKey?: string;
-    industryLabel?: string;
-    subIndustryLabel?: string | null;
-  }) {
+  async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
     setErr(null);
     setLastAction(null);
 
@@ -282,7 +276,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Industry saved.");
-    go(5); // ✅ next is now step 5 (AI & Pricing Policy)
+    go(5);
   }
 
   async function ensureActiveTenant(tid: string) {
@@ -333,7 +327,7 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 6, // ✅ branding is now step 6
+        step: 6,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -345,7 +339,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Saved branding & lead routing.");
-    go(7); // ✅ plan is now step 7
+    go(7);
   }
 
   if (loading) {
@@ -380,7 +374,9 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              We’ll tailor your quoting experience in just a few steps.
+            </div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -432,16 +428,13 @@ export default function OnboardingWizard() {
               aiAnalysis={normalizedAiAnalysis}
               onBack={() => go(2)}
               onReInterview={() => go(2)}
-              onSubmit={async ({ industryKey, subIndustryLabel }) => {
-                // ✅ Do NOT save to server yet. Hand off to Step3b.
+              onSubmit={async ({ industryKey }) => {
                 const key = safeTrim(industryKey);
                 if (!key) throw new Error("Choose an industry.");
 
                 setPendingIndustryKey(key);
-                setPendingSubIndustryLabel(subIndustryLabel ?? null);
-
                 setLastAction("Industry selected — refining focus…");
-                go(4); // ✅ Step3b
+                go(4);
               }}
             />
           ) : step === 4 ? (
@@ -451,29 +444,22 @@ export default function OnboardingWizard() {
               aiAnalysis={normalizedAiAnalysis}
               onBack={() => go(3)}
               onSkip={async () => {
-                // ✅ If you ever use onSkip, it MUST still persist the industry
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
 
-                const finalSub = safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
-
-                await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
+                await saveIndustrySelection({ industryKey: key, subIndustryLabel: null });
 
                 setPendingIndustryKey("");
-                setPendingSubIndustryLabel(null);
               }}
               onSubmit={async ({ subIndustryLabel }) => {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
 
-                // Prefer Step3b label, else keep what Step3 captured (if any)
-                const finalSub =
-                  safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
+                const finalSub = safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : null;
 
                 await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
 
                 setPendingIndustryKey("");
-                setPendingSubIndustryLabel(null);
               }}
               onError={(m) => setErr(m)}
             />
