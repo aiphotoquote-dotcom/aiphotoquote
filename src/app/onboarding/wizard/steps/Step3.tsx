@@ -47,6 +47,16 @@ function pct(n: number) {
   return Math.max(0, Math.min(100, Math.round(n * 100)));
 }
 
+function normalizeKey(raw: string) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
+
 export function Step3(props: {
   tenantId: string | null;
   aiAnalysis: any | null | undefined;
@@ -72,22 +82,36 @@ export function Step3(props: {
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
-  // AI suggestion + candidates
-  const suggestedKey = safeTrim(props.aiAnalysis?.suggestedIndustryKey);
+  /**
+   * ✅ IMPORTANT FIX:
+   * Step2 writes suggestion under aiAnalysis.industryInference.* (and may also mirror to root).
+   * Step3 must read BOTH, preferring industryInference.
+   */
+  const inference = props.aiAnalysis?.industryInference ?? null;
+
+  const suggestedKey = safeTrim(inference?.suggestedIndustryKey) || safeTrim(props.aiAnalysis?.suggestedIndustryKey);
+  const suggestedConfidenceRaw =
+    inference?.confidenceScore !== null && inference?.confidenceScore !== undefined
+      ? inference?.confidenceScore
+      : props.aiAnalysis?.confidenceScore;
+
   const suggestedConfidence =
-    props.aiAnalysis?.confidenceScore !== null && props.aiAnalysis?.confidenceScore !== undefined
-      ? toNum(props.aiAnalysis?.confidenceScore, 0)
-      : null;
+    suggestedConfidenceRaw !== null && suggestedConfidenceRaw !== undefined ? toNum(suggestedConfidenceRaw, 0) : null;
 
-  const candidates: Candidate[] = Array.isArray(props.aiAnalysis?.industryInference?.candidates)
-    ? props.aiAnalysis.industryInference.candidates
-    : [];
+  const candidates: Candidate[] = Array.isArray(inference?.candidates)
+    ? inference.candidates
+    : Array.isArray(props.aiAnalysis?.candidates)
+      ? props.aiAnalysis.candidates
+      : [];
 
-  const topCandidates = candidates.slice(0, 4).map((c: any) => ({
+  const topCandidates = candidates.slice(0, 6).map((c: any) => ({
     key: safeTrim(c?.key),
     label: safeTrim(c?.label),
     score: toNum(c?.score, 0),
   }));
+
+  const aiStatus = safeTrim(inference?.status) || "";
+  const debugReason = safeTrim(inference?.meta?.debug?.reason) || safeTrim(props.aiAnalysis?.meta?.debug?.reason) || "";
 
   const selectedLabel = useMemo(() => {
     const hit = items.find((x) => x.key === selectedKey);
@@ -147,6 +171,27 @@ export function Step3(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tenantId]);
 
+  /**
+   * ✅ If aiAnalysis arrives AFTER industries load, ensure we adopt it.
+   * This prevents Step3 from looking like it "reverted" to Service.
+   */
+  useEffect(() => {
+    if (!items.length) return;
+    if (!suggestedKey) return;
+
+    const exists = items.some((x) => x.key === suggestedKey);
+    if (!exists) return;
+
+    // If user already picked something non-generic, don’t override.
+    const cur = safeTrim(selectedKey);
+    const isGeneric = !cur || cur === "service";
+
+    if (isGeneric) {
+      setSelectedKey(suggestedKey);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestedKey, items.length]);
+
   useEffect(() => {
     const tid = safeTrim(props.tenantId);
     if (!tid) return;
@@ -178,7 +223,20 @@ export function Step3(props: {
   }, [props.tenantId, selectedKey]);
 
   const canSave = Boolean(selectedKey);
-  const showAiCard = Boolean(suggestedKey);
+
+  /**
+   * ✅ Show the AI card whenever we have ANY meaningful signal
+   * (suggestedKey OR candidates list). Otherwise Step3 feels dead.
+   */
+  const hasAnyAiSignal = Boolean(suggestedKey) || topCandidates.some((c) => Boolean(c.key));
+  const showAiCard = hasAnyAiSignal;
+
+  /**
+   * ✅ Only show the “need more signal” warning if there is truly no signal.
+   * If we have candidates but no final suggestion yet, we show the AI card
+   * and encourage “Improve match”.
+   */
+  const showNeedSignal = !hasAnyAiSignal;
 
   return (
     <div>
@@ -191,27 +249,34 @@ export function Step3(props: {
         <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="font-semibold">AI suggestion</div>
+              <div className="font-semibold">AI signal</div>
+
               <div className="mt-1">
-                {suggestedLabel ? (
-                  <>
-                    <span className="font-semibold">{suggestedLabel}</span>{" "}
-                    <span className="font-mono text-xs opacity-90">({suggestedKey})</span>
-                  </>
+                {suggestedKey ? (
+                  suggestedLabel ? (
+                    <>
+                      <span className="font-semibold">{suggestedLabel}</span>{" "}
+                      <span className="font-mono text-xs opacity-90">({suggestedKey})</span>
+                    </>
+                  ) : (
+                    <>
+                      Suggested industry key: <span className="font-mono text-xs">{suggestedKey}</span>
+                    </>
+                  )
                 ) : (
-                  <>
-                    Suggested industry key: <span className="font-mono text-xs">{suggestedKey}</span>
-                  </>
+                  <span className="opacity-90">
+                    We have a few close matches — pick one below or click “Improve match”.
+                  </span>
                 )}
               </div>
 
               {topCandidates.length ? (
                 <div className="mt-3">
-                  <div className="text-xs font-semibold opacity-90">Other close matches</div>
+                  <div className="text-xs font-semibold opacity-90">Close matches</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {topCandidates
                       .filter((c) => c.key && c.key !== selectedKey)
-                      .slice(0, 3)
+                      .slice(0, 4)
                       .map((c) => (
                         <button
                           key={c.key}
@@ -224,6 +289,19 @@ export function Step3(props: {
                         </button>
                       ))}
                   </div>
+                </div>
+              ) : null}
+
+              {debugReason ? (
+                <div className="mt-3 text-[11px] opacity-80">
+                  <span className="font-semibold">Why:</span> {debugReason}
+                </div>
+              ) : null}
+
+              {aiStatus ? (
+                <div className="mt-2 text-[11px] opacity-80">
+                  <span className="font-semibold">Status:</span>{" "}
+                  <span className="font-mono">{aiStatus}</span>
                 </div>
               ) : null}
             </div>
@@ -240,7 +318,9 @@ export function Step3(props: {
               type="button"
               className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
               disabled={saving || !suggestedKey}
-              onClick={() => setSelectedKey(suggestedKey)}
+              onClick={() => {
+                if (suggestedKey) setSelectedKey(suggestedKey);
+              }}
             >
               Use suggestion
             </button>
@@ -252,11 +332,11 @@ export function Step3(props: {
               onClick={props.onReInterview}
               title="Go back to the interview so we can improve the match"
             >
-              Not correct — ask me more →
+              Improve match →
             </button>
           </div>
         </div>
-      ) : (
+      ) : showNeedSignal ? (
         <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
           <div className="font-semibold">We need a bit more signal</div>
           <div className="mt-1">
@@ -272,7 +352,7 @@ export function Step3(props: {
             </button>
           </div>
         </div>
-      )}
+      ) : null}
 
       {err ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
@@ -315,7 +395,7 @@ export function Step3(props: {
                 </select>
               </label>
 
-              {/* ✅ NEW: Sub-industry (tenant scoped) */}
+              {/* ✅ Sub-industry (tenant scoped) */}
               <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-black">
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Sub-industry (optional)</div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
