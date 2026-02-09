@@ -4,27 +4,18 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getConfidence, getPreviewText, needsConfirmation, summarizeFetchDebug } from "../utils";
 
-/**
- * Industry interview state returned by /api/onboarding/industry-interview
- * (real-AI version: confidenceScore is 0..1, candidate.score is 0..10)
- */
 type IndustryInference = {
   mode: "interview";
   status: "collecting" | "suggested";
   round: number;
-  confidenceScore: number; // 0..1
+  confidenceScore: number;
   suggestedIndustryKey: string | null;
   needsConfirmation: boolean;
   nextQuestion: { qid: string; question: string; help?: string; options?: string[] } | null;
   answers: Array<{ qid: string; question: string; answer: string; createdAt: string }>;
-  candidates: Array<{ key: string; label: string; score: number }>;
-  meta?: { updatedAt?: string; model?: string };
+  candidates: Array<{ key: string; label: any; score: number }>;
+  meta: { updatedAt: string };
 };
-
-type InterviewDebug = {
-  proposedNewIndustry?: { key: string; label: string; description?: string | null } | null;
-  reason?: string | null;
-} | null;
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -35,32 +26,25 @@ function safeText(v: any) {
   return s ? s : "";
 }
 
-function clamp(n: number, lo: number, hi: number) {
-  if (!Number.isFinite(n)) return lo;
-  return Math.max(lo, Math.min(hi, n));
+function safeUi(v: any) {
+  // ✅ guarantees a render-safe string even if v is array/object
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
 }
 
-function pct01(n01: number) {
-  return Math.round(clamp(n01, 0, 1) * 100);
-}
-
-function looksLikeZodIssues(msg: string) {
-  const s = safeText(msg);
-  return s.startsWith("[{") && s.includes(`"code"`) && s.includes(`"path"`) && s.includes(`"message"`);
-}
-
-function friendlyInterviewError(msg: string) {
-  const s = safeText(msg);
-  if (!s) return "Interview failed.";
-  if (s === "MISSING_OPENAI_API_KEY") return "OpenAI API key is not configured on the server.";
-  if (s === "LLM_NON_JSON_RESPONSE") return "AI returned an invalid response. Please retry.";
-  if (looksLikeZodIssues(s)) return "Interview state validation failed. Hit Reset and try again.";
-  return s;
+function pct(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n * 100)));
 }
 
 /**
  * Product-aware “why we ask” lines.
- * Keeps it conversational and ties directly to AIPhotoQuote configuration.
  */
 function whyForQid(qid: string) {
   switch (qid) {
@@ -77,12 +61,11 @@ function whyForQid(qid: string) {
     case "materials":
       return "This improves fit accuracy and helps us choose the right terminology.";
     case "specialty":
-      return "This catches niche signals (e.g., collision vs detailing vs wraps vs restoration).";
+      return "This catches niche signals (e.g., collision vs detailing vs restoration).";
     case "location":
-      return "Optional — helps with service area phrasing.";
+      return "This is optional—helps with your service area phrasing.";
     case "freeform":
-    case "clarify_freeform":
-      return "Fastest way to confirm the right experience.";
+      return "This is the fastest way to confirm the right experience.";
     default:
       return "This helps us tailor your setup.";
   }
@@ -110,7 +93,6 @@ export function Step2(props: {
   const [ivErr, setIvErr] = useState<string | null>(null);
   const [ivAnswer, setIvAnswer] = useState("");
   const [inf, setInf] = useState<IndustryInference | null>(null);
-  const [ivDebug, setIvDebug] = useState<InterviewDebug>(null);
 
   const tenantId = safeText(props.tenantId);
   const websiteTrim = safeText(props.website);
@@ -138,16 +120,17 @@ export function Step2(props: {
   const ivSuggested = safeText(inf?.suggestedIndustryKey);
   const ivStatus = safeText(inf?.status);
   const ivAnsweredCount = inf?.answers?.length ?? 0;
-  const ivRound = Number(inf?.round ?? Math.max(1, ivAnsweredCount)) || 1;
+  const ivRound = Number(inf?.round ?? 1) || 1;
 
-  // Locked state: when backend says we've confidently suggested an industry
   const isLocked = ivStatus === "suggested" && Boolean(ivSuggested);
 
-  // Progress: answers / soft max
   const IV_SOFT_MAX = 8;
   const ivProgressPct = Math.max(
     8,
-    Math.min(100, Math.round(((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (isLocked ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100))
+    Math.min(
+      100,
+      Math.round(((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (isLocked ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100)
+    )
   );
 
   const showInterview = !hasWebsite;
@@ -155,11 +138,19 @@ export function Step2(props: {
 
   function topMatchLine() {
     const top = inf?.candidates?.[0];
+    const topLabel = safeText(top?.label) || safeUi(top?.label) || safeText(top?.key) || "your industry";
+
     if (!top) return "Tell us a bit about your business and we’ll pick the best-fit setup.";
-    if (isLocked) return `Locked in: ${top.label}. Next you’ll confirm it.`;
-    const second = inf?.candidates?.[1];
-    if (second && top.score === second.score) return `We’re torn between ${top.label} and ${second.label}. One more question.`;
-    return `Leaning toward ${top.label}. A couple more answers will lock it in.`;
+    if (isLocked) return `Locked in: ${topLabel}. Next you’ll confirm it.`;
+
+    if ((inf?.candidates?.length ?? 0) > 1) {
+      const second = inf?.candidates?.[1];
+      if (second && top.score === second.score) {
+        const secondLabel = safeText(second?.label) || safeUi(second?.label) || safeText(second?.key) || "another option";
+        return `We’re torn between ${topLabel} and ${secondLabel}. One more question.`;
+      }
+    }
+    return `Leaning toward ${topLabel}. A couple more answers will lock it in.`;
   }
 
   function lastAnswerLine() {
@@ -168,10 +159,18 @@ export function Step2(props: {
     return `Last answer: ${String(last.answer)}`;
   }
 
+  function normalizeErrForUi(j: any, resStatus?: number) {
+    // server might send message as array/object (e.g., zod issues). Never render that raw.
+    const msg = j?.message ?? j?.error ?? null;
+    if (typeof msg === "string" && msg.trim()) return msg.trim();
+    if (msg != null) return safeUi(msg);
+    if (typeof resStatus === "number") return `HTTP ${resStatus}`;
+    return "Unknown error";
+  }
+
   async function ivPost(payload: any) {
     setIvErr(null);
     setIvLoading(true);
-
     try {
       if (!tenantId) throw new Error("NO_TENANT: missing tenantId for interview.");
 
@@ -182,29 +181,25 @@ export function Step2(props: {
       });
 
       const j = await res.json().catch(() => null);
-      if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
 
-      const next = (j?.industryInference ?? null) as IndustryInference | null;
-      const dbg = (j?.debug ?? null) as InterviewDebug;
-
-      // Defensive: don’t smash state with null/undefined (this is what creates “undefined” Zod-looking errors elsewhere)
-      if (next && typeof next === "object") {
-        setInf(next);
+      if (!res.ok || !j?.ok) {
+        const m = normalizeErrForUi(j, res.status);
+        throw new Error(m);
       }
 
-      setIvDebug(dbg);
+      const next = (j?.industryInference ?? null) as IndustryInference | null;
+      setInf(next);
       setIvAnswer("");
       return next;
     } catch (e: any) {
-      const msg = friendlyInterviewError(e?.message ?? String(e));
-      setIvErr(msg);
+      const m = e?.message;
+      setIvErr(typeof m === "string" ? m : safeUi(m ?? e));
       throw e;
     } finally {
       setIvLoading(false);
     }
   }
 
-  // Only auto-run website scan if a website exists; otherwise start interview
   useEffect(() => {
     if (autoRanRef.current) return;
     autoRanRef.current = true;
@@ -218,7 +213,7 @@ export function Step2(props: {
       setRunning(true);
       props
         .onRun()
-        .catch((e: any) => props.onError(e?.message ?? String(e)))
+        .catch((e: any) => props.onError(typeof e?.message === "string" ? e.message : safeUi(e)))
         .finally(() => {
           if (alive) setRunning(false);
         });
@@ -228,20 +223,16 @@ export function Step2(props: {
       };
     }
 
-    // no website -> start interview
-    ivPost({ action: "start" }).catch((e: any) => props.onError(e?.message ?? String(e)));
+    ivPost({ action: "start" }).catch((e: any) =>
+      props.onError(typeof e?.message === "string" ? e.message : safeUi(e))
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props]);
 
-  // Hydrate interview state from aiAnalysis (server-sourced) ONCE if present
-  const hydratedRef = useRef(false);
   useEffect(() => {
     if (hasWebsite) return;
-    if (hydratedRef.current) return;
-
     const fromAi = props.aiAnalysis?.industryInference ?? null;
     if (fromAi && typeof fromAi === "object" && fromAi.mode === "interview") {
-      hydratedRef.current = true;
       setInf(fromAi as IndustryInference);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -259,7 +250,6 @@ export function Step2(props: {
           : "No website needed — we’ll ask a few smart questions to load the right templates, photos, and defaults."}
       </div>
 
-      {/* Website card only when a website exists */}
       {hasWebsite ? (
         <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
           <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
@@ -270,7 +260,6 @@ export function Step2(props: {
       {/* ---------------- INTERVIEW MODE (NO WEBSITE) ---------------- */}
       {showInterview ? (
         <div className="mt-4 space-y-4">
-          {/* Top summary row */}
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -280,32 +269,16 @@ export function Step2(props: {
                     ? "We’ve confidently picked the best-fit starter pack. You’ll confirm the final industry on the next step."
                     : "We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step."}
                 </div>
-
                 <div className="mt-2 text-xs font-semibold opacity-95">{topMatchLine()}</div>
                 {lastAnswerLine() ? <div className="mt-1 text-xs opacity-90">{lastAnswerLine()}</div> : null}
-
-                {/* ✅ show “new industry created/proposed” as a living AI signal */}
-                {ivDebug?.proposedNewIndustry ? (
-                  <div className="mt-3 rounded-xl border border-indigo-300/40 bg-white/60 p-3 text-xs dark:bg-black/20">
-                    <div className="font-semibold">New industry detected</div>
-                    <div className="mt-1">
-                      <span className="font-semibold">{ivDebug.proposedNewIndustry.label}</span>{" "}
-                      <span className="font-mono opacity-80">({ivDebug.proposedNewIndustry.key})</span>
-                    </div>
-                    {ivDebug.proposedNewIndustry.description ? (
-                      <div className="mt-1 opacity-90">{ivDebug.proposedNewIndustry.description}</div>
-                    ) : null}
-                    {ivDebug.reason ? <div className="mt-2 italic opacity-80">{ivDebug.reason}</div> : null}
-                  </div>
-                ) : null}
               </div>
 
               <div className="shrink-0 text-right">
                 <div className="text-xs">
-                  Match strength: <span className="font-mono">{pct01(ivConfidence)}%</span>
+                  Match strength: <span className="font-mono">{pct(ivConfidence)}%</span>
                 </div>
                 <div className="text-[11px] opacity-90">Round {ivRound}</div>
-                {inf?.meta?.model ? <div className="text-[11px] opacity-80">model: {inf.meta.model}</div> : null}
+                <div className="text-[11px] opacity-80">backend: {pct(ivConfidence)}%</div>
               </div>
             </div>
 
@@ -315,20 +288,18 @@ export function Step2(props: {
 
             {ivErr ? (
               <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                <div className="font-semibold">Interview error</div>
-                <div className="mt-1">{ivErr}</div>
+                {ivErr}
               </div>
             ) : null}
           </div>
 
-          {/* Question card (hidden once locked) */}
           {!isLocked ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-xs text-gray-500 dark:text-gray-400">Next</div>
                   <div className="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
-                    {inf?.nextQuestion?.question ?? (ivLoading ? "Loading…" : "Loading next question…")}
+                    {safeText(inf?.nextQuestion?.question) || (ivLoading ? "Loading…" : "We have enough information.")}
                   </div>
 
                   {inf?.nextQuestion?.qid ? (
@@ -336,7 +307,7 @@ export function Step2(props: {
                   ) : null}
 
                   {inf?.nextQuestion?.help ? (
-                    <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{inf.nextQuestion.help}</div>
+                    <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{safeUi(inf.nextQuestion.help)}</div>
                   ) : null}
                 </div>
 
@@ -351,7 +322,6 @@ export function Step2(props: {
                 </button>
               </div>
 
-              {/* Options chips */}
               {inf?.nextQuestion?.options?.length ? (
                 <div className="mt-4 flex flex-wrap gap-2">
                   {inf.nextQuestion.options.map((opt) => (
@@ -373,7 +343,6 @@ export function Step2(props: {
                 </div>
               ) : null}
 
-              {/* Free text input */}
               <div className="mt-4">
                 <textarea
                   value={ivAnswer}
@@ -395,7 +364,7 @@ export function Step2(props: {
                       action: "answer",
                       qid: inf?.nextQuestion?.qid,
                       answer: ivAnswer.trim(),
-                    }).catch((e: any) => props.onError(e?.message ?? String(e)))
+                    }).catch((e: any) => props.onError(typeof e?.message === "string" ? e.message : safeUi(e)))
                   }
                 >
                   {ivLoading ? "Saving…" : "Submit"}
@@ -408,7 +377,6 @@ export function Step2(props: {
             </div>
           ) : null}
 
-          {/* Best matches list (hidden once locked) */}
           {!isLocked && inf?.candidates?.length ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-center justify-between gap-3">
@@ -417,27 +385,32 @@ export function Step2(props: {
               </div>
 
               <div className="mt-3 grid gap-2">
-                {inf.candidates.slice(0, 5).map((c) => (
-                  <div
-                    key={c.key}
-                    className={cn(
-                      "rounded-2xl border p-3",
-                      c.key === ivSuggested
-                        ? "border-indigo-200 bg-indigo-50 dark:border-indigo-900/40 dark:bg-indigo-950/30"
-                        : "border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black"
-                    )}
-                  >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{c.label}</div>
-                        <div className="mt-0.5 font-mono text-[11px] text-gray-600 dark:text-gray-300 truncate">{c.key}</div>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">score {c.score}</div>
+                {inf.candidates.slice(0, 4).map((c) => {
+                  const label = safeText(c.label) || safeUi(c.label) || safeText(c.key);
+                  return (
+                    <div
+                      key={String(c.key)}
+                      className={cn(
+                        "rounded-2xl border p-3",
+                        safeText(c.key) === ivSuggested
+                          ? "border-indigo-200 bg-indigo-50 dark:border-indigo-900/40 dark:bg-indigo-950/30"
+                          : "border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black"
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{label}</div>
+                          <div className="mt-0.5 font-mono text-[11px] text-gray-600 dark:text-gray-300 truncate">
+                            {safeText(c.key)}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">score {Number(c.score ?? 0)}</div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
@@ -446,21 +419,24 @@ export function Step2(props: {
             </div>
           ) : null}
 
-          {/* Ready panel (shown once locked) */}
           {isLocked ? (
             <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
                 <div className="font-semibold">Ready</div>
                 <div className="mt-1">
                   We’ll preload the{" "}
-                  <span className="font-semibold">{inf?.candidates?.[0]?.label ?? ivSuggested}</span>{" "}
+                  <span className="font-semibold">
+                    {safeText(inf?.candidates?.[0]?.label) ||
+                      safeUi(inf?.candidates?.[0]?.label) ||
+                      ivSuggested ||
+                      "selected"}
+                  </span>{" "}
                   starter pack. Next you’ll confirm the industry.
                 </div>
               </div>
             </div>
           ) : null}
 
-          {/* Answer history (collapsed) */}
           {inf?.answers?.length ? (
             <details className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
               <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
@@ -470,14 +446,14 @@ export function Step2(props: {
                 {inf.answers
                   .slice()
                   .reverse()
-                  .slice(0, 10)
+                  .slice(0, 8)
                   .map((a, idx) => (
                     <div
                       key={`${a.qid}:${idx}`}
                       className="rounded-2xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-black"
                     >
-                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{a.question}</div>
-                      <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">{a.answer}</div>
+                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{safeUi(a.question)}</div>
+                      <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">{safeUi(a.answer)}</div>
                     </div>
                   ))}
               </div>
@@ -489,7 +465,7 @@ export function Step2(props: {
       {/* ---------------- WEBSITE MODE (HAS WEBSITE) ---------------- */}
       {props.aiAnalysisError ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-          {props.aiAnalysisError}
+          {safeUi(props.aiAnalysisError)}
         </div>
       ) : null}
 
@@ -504,7 +480,7 @@ export function Step2(props: {
               try {
                 await props.onRun();
               } catch (e: any) {
-                props.onError(e?.message ?? String(e));
+                props.onError(typeof e?.message === "string" ? e.message : safeUi(e));
               } finally {
                 setRunning(false);
               }
@@ -529,7 +505,7 @@ export function Step2(props: {
                   <div className="font-semibold">Quick check</div>
                   <ul className="mt-1 list-disc pl-5">
                     {questions.slice(0, 4).map((q, i) => (
-                      <li key={i}>{String(q)}</li>
+                      <li key={i}>{safeUi(q)}</li>
                     ))}
                   </ul>
                 </div>
@@ -549,7 +525,7 @@ export function Step2(props: {
                         await props.onConfirm({ answer: "yes" });
                         setFeedback("");
                       } catch (e: any) {
-                        props.onError(e?.message ?? String(e));
+                        props.onError(typeof e?.message === "string" ? e.message : safeUi(e));
                       } finally {
                         setConfirming(false);
                       }
@@ -567,7 +543,7 @@ export function Step2(props: {
                       try {
                         await props.onConfirm({ answer: "no", feedback: feedback.trim() || undefined });
                       } catch (e: any) {
-                        props.onError(e?.message ?? String(e));
+                        props.onError(typeof e?.message === "string" ? e.message : safeUi(e));
                       } finally {
                         setConfirming(false);
                       }
@@ -608,25 +584,12 @@ export function Step2(props: {
                   <div className="mt-2 rounded-xl border border-emerald-300/40 bg-white/60 p-3 text-[11px] leading-snug dark:bg-black/20">
                     <div className="font-semibold">Extractor summary</div>
                     <div className="mt-1">
-                      Aggregate chars: <span className="font-mono">{fetchSummary.aggregateChars}</span>
+                      Aggregate chars: <span className="font-mono">{safeUi(fetchSummary.aggregateChars)}</span>
                       {" • "}
-                      Pages used: <span className="font-mono">{fetchSummary.pagesUsed.length}</span>
+                      Pages used: <span className="font-mono">{safeUi(fetchSummary.pagesUsed.length)}</span>
                       {" • "}
-                      Base attempts: <span className="font-mono">{fetchSummary.attemptedCount}</span>
+                      Base attempts: <span className="font-mono">{safeUi(fetchSummary.attemptedCount)}</span>
                     </div>
-                    {fetchSummary.pagesUsed.length ? (
-                      <div className="mt-1 break-words">
-                        Used:
-                        <ul className="mt-1 list-disc pl-5">
-                          {fetchSummary.pagesUsed.slice(0, 4).map((u, i) => (
-                            <li key={i} className="break-all">
-                              {u}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {fetchSummary.hint ? <div className="mt-2 italic opacity-90">{fetchSummary.hint}</div> : null}
                   </div>
                 ) : null}
 
@@ -673,7 +636,6 @@ export function Step2(props: {
             Continue
           </button>
 
-          {/* Escape hatch for support/testing */}
           <button
             type="button"
             className="rounded-2xl border border-gray-200 bg-white py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
