@@ -15,6 +15,25 @@ type IndustryDefaults = {
 
 type Candidate = { key: string; label?: string; score?: number };
 
+type ModeA_Interview = {
+  mode: "A";
+  status: "collecting" | "locked";
+  round: number;
+  confidenceScore: number;
+  fitScore: number;
+  proposedIndustry: {
+    key: string;
+    label: string;
+    description?: string | null;
+    exists: boolean;
+    shouldCreate: boolean;
+  } | null;
+  candidates: Array<{ key: string; label: string; score: number; exists?: boolean }>;
+  nextQuestion: any | null;
+  answers: Array<any>;
+  meta?: any;
+};
+
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
@@ -83,35 +102,64 @@ export function Step3(props: {
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
   /**
-   * ✅ IMPORTANT FIX:
-   * Step2 writes suggestion under aiAnalysis.industryInference.* (and may also mirror to root).
-   * Step3 must read BOTH, preferring industryInference.
+   * ✅ NEW SOURCE OF TRUTH:
+   * Mode A writes to aiAnalysis.industryInterview.
+   * Step3 must prefer it when present, but remain backward-compatible.
    */
-  const inference = props.aiAnalysis?.industryInference ?? null;
+  const interview: ModeA_Interview | null = useMemo(() => {
+    const x = props.aiAnalysis?.industryInterview;
+    if (!x || typeof x !== "object") return null;
+    if (x.mode !== "A") return null;
+    return x as ModeA_Interview;
+  }, [props.aiAnalysis]);
 
-  const suggestedKey = safeTrim(inference?.suggestedIndustryKey) || safeTrim(props.aiAnalysis?.suggestedIndustryKey);
-  const suggestedConfidenceRaw =
-    inference?.confidenceScore !== null && inference?.confidenceScore !== undefined
-      ? inference?.confidenceScore
-      : props.aiAnalysis?.confidenceScore;
+  // legacy fallback
+  const legacyInference = props.aiAnalysis?.industryInference ?? null;
 
-  const suggestedConfidence =
-    suggestedConfidenceRaw !== null && suggestedConfidenceRaw !== undefined ? toNum(suggestedConfidenceRaw, 0) : null;
+  const usingModeA = Boolean(interview && interview.mode === "A");
 
-  const candidates: Candidate[] = Array.isArray(inference?.candidates)
-    ? inference.candidates
-    : Array.isArray(props.aiAnalysis?.candidates)
-      ? props.aiAnalysis.candidates
-      : [];
+  const suggestedKey = useMemo(() => {
+    if (usingModeA) return normalizeKey(interview?.proposedIndustry?.key);
+    const k =
+      safeTrim(legacyInference?.suggestedIndustryKey) ||
+      safeTrim(props.aiAnalysis?.suggestedIndustryKey) ||
+      safeTrim(props.aiAnalysis?.industryInference?.suggestedIndustryKey);
+    return normalizeKey(k);
+  }, [usingModeA, interview?.proposedIndustry?.key, legacyInference, props.aiAnalysis]);
 
-  const topCandidates = candidates.slice(0, 6).map((c: any) => ({
-    key: safeTrim(c?.key),
-    label: safeTrim(c?.label),
-    score: toNum(c?.score, 0),
-  }));
+  const suggestedConfidence = useMemo(() => {
+    if (usingModeA) return toNum(interview?.confidenceScore, 0);
+    const raw =
+      legacyInference?.confidenceScore !== null && legacyInference?.confidenceScore !== undefined
+        ? legacyInference?.confidenceScore
+        : props.aiAnalysis?.confidenceScore;
+    return raw !== null && raw !== undefined ? toNum(raw, 0) : null;
+  }, [usingModeA, interview?.confidenceScore, legacyInference, props.aiAnalysis]);
 
-  const aiStatus = safeTrim(inference?.status) || "";
-  const debugReason = safeTrim(inference?.meta?.debug?.reason) || safeTrim(props.aiAnalysis?.meta?.debug?.reason) || "";
+  const aiStatus = useMemo(() => {
+    if (usingModeA) return safeTrim(interview?.status);
+    return safeTrim(legacyInference?.status) || "";
+  }, [usingModeA, interview?.status, legacyInference]);
+
+  const debugReason = useMemo(() => {
+    if (usingModeA) return safeTrim(interview?.meta?.debug?.reason);
+    return safeTrim(legacyInference?.meta?.debug?.reason) || safeTrim(props.aiAnalysis?.meta?.debug?.reason) || "";
+  }, [usingModeA, interview?.meta, legacyInference, props.aiAnalysis]);
+
+  const candidates: Candidate[] = useMemo(() => {
+    if (usingModeA && Array.isArray(interview?.candidates)) return interview!.candidates;
+    if (Array.isArray(legacyInference?.candidates)) return legacyInference.candidates;
+    if (Array.isArray(props.aiAnalysis?.candidates)) return props.aiAnalysis.candidates;
+    return [];
+  }, [usingModeA, interview?.candidates, legacyInference, props.aiAnalysis]);
+
+  const topCandidates = useMemo(() => {
+    return candidates.slice(0, 6).map((c: any) => ({
+      key: normalizeKey(safeTrim(c?.key)),
+      label: safeTrim(c?.label),
+      score: toNum(c?.score, 0),
+    }));
+  }, [candidates]);
 
   const selectedLabel = useMemo(() => {
     const hit = items.find((x) => x.key === selectedKey);
@@ -145,8 +193,8 @@ export function Step3(props: {
       setSuggestedSubLabel(subHint);
 
       // Prefer: AI suggested -> server selected -> first item
-      const serverSel = safeTrim(j.selectedKey);
-      const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
+      const serverSel = normalizeKey(safeTrim(j.selectedKey));
+      const hasSuggested = Boolean(suggestedKey) && list.some((x) => x.key === suggestedKey);
 
       const next =
         (hasSuggested ? suggestedKey : "") ||
@@ -172,8 +220,8 @@ export function Step3(props: {
   }, [props.tenantId]);
 
   /**
-   * ✅ If aiAnalysis arrives AFTER industries load, ensure we adopt it.
-   * This prevents Step3 from looking like it "reverted" to Service.
+   * ✅ If aiAnalysis arrives AFTER industries load, adopt the Mode A suggestion.
+   * Especially important when interview is "locked".
    */
   useEffect(() => {
     if (!items.length) return;
@@ -182,15 +230,23 @@ export function Step3(props: {
     const exists = items.some((x) => x.key === suggestedKey);
     if (!exists) return;
 
-    // If user already picked something non-generic, don’t override.
-    const cur = safeTrim(selectedKey);
+    const cur = normalizeKey(safeTrim(selectedKey));
     const isGeneric = !cur || cur === "service";
 
+    // If locked, we can safely auto-select (unless user already chose something else)
+    const locked = usingModeA && safeTrim(interview?.status) === "locked";
+
+    if (locked && (isGeneric || cur === suggestedKey)) {
+      setSelectedKey(suggestedKey);
+      return;
+    }
+
+    // Otherwise, only adopt if still generic
     if (isGeneric) {
       setSelectedKey(suggestedKey);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestedKey, items.length]);
+  }, [suggestedKey, items.length, usingModeA, interview?.status]);
 
   useEffect(() => {
     const tid = safeTrim(props.tenantId);
@@ -225,17 +281,13 @@ export function Step3(props: {
   const canSave = Boolean(selectedKey);
 
   /**
-   * ✅ Show the AI card whenever we have ANY meaningful signal
-   * (suggestedKey OR candidates list). Otherwise Step3 feels dead.
+   * ✅ Show AI card whenever we have real signal.
+   * For Mode A locked, we ALWAYS have signal (proposedIndustry).
    */
-  const hasAnyAiSignal = Boolean(suggestedKey) || topCandidates.some((c) => Boolean(c.key));
-  const showAiCard = hasAnyAiSignal;
+  const hasAnyAiSignal =
+    Boolean(suggestedKey) || topCandidates.some((c) => Boolean(c.key)) || (usingModeA && Boolean(interview?.proposedIndustry?.key));
 
-  /**
-   * ✅ Only show the “need more signal” warning if there is truly no signal.
-   * If we have candidates but no final suggestion yet, we show the AI card
-   * and encourage “Improve match”.
-   */
+  const showAiCard = hasAnyAiSignal;
   const showNeedSignal = !hasAnyAiSignal;
 
   return (
@@ -249,7 +301,7 @@ export function Step3(props: {
         <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="font-semibold">AI signal</div>
+              <div className="font-semibold">{usingModeA ? "AI interview result" : "AI signal"}</div>
 
               <div className="mt-1">
                 {suggestedKey ? (
@@ -275,7 +327,7 @@ export function Step3(props: {
                   <div className="text-xs font-semibold opacity-90">Close matches</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {topCandidates
-                      .filter((c) => c.key && c.key !== selectedKey)
+                      .filter((c) => c.key && c.key !== normalizeKey(selectedKey))
                       .slice(0, 4)
                       .map((c) => (
                         <button
@@ -285,7 +337,7 @@ export function Step3(props: {
                           onClick={() => setSelectedKey(c.key)}
                         >
                           {c.label || c.key}
-                          {Number.isFinite(c.score) ? <span className="ml-2 font-mono opacity-70">{c.score}</span> : null}
+                          {Number.isFinite(c.score as any) ? <span className="ml-2 font-mono opacity-70">{pct(c.score || 0)}%</span> : null}
                         </button>
                       ))}
                   </div>
@@ -300,8 +352,7 @@ export function Step3(props: {
 
               {aiStatus ? (
                 <div className="mt-2 text-[11px] opacity-80">
-                  <span className="font-semibold">Status:</span>{" "}
-                  <span className="font-mono">{aiStatus}</span>
+                  <span className="font-semibold">Status:</span> <span className="font-mono">{aiStatus}</span>
                 </div>
               ) : null}
             </div>
@@ -339,9 +390,7 @@ export function Step3(props: {
       ) : showNeedSignal ? (
         <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
           <div className="font-semibold">We need a bit more signal</div>
-          <div className="mt-1">
-            We couldn’t confidently suggest an industry yet. Go back and answer a couple more questions.
-          </div>
+          <div className="mt-1">We couldn’t confidently suggest an industry yet. Go back and answer a couple more questions.</div>
           <div className="mt-3">
             <button
               type="button"
@@ -446,9 +495,7 @@ export function Step3(props: {
                     />
                   </label>
 
-                  <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                    Leave blank if you’re not sure — you can refine later.
-                  </div>
+                  <div className="text-[11px] text-gray-500 dark:text-gray-400">Leave blank if you’re not sure — you can refine later.</div>
                 </div>
               </div>
 
@@ -465,8 +512,7 @@ export function Step3(props: {
               <div className="rounded-2xl border border-gray-200 bg-white p-4 text-xs text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
                 <div className="font-semibold text-gray-900 dark:text-gray-100">How we stay flexible</div>
                 <div className="mt-1">
-                  We can create new industries during onboarding when needed. Sub-industries are tenant-scoped so you can be
-                  specific without polluting the platform-wide catalog.
+                  We can create new industries during onboarding when needed. Sub-industries are tenant-scoped so you can be specific without polluting the platform-wide catalog.
                 </div>
               </div>
             </div>
@@ -476,9 +522,7 @@ export function Step3(props: {
         {/* RIGHT */}
         <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
-          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            This is the “instant experience” we can provide even with no website.
-          </div>
+          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">This is the “instant experience” we can provide even with no website.</div>
 
           {!selectedKey ? (
             <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
