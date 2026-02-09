@@ -195,6 +195,13 @@ async function industryExistsByKey(key: string): Promise<boolean> {
   return Boolean(row?.ok);
 }
 
+/**
+ * ✅ FIXED:
+ * The previous query used: where key = any(${keys}::text[])
+ * That creates invalid SQL with parameters.
+ *
+ * Now we use IN (...) with sql.join.
+ */
 async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
   const keys = Array.from(
     new Set(
@@ -206,13 +213,15 @@ async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
   );
   if (!keys.length) return cands;
 
+  const inList = sql.join(keys.map((k) => sql`${k}`), sql`, `);
+
   const r = await db.execute(sql`
     select key::text as key
     from industries
-    where key = any(${keys}::text[])
+    where key in (${inList})
   `);
-  const found = new Set(rowsOf(r).map((x: any) => String(x.key)));
 
+  const found = new Set(rowsOf(r).map((x: any) => String(x.key)));
   return cands.map((c) => ({ ...c, exists: found.has(normalizeKey(c.key)) }));
 }
 
@@ -410,7 +419,7 @@ async function runLLM_ModeA(args: {
       label: safeTrim(c?.label ?? ""),
       score: Number(c?.score ?? 0) || 0,
     }))
-.filter((c: Candidate) => Boolean(c.key))
+    .filter((c: Candidate) => Boolean(c.key))
     .slice(0, 6);
 
   // nextQuestion
@@ -445,7 +454,7 @@ async function runLLM_ModeA(args: {
         ? [{ key: proposedIndustry.key, label: proposedIndustry.label, score: confidenceScore }]
         : [],
     nextQuestion,
-    debugReason: safeTrim(parsed.debugReason ?? ""),
+    debugReason: safeTrim((parsed as any).debugReason ?? ""),
   };
 }
 
@@ -510,10 +519,8 @@ export async function POST(req: Request) {
       try {
         const out = await runLLM_ModeA({ st, action: "start" });
 
-        // candidates existence marking (no leaking canon list to model)
         const candidates = await markCandidatesExist(out.candidates ?? []);
 
-        // determine proposed industry existence + optional create (guarded)
         let proposed: IndustryInterviewA["proposedIndustry"] = null;
         if (out.proposedIndustry?.key) {
           const exists = await industryExistsByKey(out.proposedIndustry.key);
@@ -580,7 +587,11 @@ export async function POST(req: Request) {
           nextQuestion: firstQuestionFallback(),
           meta: {
             updatedAt: now,
-            model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "llm_error", error: e?.message ?? String(e) },
+            model: {
+              name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini",
+              status: "llm_error",
+              error: e?.message ?? String(e),
+            },
           },
         };
 
@@ -593,25 +604,46 @@ export async function POST(req: Request) {
     }
 
     // action === "answer"
-    const qText = safeTrim(parsed.data.questionText);
+    const qid = safeTrim(parsed.data.questionId);
+    const qTextFromBody = safeTrim(parsed.data.questionText);
+
+    // ✅ accept either questionText OR questionId (Step2 now sends questionId)
+    const qTextFromState =
+      qid && st.nextQuestion?.id === qid ? safeTrim(st.nextQuestion?.question) : safeTrim(st.nextQuestion?.question);
+
+    const qText = qTextFromBody || qTextFromState;
+
     const ansRaw = parsed.data.answer;
     const ans = typeof ansRaw === "string" ? safeTrim(ansRaw) : safeTrim(ansRaw == null ? "" : JSON.stringify(ansRaw));
 
     if (!qText || !ans) {
       return noCacheJson(
-        { ok: false, error: "ANSWER_REQUIRED", message: "questionText and answer are required." },
+        {
+          ok: false,
+          error: "ANSWER_REQUIRED",
+          message: "questionText (or valid questionId) and answer are required.",
+        },
         400
       );
     }
 
-    // store answer
+    // ✅ server-side dedupe to prevent “same question again”
+    const last = Array.isArray(st.answers) && st.answers.length ? st.answers[st.answers.length - 1] : null;
+    const lastSame =
+      last &&
+      safeTrim(last.id) === (qid || safeTrim(last.id)) &&
+      safeTrim(last.question).toLowerCase() === safeTrim(qText).toLowerCase() &&
+      safeTrim(last.answer).toLowerCase() === safeTrim(ans).toLowerCase();
+
     const answers = Array.isArray(st.answers) ? [...st.answers] : [];
-    answers.push({
-      id: safeTrim(parsed.data.questionId) || `a_${Date.now()}`,
-      question: qText,
-      answer: ans,
-      createdAt: now,
-    });
+    if (!lastSame) {
+      answers.push({
+        id: qid || `a_${Date.now()}`,
+        question: qText,
+        answer: ans,
+        createdAt: now,
+      });
+    }
 
     st = {
       ...st,
@@ -688,7 +720,11 @@ export async function POST(req: Request) {
         nextQuestion: firstQuestionFallback(),
         meta: {
           updatedAt: now,
-          model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "llm_error", error: e?.message ?? String(e) },
+          model: {
+            name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini",
+            status: "llm_error",
+            error: e?.message ?? String(e),
+          },
         },
       };
 
