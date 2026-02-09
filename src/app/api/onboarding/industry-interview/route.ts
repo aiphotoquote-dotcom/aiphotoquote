@@ -156,7 +156,6 @@ async function readAiAnalysis(tenantId: string): Promise<any | null> {
   const row = firstRow(r);
   const ai = row?.ai_analysis ?? null;
 
-  // in case adapter returns json as string
   if (typeof ai === "string") {
     try {
       return JSON.parse(ai);
@@ -196,11 +195,7 @@ async function industryExistsByKey(key: string): Promise<boolean> {
 }
 
 /**
- * ✅ FIXED:
- * The previous query used: where key = any(${keys}::text[])
- * That creates invalid SQL with parameters.
- *
- * Now we use IN (...) with sql.join.
+ * ✅ Correct IN list (no ANY(...) param weirdness)
  */
 async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
   const keys = Array.from(
@@ -390,29 +385,29 @@ async function runLLM_ModeA(args: {
   const parsed = jsonExtract(content);
   if (!parsed || typeof parsed !== "object") throw new Error("LLM returned non-JSON output.");
 
-  const confidence = Number(parsed.confidenceScore ?? 0);
-  const fit = Number(parsed.fitScore ?? 0);
+  const confidence = Number((parsed as any).confidenceScore ?? 0);
+  const fit = Number((parsed as any).fitScore ?? 0);
 
   const confidenceScore = Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0;
   const fitScore = Number.isFinite(fit) ? Math.max(0, Math.min(1, fit)) : 0;
 
   // proposedIndustry
   let proposedIndustry: any = null;
-  if (parsed.proposedIndustry && typeof parsed.proposedIndustry === "object") {
-    const key = normalizeKey(parsed.proposedIndustry.key ?? "");
-    const label = safeTrim(parsed.proposedIndustry.label ?? "");
+  if ((parsed as any).proposedIndustry && typeof (parsed as any).proposedIndustry === "object") {
+    const key = normalizeKey((parsed as any).proposedIndustry.key ?? "");
+    const label = safeTrim((parsed as any).proposedIndustry.label ?? "");
     if (key && label) {
       proposedIndustry = {
         key,
         label,
-        description: parsed.proposedIndustry.description == null ? null : String(parsed.proposedIndustry.description),
-        shouldCreate: Boolean(parsed.proposedIndustry.shouldCreate ?? false),
+        description: (parsed as any).proposedIndustry.description == null ? null : String((parsed as any).proposedIndustry.description),
+        shouldCreate: Boolean((parsed as any).proposedIndustry.shouldCreate ?? false),
       };
     }
   }
 
   // candidates
-  const candRaw = Array.isArray(parsed.candidates) ? parsed.candidates : [];
+  const candRaw = Array.isArray((parsed as any).candidates) ? (parsed as any).candidates : [];
   const candidates: Candidate[] = candRaw
     .map((c: any) => ({
       key: normalizeKey(c?.key ?? ""),
@@ -423,7 +418,7 @@ async function runLLM_ModeA(args: {
     .slice(0, 6);
 
   // nextQuestion
-  let nextQuestion: any = parsed.nextQuestion ?? null;
+  let nextQuestion: any = (parsed as any).nextQuestion ?? null;
   if (nextQuestion && typeof nextQuestion === "object") {
     const q = safeTrim(nextQuestion.question);
     const qLower = q.toLowerCase();
@@ -504,8 +499,6 @@ export async function POST(req: Request) {
       };
 
       ai.industryInterview = st;
-
-      // compat mirror for Step3 (optional)
       ai.suggestedIndustryKey = null;
       ai.confidenceScore = 0;
       ai.needsConfirmation = true;
@@ -515,10 +508,8 @@ export async function POST(req: Request) {
     }
 
     if (parsed.data.action === "start") {
-      // Always start with a question; never hang.
       try {
         const out = await runLLM_ModeA({ st, action: "start" });
-
         const candidates = await markCandidatesExist(out.candidates ?? []);
 
         let proposed: IndustryInterviewA["proposedIndustry"] = null;
@@ -567,8 +558,6 @@ export async function POST(req: Request) {
         };
 
         ai.industryInterview = st;
-
-        // compat mirror for Step3
         if (proposed?.key) ai.suggestedIndustryKey = proposed.key;
         ai.confidenceScore = st.confidenceScore;
         ai.needsConfirmation = true;
@@ -607,10 +596,8 @@ export async function POST(req: Request) {
     const qid = safeTrim(parsed.data.questionId);
     const qTextFromBody = safeTrim(parsed.data.questionText);
 
-    // ✅ accept either questionText OR questionId (Step2 now sends questionId)
-    const qTextFromState =
-      qid && st.nextQuestion?.id === qid ? safeTrim(st.nextQuestion?.question) : safeTrim(st.nextQuestion?.question);
-
+    // Accept either questionText OR derive from current state
+    const qTextFromState = safeTrim(st.nextQuestion?.question);
     const qText = qTextFromBody || qTextFromState;
 
     const ansRaw = parsed.data.answer;
@@ -627,18 +614,17 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ server-side dedupe to prevent “same question again”
+    // Server-side dedupe
     const last = Array.isArray(st.answers) && st.answers.length ? st.answers[st.answers.length - 1] : null;
     const lastSame =
       last &&
-      safeTrim(last.id) === (qid || safeTrim(last.id)) &&
       safeTrim(last.question).toLowerCase() === safeTrim(qText).toLowerCase() &&
       safeTrim(last.answer).toLowerCase() === safeTrim(ans).toLowerCase();
 
     const answers = Array.isArray(st.answers) ? [...st.answers] : [];
     if (!lastSame) {
       answers.push({
-        id: qid || `a_${Date.now()}`,
+        id: qid || safeTrim(last?.id) || `a_${Date.now()}`,
         question: qText,
         answer: ans,
         createdAt: now,
@@ -652,10 +638,8 @@ export async function POST(req: Request) {
       meta: { ...(st.meta ?? {}), updatedAt: now },
     };
 
-    // run model
     try {
       const out = await runLLM_ModeA({ st, action: "answer" });
-
       const candidates = await markCandidatesExist(out.candidates ?? []);
 
       let proposed: IndustryInterviewA["proposedIndustry"] = null;
@@ -674,19 +658,24 @@ export async function POST(req: Request) {
           exists,
           shouldCreate,
         };
+      }
 
-        if (shouldCreate) {
+      const reached = out.confidenceScore >= CONF_TARGET && out.fitScore >= FIT_TARGET;
+      const status: IndustryInterviewA["status"] = reached ? "locked" : "collecting";
+
+      // ✅ AUTO-CREATE ON LOCK (do not rely on model's shouldCreate)
+      if (status === "locked" && proposed?.key) {
+        const existsNow = await industryExistsByKey(proposed.key);
+        if (!existsNow) {
           await ensureIndustryExists({
             key: proposed.key,
             label: proposed.label,
             description: proposed.description ?? null,
           });
-          proposed.exists = true;
         }
+        proposed.exists = true;
+        proposed.shouldCreate = proposed.shouldCreate || !existsNow;
       }
-
-      const reached = out.confidenceScore >= CONF_TARGET && out.fitScore >= FIT_TARGET;
-      const status: IndustryInterviewA["status"] = reached ? "locked" : "collecting";
 
       st = {
         ...st,
@@ -704,8 +693,6 @@ export async function POST(req: Request) {
       };
 
       ai.industryInterview = st;
-
-      // compat mirror for Step3
       if (proposed?.key) ai.suggestedIndustryKey = proposed.key;
       ai.confidenceScore = st.confidenceScore;
       ai.needsConfirmation = true;
@@ -713,7 +700,6 @@ export async function POST(req: Request) {
       await writeAiAnalysis(tenantId, ai);
       return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
     } catch (e: any) {
-      // even on error, never dead-end
       st = {
         ...st,
         status: "collecting",
