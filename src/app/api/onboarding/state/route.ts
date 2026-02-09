@@ -119,6 +119,20 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   return { appUserId };
 }
 
+/* --------------------- NO-CACHE response headers --------------------- */
+
+function noCacheJson(data: any, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+      "Surrogate-Control": "no-store",
+    },
+  });
+}
+
 /* --------------------- AI meta derivation (kept as-is) --------------------- */
 
 function getConfidence(ai: any): number {
@@ -196,6 +210,59 @@ function deriveAiMeta(aiAnalysis: any | null) {
   };
 }
 
+/* --------------------- ai_analysis coercion + compat bridge --------------------- */
+
+function coerceAiAnalysis(v: any): any | null {
+  if (!v) return null;
+  if (typeof v === "object") return v;
+
+  // Sometimes jsonb can come back as a string depending on driver/adapter.
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return null;
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * If Mode A writes ai_analysis.industryInterview but does not mirror
+ * suggestedIndustryKey/confidenceScore at the root, Step3 can “feel reverted”.
+ * This bridges that for the UI only (does not write back to DB).
+ */
+function applyModeACompat(ai: any | null): any | null {
+  if (!ai || typeof ai !== "object") return ai;
+
+  const ii = ai?.industryInterview;
+  if (!ii || typeof ii !== "object") return ai;
+
+  const mode = String(ii?.mode ?? "").trim();
+  if (mode !== "A") return ai;
+
+  const proposed = ii?.proposedIndustry;
+  const proposedKey = proposed && typeof proposed === "object" ? safeTrim(proposed.key) : "";
+  const proposedLabel = proposed && typeof proposed === "object" ? safeTrim(proposed.label) : "";
+
+  const confidenceScore = Number(ii?.confidenceScore ?? 0);
+  const conf = Number.isFinite(confidenceScore) ? confidenceScore : 0;
+
+  // Only fill if missing — never overwrite other paths
+  const next = { ...ai };
+
+  if (!safeTrim(next.suggestedIndustryKey) && proposedKey) next.suggestedIndustryKey = proposedKey;
+  if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf)) next.confidenceScore = conf;
+  if (next.needsConfirmation === undefined || next.needsConfirmation === null) next.needsConfirmation = true;
+
+  // Optional: a friendly label hint for Step3 if you want it later
+  if (!safeTrim(next.suggestedIndustryLabel) && proposedLabel) next.suggestedIndustryLabel = proposedLabel;
+
+  return next;
+}
+
 /* --------------------- db read --------------------- */
 
 async function readTenantOnboarding(tenantId: string) {
@@ -216,14 +283,19 @@ async function readTenantOnboarding(tenantId: string) {
 
   const row = firstRow(r);
 
-  const aiAnalysis = row?.ai_analysis ?? null;
+  const aiAnalysis0 = coerceAiAnalysis(row?.ai_analysis ?? null);
+  const aiAnalysis = applyModeACompat(aiAnalysis0);
+
   const derived = deriveAiMeta(aiAnalysis);
 
   const website = row?.website ?? null;
   const hasWebsite = Boolean(safeTrim(website));
 
-  // NEW: interview path reads a dedicated shape inside ai_analysis (we’ll write it next)
+  // Kept for backward compatibility (older Step3 / older interview modes)
   const industryInference = aiAnalysis?.industryInference ?? null;
+
+  // ✅ NEW: Mode A interview state, consumed by Step2
+  const industryInterview = aiAnalysis?.industryInterview ?? null;
 
   const planTierRaw = safeTrim(row?.plan_tier);
   const planTier = safePlan(planTierRaw);
@@ -237,6 +309,7 @@ async function readTenantOnboarding(tenantId: string) {
     onboardingPath: (hasWebsite ? "website" : "interview") as "website" | "interview",
     aiAnalysis: aiAnalysis ?? null,
     industryInference,
+    industryInterview,
     planTier: planTier ?? null,
     ...derived,
   };
@@ -250,7 +323,7 @@ export async function GET(req: Request) {
     const { clerkUserId } = await requireAuthed();
 
     if (mode === "new" && !tenantId) {
-      return NextResponse.json(
+      return noCacheJson(
         {
           ok: true,
           isAuthenticated: true,
@@ -263,6 +336,7 @@ export async function GET(req: Request) {
           onboardingPath: "interview",
           aiAnalysis: null,
           industryInference: null,
+          industryInterview: null,
           planTier: null,
           aiAnalysisStatus: "idle",
           aiAnalysisRound: 0,
@@ -271,33 +345,33 @@ export async function GET(req: Request) {
           aiAnalysisConfidenceTarget: 0.8,
           aiAnalysisUserCorrection: null,
         },
-        { status: 200 }
+        200
       );
     }
 
     if (!tenantId) {
-      return NextResponse.json(
+      return noCacheJson(
         { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
-        { status: 400 }
+        400
       );
     }
 
     await requireMembership(clerkUserId, tenantId);
     const data = await readTenantOnboarding(tenantId);
 
-    return NextResponse.json(
+    return noCacheJson(
       {
         ok: true,
         isAuthenticated: true,
         tenantId,
         ...data,
       },
-      { status: 200 }
+      200
     );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
+    return noCacheJson({ ok: false, error: "INTERNAL", message: msg }, status);
   }
 }
 
@@ -315,7 +389,7 @@ export async function POST(req: Request) {
       const website = safeTrim(body?.website);
 
       if (businessName.length < 2) {
-        return NextResponse.json({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, { status: 400 });
+        return noCacheJson({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, 400);
       }
 
       const { appUserId } = await ensureAppUser(clerkUserId);
@@ -332,17 +406,17 @@ export async function POST(req: Request) {
       }
 
       if (ownerName.length < 2) {
-        return NextResponse.json({ ok: false, error: "OWNER_NAME_REQUIRED" }, { status: 400 });
+        return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
       }
       if (!ownerEmail.includes("@")) {
-        return NextResponse.json({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, { status: 400 });
+        return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
       }
 
       let tenantId: string | null = null;
 
       if (mode === "update" || mode === "existing") {
         const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-        if (!t) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+        if (!t) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
         await requireMembership(clerkUserId, t);
         tenantId = t;
       }
@@ -367,7 +441,7 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // NOTE: leaving your placeholder industry_key for now
+        // NOTE: leaving placeholder industry_key for now (Mode A will propose/create later)
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -391,7 +465,7 @@ export async function POST(req: Request) {
         `);
       }
 
-      // ✅ NEW: if no website, skip analysis step and go to interview/industry step
+      // ✅ If no website, skip website analysis and go to interview/industry step
       const nextStep = website ? 2 : 3;
 
       await db.execute(sql`
@@ -403,13 +477,13 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
-      return NextResponse.json({ ok: true, tenantId }, { status: 200 });
+      return noCacheJson({ ok: true, tenantId }, 200);
     }
 
     // ---------------- STEP 5: branding save ----------------
     if (step === 5) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-      if (!tid) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+      if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
       await requireMembership(clerkUserId, tid);
 
@@ -417,17 +491,14 @@ export async function POST(req: Request) {
       const brandLogoUrlRaw = safeTrim(body?.brand_logo_url);
 
       if (!leadToEmail.includes("@")) {
-        return NextResponse.json(
+        return noCacheJson(
           { ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." },
-          { status: 400 }
+          400
         );
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
 
-      // IMPORTANT:
-      // - Set resend_from_email to the platform default ONLY if it's currently null.
-      // - Never overwrite a tenant's custom configured sender later.
       const platformFrom = "no-reply@aiphotoquote.com";
 
       await db.execute(sql`
@@ -462,19 +533,19 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
-      return NextResponse.json({ ok: true, tenantId: tid }, { status: 200 });
+      return noCacheJson({ ok: true, tenantId: tid }, 200);
     }
 
     // ---------------- STEP 6: plan selection ----------------
     if (step === 6) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
-      if (!tid) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
+      if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
       await requireMembership(clerkUserId, tid);
 
       const plan = safePlan(body?.plan);
       if (!plan) {
-        return NextResponse.json({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, { status: 400 });
+        return noCacheJson({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, 400);
       }
 
       const monthlyLimit = plan === "tier0" ? 5 : plan === "tier1" ? 50 : null;
@@ -501,10 +572,10 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
-      return NextResponse.json({ ok: true, tenantId: tid, planTier: plan }, { status: 200 });
+      return noCacheJson({ ok: true, tenantId: tid, planTier: plan }, 200);
     }
 
-    return NextResponse.json({ ok: false, error: "UNSUPPORTED_STEP" }, { status: 400 });
+    return noCacheJson({ ok: false, error: "UNSUPPORTED_STEP" }, 400);
   } catch (e: any) {
     const base = e?.message ?? String(e);
     const detail =
@@ -515,6 +586,6 @@ export async function POST(req: Request) {
     const msg = detail ? `${base} :: ${detail}` : base;
 
     const status = msg.includes("UNAUTHENTICATED") ? 401 : msg.includes("FORBIDDEN_TENANT") ? 403 : 500;
-    return NextResponse.json({ ok: false, error: "INTERNAL", message: msg }, { status });
+    return noCacheJson({ ok: false, error: "INTERNAL", message: msg }, status);
   }
 }
