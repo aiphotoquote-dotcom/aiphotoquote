@@ -18,16 +18,8 @@ function pct(n: number) {
   return Math.max(0, Math.min(100, Math.round(n * 100)));
 }
 
-/**
- * NOTE:
- * Your backend currently errors with: "questionText and answer are required."
- * That means the POST /api/onboarding/industry-interview expects:
- *   { tenantId, action: "start" | "answer", questionText?, answer? }
- *
- * So this Step2 must submit `questionText` (NOT questionId/qid).
- */
 type NextQuestion = {
-  id?: string; // optional; UI can use it for local resets, but server only needs questionText
+  id: string;
   question: string;
   help?: string | null;
   inputType: "text" | "yes_no" | "single_choice" | "multi_choice";
@@ -74,8 +66,7 @@ async function postInterview(payload: any) {
   if (!res.ok || !j?.ok) {
     throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
   }
-  // keep flexible return shape; wizard refresh() should re-pull aiAnalysis anyway
-  return j as { ok: true; tenantId: string; industryInterview?: IndustryInterviewA };
+  return j as { ok: true; tenantId: string; industryInterview: IndustryInterviewA };
 }
 
 function cn(...xs: Array<string | false | null | undefined>) {
@@ -91,7 +82,7 @@ export function Step2(props: {
   aiAnalysisStatus?: string | null; // unused for Mode A, but kept for compatibility
   aiAnalysisError?: string | null;
 
-  onRun: () => Promise<void>; // website analysis (legacy)
+  onRun: () => Promise<void>; // legacy website analysis
   onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>; // legacy
   onNext: () => void;
   onBack: () => void;
@@ -99,25 +90,40 @@ export function Step2(props: {
 }) {
   const tid = safeTrim(props.tenantId);
 
-  // Pull Mode A state from aiAnalysis
-  const interview: IndustryInterviewA | null = useMemo(() => {
+  // Pull Mode A interview from aiAnalysis (if present)
+  const interviewFromProps: IndustryInterviewA | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
     if (!x || typeof x !== "object") return null;
     if (x.mode !== "A") return null;
     return x as IndustryInterviewA;
   }, [props.aiAnalysis]);
 
-  const status = safeTrim(interview?.status) || "collecting";
-  const nextQ = (interview?.nextQuestion ?? null) as NextQuestion | null;
+  // ✅ Local interview state so we don’t “hang” waiting for parent refresh()
+  const [interviewState, setInterviewState] = useState<IndustryInterviewA | null>(interviewFromProps);
 
-  const hypothesis = safeTrim(interview?.hypothesisLabel) || safeTrim(interview?.proposedIndustry?.label) || "";
-  const proposedKey = safeTrim(interview?.proposedIndustry?.key);
-  const conf = clamp01(interview?.confidenceScore);
-  const fit = clamp01(interview?.fitScore);
-  const fitReason = safeTrim(interview?.fitReason);
+  // If parent later provides a newer interview (e.g. refresh), adopt it.
+  useEffect(() => {
+    if (!interviewFromProps) return;
+    setInterviewState((prev) => {
+      // Prefer the most recent (by round or updated timestamp if present)
+      const prevRound = Number(prev?.round ?? 0) || 0;
+      const nextRound = Number(interviewFromProps.round ?? 0) || 0;
+      return nextRound >= prevRound ? interviewFromProps : prev;
+    });
+  }, [interviewFromProps]);
 
-  const candidates: Candidate[] = Array.isArray(interview?.candidates)
-    ? interview!.candidates
+  const status = safeTrim(interviewState?.status) || "collecting";
+  const nextQ = (interviewState?.nextQuestion ?? null) as NextQuestion | null;
+
+  const hypothesis =
+    safeTrim(interviewState?.hypothesisLabel) || safeTrim(interviewState?.proposedIndustry?.label) || "";
+  const proposedKey = safeTrim(interviewState?.proposedIndustry?.key);
+  const conf = clamp01(interviewState?.confidenceScore);
+  const fit = clamp01(interviewState?.fitScore);
+  const fitReason = safeTrim(interviewState?.fitReason);
+
+  const candidates: Candidate[] = Array.isArray(interviewState?.candidates)
+    ? interviewState!.candidates
         .map((c: any) => ({ label: safeTrim(c?.label), score: clamp01(c?.score) }))
         .filter((c) => c.label)
         .slice(0, 5)
@@ -140,19 +146,20 @@ export function Step2(props: {
     setChoiceAnswer("");
     setMultiAnswer({});
     lastSubmitRef.current = "";
-    // prefer stable reset key: id if present, else question text
-  }, [nextQ?.id, nextQ?.question]);
+  }, [nextQ?.id]);
 
   async function startIfNeeded() {
     if (!tid) return;
-    // If we already have a question, don't start again
-    if (safeTrim(nextQ?.question)) return;
+
+    // Already have a next question? We’re started.
+    if (nextQ?.id) return;
 
     setWorking(true);
     setErr(null);
     try {
-      await postInterview({ tenantId: tid, action: "start" });
-      // Parent wizard should refresh aiAnalysis; this component stays simple.
+      const out = await postInterview({ tenantId: tid, action: "start" });
+      // ✅ update local state immediately
+      setInterviewState(out.industryInterview);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -162,7 +169,7 @@ export function Step2(props: {
     }
   }
 
-  // Auto-start the interview when step loads (prevents blank state)
+  // Auto-start when step loads (prevents blank state)
   useEffect(() => {
     startIfNeeded().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -174,7 +181,7 @@ export function Step2(props: {
     if (nextQ.inputType === "yes_no") {
       const v = safeTrim(choiceAnswer);
       if (!v) return "";
-      return v; // "Yes"/"No"
+      return v;
     }
 
     if (nextQ.inputType === "single_choice") {
@@ -188,7 +195,6 @@ export function Step2(props: {
       return picked.length ? picked.join(", ") : "";
     }
 
-    // text
     return safeTrim(textAnswer);
   }
 
@@ -197,9 +203,7 @@ export function Step2(props: {
       setErr("Missing tenantId.");
       return;
     }
-
-    const qText = safeTrim(nextQ?.question);
-    if (!qText) {
+    if (!nextQ?.id) {
       setErr("No active question yet. Tap ‘Start interview’.");
       return;
     }
@@ -211,7 +215,7 @@ export function Step2(props: {
     }
 
     // UI-level anti-double-submit
-    const dupeKey = `${tid}:${qText}:${ans}`;
+    const dupeKey = `${tid}:${nextQ.id}:${ans}`;
     if (lastSubmitRef.current === dupeKey) return;
     lastSubmitRef.current = dupeKey;
 
@@ -219,14 +223,17 @@ export function Step2(props: {
     setErr(null);
 
     try {
-      // ✅ CRITICAL FIX:
-      // Backend requires `questionText` + `answer` (not questionId/qid)
-      await postInterview({
+      const out = await postInterview({
         tenantId: tid,
         action: "answer",
-        questionText: qText,
+        // ✅ API expects questionText + answer
+        questionId: nextQ.id, // harmless if the API ignores it
+        questionText: nextQ.question,
         answer: ans,
       });
+
+      // ✅ update local state immediately
+      setInterviewState(out.industryInterview);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -311,19 +318,21 @@ export function Step2(props: {
             disabled={working || !tid}
             title="Starts the interview if it hasn’t started yet."
           >
-            {safeTrim(nextQ?.question) ? "Interview running" : "Start interview"}
+            {nextQ?.id ? "Interview running" : "Start interview"}
           </button>
         </div>
 
-        {!safeTrim(nextQ?.question) ? (
-          <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">{working ? "Thinking…" : "Waiting for the first question…"}</div>
+        {!nextQ ? (
+          <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
+            {working ? "Thinking…" : "Waiting for the first question…"}
+          </div>
         ) : (
           <div className="mt-3">
-            <div className="text-base font-semibold text-gray-900 dark:text-gray-100">{nextQ!.question}</div>
-            {nextQ?.help ? <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{nextQ.help}</div> : null}
+            <div className="text-base font-semibold text-gray-900 dark:text-gray-100">{nextQ.question}</div>
+            {nextQ.help ? <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{nextQ.help}</div> : null}
 
             <div className="mt-4">
-              {nextQ?.inputType === "text" ? (
+              {nextQ.inputType === "text" ? (
                 <textarea
                   value={textAnswer}
                   onChange={(e) => setTextAnswer(e.target.value)}
@@ -333,13 +342,14 @@ export function Step2(props: {
                 />
               ) : null}
 
-              {nextQ?.inputType === "yes_no" || nextQ?.inputType === "single_choice" ? (
+              {nextQ.inputType === "yes_no" || nextQ.inputType === "single_choice" ? (
                 <div className="grid gap-2">
                   {(nextQ.inputType === "yes_no"
                     ? ["Yes", "No"]
                     : Array.isArray(nextQ.options) && nextQ.options.length
                       ? nextQ.options
-                      : [])?.map((opt) => (
+                      : []
+                  ).map((opt) => (
                     <button
                       key={opt}
                       type="button"
@@ -358,7 +368,7 @@ export function Step2(props: {
                 </div>
               ) : null}
 
-              {nextQ?.inputType === "multi_choice" ? (
+              {nextQ.inputType === "multi_choice" ? (
                 <div className="grid gap-2">
                   {(nextQ.options ?? []).map((opt) => {
                     const on = Boolean(multiAnswer[opt]);
@@ -397,7 +407,7 @@ export function Step2(props: {
                 type="button"
                 className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
                 onClick={() => submitAnswer().catch(() => null)}
-                disabled={working || !tid || !safeTrim(nextQ?.question)}
+                disabled={working || !tid || !nextQ?.id}
               >
                 {working ? "Thinking…" : "Continue →"}
               </button>
