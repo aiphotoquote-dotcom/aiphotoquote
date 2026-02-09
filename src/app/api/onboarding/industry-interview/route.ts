@@ -410,7 +410,7 @@ async function runLLM_ModeA(args: {
       label: safeTrim(c?.label ?? ""),
       score: Number(c?.score ?? 0) || 0,
     }))
-    .filter((c) => c.key)
+.filter((c: Candidate) => Boolean(c.key))
     .slice(0, 6);
 
   // nextQuestion
