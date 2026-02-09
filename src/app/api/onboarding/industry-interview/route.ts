@@ -194,9 +194,6 @@ async function industryExistsByKey(key: string): Promise<boolean> {
   return Boolean(row?.ok);
 }
 
-/**
- * ✅ Correct IN list (no ANY(...) param weirdness)
- */
 async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
   const keys = Array.from(
     new Set(
@@ -288,13 +285,49 @@ function buildTranscript(st: IndustryInterviewA) {
   return st.answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
 }
 
-function firstQuestionFallback() {
-  return {
-    id: "q_start",
-    question: "In one sentence, what do you do and what do you work on most often?",
-    help: "Example: “We build and repair in-ground pools for residential customers.”",
-    inputType: "text" as const,
-  };
+/**
+ * ✅ Progressive fallback: returns the first unasked question (by question text).
+ * This prevents the "same question again" loop when the model doesn't provide nextQuestion.
+ */
+function fallbackNextQuestion(st: IndustryInterviewA) {
+  const asked = new Set(st.answers.map((a) => safeTrim(a.question).toLowerCase()).filter(Boolean));
+
+  const pool = [
+    {
+      id: "q_start",
+      question: "In one sentence, what do you do and what do you work on most often?",
+      help: "Example: “We build and repair in-ground pools for residential customers.”",
+      inputType: "text" as const,
+    },
+    {
+      id: "q_scope",
+      question: "What are your most common job types or services you provide?",
+      help: "Example: interior repaint, exterior repaint, cabinets, drywall repair, commercial build-outs.",
+      inputType: "text" as const,
+    },
+    {
+      id: "q_materials",
+      question: "What materials or surfaces do you work on most often?",
+      help: "Example: drywall, plaster, brick, wood trim, cabinets, stucco, metal.",
+      inputType: "text" as const,
+    },
+    {
+      id: "q_photos",
+      question: "Do you usually get photos from customers before you provide an estimate?",
+      help: "This helps us tailor photo-based quoting for your business.",
+      inputType: "select" as const,
+      options: ["Yes", "No", "Sometimes"],
+    },
+    {
+      id: "q_pricing",
+      question: "How do you typically price jobs today?",
+      help: "Example: time & materials, per room, per sqft, fixed bid, tiered packages.",
+      inputType: "text" as const,
+    },
+  ];
+
+  const next = pool.find((q) => !asked.has(q.question.toLowerCase()));
+  return next ?? pool[pool.length - 1];
 }
 
 /* -------------------- LLM -------------------- */
@@ -400,7 +433,8 @@ async function runLLM_ModeA(args: {
       proposedIndustry = {
         key,
         label,
-        description: (parsed as any).proposedIndustry.description == null ? null : String((parsed as any).proposedIndustry.description),
+        description:
+          (parsed as any).proposedIndustry.description == null ? null : String((parsed as any).proposedIndustry.description),
         shouldCreate: Boolean((parsed as any).proposedIndustry.shouldCreate ?? false),
       };
     }
@@ -417,7 +451,7 @@ async function runLLM_ModeA(args: {
     .filter((c: Candidate) => Boolean(c.key))
     .slice(0, 6);
 
-  // nextQuestion
+  // nextQuestion (reject repeats by question text)
   let nextQuestion: any = (parsed as any).nextQuestion ?? null;
   if (nextQuestion && typeof nextQuestion === "object") {
     const q = safeTrim(nextQuestion.question);
@@ -493,7 +527,7 @@ export async function POST(req: Request) {
         fitScore: 0,
         proposedIndustry: null,
         candidates: [],
-        nextQuestion: firstQuestionFallback(),
+        nextQuestion: fallbackNextQuestion({ ...st, answers: [] }),
         answers: [],
         meta: { updatedAt: now, model: { status: "ok" } },
       };
@@ -515,31 +549,17 @@ export async function POST(req: Request) {
         let proposed: IndustryInterviewA["proposedIndustry"] = null;
         if (out.proposedIndustry?.key) {
           const exists = await industryExistsByKey(out.proposedIndustry.key);
-          const shouldCreate =
-            Boolean(out.proposedIndustry.shouldCreate) &&
-            !exists &&
-            out.confidenceScore >= CONF_TARGET &&
-            out.fitScore >= FIT_TARGET;
-
           proposed = {
             key: out.proposedIndustry.key,
             label: out.proposedIndustry.label,
             description: out.proposedIndustry.description ?? null,
             exists,
-            shouldCreate,
+            shouldCreate: Boolean(out.proposedIndustry.shouldCreate ?? false),
           };
-
-          if (shouldCreate) {
-            await ensureIndustryExists({
-              key: proposed.key,
-              label: proposed.label,
-              description: proposed.description ?? null,
-            });
-            proposed.exists = true;
-          }
         }
 
-        const nextQ = out.nextQuestion ?? firstQuestionFallback();
+        // ✅ if model didn't provide a valid next question, use progressive fallback
+        const nextQ = out.nextQuestion ?? fallbackNextQuestion(st);
 
         st = {
           ...st,
@@ -573,7 +593,7 @@ export async function POST(req: Request) {
           fitScore: 0,
           proposedIndustry: null,
           candidates: [],
-          nextQuestion: firstQuestionFallback(),
+          nextQuestion: fallbackNextQuestion(st),
           meta: {
             updatedAt: now,
             model: {
@@ -595,8 +615,6 @@ export async function POST(req: Request) {
     // action === "answer"
     const qid = safeTrim(parsed.data.questionId);
     const qTextFromBody = safeTrim(parsed.data.questionText);
-
-    // Accept either questionText OR derive from current state
     const qTextFromState = safeTrim(st.nextQuestion?.question);
     const qText = qTextFromBody || qTextFromState;
 
@@ -614,7 +632,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Server-side dedupe
     const last = Array.isArray(st.answers) && st.answers.length ? st.answers[st.answers.length - 1] : null;
     const lastSame =
       last &&
@@ -645,25 +662,19 @@ export async function POST(req: Request) {
       let proposed: IndustryInterviewA["proposedIndustry"] = null;
       if (out.proposedIndustry?.key) {
         const exists = await industryExistsByKey(out.proposedIndustry.key);
-        const shouldCreate =
-          Boolean(out.proposedIndustry.shouldCreate) &&
-          !exists &&
-          out.confidenceScore >= CONF_TARGET &&
-          out.fitScore >= FIT_TARGET;
-
         proposed = {
           key: out.proposedIndustry.key,
           label: out.proposedIndustry.label,
           description: out.proposedIndustry.description ?? null,
           exists,
-          shouldCreate,
+          shouldCreate: Boolean(out.proposedIndustry.shouldCreate ?? false),
         };
       }
 
       const reached = out.confidenceScore >= CONF_TARGET && out.fitScore >= FIT_TARGET;
       const status: IndustryInterviewA["status"] = reached ? "locked" : "collecting";
 
-      // ✅ AUTO-CREATE ON LOCK (do not rely on model's shouldCreate)
+      // ✅ AUTO-CREATE ON LOCK
       if (status === "locked" && proposed?.key) {
         const existsNow = await industryExistsByKey(proposed.key);
         if (!existsNow) {
@@ -677,6 +688,24 @@ export async function POST(req: Request) {
         proposed.shouldCreate = proposed.shouldCreate || !existsNow;
       }
 
+      // ✅ if collecting, force a non-repeating next question
+      let nextQ = status === "collecting" ? out.nextQuestion : null;
+
+      if (status === "collecting") {
+        const asked = new Set(st.answers.map((a) => safeTrim(a.question).toLowerCase()).filter(Boolean));
+        const nextText = safeTrim(nextQ?.question).toLowerCase();
+
+        if (!nextQ || !nextText || asked.has(nextText)) {
+          nextQ = fallbackNextQuestion(st);
+        }
+
+        // absolute guard: never return the same question id back-to-back
+        if (nextQ?.id && st.nextQuestion?.id && safeTrim(nextQ.id) === safeTrim(st.nextQuestion.id)) {
+          const forced = fallbackNextQuestion(st);
+          if (safeTrim(forced.id) !== safeTrim(nextQ.id)) nextQ = forced;
+        }
+      }
+
       st = {
         ...st,
         status,
@@ -684,7 +713,7 @@ export async function POST(req: Request) {
         fitScore: out.fitScore,
         proposedIndustry: proposed,
         candidates,
-        nextQuestion: status === "collecting" ? (out.nextQuestion ?? firstQuestionFallback()) : null,
+        nextQuestion: nextQ,
         meta: {
           updatedAt: now,
           model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "ok" },
@@ -703,7 +732,7 @@ export async function POST(req: Request) {
       st = {
         ...st,
         status: "collecting",
-        nextQuestion: firstQuestionFallback(),
+        nextQuestion: fallbackNextQuestion(st),
         meta: {
           updatedAt: now,
           model: {
