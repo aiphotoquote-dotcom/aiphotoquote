@@ -1,4 +1,5 @@
 // src/app/onboarding/wizard/OnboardingWizard.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -21,14 +22,24 @@ import { Step5Branding } from "./steps/Step5Branding";
 import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
+/**
+ * Some of our API routes may return AI analysis under different keys/shapes
+ * depending on which table/view they read from (tenant_onboarding.ai_analysis vs state.aiAnalysis).
+ * Step2/Step3/Step3b must receive a stable aiAnalysis object.
+ */
 function getAiAnalysis(state: OnboardingState | null): any | null {
   if (!state) return null;
+
   const s: any = state as any;
 
+  // Preferred / expected
   if (s.aiAnalysis && typeof s.aiAnalysis === "object") return s.aiAnalysis;
+
+  // Common alternates
   if (s.ai_analysis && typeof s.ai_analysis === "object") return s.ai_analysis;
   if (s.aiAnalysisJson && typeof s.aiAnalysisJson === "object") return s.aiAnalysisJson;
 
+  // Nested alternates (if state endpoint returns tenant_onboarding row as nested object)
   if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
   if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
 
@@ -40,6 +51,11 @@ function safeTrim(v: any) {
   return s ? s : "";
 }
 
+/**
+ * ✅ IMPORTANT:
+ * We now have 7 steps (Step3b added). Do NOT rely on utils.safeStep()
+ * if it still clamps to 6 (older wizard).
+ */
 function clampStep(n: any) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 1;
@@ -52,8 +68,10 @@ export default function OnboardingWizard() {
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<OnboardingState | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
   const [lastAction, setLastAction] = useState<string | null>(null);
 
+  // ✅ Step3 -> Step3b handoff state (local, non-persisted)
   const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
   const [pendingSubIndustryLabel, setPendingSubIndustryLabel] = useState<string | null>(null);
 
@@ -88,6 +106,7 @@ export default function OnboardingWizard() {
   const serverLastAction = useMemo(() => {
     const a = safeTrim((state as any)?.aiAnalysisLastAction);
     if (a) return a;
+
     const b = getMetaLastAction(normalizedAiAnalysis);
     return b || "";
   }, [state, normalizedAiAnalysis]);
@@ -118,7 +137,9 @@ export default function OnboardingWizard() {
       if (mountedRef.current) setState(j);
 
       const serverTenantId = safeTrim((j as any)?.tenantId);
-      if (serverTenantId && serverTenantId !== navTenantId) setTenantInNav(serverTenantId);
+      if (serverTenantId && serverTenantId !== navTenantId) {
+        setTenantInNav(serverTenantId);
+      }
 
       const urlStep = getUrlParams().step;
       const nextStep = clampStep(urlStep || ((j as any)?.currentStep as any) || 1);
@@ -155,9 +176,12 @@ export default function OnboardingWizard() {
 
     while (mountedRef.current && Date.now() - start < maxMs) {
       const j = await refresh({ tenantId: tid });
+
       const aj = getAiAnalysis(j as any);
       const status = safeTrim((j as any)?.aiAnalysisStatus) || safeTrim(aj?.meta?.status);
+
       if (status && status.toLowerCase() !== "running") return;
+
       await sleep(650);
     }
   }
@@ -235,7 +259,11 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
-  async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
+  async function saveIndustrySelection(args: {
+    industryKey?: string;
+    industryLabel?: string;
+    subIndustryLabel?: string | null;
+  }) {
     setErr(null);
     setLastAction(null);
 
@@ -253,7 +281,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Industry saved.");
-    go(5);
+    go(5); // ✅ next is now step 5 (AI & Pricing Policy)
   }
 
   async function ensureActiveTenant(tid: string) {
@@ -269,7 +297,9 @@ export default function OnboardingWizard() {
     });
 
     const j = await res.json().catch(() => null);
-    if (!res.ok || !j?.ok) throw new Error(j?.message || j?.error || `Failed to switch active tenant (HTTP ${res.status})`);
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Failed to switch active tenant (HTTP ${res.status})`);
+    }
   }
 
   async function openSetup(path: string) {
@@ -302,7 +332,7 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 6,
+        step: 6, // ✅ branding is now step 6
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -314,7 +344,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Saved branding & lead routing.");
-    go(7);
+    go(7); // ✅ plan is now step 7
   }
 
   if (loading) {
@@ -328,8 +358,11 @@ export default function OnboardingWizard() {
   }
 
   const existingUserContext = Boolean((state as any)?.isAuthenticated ?? true);
+
   const aiStatus = safeTrim((state as any)?.aiAnalysisStatus) || getMetaStatus(normalizedAiAnalysis);
 
+  // If Step3b is entered directly (URL), but we don’t have a pending industry key,
+  // fall back to whatever the server already has (best-effort).
   const fallbackIndustryKey =
     safeTrim((state as any)?.industryKey) ||
     safeTrim((state as any)?.selectedIndustryKey) ||
@@ -346,7 +379,9 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              We’ll tailor your quoting experience in just a few steps.
+            </div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -398,22 +433,17 @@ export default function OnboardingWizard() {
               aiAnalysis={normalizedAiAnalysis}
               onBack={() => go(2)}
               onReInterview={() => go(2)}
-              onSubmit={async ({ industryKey, refineSubIndustry }) => {
+              onSubmit={async ({ industryKey }) => {
+                // ✅ Do NOT save to server yet. Hand off to Step3b.
                 const key = safeTrim(industryKey);
                 if (!key) throw new Error("Choose an industry.");
 
                 setPendingIndustryKey(key);
+                // Step3 no longer passes subIndustryLabel; Step3b handles it.
                 setPendingSubIndustryLabel(null);
 
-                if (refineSubIndustry) {
-                  setLastAction("Industry locked — refining sub-industry…");
-                  go(4);
-                } else {
-                  setLastAction("Industry selected — continuing…");
-                  await saveIndustrySelection({ industryKey: key, subIndustryLabel: null });
-                  setPendingIndustryKey("");
-                  setPendingSubIndustryLabel(null);
-                }
+                setLastAction("Industry selected — refining focus…");
+                go(4); // ✅ Step3b
               }}
             />
           ) : step === 4 ? (
@@ -426,7 +456,9 @@ export default function OnboardingWizard() {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
 
-                await saveIndustrySelection({ industryKey: key, subIndustryLabel: null });
+                const finalSub = safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
+
+                await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
 
                 setPendingIndustryKey("");
                 setPendingSubIndustryLabel(null);
@@ -435,7 +467,13 @@ export default function OnboardingWizard() {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
 
-                const finalSub = safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : null;
+                const finalSub =
+                  safeTrim(subIndustryLabel)
+                    ? safeTrim(subIndustryLabel)
+                    : safeTrim(pendingSubIndustryLabel)
+                      ? safeTrim(pendingSubIndustryLabel)
+                      : null;
+
                 await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
 
                 setPendingIndustryKey("");
