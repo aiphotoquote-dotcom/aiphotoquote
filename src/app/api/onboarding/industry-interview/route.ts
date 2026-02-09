@@ -71,24 +71,16 @@ function titleFromKey(key: string) {
     .join(" ");
 }
 
-function clamp01(n: number) {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(1, n));
-}
-
-function stableCandidates(cands: Candidate[], canon: Array<{ key: string; label: string }>) {
-  const seen = new Set<string>();
-  const out: Candidate[] = [];
-  for (const c of cands) {
-    const k = normalizeKey(c.key);
-    if (!k || seen.has(k)) continue;
-    seen.add(k);
-    const label = safeTrim(c.label) || canon.find((x) => x.key === k)?.label || titleFromKey(k);
-    out.push({ key: k, label, score: Number(c.score ?? 0) || 0 });
-    if (out.length >= 6) break;
+function jsonExtract(s: string): any | null {
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  const chunk = s.slice(start, end + 1);
+  try {
+    return JSON.parse(chunk);
+  } catch {
+    return null;
   }
-  if (!out.length) out.push({ key: "service", label: "Service", score: 0 });
-  return out;
 }
 
 /* -------------------- shapes -------------------- */
@@ -115,7 +107,7 @@ type IndustryInference = {
   meta: {
     updatedAt: string;
     model?: { name?: string; status?: "ok" | "llm_error"; error?: string };
-    debug?: { reason?: string };
+    debug?: { reason?: string; note?: string; conflict?: boolean; preGuess?: string };
   };
 };
 
@@ -124,9 +116,12 @@ type IndustryInference = {
 const CONF_TARGET = 0.82;
 const MAX_ROUNDS = 8;
 
+/* -------------------- question bank -------------------- */
 /**
- * Bank qids are the ONLY qids we allow the UI flow to use.
- * (This is what stops the “repeating / dead / same question” feel.)
+ * IMPORTANT:
+ * - freeform is LAST resort only
+ * - industry-specific lock-in questions exist for multiple industries now
+ * - domain_clarifier prevents “Homes” from derailing auto/collision etc.
  */
 const QUESTION_BANK: Array<{ qid: string; question: string; help?: string; options?: string[] }> = [
   {
@@ -139,7 +134,6 @@ const QUESTION_BANK: Array<{ qid: string; question: string; help?: string; optio
       "Auto body / collision",
       "Vehicle wraps / vinyl graphics",
       "Window treatments (blinds/shades)",
-      "Painting contractor",
       "Upholstery / reupholstery",
       "Paving / asphalt / concrete",
       "Landscaping / hardscaping",
@@ -167,12 +161,108 @@ const QUESTION_BANK: Array<{ qid: string; question: string; help?: string; optio
     question: "What keywords do customers use to find you?",
     help: "Example: “ceramic coating”, “wraps”, “blinds”, “paint correction”, “PPF”.",
   },
+
+  // ✅ conflict resolver (prevents “Homes” poisoning vehicle industries)
+  {
+    qid: "domain_clarifier",
+    question: "Quick clarifier — what do you quote MOST often?",
+    help: "This prevents loading the wrong starter pack.",
+    options: ["Vehicles (cars/trucks/vans)", "Homes (residential)", "Commercial buildings/offices", "Outdoor/roads/land", "Other"],
+  },
+
+  // ✅ Window Treatments lock-ins
+  {
+    qid: "wt_products",
+    question: "For window treatments — what do you install most?",
+    options: ["Blinds", "Shades", "Shutters", "Drapes/Curtains", "Mix of these"],
+  },
+  {
+    qid: "wt_job_type",
+    question: "For window treatments — what kind of jobs are most common?",
+    options: ["New install", "Replacement", "Repair", "Measuring/consultation", "Mix of these"],
+  },
+  {
+    qid: "wt_customer_type",
+    question: "For window treatments — who are your customers most often?",
+    options: ["Residential", "Commercial", "Both"],
+  },
+
+  // ✅ Vehicle Wraps lock-ins
+  {
+    qid: "vw_wrap_type",
+    question: "For wraps — what do you do most?",
+    options: ["Full wraps", "Partial wraps", "Commercial lettering/decals", "Fleet wraps", "Mix of these"],
+  },
+  {
+    qid: "vw_design",
+    question: "For wraps — do customers typically provide artwork?",
+    options: ["They provide artwork", "We design it", "Both"],
+  },
+
+  // ✅ Auto Repair / Collision lock-ins
+  {
+    qid: "arc_work_type",
+    question: "For collision/body work — what do you do most?",
+    options: ["Dent/scratch repair", "Panel replacement", "Paint & refinish", "Insurance collision claims", "Mix of these"],
+  },
+  {
+    qid: "arc_claims",
+    question: "Do you handle insurance claims?",
+    options: ["Yes", "No", "Sometimes"],
+  },
+
+  // ✅ Auto Detailing lock-ins
+  {
+    qid: "ad_services",
+    question: "For detailing — what do you sell most?",
+    options: ["Wash packages", "Interior detail", "Paint correction", "Ceramic coating", "Mix of these"],
+  },
+
+  // ✅ Painting Contractors lock-ins
+  {
+    qid: "paint_scope",
+    question: "For painting — what do you paint most?",
+    options: ["Interior", "Exterior", "Both"],
+  },
+  {
+    qid: "paint_customer_type",
+    question: "For painting — who are your customers most often?",
+    options: ["Residential", "Commercial", "Both"],
+  },
+
+  // ✅ Paving lock-ins
+  {
+    qid: "paving_type",
+    question: "For paving — what do you do most?",
+    options: ["Asphalt paving", "Sealcoating", "Concrete", "Striping", "Mix of these"],
+  },
+
+  // ✅ Upholstery lock-ins
+  {
+    qid: "uph_domain",
+    question: "For upholstery — what do you work on most?",
+    options: ["Auto", "Marine", "Furniture", "Commercial", "Mix of these"],
+  },
+
+  // LAST resort only
   {
     qid: "freeform",
     question: "Describe your business in one sentence.",
-    help: "Example: “We install custom blinds and shades for homes and offices.”",
+    help: "Be specific: what you do + what you work on (short is fine).",
   },
 ];
+
+/* -------------------- industry lock-ins -------------------- */
+
+const INDUSTRY_LOCKINS: Record<string, string[]> = {
+  window_treatments: ["wt_products", "wt_job_type", "wt_customer_type"],
+  vehicle_wraps: ["vw_wrap_type", "vw_design"],
+  auto_repair_collision: ["arc_work_type", "arc_claims"],
+  auto_detailing: ["ad_services"],
+  painting_contractors: ["paint_scope", "paint_customer_type"],
+  paving_contractor: ["paving_type"],
+  upholstery: ["uph_domain"],
+};
 
 /* -------------------- db helpers -------------------- */
 
@@ -275,82 +365,116 @@ function ensureInference(ai: any | null): { ai: any; inf: IndustryInference } {
   return { ai: baseAi, inf };
 }
 
-function nextUnansweredFromBank(inf: IndustryInference) {
-  const answered = new Set(inf.answers.map((a) => a.qid));
-  const q = QUESTION_BANK.find((x) => !answered.has(x.qid));
-  return q ?? null;
+function answeredSet(inf: IndustryInference) {
+  return new Set((inf.answers ?? []).map((a) => a.qid));
 }
 
-function pickNextQuestionDeterministic(inf: IndustryInference) {
-  // Make it feel alive: if they haven’t answered “services” yet, always ask that first.
-  const answered = new Set(inf.answers.map((a) => a.qid));
-  if (!answered.has("services")) return QUESTION_BANK.find((q) => q.qid === "services") ?? null;
-  return nextUnansweredFromBank(inf);
+function pickQ(qid: string) {
+  return QUESTION_BANK.find((q) => q.qid === qid) ?? null;
 }
 
-/* -------------------- heuristic fallback (only if LLM fails) -------------------- */
+/* -------------------- heuristics + conflict detection -------------------- */
 
 function heuristicSuggestIndustry(text: string) {
   const t = text.toLowerCase();
 
-  if (/(wrap|wrapped|wrapping|vinyl|graphics|decal|lettering)/i.test(t)) return { key: "vehicle_wraps", conf: 0.78 };
-  if (/(blinds|shade|shades|window treatment|window coverings|drapes|curtain)/i.test(t))
-    return { key: "window_treatments", conf: 0.80 };
-  if (/(paint|painting|interior paint|exterior paint|painter)/i.test(t)) return { key: "painting_contractors", conf: 0.78 };
+  if (/(wrap|wrapped|wrapping|vinyl|graphics|decal|lettering)/i.test(t)) return { key: "vehicle_wraps", conf: 0.80 };
+  if (/(blinds|shade|shades|window treatment|window coverings|drapes|curtain|shutters)/i.test(t))
+    return { key: "window_treatments", conf: 0.82 };
 
+  if (/(collision|auto body|body shop|dent|bumper|panel|refinish)/i.test(t)) return { key: "auto_repair_collision", conf: 0.78 };
   if (/(ceramic|coating|paint correction|detail|detailing|wax|wash|buff|polish|ppf)/i.test(t))
-    return { key: "auto_detailing", conf: 0.74 };
+    return { key: "auto_detailing", conf: 0.76 };
+  if (/(interior|exterior).*(paint|painting)|painting contractor|repaint house|trim paint/i.test(t))
+    return { key: "painting_contractors", conf: 0.76 };
+
   if (/(mechanic|brake|engine|oil change|diagnostic|repair)/i.test(t)) return { key: "auto_repair", conf: 0.72 };
-  if (/(collision|auto body|body shop|dent|bumper|panel)/i.test(t)) return { key: "auto_repair_collision", conf: 0.72 };
   if (/(upholster|vinyl|leather|canvas|headliner|marine|sew)/i.test(t)) return { key: "upholstery", conf: 0.72 };
-  if (/(asphalt|sealcoat|driveway|parking lot|paving|concrete)/i.test(t)) return { key: "paving_contractor", conf: 0.72 };
+  if (/(asphalt|sealcoat|driveway|parking lot|paving|concrete|striping)/i.test(t)) return { key: "paving_contractor", conf: 0.72 };
   if (/(cleaning|janitor|maid|deep clean|pressure wash)/i.test(t)) return { key: "cleaning_services", conf: 0.70 };
 
   return { key: "service", conf: 0.1 };
 }
 
+/**
+ * Detect “vehicle industry + home object” type conflicts and force a domain clarifier.
+ */
+function detectDomainConflict(inf: IndustryInference, bestGuessKey: string | null) {
+  const key = normalizeKey(bestGuessKey ?? "");
+  if (!key) return false;
+
+  const answers = (inf.answers ?? []).map((a) => `${a.qid}:${a.answer}`.toLowerCase()).join(" | ");
+  const hasHomes = /\bhomes?\b/.test(answers) || /\bresidential\b/.test(answers);
+  const hasVehicles = /\bcars?\b|\btrucks?\b|\bvans?\b|\bvehicles?\b/.test(answers);
+
+  const vehicleIndustries = new Set(["auto_repair_collision", "auto_detailing", "auto_repair", "vehicle_wraps"]);
+  if (vehicleIndustries.has(key) && hasHomes && !hasVehicles) return true;
+
+  return false;
+}
+
+/* -------------------- question picking -------------------- */
+
+function nextFromStructuredBank(inf: IndustryInference) {
+  const answered = answeredSet(inf);
+
+  // Always prefer structured qids before freeform
+  const preferred = ["services", "work_objects", "top_jobs", "keywords"];
+
+  for (const qid of preferred) {
+    if (!answered.has(qid)) return pickQ(qid);
+  }
+
+  // freeform LAST
+  if (!answered.has("freeform")) return pickQ("freeform");
+  return null;
+}
+
+function deterministicLockIn(inf: IndustryInference, bestGuessKey: string | null) {
+  const key = normalizeKey(bestGuessKey ?? "");
+  if (!key) return null;
+
+  const answered = answeredSet(inf);
+  const list = INDUSTRY_LOCKINS[key] ?? [];
+  for (const qid of list) {
+    if (!answered.has(qid)) return pickQ(qid);
+  }
+  return null;
+}
+
+function allowedNextQids(inf: IndustryInference, bestGuessKey: string | null) {
+  const answered = answeredSet(inf);
+
+  // conflict clarifier can always be used if not answered
+  const qids: string[] = [];
+  if (!answered.has("domain_clarifier")) qids.push("domain_clarifier");
+
+  // industry lock-ins
+  const key = normalizeKey(bestGuessKey ?? "");
+  const lockIns = INDUSTRY_LOCKINS[key] ?? [];
+  for (const qid of lockIns) if (!answered.has(qid)) qids.push(qid);
+
+  // structured
+  for (const qid of ["services", "work_objects", "top_jobs", "keywords"]) {
+    if (!answered.has(qid)) qids.push(qid);
+  }
+
+  // freeform last, only if nothing else left
+  if (qids.length === 0 && !answered.has("freeform")) qids.push("freeform");
+  return qids;
+}
+
 /* -------------------- REAL AI (LLM) -------------------- */
 
 function buildInterviewText(inf: IndustryInference) {
-  return inf.answers
-    .map((a) => `- (${a.qid}) ${a.question}\n  Answer: ${a.answer}`)
-    .join("\n");
+  return (inf.answers ?? []).map((a) => `- (${a.qid}) ${a.question}\n  Answer: ${a.answer}`).join("\n");
 }
-
-function allowedNextQids(inf: IndustryInference) {
-  const answered = new Set(inf.answers.map((a) => a.qid));
-  return QUESTION_BANK.map((q) => q.qid).filter((qid) => !answered.has(qid));
-}
-
-const LlmOutSchema = z.object({
-  suggestedIndustryKey: z.string().nullable().optional(),
-  confidenceScore: z.number().min(0).max(1),
-  candidates: z.array(z.object({ key: z.string(), label: z.string().optional(), score: z.number().optional() })).min(1).max(6),
-  // We only accept nextQuestion.qid if it's one of allowedNextQids (validated after parse)
-  nextQuestion: z
-    .object({
-      qid: z.string(),
-      question: z.string(),
-      help: z.string().optional(),
-      options: z.array(z.string()).optional(),
-    })
-    .nullable()
-    .optional(),
-  newIndustry: z
-    .object({
-      key: z.string(),
-      label: z.string(),
-      description: z.string().nullable().optional(),
-    })
-    .nullable()
-    .optional(),
-  debugReason: z.string().optional(),
-});
 
 async function runLLM(args: {
   canon: Array<{ key: string; label: string }>;
   inf: IndustryInference;
   action: "start" | "answer";
+  preGuessKey: string | null;
 }): Promise<{
   suggestedIndustryKey: string | null;
   confidenceScore: number;
@@ -364,175 +488,139 @@ async function runLLM(args: {
 
   const client = new OpenAI({ apiKey });
 
-  const model = process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini";
-
-  const allowedQids = allowedNextQids(args.inf);
-  const canonList = args.canon.slice(0, 600).map((c) => `${c.key} — ${c.label}`).join("\n");
+  const canonList = args.canon.slice(0, 500).map((c) => `${c.key} — ${c.label}`).join("\n");
   const history = buildInterviewText(args.inf);
+  const last = args.inf.answers?.[args.inf.answers.length - 1];
+
+  const allowQids = allowedNextQids(args.inf, args.preGuessKey);
 
   const system = [
     "You are the onboarding classifier for AIPhotoQuote.",
-    "Goal: infer the best-fit industry starter pack AND choose the next best interview question.",
+    "Goal: pick the best industry starter pack and ask the next best question.",
+    "Output ONLY valid JSON (no markdown, no extra text).",
     "",
-    "Hard rules:",
-    "- Output MUST be valid JSON matching the provided JSON schema.",
+    "Rules:",
     "- suggestedIndustryKey MUST be snake_case.",
-    "- confidenceScore is 0..1.",
-    "- candidates: 3-6 items with { key, label, score } (score can be any numeric ranking).",
-    "- nextQuestion.qid MUST be one of the allowedNextQids provided (never repeat).",
-    "- If the correct industry is missing, propose newIndustry { key, label, description? }.",
+    "- confidenceScore must be 0..1.",
+    "- candidates: 3-6 items, each { key, label, score }.",
+    "- nextQuestion must be one of the allowed qids (or null).",
+    "- Do NOT repeat a qid already answered.",
+    "- Prefer multiple-choice clarifiers over freeform.",
+    "- If correct industry is NOT in canonical industries, propose newIndustry { key, label, description? }.",
     "",
-    "First-class industries we DO want if detected:",
+    "We DO want these as first-class industries if detected:",
     "- vehicle_wraps (vinyl wraps / graphics / decals)",
-    "- window_treatments (blinds / shades / window coverings)",
-    "- painting_contractors (interior/exterior painting)",
+    "- window_treatments (blinds / shades / window coverings / shutters / drapes)",
   ].join("\n");
 
   const user = [
     `Action: ${args.action}`,
+    `Pre-guess industry key: ${args.preGuessKey || "(none)"}`,
     "",
     "Canonical industries (key — label):",
     canonList || "(none)",
     "",
     "Allowed next qids:",
-    allowedQids.join(", ") || "(none)",
+    allowQids.join(", ") || "(none)",
     "",
     "Interview so far:",
     history || "(none yet)",
+    "",
+    last ? `Last answer: (${last.qid}) ${last.answer}` : "",
+    "",
+    "Return JSON with this shape:",
+    JSON.stringify(
+      {
+        suggestedIndustryKey: "string_or_null",
+        confidenceScore: 0.0,
+        candidates: [{ key: "snake_case", label: "Label", score: 0 }],
+        nextQuestion: { qid: "one_of_allowed_qids", question: "string", help: "string", options: ["a", "b"] },
+        newIndustry: { key: "snake_case", label: "Label", description: "optional" },
+        debugReason: "short reason",
+      },
+      null,
+      2
+    ),
   ].join("\n");
 
-  // Use strict JSON schema output to eliminate “prose + JSON” and missing fields.
+  const model = process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini";
+
   const resp = await client.chat.completions.create({
     model,
     temperature: 0.2,
+    // helps prevent “prose then json”
+    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-    // @ts-ignore - supported by OpenAI chat.completions on modern models
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "IndustryInterviewDecision",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            suggestedIndustryKey: { type: ["string", "null"] },
-            confidenceScore: { type: "number", minimum: 0, maximum: 1 },
-            candidates: {
-              type: "array",
-              minItems: 1,
-              maxItems: 6,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  key: { type: "string" },
-                  label: { type: "string" },
-                  score: { type: "number" },
-                },
-                required: ["key"],
-              },
-            },
-            nextQuestion: {
-              anyOf: [
-                { type: "null" },
-                {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    qid: { type: "string" },
-                    question: { type: "string" },
-                    help: { type: "string" },
-                    options: { type: "array", items: { type: "string" } },
-                  },
-                  required: ["qid", "question"],
-                },
-              ],
-            },
-            newIndustry: {
-              anyOf: [
-                { type: "null" },
-                {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    key: { type: "string" },
-                    label: { type: "string" },
-                    description: { type: ["string", "null"] },
-                  },
-                  required: ["key", "label"],
-                },
-              ],
-            },
-            debugReason: { type: "string" },
-          },
-          required: ["confidenceScore", "candidates"],
-        },
-      },
-    },
   });
 
   const content = resp.choices?.[0]?.message?.content ?? "";
-  let parsedJson: any;
-  try {
-    parsedJson = JSON.parse(content);
-  } catch {
-    throw new Error("LLM returned non-JSON output.");
-  }
+  const parsed = jsonExtract(content) ?? (content ? JSON.parse(content) : null);
+  if (!parsed || typeof parsed !== "object") throw new Error("LLM returned non-JSON output.");
 
-  const parsed = LlmOutSchema.safeParse(parsedJson);
-  if (!parsed.success) {
-    throw new Error("LLM returned JSON that failed validation.");
-  }
+  const suggested = normalizeKey(parsed.suggestedIndustryKey ?? "");
+  const rawConf = Number(parsed.confidenceScore ?? 0);
+  const confidenceScore = Number.isFinite(rawConf) ? Math.max(0, Math.min(1, rawConf)) : 0;
 
-  const suggested = normalizeKey(parsed.data.suggestedIndustryKey ?? "");
-  const confidenceScore = clamp01(parsed.data.confidenceScore);
+  const candRaw = Array.isArray(parsed.candidates) ? parsed.candidates : [];
+  const candidates: Candidate[] = candRaw
+    .map((c: any) => ({
+      key: normalizeKey(c?.key ?? ""),
+      label: safeTrim(c?.label ?? ""),
+      score: Number(c?.score ?? 0) || 0,
+    }))
+    .filter((c: Candidate) => c.key);
 
-  const rawCandidates: Candidate[] = (parsed.data.candidates ?? []).map((c) => ({
-    key: normalizeKey(c.key ?? ""),
-    label: safeTrim((c as any).label ?? ""),
-    score: Number((c as any).score ?? 0) || 0,
-  }));
+  const finalCandidates =
+    candidates.length > 0
+      ? candidates.slice(0, 6)
+      : [{ key: suggested || args.preGuessKey || "service", label: titleFromKey(suggested || args.preGuessKey || "service"), score: 0 }];
 
-  const candidates = stableCandidates(rawCandidates, args.canon);
-  const topKey = candidates[0]?.key || "service";
+  const answered = answeredSet(args.inf);
+  const allowed = new Set(allowQids);
 
-  // nextQuestion must be one of allowed qids (or null)
-  let nextQuestion: IndustryInference["nextQuestion"] = null;
-  if (parsed.data.nextQuestion && typeof parsed.data.nextQuestion === "object") {
-    const qid = safeTrim(parsed.data.nextQuestion.qid);
-    const ok = allowedQids.includes(qid);
-    if (ok) {
-      const q = QUESTION_BANK.find((x) => x.qid === qid);
+  let nextQuestion: any = parsed.nextQuestion ?? null;
+  if (nextQuestion && typeof nextQuestion === "object") {
+    const qid = safeTrim(nextQuestion.qid);
+    if (!qid || answered.has(qid) || !allowed.has(qid)) {
+      nextQuestion = null;
+    } else {
+      const bank = pickQ(qid);
       nextQuestion = {
         qid,
-        question: safeTrim(parsed.data.nextQuestion.question) || q?.question || "Describe your business in one sentence.",
-        help: safeTrim(parsed.data.nextQuestion.help) || q?.help || undefined,
-        options: Array.isArray(parsed.data.nextQuestion.options) ? parsed.data.nextQuestion.options.map((x) => safeTrim(x)).filter(Boolean) : q?.options,
+        question: safeTrim(nextQuestion.question) || bank?.question || titleFromKey(qid),
+        help: safeTrim(nextQuestion.help) || bank?.help || undefined,
+        options: Array.isArray(nextQuestion.options)
+          ? nextQuestion.options.map((x: any) => safeTrim(x)).filter(Boolean)
+          : bank?.options,
       };
     }
+  } else {
+    nextQuestion = null;
   }
 
-  // newIndustry proposal
-  let newIndustry: any = null;
-  if (parsed.data.newIndustry && typeof parsed.data.newIndustry === "object") {
-    const nk = normalizeKey(parsed.data.newIndustry.key ?? "");
-    const nl = safeTrim(parsed.data.newIndustry.label ?? "");
+  let newIndustry: any = parsed.newIndustry ?? null;
+  if (newIndustry && typeof newIndustry === "object") {
+    const nk = normalizeKey(newIndustry.key ?? "");
+    const nl = safeTrim(newIndustry.label ?? "");
     if (nk && nl) {
-      newIndustry = { key: nk, label: nl, description: parsed.data.newIndustry.description ?? null };
-    }
-  }
+      newIndustry = { key: nk, label: nl, description: newIndustry.description == null ? null : String(newIndustry.description) };
+    } else newIndustry = null;
+  } else newIndustry = null;
 
   return {
-    suggestedIndustryKey: suggested || topKey || null,
+    suggestedIndustryKey: suggested || (finalCandidates[0]?.key ?? null),
     confidenceScore,
-    candidates,
+    candidates: finalCandidates.map((c) => ({
+      key: c.key,
+      label: c.label || args.canon.find((x) => x.key === c.key)?.label || titleFromKey(c.key),
+      score: c.score,
+    })),
     nextQuestion,
     newIndustry,
-    debugReason: safeTrim(parsed.data.debugReason ?? ""),
+    debugReason: safeTrim(parsed.debugReason ?? ""),
   };
 }
 
@@ -562,16 +650,13 @@ export async function POST(req: Request) {
 
     const ai0 = await readAiAnalysis(tenantId);
     const { ai, inf: inf0 } = ensureInference(ai0);
-    const canon = await listCanonicalIndustries();
 
+    const canon = await listCanonicalIndustries();
     const now = new Date().toISOString();
 
     let inf: IndustryInference = {
       ...inf0,
       meta: { ...(inf0.meta ?? {}), updatedAt: now },
-      // hardening: never allow undefined arrays
-      answers: Array.isArray(inf0.answers) ? inf0.answers : [],
-      candidates: Array.isArray(inf0.candidates) ? inf0.candidates : [],
     };
 
     if (parsed.data.action === "reset") {
@@ -582,17 +667,9 @@ export async function POST(req: Request) {
         confidenceScore: 0,
         suggestedIndustryKey: null,
         needsConfirmation: true,
-        nextQuestion: pickNextQuestionDeterministic({
-          ...inf,
-          answers: [],
-        }) ?? {
-          qid: "services",
-          question: "What do you primarily do?",
-          help: "Pick the closest match.",
-          options: QUESTION_BANK.find((q) => q.qid === "services")?.options ?? [],
-        },
+        nextQuestion: null,
         answers: [],
-        candidates: [{ key: "service", label: "Service", score: 0 }],
+        candidates: [],
         meta: { updatedAt: now, model: { status: "ok" } },
       };
 
@@ -605,14 +682,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
     }
 
+    const answersBlobForGuess = (inf.answers ?? []).map((a) => a.answer).join(" | ");
+    const preH = heuristicSuggestIndustry(answersBlobForGuess);
+    const preGuessKey = inf.suggestedIndustryKey || preH.key || null;
+
     if (parsed.data.action === "start") {
-      // If we already have answers, don't re-ask; otherwise start with "services" to feel alive.
-      const q0 = pickNextQuestionDeterministic(inf) ?? QUESTION_BANK.find((q) => q.qid === "services") ?? QUESTION_BANK[0];
-
-      // Try LLM, but always return a complete IndustryInference even if LLM fails.
       try {
-        const out = await runLLM({ canon, inf, action: "start" });
+        const out = await runLLM({ canon, inf, action: "start", preGuessKey });
 
+        // build-criteria: create new industries
         if (out.newIndustry?.key && out.newIndustry?.label) {
           await ensureIndustryExists({
             keyOrLabel: out.newIndustry.key,
@@ -620,7 +698,6 @@ export async function POST(req: Request) {
             description: out.newIndustry.description ?? null,
           });
         }
-
         if (out.suggestedIndustryKey) {
           const existsInCanon = canon.some((c) => c.key === out.suggestedIndustryKey);
           if (!existsInCanon) {
@@ -628,30 +705,35 @@ export async function POST(req: Request) {
           }
         }
 
-        const candidates = stableCandidates(out.candidates ?? [], canon);
+        const bestKey = out.suggestedIndustryKey || preGuessKey;
 
-        // On start, we NEVER allow nextQuestion to be null.
-        const nextQuestion =
-          out.nextQuestion ??
-          q0 ??
-          ({
-            qid: "freeform",
-            question: "Describe your business in one sentence.",
-            help: "Be specific: what you do + what you work on.",
-          } as const);
+        // ✅ conflict clarifier first
+        const conflict = detectDomainConflict(inf, bestKey);
+        const conflictQ = conflict ? pickQ("domain_clarifier") : null;
+
+        // ✅ deterministic lock-in second
+        const lockIn = !conflict ? deterministicLockIn(inf, bestKey) : null;
+
+        // ✅ model question third
+        const modelQ = !conflict && out.nextQuestion ? out.nextQuestion : null;
+
+        // ✅ structured bank fourth
+        const bankQ = !conflict && !lockIn && !modelQ ? nextFromStructuredBank(inf) : null;
+
+        const q = conflictQ ?? lockIn ?? modelQ ?? bankQ ?? pickQ("freeform");
 
         inf = {
           ...inf,
           status: "collecting",
-          suggestedIndustryKey: out.suggestedIndustryKey || candidates[0]?.key || null,
-          confidenceScore: clamp01(out.confidenceScore),
-          candidates,
-          nextQuestion,
+          suggestedIndustryKey: bestKey || null,
+          confidenceScore: Number.isFinite(out.confidenceScore) ? out.confidenceScore : 0,
+          candidates: Array.isArray(out.candidates) && out.candidates.length ? out.candidates : [{ key: "service", label: "Service", score: 0 }],
+          nextQuestion: q,
           needsConfirmation: true,
           meta: {
             updatedAt: now,
             model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "ok" },
-            debug: { reason: out.debugReason || undefined },
+            debug: { reason: out.debugReason || undefined, note: conflict ? "domain_conflict" : lockIn ? "lock_in" : undefined, conflict, preGuess: preGuessKey || undefined },
           },
         };
 
@@ -663,23 +745,20 @@ export async function POST(req: Request) {
         await writeAiAnalysis(tenantId, ai);
         return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
       } catch (e: any) {
-        const candidates = stableCandidates(inf.candidates ?? [{ key: "service", label: "Service", score: 0 }], canon);
+        const fallbackQ = pickQ("services") ?? pickQ("freeform");
 
         inf = {
           ...inf,
           status: "collecting",
-          suggestedIndustryKey: inf.suggestedIndustryKey ?? candidates[0]?.key ?? null,
-          confidenceScore: Number.isFinite(inf.confidenceScore) ? clamp01(inf.confidenceScore) : 0,
-          candidates,
-          nextQuestion: q0 ?? {
-            qid: "freeform",
-            question: "Describe your business in one sentence.",
-            help: "Example: “We do vehicle wraps and vinyl graphics for cars and vans.”",
-          },
+          suggestedIndustryKey: preGuessKey,
+          confidenceScore: Number.isFinite(inf.confidenceScore) ? inf.confidenceScore : 0,
+          candidates: [{ key: preGuessKey || "service", label: titleFromKey(preGuessKey || "service"), score: 0 }],
+          nextQuestion: fallbackQ,
           needsConfirmation: true,
           meta: {
             updatedAt: now,
             model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "llm_error", error: e?.message ?? String(e) },
+            debug: { note: "start_fallback", preGuess: preGuessKey || undefined },
           },
         };
 
@@ -698,26 +777,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "ANSWER_REQUIRED", message: "qid and answer are required." }, { status: 400 });
     }
 
-    // Store answer
-    const qFromBank = QUESTION_BANK.find((q) => q.qid === qid);
+    const qFromBank = pickQ(qid);
     const qText = qFromBank?.question ?? qid;
 
     const answers = Array.isArray(inf.answers) ? [...inf.answers] : [];
     answers.push({ qid, question: qText, answer: ans, createdAt: now });
 
-    // Round bump (cap)
-    const nextRound = Math.min(MAX_ROUNDS, (Number(inf.round ?? 1) || 1) + 1);
-
     inf = {
       ...inf,
       answers,
-      round: nextRound,
+      round: Math.min(MAX_ROUNDS, (Number(inf.round ?? 1) || 1) + 1),
       meta: { ...(inf.meta ?? {}), updatedAt: now },
     };
 
-    // Try LLM first
+    const blob = answers.map((a) => a.answer).join(" | ");
+    const h = heuristicSuggestIndustry(blob);
+    const preKey = inf.suggestedIndustryKey || h.key;
+
     try {
-      const out = await runLLM({ canon, inf, action: "answer" });
+      const out = await runLLM({ canon, inf, action: "answer", preGuessKey: preKey });
 
       if (out.newIndustry?.key && out.newIndustry?.label) {
         await ensureIndustryExists({
@@ -727,41 +805,43 @@ export async function POST(req: Request) {
         });
       }
 
-      if (out.suggestedIndustryKey) {
-        const existsInCanon = canon.some((c) => c.key === out.suggestedIndustryKey);
+      const bestKey = out.suggestedIndustryKey || preKey;
+
+      if (bestKey) {
+        const existsInCanon = canon.some((c) => c.key === bestKey);
         if (!existsInCanon) {
-          await ensureIndustryExists({ keyOrLabel: out.suggestedIndustryKey, label: titleFromKey(out.suggestedIndustryKey) });
+          await ensureIndustryExists({ keyOrLabel: bestKey, label: titleFromKey(bestKey) });
         }
       }
 
-      const candidates = stableCandidates(out.candidates ?? [], canon);
-      const confidenceScore = clamp01(out.confidenceScore);
-
-      const reached = confidenceScore >= CONF_TARGET;
+      const reached = out.confidenceScore >= CONF_TARGET;
       const status: IndustryInference["status"] = reached ? "suggested" : "collecting";
 
       let nextQ: IndustryInference["nextQuestion"] = null;
-      if (status === "collecting") {
-        // Enforce: only bank qids, never repeat
-        const answeredQids = new Set(answers.map((a) => a.qid));
-        const modelQ = out.nextQuestion && !answeredQids.has(out.nextQuestion.qid) ? out.nextQuestion : null;
 
-        nextQ =
-          modelQ ??
-          pickNextQuestionDeterministic({ ...inf, answers } as any) ??
-          ({
-            qid: "freeform",
-            question: "Describe your business in one sentence.",
-            help: "Be specific: what you do + what you work on.",
-          } as const);
+      if (status === "collecting") {
+        const conflict = detectDomainConflict(inf, bestKey);
+        const conflictQ = conflict ? pickQ("domain_clarifier") : null;
+        const lockIn = !conflict ? deterministicLockIn(inf, bestKey) : null;
+
+        // Only accept modelQ if it’s not answered already
+        const answered = answeredSet(inf);
+        const modelQ = out.nextQuestion && !answered.has(out.nextQuestion.qid) ? out.nextQuestion : null;
+
+        nextQ = conflictQ ?? lockIn ?? modelQ ?? nextFromStructuredBank(inf) ?? pickQ("freeform");
       }
+
+      const candidates =
+        Array.isArray(out.candidates) && out.candidates.length
+          ? out.candidates
+          : [{ key: bestKey || "service", label: titleFromKey(bestKey || "service"), score: 0 }];
 
       inf = {
         mode: "interview",
         status,
-        round: nextRound,
-        confidenceScore,
-        suggestedIndustryKey: out.suggestedIndustryKey || candidates[0]?.key || null,
+        round: inf.round,
+        confidenceScore: out.confidenceScore,
+        suggestedIndustryKey: bestKey || candidates[0]?.key || null,
         needsConfirmation: true,
         nextQuestion: nextQ,
         answers,
@@ -769,7 +849,7 @@ export async function POST(req: Request) {
         meta: {
           updatedAt: now,
           model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "ok" },
-          debug: { reason: out.debugReason || undefined },
+          debug: { reason: out.debugReason || undefined, preGuess: preKey || undefined },
         },
       };
 
@@ -781,45 +861,36 @@ export async function POST(req: Request) {
       await writeAiAnalysis(tenantId, ai);
       return NextResponse.json({ ok: true, tenantId, industryInference: inf }, { status: 200 });
     } catch (e: any) {
-      // Heuristic fallback: still never return incomplete payload, and never loop the same qid.
-      const blob = answers.map((a) => a.answer).join(" | ");
-      const h = heuristicSuggestIndustry(blob);
-
+      // Heuristic fallback, but still “alive”
       if (h.key && h.key !== "service") {
         await ensureIndustryExists({ keyOrLabel: h.key, label: titleFromKey(h.key) });
       }
 
-      const confidenceScore = clamp01(h.conf);
-      const reached = confidenceScore >= CONF_TARGET;
-      const status: IndustryInference["status"] = reached ? "suggested" : "collecting";
+      const status: IndustryInference["status"] = h.conf >= CONF_TARGET ? "suggested" : "collecting";
 
-      const answered = new Set(answers.map((a) => a.qid));
-      const fallbackQ =
-        (!answered.has("keywords") ? QUESTION_BANK.find((x) => x.qid === "keywords") : null) ||
-        (!answered.has("top_jobs") ? QUESTION_BANK.find((x) => x.qid === "top_jobs") : null) ||
-        (!answered.has("work_objects") ? QUESTION_BANK.find((x) => x.qid === "work_objects") : null) ||
-        (!answered.has("freeform") ? QUESTION_BANK.find((x) => x.qid === "freeform") : null) ||
-        null;
+      const conflict = detectDomainConflict(inf, h.key);
+      const conflictQ = conflict ? pickQ("domain_clarifier") : null;
+      const lockIn = !conflict ? deterministicLockIn(inf, h.key) : null;
+
+      const fallbackQ = conflictQ ?? lockIn ?? nextFromStructuredBank(inf) ?? pickQ("freeform");
 
       inf = {
         mode: "interview",
         status,
-        round: nextRound,
-        confidenceScore,
+        round: inf.round,
+        confidenceScore: h.conf,
         suggestedIndustryKey: h.key || null,
         needsConfirmation: true,
-        nextQuestion: status === "collecting" ? (fallbackQ ? { ...fallbackQ } : null) : null,
+        nextQuestion: status === "collecting" ? fallbackQ : null,
         answers,
-        candidates: stableCandidates(
-          [
-            { key: h.key, label: titleFromKey(h.key), score: Math.round(confidenceScore * 10) },
-            { key: "service", label: "Service", score: 0 },
-          ],
-          canon
-        ),
+        candidates: [
+          { key: h.key, label: titleFromKey(h.key), score: Math.round(h.conf * 10) },
+          { key: "service", label: "Service", score: 0 },
+        ],
         meta: {
           updatedAt: now,
           model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "llm_error", error: e?.message ?? String(e) },
+          debug: { note: "heuristic_fallback", conflict, preGuess: preKey || undefined },
         },
       };
 
