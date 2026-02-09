@@ -2,340 +2,344 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { getConfidence, getPreviewText, needsConfirmation, summarizeFetchDebug } from "../utils";
 
-type IndustryInference = {
-  mode: "interview";
-  status: "collecting" | "suggested";
-  round: number;
-  confidenceScore: number;
-  suggestedIndustryKey: string | null;
-  needsConfirmation: boolean;
-  nextQuestion: { qid: string; question: string; help?: string; options?: string[] } | null;
-  answers: Array<{ qid: string; question: string; answer: string; createdAt: string }>;
-  candidates: Array<{ key: string; label: any; score: number }>;
-  meta: { updatedAt: string };
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function clamp01(n: any) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function pct(n: number) {
+  return Math.max(0, Math.min(100, Math.round(n * 100)));
+}
+
+type NextQuestion = {
+  id: string;
+  question: string;
+  help?: string | null;
+  inputType: "text" | "yes_no" | "single_choice" | "multi_choice";
+  options?: string[];
 };
+
+type Candidate = { label: string; score: number };
+
+type IndustryInterviewA = {
+  mode: "A";
+  status: "collecting" | "ready";
+  round: number;
+
+  hypothesisLabel: string | null;
+  proposedIndustry: { key: string; label: string } | null;
+
+  confidenceScore: number;
+  fitScore: number;
+  fitReason: string | null;
+
+  candidates: Candidate[];
+  nextQuestion: NextQuestion | null;
+
+  turns: Array<{
+    id: string;
+    question: string;
+    inputType: string;
+    options?: string[];
+    answer?: string | null;
+    createdAt: string;
+  }>;
+
+  meta?: any;
+};
+
+async function postInterview(payload: any) {
+  const res = await fetch("/api/onboarding/industry-interview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(payload),
+  });
+  const j = await res.json().catch(() => null);
+  if (!res.ok || !j?.ok) {
+    throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+  }
+  return j as { ok: true; tenantId: string; industryInterview: IndustryInterviewA };
+}
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function safeText(v: any) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
-function safeUi(v: any) {
-  // ✅ guarantees a render-safe string even if v is array/object
-  if (v == null) return "";
-  if (typeof v === "string") return v;
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
-
-function pct(n: number) {
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(100, Math.round(n * 100)));
-}
-
-/**
- * Product-aware “why we ask” lines.
- */
-function whyForQid(qid: string) {
-  switch (qid) {
-    case "services":
-      return "This picks your starter quote template + default services.";
-    case "materials_objects":
-      return "This loads the right photo checklist (what we ask customers to upload).";
-    case "job_type":
-      return "This tunes how we scope estimates (repair vs replacement vs install).";
-    case "who_for":
-      return "This tailors your intake language + typical job mix.";
-    case "top_jobs":
-      return "This helps us name your common jobs and question prompts.";
-    case "materials":
-      return "This improves fit accuracy and helps us choose the right terminology.";
-    case "specialty":
-      return "This catches niche signals (e.g., collision vs detailing vs restoration).";
-    case "location":
-      return "This is optional—helps with your service area phrasing.";
-    case "freeform":
-      return "This is the fastest way to confirm the right experience.";
-    default:
-      return "This helps us tailor your setup.";
-  }
-}
-
 export function Step2(props: {
   tenantId: string | null;
+
   website: string;
   aiAnalysis: any | null | undefined;
-  aiAnalysisStatus?: string;
+
+  aiAnalysisStatus?: string | null; // unused for Mode A, but kept for compatibility
   aiAnalysisError?: string | null;
-  onRun: () => Promise<void>;
-  onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
+
+  onRun: () => Promise<void>; // website analysis (legacy)
+  onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>; // legacy
   onNext: () => void;
   onBack: () => void;
-  onError: (msg: string) => void;
+  onError: (m: string) => void;
 }) {
-  const [running, setRunning] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [feedback, setFeedback] = useState("");
-  const autoRanRef = useRef(false);
+  const tid = safeTrim(props.tenantId);
 
-  // Interview state
-  const [ivLoading, setIvLoading] = useState(false);
-  const [ivErr, setIvErr] = useState<string | null>(null);
-  const [ivAnswer, setIvAnswer] = useState("");
-  const [inf, setInf] = useState<IndustryInference | null>(null);
+  // Pull Mode A state from aiAnalysis
+  const interview: IndustryInterviewA | null = useMemo(() => {
+    const x = props.aiAnalysis?.industryInterview;
+    if (!x || typeof x !== "object") return null;
+    if (x.mode !== "A") return null;
+    return x as IndustryInterviewA;
+  }, [props.aiAnalysis]);
 
-  const tenantId = safeText(props.tenantId);
-  const websiteTrim = safeText(props.website);
-  const hasWebsite = websiteTrim.length > 0;
+  const status = safeTrim(interview?.status) || "collecting";
+  const nextQ = (interview?.nextQuestion ?? null) as NextQuestion | null;
 
-  // Website analysis meta
-  const conf = getConfidence(props.aiAnalysis);
-  const mustConfirm = needsConfirmation(props.aiAnalysis);
-  const businessGuess = safeText(props.aiAnalysis?.businessGuess);
-  const questions: string[] = Array.isArray(props.aiAnalysis?.questions) ? props.aiAnalysis.questions : [];
-  const preview = getPreviewText(props.aiAnalysis);
-  const fetchSummary = summarizeFetchDebug(props.aiAnalysis);
+  const hypothesis = safeTrim(interview?.hypothesisLabel) || safeTrim(interview?.proposedIndustry?.label) || "";
+  const proposedKey = safeTrim(interview?.proposedIndustry?.key);
+  const conf = clamp01(interview?.confidenceScore);
+  const fit = clamp01(interview?.fitScore);
+  const fitReason = safeTrim(interview?.fitReason);
 
-  const serverSaysAnalyzing = String(props.aiAnalysisStatus ?? "").toLowerCase() === "running";
-  const showAnalyzing = running || serverSaysAnalyzing;
+  const candidates: Candidate[] = Array.isArray(interview?.candidates)
+    ? interview!.candidates
+        .map((c: any) => ({ label: safeTrim(c?.label), score: clamp01(c?.score) }))
+        .filter((c) => c.label)
+        .slice(0, 5)
+    : [];
 
-  const canContinueWebsite = Boolean(props.aiAnalysis) && !mustConfirm;
+  const [err, setErr] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
 
-  // Interview derived values
-  const ivConfidence = useMemo(() => {
-    const v = Number(inf?.confidenceScore ?? 0);
-    return Number.isFinite(v) ? v : 0;
-  }, [inf?.confidenceScore]);
+  // current answer UI state
+  const [textAnswer, setTextAnswer] = useState("");
+  const [choiceAnswer, setChoiceAnswer] = useState<string>("");
+  const [multiAnswer, setMultiAnswer] = useState<Record<string, boolean>>({});
 
-  const ivSuggested = safeText(inf?.suggestedIndustryKey);
-  const ivStatus = safeText(inf?.status);
-  const ivAnsweredCount = inf?.answers?.length ?? 0;
-  const ivRound = Number(inf?.round ?? 1) || 1;
+  const lastSubmitRef = useRef<string>("");
 
-  const isLocked = ivStatus === "suggested" && Boolean(ivSuggested);
+  // reset inputs whenever the question changes
+  useEffect(() => {
+    setErr(null);
+    setTextAnswer("");
+    setChoiceAnswer("");
+    setMultiAnswer({});
+    // also reset duplicate-submit key
+    lastSubmitRef.current = "";
+  }, [nextQ?.id]);
 
-  const IV_SOFT_MAX = 8;
-  const ivProgressPct = Math.max(
-    8,
-    Math.min(
-      100,
-      Math.round(((Math.min(ivAnsweredCount, IV_SOFT_MAX) + (isLocked ? 1 : 0)) / (IV_SOFT_MAX + 1)) * 100)
-    )
-  );
+  async function startIfNeeded() {
+    if (!tid) return;
+    // If we already have a next question, no need to start again
+    if (nextQ?.id) return;
 
-  const showInterview = !hasWebsite;
-  const canContinueInterview = isLocked;
-
-  function topMatchLine() {
-    const top = inf?.candidates?.[0];
-    const topLabel = safeText(top?.label) || safeUi(top?.label) || safeText(top?.key) || "your industry";
-
-    if (!top) return "Tell us a bit about your business and we’ll pick the best-fit setup.";
-    if (isLocked) return `Locked in: ${topLabel}. Next you’ll confirm it.`;
-
-    if ((inf?.candidates?.length ?? 0) > 1) {
-      const second = inf?.candidates?.[1];
-      if (second && top.score === second.score) {
-        const secondLabel = safeText(second?.label) || safeUi(second?.label) || safeText(second?.key) || "another option";
-        return `We’re torn between ${topLabel} and ${secondLabel}. One more question.`;
-      }
-    }
-    return `Leaning toward ${topLabel}. A couple more answers will lock it in.`;
-  }
-
-  function lastAnswerLine() {
-    const last = inf?.answers?.[inf.answers.length - 1];
-    if (!last?.answer) return "";
-    return `Last answer: ${String(last.answer)}`;
-  }
-
-  function normalizeErrForUi(j: any, resStatus?: number) {
-    // server might send message as array/object (e.g., zod issues). Never render that raw.
-    const msg = j?.message ?? j?.error ?? null;
-    if (typeof msg === "string" && msg.trim()) return msg.trim();
-    if (msg != null) return safeUi(msg);
-    if (typeof resStatus === "number") return `HTTP ${resStatus}`;
-    return "Unknown error";
-  }
-
-  async function ivPost(payload: any) {
-    setIvErr(null);
-    setIvLoading(true);
+    setWorking(true);
+    setErr(null);
     try {
-      if (!tenantId) throw new Error("NO_TENANT: missing tenantId for interview.");
-
-      const res = await fetch("/api/onboarding/industry-interview", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tenantId, ...payload }),
-      });
-
-      const j = await res.json().catch(() => null);
-
-      if (!res.ok || !j?.ok) {
-        const m = normalizeErrForUi(j, res.status);
-        throw new Error(m);
-      }
-
-      const next = (j?.industryInference ?? null) as IndustryInference | null;
-      setInf(next);
-      setIvAnswer("");
-      return next;
+      await postInterview({ tenantId: tid, action: "start" });
+      // OnboardingWizard refresh() will pull updated aiAnalysis; user sees next question immediately
+      // If you want immediate local update, we’d need to bubble state up (not doing that here).
     } catch (e: any) {
-      const m = e?.message;
-      setIvErr(typeof m === "string" ? m : safeUi(m ?? e));
-      throw e;
+      setErr(e?.message ?? String(e));
+      props.onError(e?.message ?? String(e));
     } finally {
-      setIvLoading(false);
+      setWorking(false);
     }
   }
 
+  // Auto-start the interview when step loads (prevents “blank / old flow”)
   useEffect(() => {
-    if (autoRanRef.current) return;
-    autoRanRef.current = true;
+    startIfNeeded().catch(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tid]);
 
-    const hasAnalysis = Boolean(props.aiAnalysis);
+  function buildAnswerPayload(): string {
+    if (!nextQ) return "";
 
-    if (hasWebsite) {
-      if (hasAnalysis) return;
-
-      let alive = true;
-      setRunning(true);
-      props
-        .onRun()
-        .catch((e: any) => props.onError(typeof e?.message === "string" ? e.message : safeUi(e)))
-        .finally(() => {
-          if (alive) setRunning(false);
-        });
-
-      return () => {
-        alive = false;
-      };
+    if (nextQ.inputType === "yes_no") {
+      const v = safeTrim(choiceAnswer);
+      if (!v) return "";
+      return v; // "Yes"/"No" etc
     }
 
-    ivPost({ action: "start" }).catch((e: any) =>
-      props.onError(typeof e?.message === "string" ? e.message : safeUi(e))
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props]);
-
-  useEffect(() => {
-    if (hasWebsite) return;
-    const fromAi = props.aiAnalysis?.industryInference ?? null;
-    if (fromAi && typeof fromAi === "object" && fromAi.mode === "interview") {
-      setInf(fromAi as IndustryInference);
+    if (nextQ.inputType === "single_choice") {
+      return safeTrim(choiceAnswer);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, props.aiAnalysis]);
+
+    if (nextQ.inputType === "multi_choice") {
+      const picked = Object.entries(multiAnswer)
+        .filter(([, on]) => on)
+        .map(([k]) => k);
+      return picked.length ? picked.join(", ") : "";
+    }
+
+    // text
+    return safeTrim(textAnswer);
+  }
+
+  async function submitAnswer() {
+    if (!tid) {
+      setErr("Missing tenantId.");
+      return;
+    }
+    if (!nextQ?.id) {
+      setErr("No active question yet. Tap ‘Start interview’.");
+      return;
+    }
+
+    const ans = buildAnswerPayload();
+    if (!ans) {
+      setErr("Please answer the question to continue.");
+      return;
+    }
+
+    // UI-level anti-double-submit (prevents “asked 3 times” if user taps fast)
+    const dupeKey = `${tid}:${nextQ.id}:${ans}`;
+    if (lastSubmitRef.current === dupeKey) return;
+    lastSubmitRef.current = dupeKey;
+
+    setWorking(true);
+    setErr(null);
+
+    try {
+      await postInterview({
+        tenantId: tid,
+        action: "answer",
+        questionId: nextQ.id,
+        answer: ans,
+      });
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+      props.onError(e?.message ?? String(e));
+      // allow retry
+      lastSubmitRef.current = "";
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const showReady = status === "ready" && Boolean(proposedKey);
 
   return (
     <div>
-      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-        {hasWebsite ? "AI fit check" : "Quick setup interview"}
-      </div>
-
+      <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industry interview</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        {hasWebsite
-          ? "We’ll scan your website to understand what you do, then confirm it with you."
-          : "No website needed — we’ll ask a few smart questions to load the right templates, photos, and defaults."}
+        We’ll ask a few smart questions to understand what you do — then we’ll build the best-fit industry starter pack.
       </div>
 
-      {hasWebsite ? (
-        <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
-          <div className="font-medium text-gray-900 dark:text-gray-100">Website</div>
-          <div className="mt-1 break-words text-gray-700 dark:text-gray-300">{websiteTrim}</div>
-        </div>
-      ) : null}
-
-      {/* ---------------- INTERVIEW MODE (NO WEBSITE) ---------------- */}
-      {showInterview ? (
-        <div className="mt-4 space-y-4">
-          <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-950 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="font-semibold">{isLocked ? "Your setup is ready" : "We’re setting up your AIPhotoQuote experience"}</div>
-                <div className="mt-1 text-xs opacity-90">
-                  {isLocked
-                    ? "We’ve confidently picked the best-fit starter pack. You’ll confirm the final industry on the next step."
-                    : "We’ll stop early once the top match is clear. You’ll confirm the final industry on the next step."}
-                </div>
-                <div className="mt-2 text-xs font-semibold opacity-95">{topMatchLine()}</div>
-                {lastAnswerLine() ? <div className="mt-1 text-xs opacity-90">{lastAnswerLine()}</div> : null}
-              </div>
-
-              <div className="shrink-0 text-right">
-                <div className="text-xs">
-                  Match strength: <span className="font-mono">{pct(ivConfidence)}%</span>
-                </div>
-                <div className="text-[11px] opacity-90">Round {ivRound}</div>
-                <div className="text-[11px] opacity-80">backend: {pct(ivConfidence)}%</div>
-              </div>
+      {/* Live AI card */}
+      <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Live understanding</div>
+            <div className="mt-1 text-sm text-gray-900 dark:text-gray-100">
+              {hypothesis ? (
+                <>
+                  <span className="font-semibold">{hypothesis}</span>
+                  {proposedKey ? <span className="ml-2 font-mono text-xs opacity-70">({proposedKey})</span> : null}
+                </>
+              ) : (
+                <span className="text-gray-600 dark:text-gray-300">Building context…</span>
+              )}
             </div>
 
-            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-white/60 dark:bg-black/20">
-              <div className="h-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${ivProgressPct}%` }} />
-            </div>
-
-            {ivErr ? (
-              <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                {ivErr}
+            {candidates.length ? (
+              <div className="mt-3">
+                <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Other possible matches</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {candidates.map((c, i) => (
+                    <span
+                      key={i}
+                      className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-semibold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200"
+                    >
+                      {c.label}
+                      <span className="ml-2 font-mono opacity-70">{pct(c.score)}%</span>
+                    </span>
+                  ))}
+                </div>
               </div>
             ) : null}
           </div>
 
-          {!isLocked ? (
-            <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-xs text-gray-500 dark:text-gray-400">Next</div>
-                  <div className="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
-                    {safeText(inf?.nextQuestion?.question) || (ivLoading ? "Loading…" : "We have enough information.")}
-                  </div>
+          <div className="shrink-0 text-right text-xs text-gray-600 dark:text-gray-300">
+            <div>
+              Confidence: <span className="font-mono">{pct(conf)}%</span>
+            </div>
+            <div>
+              Fit: <span className="font-mono">{pct(fit)}%</span>
+            </div>
+          </div>
+        </div>
 
-                  {inf?.nextQuestion?.qid ? (
-                    <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{whyForQid(inf.nextQuestion.qid)}</div>
-                  ) : null}
+        {fitReason ? <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">{fitReason}</div> : null}
+      </div>
 
-                  {inf?.nextQuestion?.help ? (
-                    <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{safeUi(inf.nextQuestion.help)}</div>
-                  ) : null}
-                </div>
+      {err ? (
+        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          {err}
+        </div>
+      ) : null}
 
-                <button
-                  type="button"
-                  className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 disabled:opacity-50"
-                  disabled={ivLoading}
-                  onClick={() => ivPost({ action: "reset" }).catch(() => null)}
-                  title="Start interview over"
-                >
-                  Reset
-                </button>
-              </div>
+      {/* Question */}
+      <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Question</div>
 
-              {inf?.nextQuestion?.options?.length ? (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {inf.nextQuestion.options.map((opt) => (
+          <button
+            type="button"
+            className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+            onClick={() => startIfNeeded().catch(() => null)}
+            disabled={working || !tid}
+            title="Starts the interview if it hasn’t started yet."
+          >
+            {nextQ?.id ? "Interview running" : "Start interview"}
+          </button>
+        </div>
+
+        {!nextQ ? (
+          <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
+            {working ? "Thinking…" : "Waiting for the first question…"}
+          </div>
+        ) : (
+          <div className="mt-3">
+            <div className="text-base font-semibold text-gray-900 dark:text-gray-100">{nextQ.question}</div>
+            {nextQ.help ? <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">{nextQ.help}</div> : null}
+
+            <div className="mt-4">
+              {nextQ.inputType === "text" ? (
+                <textarea
+                  value={textAnswer}
+                  onChange={(e) => setTextAnswer(e.target.value)}
+                  rows={3}
+                  placeholder="Type your answer…"
+                  className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                />
+              ) : null}
+
+              {nextQ.inputType === "yes_no" || nextQ.inputType === "single_choice" ? (
+                <div className="grid gap-2">
+                  {(nextQ.inputType === "yes_no"
+                    ? ["Yes", "No"]
+                    : Array.isArray(nextQ.options) && nextQ.options.length
+                      ? nextQ.options
+                      : [])?.map((opt) => (
                     <button
                       key={opt}
                       type="button"
                       className={cn(
-                        "rounded-full border px-3 py-1.5 text-xs font-semibold",
-                        "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100",
-                        "dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900",
-                        ivAnswer === opt && "border-indigo-300 bg-indigo-50 dark:border-indigo-900/40 dark:bg-indigo-950/30"
+                        "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                        choiceAnswer === opt
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+                          : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                       )}
-                      onClick={() => setIvAnswer(opt)}
-                      disabled={ivLoading}
+                      onClick={() => setChoiceAnswer(opt)}
+                      disabled={working}
                     >
                       {opt}
                     </button>
@@ -343,307 +347,71 @@ export function Step2(props: {
                 </div>
               ) : null}
 
-              <div className="mt-4">
-                <textarea
-                  value={ivAnswer}
-                  onChange={(e) => setIvAnswer(e.target.value)}
-                  rows={3}
-                  placeholder="Type your answer…"
-                  className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  disabled={ivLoading || !inf?.nextQuestion}
-                />
-              </div>
-
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="rounded-2xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                  disabled={ivLoading || !inf?.nextQuestion || ivAnswer.trim().length < 1}
-                  onClick={() =>
-                    ivPost({
-                      action: "answer",
-                      qid: inf?.nextQuestion?.qid,
-                      answer: ivAnswer.trim(),
-                    }).catch((e: any) => props.onError(typeof e?.message === "string" ? e.message : safeUi(e)))
-                  }
-                >
-                  {ivLoading ? "Saving…" : "Submit"}
-                </button>
-
-                <div className="text-xs text-gray-500 dark:text-gray-400">
-                  Tip: short answers are fine — we’re looking for high-signal keywords.
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {!isLocked && inf?.candidates?.length ? (
-            <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Best matches so far</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">live ranking</div>
-              </div>
-
-              <div className="mt-3 grid gap-2">
-                {inf.candidates.slice(0, 4).map((c) => {
-                  const label = safeText(c.label) || safeUi(c.label) || safeText(c.key);
-                  return (
-                    <div
-                      key={String(c.key)}
-                      className={cn(
-                        "rounded-2xl border p-3",
-                        safeText(c.key) === ivSuggested
-                          ? "border-indigo-200 bg-indigo-50 dark:border-indigo-900/40 dark:bg-indigo-950/30"
-                          : "border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black"
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{label}</div>
-                          <div className="mt-0.5 font-mono text-[11px] text-gray-600 dark:text-gray-300 truncate">
-                            {safeText(c.key)}
-                          </div>
-                        </div>
-                        <div className="shrink-0 text-right">
-                          <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">score {Number(c.score ?? 0)}</div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                We’ll stop once the top match is clear (usually 2–4 answers).
-              </div>
-            </div>
-          ) : null}
-
-          {isLocked ? (
-            <div className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-                <div className="font-semibold">Ready</div>
-                <div className="mt-1">
-                  We’ll preload the{" "}
-                  <span className="font-semibold">
-                    {safeText(inf?.candidates?.[0]?.label) ||
-                      safeUi(inf?.candidates?.[0]?.label) ||
-                      ivSuggested ||
-                      "selected"}
-                  </span>{" "}
-                  starter pack. Next you’ll confirm the industry.
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {inf?.answers?.length ? (
-            <details className="rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-              <summary className="cursor-pointer text-sm font-semibold text-gray-900 dark:text-gray-100">
-                Review your answers ({inf.answers.length})
-              </summary>
-              <div className="mt-3 grid gap-2">
-                {inf.answers
-                  .slice()
-                  .reverse()
-                  .slice(0, 8)
-                  .map((a, idx) => (
-                    <div
-                      key={`${a.qid}:${idx}`}
-                      className="rounded-2xl border border-gray-200 bg-gray-50 p-3 dark:border-gray-800 dark:bg-black"
-                    >
-                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{safeUi(a.question)}</div>
-                      <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">{safeUi(a.answer)}</div>
-                    </div>
-                  ))}
-              </div>
-            </details>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* ---------------- WEBSITE MODE (HAS WEBSITE) ---------------- */}
-      {props.aiAnalysisError ? (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-          {safeUi(props.aiAnalysisError)}
-        </div>
-      ) : null}
-
-      {hasWebsite ? (
-        <div className="mt-4 grid gap-3">
-          <button
-            type="button"
-            className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white disabled:opacity-50"
-            disabled={showAnalyzing}
-            onClick={async () => {
-              setRunning(true);
-              try {
-                await props.onRun();
-              } catch (e: any) {
-                props.onError(typeof e?.message === "string" ? e.message : safeUi(e));
-              } finally {
-                setRunning(false);
-              }
-            }}
-          >
-            {showAnalyzing ? "Analyzing…" : props.aiAnalysis ? "Re-run website analysis" : "Run website analysis"}
-          </button>
-
-          {props.aiAnalysis ? (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-              <div className="flex items-center justify-between gap-3">
-                <div className="font-semibold">What we think you do</div>
-                <div className="text-xs">
-                  Confidence: <span className="font-mono">{Math.round(conf * 100)}%</span>
-                </div>
-              </div>
-
-              <div className="mt-2 text-sm">{businessGuess || "Analysis returned no summary."}</div>
-
-              {questions.length ? (
-                <div className="mt-3 text-xs opacity-90">
-                  <div className="font-semibold">Quick check</div>
-                  <ul className="mt-1 list-disc pl-5">
-                    {questions.slice(0, 4).map((q, i) => (
-                      <li key={i}>{safeUi(q)}</li>
-                    ))}
-                  </ul>
+              {nextQ.inputType === "multi_choice" ? (
+                <div className="grid gap-2">
+                  {(nextQ.options ?? []).map((opt) => {
+                    const on = Boolean(multiAnswer[opt]);
+                    return (
+                      <button
+                        key={opt}
+                        type="button"
+                        className={cn(
+                          "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                          on
+                            ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+                            : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                        )}
+                        onClick={() => setMultiAnswer((p) => ({ ...p, [opt]: !p[opt] }))}
+                        disabled={working}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
+            </div>
 
-              <div className="mt-4 rounded-xl border border-emerald-300/40 bg-white/60 p-3 dark:bg-black/20">
-                <div className="text-xs font-semibold">Does this sound correct?</div>
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                onClick={props.onBack}
+                disabled={working}
+              >
+                Back
+              </button>
 
-                <div className="mt-2 grid gap-2 md:grid-cols-2">
+              <button
+                type="button"
+                className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                onClick={() => submitAnswer().catch(() => null)}
+                disabled={working || !tid || !nextQ?.id}
+              >
+                {working ? "Thinking…" : "Continue →"}
+              </button>
+            </div>
+
+            {showReady ? (
+              <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                <div className="font-semibold">We’re ready.</div>
+                <div className="mt-1">
+                  Next step will let you confirm:{" "}
+                  <span className="font-semibold">{hypothesis || proposedKey}</span>
+                </div>
+                <div className="mt-3">
                   <button
                     type="button"
-                    className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                    disabled={confirming}
-                    onClick={async () => {
-                      setConfirming(true);
-                      try {
-                        await props.onConfirm({ answer: "yes" });
-                        setFeedback("");
-                      } catch (e: any) {
-                        props.onError(typeof e?.message === "string" ? e.message : safeUi(e));
-                      } finally {
-                        setConfirming(false);
-                      }
-                    }}
+                    className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
+                    onClick={props.onNext}
                   >
-                    {confirming ? "Saving…" : "Yes, that’s right"}
-                  </button>
-
-                  <button
-                    type="button"
-                    className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 disabled:opacity-50 dark:text-emerald-100"
-                    disabled={confirming}
-                    onClick={async () => {
-                      setConfirming(true);
-                      try {
-                        await props.onConfirm({ answer: "no", feedback: feedback.trim() || undefined });
-                      } catch (e: any) {
-                        props.onError(typeof e?.message === "string" ? e.message : safeUi(e));
-                      } finally {
-                        setConfirming(false);
-                      }
-                    }}
-                  >
-                    {confirming ? "Saving…" : "Not quite"}
+                    Continue to industry confirmation →
                   </button>
                 </div>
-
-                <div className="mt-2">
-                  <div className="text-xs text-emerald-950/80 dark:text-emerald-100/80">
-                    If not correct, tell us what you do (boats/cars/etc. + services). We’ll re-evaluate.
-                  </div>
-                  <textarea
-                    value={feedback}
-                    onChange={(e) => setFeedback(e.target.value)}
-                    rows={4}
-                    placeholder="Example: We do custom automotive upholstery (seats + door panels), headliners, and marine vinyl repairs. We do not do painting."
-                    className="mt-2 w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-900 outline-none dark:border-emerald-900/40 dark:bg-gray-950 dark:text-gray-100"
-                  />
-                </div>
-
-                {mustConfirm ? (
-                  <div className="mt-2 text-xs text-emerald-950/80 dark:text-emerald-100/80">
-                    We’ll ask for confirmation until confidence is high enough to categorize your business automatically.
-                  </div>
-                ) : (
-                  <div className="mt-2 text-xs text-emerald-950/80 dark:text-emerald-100/80">
-                    Nice — confidence looks good. You can continue to industry selection.
-                  </div>
-                )}
               </div>
-
-              <details className="mt-3">
-                <summary className="cursor-pointer text-xs font-semibold opacity-90">Debug preview (text sample)</summary>
-
-                {fetchSummary ? (
-                  <div className="mt-2 rounded-xl border border-emerald-300/40 bg-white/60 p-3 text-[11px] leading-snug dark:bg-black/20">
-                    <div className="font-semibold">Extractor summary</div>
-                    <div className="mt-1">
-                      Aggregate chars: <span className="font-mono">{safeUi(fetchSummary.aggregateChars)}</span>
-                      {" • "}
-                      Pages used: <span className="font-mono">{safeUi(fetchSummary.pagesUsed.length)}</span>
-                      {" • "}
-                      Base attempts: <span className="font-mono">{safeUi(fetchSummary.attemptedCount)}</span>
-                    </div>
-                  </div>
-                ) : null}
-
-                <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-snug">
-                  {preview || "(no preview — extractor did not capture readable text)"}
-                </pre>
-              </details>
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
-              No analysis yet. Click the button to generate a starter result.
-            </div>
-          )}
-        </div>
-      ) : null}
-
-      {/* Bottom nav */}
-      <div className="mt-6 grid grid-cols-2 gap-3">
-        <button
-          type="button"
-          className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-          onClick={props.onBack}
-          disabled={ivLoading || running || confirming}
-        >
-          Back
-        </button>
-
-        <div className="grid gap-2">
-          <button
-            type="button"
-            className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-            disabled={hasWebsite ? !canContinueWebsite : !canContinueInterview}
-            onClick={props.onNext}
-            title={
-              hasWebsite
-                ? mustConfirm
-                  ? "Please confirm/correct the website analysis first."
-                  : ""
-                : !canContinueInterview
-                  ? "Answer a couple more questions to reach a confident match."
-                  : ""
-            }
-          >
-            Continue
-          </button>
-
-          <button
-            type="button"
-            className="rounded-2xl border border-gray-200 bg-white py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            onClick={props.onNext}
-          >
-            Continue anyway
-          </button>
-        </div>
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   );
