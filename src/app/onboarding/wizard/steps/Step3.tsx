@@ -1,7 +1,7 @@
 // src/app/onboarding/wizard/steps/Step3.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { IndustriesResponse, IndustryItem, SubIndustryItem } from "../types";
 import { buildIndustriesUrl } from "../utils";
 
@@ -101,6 +101,12 @@ export function Step3(props: {
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
+  // UX state for the “Yes / Not quite” flow
+  const [showDisagree, setShowDisagree] = useState(false);
+  const [showSubPrompt, setShowSubPrompt] = useState(false);
+
+  const subBlockRef = useRef<HTMLDivElement | null>(null);
+
   /**
    * ✅ NEW SOURCE OF TRUTH:
    * Mode A writes to aiAnalysis.industryInterview.
@@ -117,6 +123,8 @@ export function Step3(props: {
   const legacyInference = props.aiAnalysis?.industryInference ?? null;
 
   const usingModeA = Boolean(interview && interview.mode === "A");
+
+  const isLocked = usingModeA && safeTrim(interview?.status) === "locked";
 
   const suggestedKey = useMemo(() => {
     if (usingModeA) return normalizeKey(interview?.proposedIndustry?.key ?? "");
@@ -233,9 +241,7 @@ export function Step3(props: {
     const cur = normalizeKey(safeTrim(selectedKey));
     const isGeneric = !cur || cur === "service";
 
-    const locked = usingModeA && safeTrim(interview?.status) === "locked";
-
-    if (locked && (isGeneric || cur === suggestedKey)) {
+    if (isLocked && (isGeneric || cur === suggestedKey)) {
       setSelectedKey(suggestedKey);
       return;
     }
@@ -244,7 +250,7 @@ export function Step3(props: {
       setSelectedKey(suggestedKey);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestedKey, items.length, usingModeA, interview?.status]);
+  }, [suggestedKey, items.length, isLocked]);
 
   useEffect(() => {
     const tid = safeTrim(props.tenantId);
@@ -284,7 +290,11 @@ export function Step3(props: {
     (usingModeA && Boolean(interview?.proposedIndustry?.key));
 
   const showAiCard = hasAnyAiSignal;
-  const showNeedSignal = !hasAnyAiSignal;
+
+  // ✅ IMPORTANT: never show “need more signal” when Mode A is locked
+  const showNeedSignal = !hasAnyAiSignal && !isLocked;
+
+  const showConfirmButtons = isLocked && Boolean(suggestedKey) && !showSubPrompt;
 
   return (
     <div>
@@ -330,7 +340,10 @@ export function Step3(props: {
                           key={c.key}
                           type="button"
                           className="inline-flex items-center rounded-full border border-emerald-300/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-emerald-950 hover:bg-white dark:bg-black/20 dark:text-emerald-100"
-                          onClick={() => setSelectedKey(c.key)}
+                          onClick={() => {
+                            setSelectedKey(c.key);
+                            setShowDisagree(true);
+                          }}
                         >
                           {c.label || c.key}
                           {Number.isFinite(c.score as any) ? (
@@ -362,28 +375,122 @@ export function Step3(props: {
             ) : null}
           </div>
 
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
-              disabled={saving || !suggestedKey}
-              onClick={() => {
-                if (suggestedKey) setSelectedKey(suggestedKey);
-              }}
-            >
-              Use suggestion
-            </button>
+          {/* ✅ Locked “Yes / Not quite” flow */}
+          {showConfirmButtons ? (
+            <div className="mt-4">
+              <div className="text-sm opacity-90">
+                Based on your answers, this looks like{" "}
+                <span className="font-semibold">{suggestedLabel || suggestedKey}</span>. Want to lock that in?
+              </div>
 
-            <button
-              type="button"
-              className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
-              disabled={saving}
-              onClick={props.onReInterview}
-              title="Go back to the interview so we can improve the match"
-            >
-              Improve match →
-            </button>
-          </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
+                  disabled={saving || !suggestedKey}
+                  onClick={() => {
+                    if (suggestedKey) {
+                      setSelectedKey(suggestedKey);
+                      setShowDisagree(false);
+                      setShowSubPrompt(true);
+                    }
+                  }}
+                >
+                  Yes — use {suggestedLabel || "this industry"}
+                </button>
+
+                <button
+                  type="button"
+                  className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
+                  disabled={saving}
+                  onClick={() => setShowDisagree((v) => !v)}
+                >
+                  Not quite
+                </button>
+              </div>
+
+              {showDisagree ? (
+                <div className="mt-3 rounded-2xl border border-emerald-300/40 bg-white/50 p-3 text-xs text-emerald-950 dark:bg-black/20 dark:text-emerald-100">
+                  <div className="font-semibold">No problem.</div>
+                  <div className="mt-1 opacity-90">
+                    Pick a close match above, choose from the dropdown below, or restart the interview so we can ask better
+                    questions.
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="rounded-xl border border-emerald-300/50 bg-transparent px-3 py-2 text-xs font-semibold"
+                      onClick={props.onReInterview}
+                      disabled={saving}
+                    >
+                      Restart interview →
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* ✅ Sub-industry prompt after “Yes” */}
+          {showSubPrompt ? (
+            <div className="mt-4 rounded-2xl border border-emerald-300/40 bg-white/60 p-4 text-sm text-emerald-950 dark:bg-black/20 dark:text-emerald-100">
+              <div className="font-semibold">Want to get more specific?</div>
+              <div className="mt-1 opacity-90">
+                If your work has a particular niche, adding a <span className="font-semibold">sub-industry</span> can make
+                your defaults feel much more accurate (services, photo requests, and customer questions).
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
+                  onClick={() => {
+                    // scroll to sub-industry box and focus user there
+                    const el = subBlockRef.current;
+                    if (el) {
+                      el.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }
+                  }}
+                >
+                  Yes — let’s narrow it down
+                </button>
+
+                <button
+                  type="button"
+                  className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold"
+                  onClick={() => setShowSubPrompt(false)}
+                >
+                  Skip for now
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {/* Keep Improve match available when not in locked confirmation flow */}
+          {!isLocked ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
+                disabled={saving || !suggestedKey}
+                onClick={() => {
+                  if (suggestedKey) setSelectedKey(suggestedKey);
+                }}
+              >
+                Use suggestion
+              </button>
+
+              <button
+                type="button"
+                className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
+                disabled={saving}
+                onClick={props.onReInterview}
+                title="Go back to the interview so we can improve the match"
+              >
+                Improve match →
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : showNeedSignal ? (
         <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
@@ -445,7 +552,10 @@ export function Step3(props: {
               </label>
 
               {/* ✅ Sub-industry (tenant scoped) */}
-              <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-black">
+              <div
+                ref={subBlockRef}
+                className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-black"
+              >
                 <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Sub-industry (optional)</div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
                   Helps tailor defaults without creating a global taxonomy mess.
@@ -490,7 +600,7 @@ export function Step3(props: {
                     <input
                       value={subLabel}
                       onChange={(e) => setSubLabel(e.target.value)}
-                      placeholder="e.g., Ceramic Coating, Interior Detailing, Fleet Washing"
+                      placeholder="e.g., Cabinet Refinishing, New Construction, Turnovers"
                       className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                     />
                   </label>
