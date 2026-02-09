@@ -73,6 +73,23 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+/**
+ * Step3 can set sessionStorage "apq_onboarding_sub_intent":
+ *  - "refine"  -> auto select Yes and auto-start interview
+ *  - "skip"    -> immediately persist null (no sub-industry) and continue
+ *  - "unknown" -> do nothing
+ */
+function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
+  try {
+    const v = String(window.sessionStorage.getItem("apq_onboarding_sub_intent") ?? "").trim();
+    window.sessionStorage.removeItem("apq_onboarding_sub_intent");
+    if (v === "refine" || v === "skip") return v;
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export function Step3b(props: {
   tenantId: string | null;
   industryKey: string; // confirmed industry from Step3 selection
@@ -140,8 +157,9 @@ export function Step3b(props: {
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
   const lastSubmitRef = useRef<string>("");
+  const didHydrateIntentRef = useRef(false);
 
-  // ✅ FIX: treat locked as locked even if proposedSubIndustryLabel is missing/null
+  // ✅ locked is locked even if proposedSubIndustryLabel is missing/null
   const isLocked = status === "locked";
 
   // Reset answer box when question changes
@@ -151,6 +169,20 @@ export function Step3b(props: {
     setChoiceAnswer("");
     lastSubmitRef.current = "";
   }, [nextQ?.id]);
+
+  async function saveAndContinue(label: string | null) {
+    setWorking(true);
+    setErr(null);
+    try {
+      await props.onSubmit({ subIndustryLabel: label });
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      setErr(msg);
+      props.onError(msg);
+    } finally {
+      setWorking(false);
+    }
+  }
 
   async function start() {
     if (!tid) return;
@@ -172,7 +204,55 @@ export function Step3b(props: {
     }
   }
 
-  // ✅ FIX: auto-start the sub interview when they choose "yes"
+  /**
+   * ✅ CLEAN HANDOFF FROM STEP3
+   * - If Step3 said "skip", we immediately persist null and continue (no sub prompt shown).
+   * - If Step3 said "refine", we auto-select Yes and auto-start.
+   */
+  useEffect(() => {
+    if (didHydrateIntentRef.current) return;
+    didHydrateIntentRef.current = true;
+
+    const intent = readAndClearSubIntent();
+
+    // We may mount before tenantId/industryKey are present; handle that in a follow-up effect.
+    if (intent === "refine") {
+      setWantsSub("yes");
+      return;
+    }
+
+    if (intent === "skip") {
+      // If we have what we need right now, persist and continue.
+      if (tid && industryKey) {
+        saveAndContinue(null).catch(() => null);
+      } else {
+        // Defer until tid/industryKey arrive.
+        setWantsSub("no");
+      }
+    }
+    // unknown => leave wantsSub empty (show prompt)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // If we deferred "skip" because tid/industryKey weren't ready, finish it once ready.
+  useEffect(() => {
+    if (!didHydrateIntentRef.current) return;
+    // Only apply if user hasn't made an explicit choice AND we're in the "no" state from deferred skip.
+    if (wantsSub !== "no") return;
+    if (!tid || !industryKey) return;
+
+    // If Step3b is already in-progress or locked, don't auto-skip.
+    if (nextQ?.id || isLocked) return;
+
+    // Auto-continue only if this "no" was set by intent hydration (best-effort).
+    // We can safely proceed if there is no existing interview state and no question.
+    if (!state) {
+      saveAndContinue(null).catch(() => null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tid, industryKey]);
+
+  // ✅ auto-start when they choose yes (including from Step3 refine intent)
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !industryKey) return;
@@ -232,26 +312,12 @@ export function Step3b(props: {
     }
   }
 
-  async function saveAndContinue(label: string | null) {
-    setWorking(true);
-    setErr(null);
-    try {
-      await props.onSubmit({ subIndustryLabel: label });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      setErr(msg);
-      props.onError(msg);
-    } finally {
-      setWorking(false);
-    }
-  }
-
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">One more thing (optional)</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions
-        feel more “you” from day one.
+        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel
+        more “you” from day one.
       </div>
 
       {debugOn ? (
@@ -266,9 +332,7 @@ export function Step3b(props: {
           <div className="mt-1">
             nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span>
           </div>
-          <div className="mt-2 font-mono whitespace-pre-wrap break-words">
-            {lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}
-          </div>
+          <div className="mt-2 font-mono whitespace-pre-wrap break-words">{lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}</div>
         </div>
       ) : null}
 
@@ -278,53 +342,55 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Ask if they want a sub-industry */}
-      <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
-        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-          Example: “Exterior-only”, “Cabinet refinishing”, “Commercial interiors”, “New construction”, etc.
-        </div>
-
-        <div className="mt-3 grid gap-2">
-          {(["yes", "no"] as const).map((v) => (
-            <button
-              key={v}
-              type="button"
-              className={cn(
-                "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                wantsSub === v
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-              )}
-              onClick={() => setWantsSub(v)}
-              disabled={working}
-            >
-              {v === "yes" ? "Yes — let’s narrow it down" : "No — keep it broad for now"}
-            </button>
-          ))}
-        </div>
-
-        {wantsSub === "no" ? (
-          <div className="mt-4 flex gap-3">
-            <button
-              type="button"
-              className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              onClick={props.onBack}
-              disabled={working}
-            >
-              Back
-            </button>
-            <button
-              type="button"
-              className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-              onClick={() => saveAndContinue(null)}
-              disabled={working}
-            >
-              Continue →
-            </button>
+      {/* Ask if they want a sub-industry (ONLY if no auto-intent forced us into yes/no) */}
+      {wantsSub === "" ? (
+        <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
+          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            Example: “Exterior-only”, “Cabinet refinishing”, “Commercial interiors”, “New construction”, etc.
           </div>
-        ) : null}
-      </div>
+
+          <div className="mt-3 grid gap-2">
+            {(["yes", "no"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                className={cn(
+                  "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                  wantsSub === v
+                    ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+                    : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                )}
+                onClick={() => setWantsSub(v)}
+                disabled={working}
+              >
+                {v === "yes" ? "Yes — let’s narrow it down" : "No — keep it broad for now"}
+              </button>
+            ))}
+          </div>
+
+          {wantsSub === "no" ? (
+            <div className="mt-4 flex gap-3">
+              <button
+                type="button"
+                className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                onClick={props.onBack}
+                disabled={working}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                onClick={() => saveAndContinue(null)}
+                disabled={working}
+              >
+                Continue →
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Sub-industry interview */}
       {wantsSub === "yes" ? (
@@ -347,11 +413,7 @@ export function Step3b(props: {
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Live understanding</div>
                 <div className="mt-1 text-sm text-gray-900 dark:text-gray-100">
-                  {proposed ? (
-                    <span className="font-semibold">{proposed}</span>
-                  ) : (
-                    <span className="opacity-80">Building context…</span>
-                  )}
+                  {proposed ? <span className="font-semibold">{proposed}</span> : <span className="opacity-80">Building context…</span>}
                 </div>
 
                 {candidates.length ? (
@@ -379,9 +441,7 @@ export function Step3b(props: {
           </div>
 
           {!nextQ && !isLocked ? (
-            <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-              {working ? "Thinking…" : "Tap Start to begin…"}
-            </div>
+            <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">{working ? "Thinking…" : "Tap Start to begin…"}</div>
           ) : null}
 
           {isLocked ? (
