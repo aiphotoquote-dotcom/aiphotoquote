@@ -77,7 +77,7 @@ function cn(...xs: Array<string | false | null | undefined>) {
  * Step3 can set sessionStorage "apq_onboarding_sub_intent":
  *  - "refine"  -> auto select Yes and auto-start interview
  *  - "skip"    -> immediately persist null (no sub-industry) and continue
- *  - "unknown" -> do nothing
+ *  - otherwise -> do nothing
  */
 function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   try {
@@ -92,15 +92,13 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
 
 export function Step3b(props: {
   tenantId: string | null;
-  industryKey: string; // confirmed industry from Step3 selection
+  industryKey: string;
   aiAnalysis: any | null | undefined;
 
   onBack: () => void;
 
-  // If they say “No, keep it broad”
   onSkip: () => void;
 
-  // Save + continue (label may be null if they skip)
   onSubmit: (args: { subIndustryLabel: string | null }) => Promise<void>;
 
   onError: (m: string) => void;
@@ -141,7 +139,6 @@ export function Step3b(props: {
   const [err, setErr] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
-  // Debug support on mobile: add ?debug=1
   const debugOn = useMemo(() => {
     try {
       const u = new URL(window.location.href);
@@ -152,17 +149,19 @@ export function Step3b(props: {
   }, []);
   const [lastApi, setLastApi] = useState<any>(null);
 
-  const [wantsSub, setWantsSub] = useState<"yes" | "no" | "">("");
+  const [wantsSub, setWantsSub] = useState<"" | "yes" | "no">("");
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
   const lastSubmitRef = useRef<string>("");
   const didHydrateIntentRef = useRef(false);
+  const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
 
-  // ✅ locked is locked even if proposedSubIndustryLabel is missing/null
   const isLocked = status === "locked";
 
-  // Reset answer box when question changes
+  // ✅ FIX: do not TS-narrow wantsSub by JSX wrapper; use boolean
+  const showPrompt = wantsSub === "";
+
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -204,55 +203,43 @@ export function Step3b(props: {
     }
   }
 
-  /**
-   * ✅ CLEAN HANDOFF FROM STEP3
-   * - If Step3 said "skip", we immediately persist null and continue (no sub prompt shown).
-   * - If Step3 said "refine", we auto-select Yes and auto-start.
-   */
+  // ✅ Hydrate Step3 intent once
   useEffect(() => {
     if (didHydrateIntentRef.current) return;
     didHydrateIntentRef.current = true;
 
     const intent = readAndClearSubIntent();
+    intentRef.current = intent;
 
-    // We may mount before tenantId/industryKey are present; handle that in a follow-up effect.
     if (intent === "refine") {
       setWantsSub("yes");
       return;
     }
 
     if (intent === "skip") {
-      // If we have what we need right now, persist and continue.
-      if (tid && industryKey) {
-        saveAndContinue(null).catch(() => null);
-      } else {
-        // Defer until tid/industryKey arrive.
-        setWantsSub("no");
-      }
+      // Defer until tid/industryKey exist
+      setWantsSub("no");
+      return;
     }
-    // unknown => leave wantsSub empty (show prompt)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If we deferred "skip" because tid/industryKey weren't ready, finish it once ready.
+  // ✅ If Step3 asked to skip, persist null once we have tid + industryKey
   useEffect(() => {
     if (!didHydrateIntentRef.current) return;
-    // Only apply if user hasn't made an explicit choice AND we're in the "no" state from deferred skip.
+    if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
-    if (!tid || !industryKey) return;
 
-    // If Step3b is already in-progress or locked, don't auto-skip.
+    if (!tid || !industryKey) return;
     if (nextQ?.id || isLocked) return;
 
-    // Auto-continue only if this "no" was set by intent hydration (best-effort).
-    // We can safely proceed if there is no existing interview state and no question.
+    // Only auto-continue if we haven't already started an interview
     if (!state) {
       saveAndContinue(null).catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tid, industryKey]);
+  }, [tid, industryKey, wantsSub, nextQ?.id, isLocked, state]);
 
-  // ✅ auto-start when they choose yes (including from Step3 refine intent)
+  // ✅ Auto-start interview when wantsSub yes (including refine intent)
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !industryKey) return;
@@ -332,7 +319,9 @@ export function Step3b(props: {
           <div className="mt-1">
             nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span>
           </div>
-          <div className="mt-2 font-mono whitespace-pre-wrap break-words">{lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}</div>
+          <div className="mt-2 font-mono whitespace-pre-wrap break-words">
+            {lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}
+          </div>
         </div>
       ) : null}
 
@@ -342,8 +331,8 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Ask if they want a sub-industry (ONLY if no auto-intent forced us into yes/no) */}
-      {wantsSub === "" ? (
+      {/* Prompt (only when they haven't chosen yet AND no intent forced state) */}
+      {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -368,27 +357,28 @@ export function Step3b(props: {
               </button>
             ))}
           </div>
+        </div>
+      ) : null}
 
-          {wantsSub === "no" ? (
-            <div className="mt-4 flex gap-3">
-              <button
-                type="button"
-                className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                onClick={props.onBack}
-                disabled={working}
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                onClick={() => saveAndContinue(null)}
-                disabled={working}
-              >
-                Continue →
-              </button>
-            </div>
-          ) : null}
+      {/* If they chose "no" manually (not the auto-skip), show action buttons */}
+      {wantsSub === "no" && intentRef.current !== "skip" ? (
+        <div className="mt-5 flex gap-3">
+          <button
+            type="button"
+            className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            onClick={props.onBack}
+            disabled={working}
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+            onClick={() => saveAndContinue(null)}
+            disabled={working}
+          >
+            Continue →
+          </button>
         </div>
       ) : null}
 
