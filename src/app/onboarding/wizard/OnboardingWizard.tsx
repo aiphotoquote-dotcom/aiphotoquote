@@ -123,7 +123,7 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
-      // ✅ FIX: never allow a stale URL step to drag us backwards.
+      // ✅ never allow a stale URL step to drag us backwards.
       const p = getUrlParams();
       const urlStepRaw = (p as any)?.step;
       const urlStep = urlStepRaw ? clampStep(urlStepRaw) : null;
@@ -195,12 +195,13 @@ export default function OnboardingWizard() {
     const newTenantId = safeTrim(j.tenantId);
     if (newTenantId) setTenantInNav(newTenantId);
 
-    // ✅ FIX: route to the correct next step based on whether website exists
-    const next = payload.website ? 2 : 3;
-
     await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
     setLastAction("Saved business identity.");
-    go(next);
+
+    // ✅ ALWAYS go to Step 2:
+    // Step2 renders Website Analysis when website exists,
+    // and renders Interview when website is missing.
+    go(2);
   }
 
   async function runWebsiteAnalysis() {
@@ -251,7 +252,6 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
-  // ✅ FIX: do not send subIndustryLabel: null to API (omit instead)
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
     setErr(null);
     setLastAction(null);
@@ -261,7 +261,6 @@ export default function OnboardingWizard() {
 
     const body: any = { tenantId: tid, ...args };
 
-    // Omit null/empty to avoid zod "invalid request body"
     if (body.subIndustryLabel === null || safeTrim(body.subIndustryLabel) === "") {
       delete body.subIndustryLabel;
     }
@@ -328,8 +327,9 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        // ✅ FIX: branding save is step 5 in the API (step 6 is plan selection)
-        step: 5,
+        // ✅ MUST match src/app/api/onboarding/state/route.ts
+        // branding is step 6, plan is step 7
+        step: 6,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -423,7 +423,6 @@ export default function OnboardingWizard() {
             <Step3
               tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               aiAnalysis={normalizedAiAnalysis}
-              // ✅ ensures Step3 never "falls back" to Service after a real selection exists
               currentIndustryKey={effectiveIndustryKey || null}
               onBack={() => go(2)}
               onReInterview={() => go(2)}
