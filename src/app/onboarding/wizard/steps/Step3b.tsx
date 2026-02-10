@@ -51,32 +51,10 @@ type SubInterview = {
   meta?: any;
 };
 
-async function postSubInterview(payload: any) {
-  const res = await fetch("/api/onboarding/sub-industry-interview", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    cache: "no-store",
-    credentials: "include",
-    body: JSON.stringify(payload),
-  });
-
-  const txt = await res.text().catch(() => "");
-  const j = txt ? JSON.parse(txt) : null;
-
-  if (!res.ok || !j?.ok) {
-    throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
-  }
-  return j as { ok: true; tenantId: string; subIndustryInterview: SubInterview };
-}
-
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
 /**
  * Step3 can set sessionStorage "apq_onboarding_sub_intent":
  *  - "refine"  -> auto select Yes and auto-start interview
- *  - "skip"    -> immediately persist null (no sub-industry) and continue
+ *  - "skip"    -> immediately persist null and continue
  *  - otherwise -> do nothing
  */
 function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
@@ -90,15 +68,90 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   }
 }
 
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+/**
+ * ✅ Critical: send BOTH camelCase and snake_case so the API route schema
+ * accepts the body regardless of which naming convention it currently validates.
+ */
+function buildApiPayload(input: any) {
+  const tenantId = safeTrim(input?.tenantId ?? input?.tenant_id);
+  const industryKey = safeTrim(input?.industryKey ?? input?.industry_key);
+
+  const action = safeTrim(input?.action);
+  const questionId = safeTrim(input?.questionId ?? input?.question_id);
+  const questionText = safeTrim(input?.questionText ?? input?.question_text);
+  const answer = safeTrim(input?.answer);
+
+  const base: any = {
+    // camelCase
+    tenantId,
+    industryKey,
+
+    // snake_case
+    tenant_id: tenantId,
+    industry_key: industryKey,
+
+    action,
+    mode: "SUB",
+  };
+
+  // Only include answer fields when present
+  if (questionId) {
+    base.questionId = questionId;
+    base.question_id = questionId;
+  }
+  if (questionText) {
+    base.questionText = questionText;
+    base.question_text = questionText;
+  }
+  if (answer) {
+    base.answer = answer;
+  }
+
+  return base;
+}
+
+async function postSubInterview(payloadIn: any) {
+  const payload = buildApiPayload(payloadIn);
+
+  const res = await fetch("/api/onboarding/sub-industry-interview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+
+  const txt = await res.text().catch(() => "");
+  let j: any = null;
+  try {
+    j = txt ? JSON.parse(txt) : null;
+  } catch {
+    // If API returned non-JSON (e.g., HTML), surface first chunk to debug
+    throw new Error(`Invalid response from server: ${txt?.slice(0, 160) || "(empty)"}`);
+  }
+
+  if (!res.ok || !j?.ok) {
+    throw new Error(j?.message || j?.error || "Invalid request body.");
+  }
+
+  return j as { ok: true; tenantId: string; subIndustryInterview: SubInterview };
+}
+
 export function Step3b(props: {
   tenantId: string | null;
-  industryKey: string;
+  industryKey: string; // confirmed industry from Step3 selection
   aiAnalysis: any | null | undefined;
 
   onBack: () => void;
 
+  // If they say “No, keep it broad”
   onSkip: () => void;
 
+  // Save + continue (label may be null if they skip)
   onSubmit: (args: { subIndustryLabel: string | null }) => Promise<void>;
 
   onError: (m: string) => void;
@@ -154,14 +207,14 @@ export function Step3b(props: {
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
   const lastSubmitRef = useRef<string>("");
+
   const didHydrateIntentRef = useRef(false);
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
 
   const isLocked = status === "locked";
-
-  // Show prompt only while unchosen
   const showPrompt = wantsSub === "";
 
+  // Reset answer box when question changes
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -184,7 +237,7 @@ export function Step3b(props: {
   }
 
   async function start() {
-    if (!tid) return;
+    if (!tid) return setErr("Missing tenantId.");
     if (!industryKey) return setErr("Missing industryKey.");
     if (nextQ?.id || isLocked) return;
 
@@ -203,7 +256,7 @@ export function Step3b(props: {
     }
   }
 
-  // Hydrate intent from Step3 once
+  // Hydrate Step3 intent once
   useEffect(() => {
     if (didHydrateIntentRef.current) return;
     didHydrateIntentRef.current = true;
@@ -215,7 +268,6 @@ export function Step3b(props: {
       setWantsSub("yes");
       return;
     }
-
     if (intent === "skip") {
       setWantsSub("no");
       return;
@@ -329,7 +381,6 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -343,8 +394,10 @@ export function Step3b(props: {
                 key={v}
                 type="button"
                 className={cn(
-                  "w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50",
-                  "dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                  wantsSub === v
+                    ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+                    : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                 )}
                 onClick={() => setWantsSub(v)}
                 disabled={working}
@@ -356,7 +409,6 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* If they chose "no" manually (not auto-skip), show action buttons */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
@@ -378,7 +430,6 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Sub-industry interview */}
       {wantsSub === "yes" ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3">
@@ -399,11 +450,7 @@ export function Step3b(props: {
               <div className="min-w-0">
                 <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Live understanding</div>
                 <div className="mt-1 text-sm text-gray-900 dark:text-gray-100">
-                  {proposed ? (
-                    <span className="font-semibold">{proposed}</span>
-                  ) : (
-                    <span className="opacity-80">Building context…</span>
-                  )}
+                  {proposed ? <span className="font-semibold">{proposed}</span> : <span className="opacity-80">Building context…</span>}
                 </div>
 
                 {candidates.length ? (
