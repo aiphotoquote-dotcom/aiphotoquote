@@ -8,16 +8,6 @@ function safeTrim(v: any) {
   return s ? s : "";
 }
 
-function clamp01(n: any) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
-  return Math.max(0, Math.min(1, x));
-}
-
-function pct(n: number) {
-  return Math.max(0, Math.min(100, Math.round(n * 100)));
-}
-
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
@@ -107,6 +97,26 @@ function pick(obj: any, paths: string[]): any {
   return null;
 }
 
+function toNumOrNull(v: any): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, n));
+}
+
+function pct(n: number) {
+  return Math.max(0, Math.min(100, Math.round(n * 100)));
+}
+
+function truncate(s: string, max = 260) {
+  const x = safeTrim(s);
+  if (!x) return "";
+  if (x.length <= max) return x;
+  return x.slice(0, max - 1).trimEnd() + "…";
+}
+
 export function Step2(props: {
   tenantId: string | null;
 
@@ -134,17 +144,12 @@ export function Step2(props: {
   const hasAnalysis = useMemo(() => {
     const a = props.aiAnalysis;
     if (!a || typeof a !== "object") return false;
-
-    // If you store analysis under meta/status, etc. this still counts
     const keys = Object.keys(a);
-    if (keys.length === 0) return false;
-
-    // If it's literally the empty placeholder shape, you can refine later.
-    return true;
+    return keys.length > 0;
   }, [props.aiAnalysis]);
 
   // Pull a few nice-to-show fields (best-effort; won’t break if missing)
-  const suggestedLabel =
+  const suggestedLabelRaw =
     safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
@@ -156,19 +161,33 @@ export function Step2(props: {
     safeTrim(pick(props.aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
     "";
 
-  const confidenceScore =
-    pick(props.aiAnalysis, ["confidenceScore", "confidence_score"]) ??
-    pick(props.aiAnalysis, ["industryInterview.confidenceScore"]) ??
+  // Prefer a “human” summary sentence if present, otherwise fall back
+  const suggestedSummaryRaw =
+    safeTrim(pick(props.aiAnalysis, ["summary"])) ||
+    safeTrim(pick(props.aiAnalysis, ["websiteSummary"])) ||
+    safeTrim(pick(props.aiAnalysis, ["website_summary"])) ||
+    suggestedLabelRaw;
+
+  const confidenceRaw =
+    toNumOrNull(pick(props.aiAnalysis, ["confidenceScore", "confidence_score"])) ??
+    toNumOrNull(pick(props.aiAnalysis, ["industryInterview.confidenceScore"])) ??
     null;
 
-  const fitScore =
-    pick(props.aiAnalysis, ["fitScore", "fit_score"]) ??
-    pick(props.aiAnalysis, ["fit"]) ??
-    pick(props.aiAnalysis, ["industryInterview.fitScore"]) ??
+  const fitRaw =
+    toNumOrNull(pick(props.aiAnalysis, ["fitScore", "fit_score"])) ??
+    toNumOrNull(pick(props.aiAnalysis, ["fit"])) ??
+    toNumOrNull(pick(props.aiAnalysis, ["industryInterview.fitScore"])) ??
     null;
 
-  const conf = clamp01(confidenceScore);
-  const fit = clamp01(fitScore);
+  const conf01 = confidenceRaw === null ? null : clamp01(confidenceRaw);
+  const fit01 = fitRaw === null ? null : clamp01(fitRaw);
+
+  // If fit is not actually computed yet, it frequently comes back as 0.
+  // Treat that as “unknown” for UI so we don’t show a scary 0%.
+  const fitDisplay = fit01 === null || fit01 === 0 ? "—" : `${pct(fit01)}%`;
+  const confDisplay = conf01 === null ? "—" : `${pct(conf01)}%`;
+
+  const suggestedText = truncate(suggestedSummaryRaw, 280);
 
   const [err, setErr] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
@@ -178,6 +197,7 @@ export function Step2(props: {
 
   // Auto-run analysis ONCE when website exists and we don't have analysis yet.
   const didAutoRunRef = useRef(false);
+  const [autoStarting, setAutoStarting] = useState(false);
 
   useEffect(() => {
     setErr(null);
@@ -198,12 +218,17 @@ export function Step2(props: {
     // Auto-run analysis once.
     if (!didAutoRunRef.current) {
       didAutoRunRef.current = true;
+      setAutoStarting(true);
+
       props
         .onRun()
         .catch((e: any) => {
           const msg = e?.message ?? String(e);
           setErr(msg);
           props.onError(msg);
+        })
+        .finally(() => {
+          setAutoStarting(false);
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -237,8 +262,10 @@ export function Step2(props: {
   const hypothesis = safeTrim(proposed?.label) || "";
   const proposedKey = safeTrim(proposed?.key);
 
-  const intConf = clamp01(interviewState?.confidenceScore);
-  const intFit = clamp01(interviewState?.fitScore);
+  const intConf01 = clamp01(Number(interviewState?.confidenceScore ?? 0) || 0);
+  const intFit01 = clamp01(Number(interviewState?.fitScore ?? 0) || 0);
+  const intFitDisplay = intFit01 === 0 ? "—" : `${pct(intFit01)}%`;
+
   const reason = safeTrim(interviewState?.meta?.debug?.reason);
 
   const candidates: Candidate[] = Array.isArray(interviewState?.candidates)
@@ -246,7 +273,7 @@ export function Step2(props: {
         .map((c: any) => ({
           key: safeTrim(c?.key),
           label: safeTrim(c?.label),
-          score: clamp01(c?.score),
+          score: clamp01(Number(c?.score ?? 0) || 0),
           exists: Boolean(c?.exists),
         }))
         .filter((c) => c.key && c.label)
@@ -277,7 +304,6 @@ export function Step2(props: {
 
   async function startIfNeeded() {
     if (!tid) return;
-
     if (isLocked) return;
     if (nextQ?.id) return;
 
@@ -389,6 +415,8 @@ export function Step2(props: {
     }
   }
 
+  const analysisRunning = aiStatus === "running" || autoStarting;
+
   return (
     <div>
       {/* If we have a website and we're not interviewing, this is the Website Analysis step */}
@@ -407,14 +435,14 @@ export function Step2(props: {
               <span
                 className={cn(
                   "inline-flex items-center rounded-full border px-2 py-1 font-semibold",
-                  aiStatus === "running"
+                  analysisRunning
                     ? "border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-800 dark:bg-black dark:text-slate-200"
                     : hasAnalysis
                     ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
                     : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
                 )}
               >
-                {aiStatus === "running" ? "Analysis running" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
+                {analysisRunning ? "Analysis running" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
               </span>
 
               {aiErr ? (
@@ -430,9 +458,9 @@ export function Step2(props: {
                   type="button"
                   className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
                   onClick={() => props.onRun().catch((e: any) => props.onError(e?.message ?? String(e)))}
-                  disabled={working || aiStatus === "running" || !tid}
+                  disabled={working || analysisRunning || !tid}
                 >
-                  {aiStatus === "running" ? "Analyzing…" : "Run analysis now"}
+                  {analysisRunning ? "Analyzing…" : "Run analysis now"}
                 </button>
               ) : (
                 <>
@@ -440,12 +468,17 @@ export function Step2(props: {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Suggestion</div>
+
                         <div className="mt-1 text-sm text-gray-900 dark:text-gray-100">
-                          {suggestedLabel ? (
-                            <>
-                              <span className="font-semibold">{suggestedLabel}</span>
-                              {suggestedKey ? <span className="ml-2 font-mono text-xs opacity-70">({suggestedKey})</span> : null}
-                            </>
+                          {suggestedText ? (
+                            <div className="space-y-2">
+                              <div className="font-semibold">{truncate(suggestedText, 220)}</div>
+                              {suggestedKey ? (
+                                <div className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-1 text-[11px] font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                                  {suggestedKey}
+                                </div>
+                              ) : null}
+                            </div>
                           ) : (
                             <span className="text-gray-600 dark:text-gray-300">No industry guess found yet.</span>
                           )}
@@ -454,10 +487,10 @@ export function Step2(props: {
 
                       <div className="shrink-0 text-right text-xs text-gray-600 dark:text-gray-300">
                         <div>
-                          Confidence: <span className="font-mono">{pct(conf)}%</span>
+                          Confidence: <span className="font-mono">{confDisplay}</span>
                         </div>
                         <div>
-                          Fit: <span className="font-mono">{pct(fit)}%</span>
+                          Fit: <span className="font-mono">{fitDisplay}</span>
                         </div>
                       </div>
                     </div>
@@ -569,10 +602,10 @@ export function Step2(props: {
 
               <div className="shrink-0 text-right text-xs text-gray-600 dark:text-gray-300">
                 <div>
-                  Confidence: <span className="font-mono">{pct(intConf)}%</span>
+                  Confidence: <span className="font-mono">{pct(intConf01)}%</span>
                 </div>
                 <div>
-                  Fit: <span className="font-mono">{pct(intFit)}%</span>
+                  Fit: <span className="font-mono">{intFitDisplay}</span>
                 </div>
               </div>
             </div>
@@ -600,7 +633,6 @@ export function Step2(props: {
                   type="button"
                   className="rounded-2xl border border-emerald-200 bg-white py-3 text-sm font-semibold text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100"
                   onClick={() => {
-                    // If we came here via website disagreement, allow going back to analysis UI
                     if (hasWebsite) setShowInterview(false);
                     else props.onBack();
                   }}
@@ -640,7 +672,7 @@ export function Step2(props: {
               </div>
 
               {!nextQ ? (
-                <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">{working ? "Thinking…" : "Thinking…"}</div>
+                <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">Thinking…</div>
               ) : (
                 <div className="mt-3">
                   <div className="text-base font-semibold text-gray-900 dark:text-gray-100">{nextQ.question}</div>

@@ -77,23 +77,6 @@ function normalizeKey(raw: string) {
     .slice(0, 64);
 }
 
-function pick(obj: any, paths: string[]) {
-  for (const p of paths) {
-    const parts = p.split(".");
-    let cur = obj;
-    let ok = true;
-    for (const k of parts) {
-      if (!cur || typeof cur !== "object" || !(k in cur)) {
-        ok = false;
-        break;
-      }
-      cur = cur[k];
-    }
-    if (ok) return cur;
-  }
-  return null;
-}
-
 /**
  * Step3 -> Step3b intent (no server coupling).
  * Step3b reads and clears this.
@@ -138,56 +121,21 @@ export function Step3(props: {
 
   const isLocked = safeTrim(interview?.status) === "locked";
 
-  /**
-   * ✅ CRITICAL FIX:
-   * Support BOTH sources of a suggested industry:
-   *  - Website analysis: aiAnalysis.suggestedIndustryKey (and variants)
-   *  - Interview: aiAnalysis.industryInterview.proposedIndustry.key
-   */
-  const suggestedKey = useMemo(() => {
-    const fromWebsite =
-      pick(props.aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key", "suggestedIndustry.key"]) ??
-      pick(props.aiAnalysis, ["industryKey", "industry_key"]); // sometimes stored after confirm
-    const fromInterview = interview?.proposedIndustry?.key ?? null;
+  const suggestedKey = useMemo(() => normalizeKey(interview?.proposedIndustry?.key ?? ""), [interview?.proposedIndustry?.key]);
+  const suggestedConfidence = useMemo(() => (interview ? clamp01(interview.confidenceScore) : null), [interview]);
 
-    return normalizeKey(String(fromWebsite ?? fromInterview ?? ""));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.aiAnalysis, interview?.proposedIndustry?.key]);
-
-  const suggestedConfidence = useMemo(() => {
-    const fromWebsite =
-      pick(props.aiAnalysis, ["confidenceScore", "confidence_score"]) ??
-      pick(props.aiAnalysis, ["industryConfidence", "industry_confidence"]);
-    const fromInterview = interview?.confidenceScore;
-    const v = fromWebsite ?? fromInterview ?? null;
-    return v === null || v === undefined ? null : clamp01(v);
-  }, [props.aiAnalysis, interview]);
-
-  const fitScore = useMemo(() => {
-    const fromWebsite =
-      pick(props.aiAnalysis, ["fitScore", "fit_score"]) ??
-      pick(props.aiAnalysis, ["fit"]) ??
-      pick(props.aiAnalysis, ["industryFit", "industry_fit"]);
-    const fromInterview = interview?.fitScore;
-    const v = fromWebsite ?? fromInterview ?? null;
-    return v === null || v === undefined ? null : clamp01(v);
-  }, [props.aiAnalysis, interview]);
+  // IMPORTANT: fit is often not computed yet; avoid showing "0%" which looks broken.
+  const fitScoreRaw = useMemo(() => (interview ? Number(interview.fitScore) : NaN), [interview]);
+  const fitScore01 = Number.isFinite(fitScoreRaw) ? clamp01(fitScoreRaw) : null;
+  const fitDisplay = fitScore01 === null || fitScore01 === 0 ? "—" : `${pct(fitScore01)}%`;
 
   const aiStatus = useMemo(() => safeTrim(interview?.status) || "", [interview]);
-  const debugReason = useMemo(() => {
-    return (
-      safeTrim(pick(props.aiAnalysis, ["fitReason", "fit_reason"])) ||
-      safeTrim(interview?.meta?.debug?.reason) ||
-      ""
-    );
-  }, [props.aiAnalysis, interview]);
+  const debugReason = useMemo(() => safeTrim(interview?.meta?.debug?.reason) || "", [interview]);
 
   const candidates: Candidate[] = useMemo(() => {
-    // Prefer interview candidates if present, else allow website analysis to expose candidates (optional)
-    const c1 = Array.isArray(interview?.candidates) ? interview!.candidates : [];
-    const c2 = Array.isArray(pick(props.aiAnalysis, ["candidates"])) ? (pick(props.aiAnalysis, ["candidates"]) as any[]) : [];
-    return c1.length ? c1 : c2;
-  }, [interview?.candidates, props.aiAnalysis]);
+    if (Array.isArray(interview?.candidates)) return interview!.candidates;
+    return [];
+  }, [interview?.candidates]);
 
   const topCandidates = useMemo(() => {
     return candidates
@@ -228,8 +176,6 @@ export function Step3(props: {
       const serverSel = normalizeKey(safeTrim((j as any).selectedKey));
       const hasSuggested = Boolean(suggestedKey) && list.some((x) => x.key === suggestedKey);
 
-      // ✅ Prefer suggestedKey over "service" / server selection.
-      // Avoid defaulting to generic service if we have a real suggestion.
       const next =
         (hasSuggested ? suggestedKey : "") ||
         (serverSel && list.some((x) => x.key === serverSel) ? serverSel : "") ||
@@ -248,7 +194,7 @@ export function Step3(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tenantId]);
 
-  // If suggestion arrives later, adopt it (especially if current is generic)
+  // If suggestion arrives later, adopt it
   useEffect(() => {
     if (!items.length) return;
     if (!suggestedKey) return;
@@ -258,13 +204,10 @@ export function Step3(props: {
     const cur = normalizeKey(safeTrim(selectedKey));
     const isGeneric = !cur || cur === "service";
 
-    // If locked, prefer the suggestion.
     if (isLocked && (isGeneric || cur === suggestedKey)) {
       setSelectedKey(suggestedKey);
       return;
     }
-
-    // If generic, upgrade to suggestion.
     if (isGeneric) setSelectedKey(suggestedKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suggestedKey, items.length, isLocked]);
@@ -301,7 +244,7 @@ export function Step3(props: {
 
   const canSave = Boolean(selectedKey);
 
-  const showAiCard = Boolean(props.aiAnalysis) || Boolean(suggestedKey) || topCandidates.length > 0;
+  const showAiCard = Boolean(interview) || Boolean(suggestedKey) || topCandidates.length > 0;
   const showThreeWay = Boolean(suggestedKey);
 
   async function commitIndustry(industryKey: string, intent: "refine" | "skip" | "unknown") {
@@ -311,7 +254,7 @@ export function Step3(props: {
     await props.onSubmit({ industryKey: k });
   }
 
-  const showFallbackPicker = !showThreeWay; // only show dropdown selection if no suggested industry key yet
+  const showFallbackPicker = !showThreeWay; // only show dropdown selection if no proposed industry key yet
 
   return (
     <div>
@@ -325,7 +268,7 @@ export function Step3(props: {
         <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="font-semibold">AI result</div>
+              <div className="font-semibold">AI interview result</div>
 
               <div className="mt-1">
                 {suggestedKey ? (
@@ -393,11 +336,9 @@ export function Step3(props: {
                   Confidence: <span className="font-mono">{pct(suggestedConfidence as number)}%</span>
                 </div>
               ) : null}
-              {Number.isFinite(fitScore as any) ? (
-                <div className="mt-1">
-                  Fit: <span className="font-mono">{pct(fitScore as number)}%</span>
-                </div>
-              ) : null}
+              <div className="mt-1">
+                Fit: <span className="font-mono">{fitDisplay}</span>
+              </div>
             </div>
           </div>
 
@@ -467,7 +408,9 @@ export function Step3(props: {
               {showDisagree ? (
                 <div className="mt-3 rounded-2xl border border-emerald-300/40 bg-white/50 p-3 text-xs text-emerald-950 dark:bg-black/20 dark:text-emerald-100">
                   <div className="font-semibold">No problem.</div>
-                  <div className="mt-1 opacity-90">Try one of the alternatives above, or restart the interview so we can ask better questions.</div>
+                  <div className="mt-1 opacity-90">
+                    Try one of the alternatives above, or restart the interview so we can ask better questions.
+                  </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -502,7 +445,7 @@ export function Step3(props: {
         </div>
       ) : null}
 
-      {/* Fallback picker only when we don't have a suggested industry yet */}
+      {/* Fallback picker only when we don't have a proposed industry yet */}
       {showFallbackPicker ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3">
@@ -578,7 +521,7 @@ export function Step3(props: {
           )}
         </div>
       ) : (
-        // When we do have a suggested industry: show only the starter pack preview
+        // When we do have a proposed industry: show only the starter pack preview
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
