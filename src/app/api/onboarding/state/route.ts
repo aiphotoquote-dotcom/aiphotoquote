@@ -254,12 +254,12 @@ function applyModeACompat(ai: any | null): any | null {
   const next = { ...ai };
 
   if (!safeTrim((next as any).suggestedIndustryKey) && proposedKey) (next as any).suggestedIndustryKey = proposedKey;
-  if (((next as any).confidenceScore === undefined || (next as any).confidenceScore === null) && Number.isFinite(conf)) {
+  if (((next as any).confidenceScore === undefined || (next as any).confidenceScore === null) && Number.isFinite(conf))
     (next as any).confidenceScore = conf;
-  }
-  if ((next as any).needsConfirmation === undefined || (next as any).needsConfirmation === null) {
+  if ((next as any).needsConfirmation === undefined || (next as any).needsConfirmation === null)
     (next as any).needsConfirmation = true;
-  }
+
+  // Optional: a friendly label hint for Step3 if you want it later
   if (!safeTrim((next as any).suggestedIndustryLabel) && proposedLabel) (next as any).suggestedIndustryLabel = proposedLabel;
 
   return next;
@@ -293,10 +293,10 @@ async function readTenantOnboarding(tenantId: string) {
   const website = row?.website ?? null;
   const hasWebsite = Boolean(safeTrim(website));
 
-  // Kept for backward compatibility
+  // Kept for backward compatibility (older Step3 / older interview modes)
   const industryInference = (aiAnalysis as any)?.industryInference ?? null;
 
-  // Mode A interview state, consumed by Step2
+  // ✅ NEW: Mode A interview state, consumed by Step2
   const industryInterview = (aiAnalysis as any)?.industryInterview ?? null;
 
   const planTierRaw = safeTrim(row?.plan_tier);
@@ -358,7 +358,15 @@ export async function GET(req: Request) {
     await requireMembership(clerkUserId, tenantId);
     const data = await readTenantOnboarding(tenantId);
 
-    return noCacheJson({ ok: true, isAuthenticated: true, tenantId, ...data }, 200);
+    return noCacheJson(
+      {
+        ok: true,
+        isAuthenticated: true,
+        tenantId,
+        ...data,
+      },
+      200
+    );
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -379,7 +387,9 @@ export async function POST(req: Request) {
       const businessName = safeTrim(body?.businessName);
       const website = safeTrim(body?.website);
 
-      if (businessName.length < 2) return noCacheJson({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, 400);
+      if (businessName.length < 2) {
+        return noCacheJson({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, 400);
+      }
 
       const { appUserId } = await ensureAppUser(clerkUserId);
 
@@ -394,8 +404,12 @@ export async function POST(req: Request) {
         ownerEmail = safeTrim(ownerEmail);
       }
 
-      if (ownerName.length < 2) return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
-      if (!ownerEmail.includes("@")) return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
+      if (ownerName.length < 2) {
+        return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
+      }
+      if (!ownerEmail.includes("@")) {
+        return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
+      }
 
       let tenantId: string | null = null;
 
@@ -426,12 +440,13 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // ✅ Do NOT force industry_key here. Keep existing/default behavior elsewhere.
+        // ✅ CRITICAL: include industry_key so NOT NULL never fails
         await db.execute(sql`
-          insert into tenant_settings (tenant_id, business_name, updated_at)
-          values (${tenantId}::uuid, ${businessName}, now())
+          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
+          values (${tenantId}::uuid, 'service', ${businessName}, now())
           on conflict (tenant_id) do update
-            set business_name = excluded.business_name,
+            set industry_key = coalesce(tenant_settings.industry_key, excluded.industry_key),
+                business_name = excluded.business_name,
                 updated_at = now()
         `);
       } else {
@@ -441,17 +456,18 @@ export async function POST(req: Request) {
           where id = ${tenantId}::uuid
         `);
 
-        // ✅ Do NOT overwrite industry_key on updates either.
+        // ✅ CRITICAL: include industry_key so NOT NULL never fails
         await db.execute(sql`
-          insert into tenant_settings (tenant_id, business_name, updated_at)
-          values (${tenantId}::uuid, ${businessName}, now())
+          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
+          values (${tenantId}::uuid, 'service', ${businessName}, now())
           on conflict (tenant_id) do update
-            set business_name = excluded.business_name,
+            set industry_key = coalesce(tenant_settings.industry_key, excluded.industry_key),
+                business_name = excluded.business_name,
                 updated_at = now()
         `);
       }
 
-      // If no website, skip website analysis and go to industry confirmation flow
+      // ✅ If no website, skip website analysis and go to interview/industry step
       const nextStep = website ? 2 : 3;
 
       await db.execute(sql`
@@ -466,7 +482,7 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId }, 200);
     }
 
-    // ---------------- STEP 6: branding save (matches UI) ----------------
+    // ---------------- STEP 6: branding save (matches wizard) ----------------
     if (step === 6) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
@@ -481,12 +497,13 @@ export async function POST(req: Request) {
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
+
       const platformFrom = "no-reply@aiphotoquote.com";
 
-      // ✅ CRITICAL: Do not overwrite industry_key here.
       await db.execute(sql`
         insert into tenant_settings (
           tenant_id,
+          industry_key,
           lead_to_email,
           brand_logo_url,
           resend_from_email,
@@ -494,6 +511,7 @@ export async function POST(req: Request) {
         )
         values (
           ${tid}::uuid,
+          'service',
           ${leadToEmail},
           ${brandLogoUrl},
           ${platformFrom},
@@ -506,6 +524,7 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
+      // branding is step 6, next is plan step 7
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
         values (${tid}::uuid, 7, false, now(), now())
@@ -517,7 +536,7 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId: tid }, 200);
     }
 
-    // ---------------- STEP 7: plan selection (matches UI) ----------------
+    // ---------------- STEP 7: plan selection (matches wizard final step) ----------------
     if (step === 7) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
@@ -525,7 +544,9 @@ export async function POST(req: Request) {
       await requireMembership(clerkUserId, tid);
 
       const plan = safePlan(body?.plan);
-      if (!plan) return noCacheJson({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, 400);
+      if (!plan) {
+        return noCacheJson({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, 400);
+      }
 
       const monthlyLimit = plan === "tier0" ? 5 : plan === "tier1" ? 50 : null;
       const graceCredits = plan === "tier0" ? 20 : 30;
