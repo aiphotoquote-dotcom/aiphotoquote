@@ -260,7 +260,8 @@ function applyModeACompat(ai: any | null): any | null {
     (next as any).needsConfirmation = true;
 
   // Optional: a friendly label hint for Step3 if you want it later
-  if (!safeTrim((next as any).suggestedIndustryLabel) && proposedLabel) (next as any).suggestedIndustryLabel = proposedLabel;
+  if (!safeTrim((next as any).suggestedIndustryLabel) && proposedLabel)
+    (next as any).suggestedIndustryLabel = proposedLabel;
 
   return next;
 }
@@ -352,7 +353,10 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." }, 400);
+      return noCacheJson(
+        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
+        400
+      );
     }
 
     await requireMembership(clerkUserId, tenantId);
@@ -440,7 +444,7 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // ✅ CRITICAL: include industry_key so NOT NULL never fails
+        // ✅ FIX: include industry_key (NOT NULL) on insert; never overwrite a real one
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -456,7 +460,7 @@ export async function POST(req: Request) {
           where id = ${tenantId}::uuid
         `);
 
-        // ✅ CRITICAL: include industry_key so NOT NULL never fails
+        // ✅ FIX: include industry_key (NOT NULL) on insert; never overwrite a real one
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -467,7 +471,7 @@ export async function POST(req: Request) {
         `);
       }
 
-      // ✅ If no website, skip website analysis and go to interview/industry step
+      // If no website, skip website analysis and go to industry confirmation step
       const nextStep = website ? 2 : 3;
 
       await db.execute(sql`
@@ -497,7 +501,6 @@ export async function POST(req: Request) {
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
-
       const platformFrom = "no-reply@aiphotoquote.com";
 
       await db.execute(sql`
@@ -524,7 +527,6 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
-      // branding is step 6, next is plan step 7
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
         values (${tid}::uuid, 7, false, now(), now())
