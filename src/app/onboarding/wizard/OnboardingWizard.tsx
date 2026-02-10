@@ -123,12 +123,19 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
-      const urlStep = getUrlParams().step;
-      const nextStep = clampStep(urlStep || ((j as any)?.currentStep as any) || 1);
+      // ✅ FIX: never allow a stale URL step to drag us backwards.
+      const p = getUrlParams();
+      const urlStepRaw = (p as any)?.step;
+      const urlStep = urlStepRaw ? clampStep(urlStepRaw) : null;
+
+      const serverStepRaw = (j as any)?.currentStep;
+      const serverStep = clampStep(serverStepRaw || 1);
+
+      const nextStep = urlStep ? Math.max(serverStep, urlStep) : serverStep;
 
       if (nextStep !== step) {
         setUrlParams({ step: nextStep });
-        setNav((p) => ({ ...p, step: nextStep }));
+        setNav((pp) => ({ ...pp, step: nextStep }));
       }
 
       return j;
@@ -188,9 +195,12 @@ export default function OnboardingWizard() {
     const newTenantId = safeTrim(j.tenantId);
     if (newTenantId) setTenantInNav(newTenantId);
 
+    // ✅ FIX: route to the correct next step based on whether website exists
+    const next = payload.website ? 2 : 3;
+
     await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
     setLastAction("Saved business identity.");
-    go(2);
+    go(next);
   }
 
   async function runWebsiteAnalysis() {
@@ -318,7 +328,8 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 6,
+        // ✅ FIX: branding save is step 5 in the API (step 6 is plan selection)
+        step: 5,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
