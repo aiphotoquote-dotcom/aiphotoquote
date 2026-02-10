@@ -1,5 +1,4 @@
 // src/app/onboarding/wizard/OnboardingWizard.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -22,61 +21,25 @@ import { Step5Branding } from "./steps/Step5Branding";
 import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
+function getAiAnalysis(state: OnboardingState | null): any | null {
+  if (!state) return null;
+  const s: any = state as any;
+
+  if (s.aiAnalysis && typeof s.aiAnalysis === "object") return s.aiAnalysis;
+  if (s.ai_analysis && typeof s.ai_analysis === "object") return s.ai_analysis;
+  if (s.aiAnalysisJson && typeof s.aiAnalysisJson === "object") return s.aiAnalysisJson;
+
+  if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
+  if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
+
+  return null;
+}
+
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
 }
 
-function tryParseJsonObject(x: any): any | null {
-  if (!x) return null;
-  if (typeof x === "object") return x;
-  if (typeof x !== "string") return null;
-
-  const s = x.trim();
-  if (!s) return null;
-  if (!(s.startsWith("{") || s.startsWith("["))) return null;
-
-  try {
-    const out = JSON.parse(s);
-    return out && typeof out === "object" ? out : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Some of our API routes may return AI analysis under different keys/shapes
- * depending on which table/view they read from (tenant_onboarding.ai_analysis vs state.aiAnalysis).
- * Step2/Step3/Step3b must receive a stable aiAnalysis object.
- *
- * ✅ Hardened: supports json object OR stringified json.
- */
-function getAiAnalysis(state: OnboardingState | null): any | null {
-  if (!state) return null;
-  const s: any = state as any;
-
-  const direct =
-    tryParseJsonObject(s.aiAnalysis) ||
-    tryParseJsonObject(s.ai_analysis) ||
-    tryParseJsonObject(s.aiAnalysisJson);
-
-  if (direct) return direct;
-
-  const nested =
-    tryParseJsonObject(s.tenantOnboarding?.aiAnalysis) ||
-    tryParseJsonObject(s.tenantOnboarding?.ai_analysis) ||
-    tryParseJsonObject(s.tenantOnboarding?.aiAnalysisJson);
-
-  if (nested) return nested;
-
-  return null;
-}
-
-/**
- * ✅ IMPORTANT:
- * We now have 7 steps (Step3b added). Do NOT rely on utils.safeStep()
- * if it still clamps to 6 (older wizard).
- */
 function clampStep(n: any) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 1;
@@ -92,7 +55,6 @@ export default function OnboardingWizard() {
 
   const [lastAction, setLastAction] = useState<string | null>(null);
 
-  // ✅ Step3 -> Step3b handoff state (local, non-persisted)
   const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
   const [pendingSubIndustryLabel, setPendingSubIndustryLabel] = useState<string | null>(null);
 
@@ -127,7 +89,6 @@ export default function OnboardingWizard() {
   const serverLastAction = useMemo(() => {
     const a = safeTrim((state as any)?.aiAnalysisLastAction);
     if (a) return a;
-
     const b = getMetaLastAction(normalizedAiAnalysis);
     return b || "";
   }, [state, normalizedAiAnalysis]);
@@ -280,21 +241,25 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
-  async function saveIndustrySelection(args: {
-    industryKey?: string;
-    industryLabel?: string;
-    subIndustryLabel?: string | null;
-  }) {
+  // ✅ FIX: do not send subIndustryLabel: null to API (omit instead)
+  async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
     setErr(null);
     setLastAction(null);
 
     const tid = safeTrim((state as any)?.tenantId ?? tenantId);
     if (!tid) throw new Error("NO_TENANT: missing tenantId for industry save.");
 
+    const body: any = { tenantId: tid, ...args };
+
+    // Omit null/empty to avoid zod "invalid request body"
+    if (body.subIndustryLabel === null || safeTrim(body.subIndustryLabel) === "") {
+      delete body.subIndustryLabel;
+    }
+
     const res = await fetch("/api/onboarding/industries", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tenantId: tid, ...args }),
+      body: JSON.stringify(body),
     });
 
     const j = await res.json().catch(() => null);
@@ -397,9 +362,7 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              We’ll tailor your quoting experience in just a few steps.
-            </div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -473,7 +436,6 @@ export default function OnboardingWizard() {
                 if (!key) throw new Error("Missing industry selection.");
 
                 const finalSub = safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
-
                 await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
 
                 setPendingIndustryKey("");
@@ -483,12 +445,7 @@ export default function OnboardingWizard() {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
 
-                const finalSub =
-                  safeTrim(subIndustryLabel)
-                    ? safeTrim(subIndustryLabel)
-                    : safeTrim(pendingSubIndustryLabel)
-                      ? safeTrim(pendingSubIndustryLabel)
-                      : null;
+                const finalSub = safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
 
                 await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
 

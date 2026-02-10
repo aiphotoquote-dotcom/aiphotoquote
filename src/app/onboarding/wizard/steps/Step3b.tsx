@@ -1,4 +1,5 @@
 // src/app/onboarding/wizard/steps/Step3b.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -51,11 +52,32 @@ type SubInterview = {
   meta?: any;
 };
 
+async function postSubInterview(payload: any) {
+  const res = await fetch("/api/onboarding/sub-industry-interview", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    cache: "no-store",
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+
+  const txt = await res.text().catch(() => "");
+  const j = txt ? JSON.parse(txt) : null;
+
+  if (!res.ok || !j?.ok) {
+    throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+  }
+  return j as { ok: true; tenantId: string; subIndustryInterview: SubInterview };
+}
+
+function cn(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
 /**
  * Step3 can set sessionStorage "apq_onboarding_sub_intent":
- *  - "refine"  -> auto select Yes and auto-start interview
- *  - "skip"    -> immediately persist null and continue
- *  - otherwise -> do nothing
+ *  - "refine"  -> auto-select Yes and auto-start interview
+ *  - "skip"    -> immediately persist "no sub-industry" and continue
  */
 function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   try {
@@ -68,88 +90,15 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   }
 }
 
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
-/**
- * ✅ Send BOTH camelCase and snake_case so the API route schema accepts the body
- * regardless of which naming convention it currently validates.
- */
-function buildApiPayload(input: any) {
-  const tenantId = safeTrim(input?.tenantId ?? input?.tenant_id);
-  const industryKey = safeTrim(input?.industryKey ?? input?.industry_key);
-
-  const action = safeTrim(input?.action);
-  const questionId = safeTrim(input?.questionId ?? input?.question_id);
-  const questionText = safeTrim(input?.questionText ?? input?.question_text);
-  const answer = safeTrim(input?.answer);
-
-  const base: any = {
-    // camelCase
-    tenantId,
-    industryKey,
-
-    // snake_case
-    tenant_id: tenantId,
-    industry_key: industryKey,
-
-    action,
-    mode: "SUB",
-  };
-
-  if (questionId) {
-    base.questionId = questionId;
-    base.question_id = questionId;
-  }
-  if (questionText) {
-    base.questionText = questionText;
-    base.question_text = questionText;
-  }
-  if (answer) {
-    base.answer = answer;
-  }
-
-  return base;
-}
-
-async function postSubInterview(payloadIn: any) {
-  const payload = buildApiPayload(payloadIn);
-
-  const res = await fetch("/api/onboarding/sub-industry-interview", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    cache: "no-store",
-    credentials: "include",
-    body: JSON.stringify(payload),
-  });
-
-  const txt = await res.text().catch(() => "");
-  let j: any = null;
-  try {
-    j = txt ? JSON.parse(txt) : null;
-  } catch {
-    throw new Error(`Invalid response from server: ${txt?.slice(0, 160) || "(empty)"}`);
-  }
-
-  if (!res.ok || !j?.ok) {
-    throw new Error(j?.message || j?.error || "Invalid request body.");
-  }
-
-  return j as { ok: true; tenantId: string; subIndustryInterview: SubInterview };
-}
-
 export function Step3b(props: {
   tenantId: string | null;
-  industryKey: string; // confirmed industry from Step3 selection
+  industryKey: string;
   aiAnalysis: any | null | undefined;
 
   onBack: () => void;
 
-  // If they say “No, keep it broad”
   onSkip: () => void;
 
-  // Save + continue (label may be null if they skip)
   onSubmit: (args: { subIndustryLabel: string | null }) => Promise<void>;
 
   onError: (m: string) => void;
@@ -158,7 +107,7 @@ export function Step3b(props: {
   const industryKey = safeTrim(props.industryKey);
 
   const existingFromAi: SubInterview | null = useMemo(() => {
-    const x = props.aiAnalysis?.subIndustryInterview;
+    const x = (props.aiAnalysis as any)?.subIndustryInterview ?? (props.aiAnalysis as any)?.sub_industry_interview;
     if (!x || typeof x !== "object") return null;
     if ((x as any).mode !== "SUB") return null;
     return x as SubInterview;
@@ -176,6 +125,7 @@ export function Step3b(props: {
   }, [existingFromAi]);
 
   const status = safeTrim(state?.status) || "collecting";
+  const isLocked = status === "locked";
   const nextQ = (state?.nextQuestion ?? null) as NextQuestion | null;
 
   const conf = clamp01(state?.confidenceScore);
@@ -205,17 +155,10 @@ export function Step3b(props: {
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
   const lastSubmitRef = useRef<string>("");
-
   const didHydrateIntentRef = useRef(false);
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
 
-  const isLocked = status === "locked";
-
-  // ✅ Avoid TS narrowing issues inside JSX:
-  // prompt is only shown when wantsSub is still empty (nothing chosen yet)
-  const showPrompt = wantsSub === "";
-
-  // Reset answer box when question changes
+  // reset answer box when question changes
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -238,7 +181,7 @@ export function Step3b(props: {
   }
 
   async function start() {
-    if (!tid) return setErr("Missing tenantId.");
+    if (!tid) return;
     if (!industryKey) return setErr("Missing industryKey.");
     if (nextQ?.id || isLocked) return;
 
@@ -257,7 +200,7 @@ export function Step3b(props: {
     }
   }
 
-  // Hydrate Step3 intent once
+  // hydrate Step3 intent once
   useEffect(() => {
     if (didHydrateIntentRef.current) return;
     didHydrateIntentRef.current = true;
@@ -269,28 +212,29 @@ export function Step3b(props: {
       setWantsSub("yes");
       return;
     }
+
     if (intent === "skip") {
       setWantsSub("no");
       return;
     }
   }, []);
 
-  // If Step3 asked to skip, persist null once we have tid + industryKey
+  // if Step3 asked to skip, persist once we have tid + industryKey
   useEffect(() => {
     if (!didHydrateIntentRef.current) return;
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
-
     if (!tid || !industryKey) return;
     if (nextQ?.id || isLocked) return;
 
+    // Only auto-continue if we haven't started an interview
     if (!state) {
       saveAndContinue(null).catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, industryKey, wantsSub, nextQ?.id, isLocked, state]);
 
-  // Auto-start interview when wantsSub yes (including refine intent)
+  // auto-start interview if they want sub-industry (including refine intent)
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !industryKey) return;
@@ -332,7 +276,6 @@ export function Step3b(props: {
       });
 
       if (debugOn) setLastApi(out);
-
       setState(out.subIndustryInterview);
 
       const returnedNextId = safeTrim(out?.subIndustryInterview?.nextQuestion?.id);
@@ -349,6 +292,8 @@ export function Step3b(props: {
       setWorking(false);
     }
   }
+
+  const showPrompt = wantsSub === "";
 
   return (
     <div>
@@ -382,7 +327,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt (only when they haven't chosen yet AND no intent forced state) */}
+      {/* Prompt stage (no “selected” styling needed) */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -391,26 +336,28 @@ export function Step3b(props: {
           </div>
 
           <div className="mt-3 grid gap-2">
-            {(["yes", "no"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                className={cn(
-                  // ✅ No selection exists yet, so don't compare wantsSub === v here (TS narrows wantsSub to "")
-                  "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                  "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-                )}
-                onClick={() => setWantsSub(v)}
-                disabled={working}
-              >
-                {v === "yes" ? "Yes — let’s narrow it down" : "No — keep it broad for now"}
-              </button>
-            ))}
+            <button
+              type="button"
+              className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              onClick={() => setWantsSub("yes")}
+              disabled={working}
+            >
+              Yes — let’s narrow it down
+            </button>
+
+            <button
+              type="button"
+              className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              onClick={() => setWantsSub("no")}
+              disabled={working}
+            >
+              No — keep it broad for now
+            </button>
           </div>
         </div>
       ) : null}
 
-      {/* If they chose "no" manually (not the auto-skip), show action buttons */}
+      {/* If they chose "no" manually (not auto-skip), show action buttons */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
@@ -570,7 +517,7 @@ export function Step3b(props: {
               </div>
 
               <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
-                If you’d rather skip this, you can go back and choose “keep it broad”.
+                If you’d rather skip this, go back and choose “keep it broad”.
               </div>
             </div>
           ) : null}
@@ -579,3 +526,4 @@ export function Step3b(props: {
     </div>
   );
 }
+
