@@ -1,5 +1,4 @@
 // src/app/onboarding/wizard/steps/Step3b.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -58,14 +57,19 @@ async function postSubInterview(payload: any) {
     headers: { "content-type": "application/json" },
     cache: "no-store",
     credentials: "include",
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload гармони??),
   });
 
   const txt = await res.text().catch(() => "");
-  const j = txt ? JSON.parse(txt) : null;
+  let j: any = null;
+  try {
+    j = txt ? JSON.parse(txt) : null;
+  } catch {
+    j = null;
+  }
 
   if (!res.ok || !j?.ok) {
-    throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+    throw new Error(j?.message || j?.error || (txt ? txt : `HTTP ${res.status}`));
   }
   return j as { ok: true; tenantId: string; subIndustryInterview: SubInterview };
 }
@@ -76,8 +80,8 @@ function cn(...xs: Array<string | false | null | undefined>) {
 
 /**
  * Step3 can set sessionStorage "apq_onboarding_sub_intent":
- *  - "refine"  -> auto-select Yes and auto-start interview
- *  - "skip"    -> immediately persist "no sub-industry" and continue
+ *  - "refine"  -> auto select Yes and auto-start interview
+ *  - "skip"    -> immediately persist null and continue
  */
 function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   try {
@@ -92,13 +96,14 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
 
 export function Step3b(props: {
   tenantId: string | null;
-  industryKey: string;
+  industryKey: string; // confirmed industry from Step3
   aiAnalysis: any | null | undefined;
 
   onBack: () => void;
 
   onSkip: () => void;
 
+  // Save + continue (label may be null if they skip)
   onSubmit: (args: { subIndustryLabel: string | null }) => Promise<void>;
 
   onError: (m: string) => void;
@@ -107,7 +112,7 @@ export function Step3b(props: {
   const industryKey = safeTrim(props.industryKey);
 
   const existingFromAi: SubInterview | null = useMemo(() => {
-    const x = (props.aiAnalysis as any)?.subIndustryInterview ?? (props.aiAnalysis as any)?.sub_industry_interview;
+    const x = props.aiAnalysis?.subIndustryInterview;
     if (!x || typeof x !== "object") return null;
     if ((x as any).mode !== "SUB") return null;
     return x as SubInterview;
@@ -125,7 +130,6 @@ export function Step3b(props: {
   }, [existingFromAi]);
 
   const status = safeTrim(state?.status) || "collecting";
-  const isLocked = status === "locked";
   const nextQ = (state?.nextQuestion ?? null) as NextQuestion | null;
 
   const conf = clamp01(state?.confidenceScore);
@@ -150,7 +154,9 @@ export function Step3b(props: {
   }, []);
   const [lastApi, setLastApi] = useState<any>(null);
 
-  const [wantsSub, setWantsSub] = useState<"" | "yes" | "no">("");
+  // IMPORTANT: don't render-map in a scope where TS has narrowed wantsSub to ""
+  const [wantsSub, setWantsSub] = useState<"unknown" | "yes" | "no">("unknown");
+
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
@@ -158,7 +164,9 @@ export function Step3b(props: {
   const didHydrateIntentRef = useRef(false);
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
 
-  // reset answer box when question changes
+  const isLocked = status === "locked";
+
+  // Reset answer box when question changes
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -188,7 +196,8 @@ export function Step3b(props: {
     setWorking(true);
     setErr(null);
     try {
-      const out = await postSubInterview({ tenantId: tid, industryKey, action: "start" });
+      // ✅ include mode in case server schema expects it
+      const out = await postSubInterview({ mode: "SUB", tenantId: tid, industryKey, action: "start" });
       setState(out.subIndustryInterview);
       if (debugOn) setLastApi(out);
     } catch (e: any) {
@@ -200,7 +209,7 @@ export function Step3b(props: {
     }
   }
 
-  // hydrate Step3 intent once
+  // Hydrate Step3 intent once
   useEffect(() => {
     if (didHydrateIntentRef.current) return;
     didHydrateIntentRef.current = true;
@@ -219,22 +228,21 @@ export function Step3b(props: {
     }
   }, []);
 
-  // if Step3 asked to skip, persist once we have tid + industryKey
+  // If Step3 asked to skip, persist null once we have tid + industryKey
   useEffect(() => {
-    if (!didHydrateIntentRef.current) return;
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
     if (!tid || !industryKey) return;
     if (nextQ?.id || isLocked) return;
 
-    // Only auto-continue if we haven't started an interview
+    // Only auto-continue if we haven't already started an interview
     if (!state) {
       saveAndContinue(null).catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, industryKey, wantsSub, nextQ?.id, isLocked, state]);
 
-  // auto-start interview if they want sub-industry (including refine intent)
+  // Auto-start interview when wantsSub yes
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !industryKey) return;
@@ -266,7 +274,9 @@ export function Step3b(props: {
     setErr(null);
 
     try {
+      // ✅ include mode in case server schema expects it
       const out = await postSubInterview({
+        mode: "SUB",
         tenantId: tid,
         industryKey,
         action: "answer",
@@ -276,6 +286,7 @@ export function Step3b(props: {
       });
 
       if (debugOn) setLastApi(out);
+
       setState(out.subIndustryInterview);
 
       const returnedNextId = safeTrim(out?.subIndustryInterview?.nextQuestion?.id);
@@ -293,7 +304,8 @@ export function Step3b(props: {
     }
   }
 
-  const showPrompt = wantsSub === "";
+  const showPrompt = wantsSub === "unknown";
+  const yesNoOptions: Array<"yes" | "no"> = ["yes", "no"]; // avoid TS narrowing traps
 
   return (
     <div>
@@ -327,7 +339,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt stage (no “selected” styling needed) */}
+      {/* Prompt */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -336,28 +348,30 @@ export function Step3b(props: {
           </div>
 
           <div className="mt-3 grid gap-2">
-            <button
-              type="button"
-              className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-              onClick={() => setWantsSub("yes")}
-              disabled={working}
-            >
-              Yes — let’s narrow it down
-            </button>
-
-            <button
-              type="button"
-              className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-left text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-              onClick={() => setWantsSub("no")}
-              disabled={working}
-            >
-              No — keep it broad for now
-            </button>
+            {yesNoOptions.map((v) => {
+              const active = String(wantsSub) === v; // ✅ avoid TS narrowing
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  className={cn(
+                    "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                    active
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+                      : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  )}
+                  onClick={() => setWantsSub(v)}
+                  disabled={working}
+                >
+                  {v === "yes" ? "Yes — let’s narrow it down" : "No — keep it broad for now"}
+                </button>
+              );
+            })}
           </div>
         </div>
       ) : null}
 
-      {/* If they chose "no" manually (not auto-skip), show action buttons */}
+      {/* Manual NO path (only when user chose it, not auto-skip intent) */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
@@ -379,7 +393,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Sub-industry interview */}
+      {/* YES path */}
       {wantsSub === "yes" ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3">
@@ -517,7 +531,7 @@ export function Step3b(props: {
               </div>
 
               <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
-                If you’d rather skip this, go back and choose “keep it broad”.
+                If you’d rather skip this, you can go back and choose “keep it broad”.
               </div>
             </div>
           ) : null}
@@ -526,4 +540,3 @@ export function Step3b(props: {
     </div>
   );
 }
-
