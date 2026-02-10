@@ -123,7 +123,6 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
-      // Prefer explicit URL step if present; otherwise fall back to server.
       const urlStep = getUrlParams().step;
       const nextStep = clampStep(urlStep || ((j as any)?.currentStep as any) || 1);
 
@@ -242,10 +241,6 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
-  /**
-   * Persist industry (+ optional subIndustry). Step3 is selection-only; Step4 finalizes.
-   * NOTE: Your API currently dislikes null subIndustryLabel, so we omit null/empty.
-   */
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
     setErr(null);
     setLastAction(null);
@@ -255,7 +250,6 @@ export default function OnboardingWizard() {
 
     const body: any = { tenantId: tid, ...args };
 
-    // Omit null/empty to avoid zod "invalid request body"
     if (body.subIndustryLabel === null || safeTrim(body.subIndustryLabel) === "") {
       delete body.subIndustryLabel;
     }
@@ -322,7 +316,9 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 6,
+        // ✅ IMPORTANT: server expects Branding as step 5 (plan/tier is step 6 on backend)
+        // UI step is 6 because we inserted the AI Policy handoff step.
+        step: 5,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -350,7 +346,6 @@ export default function OnboardingWizard() {
   const existingUserContext = Boolean((state as any)?.isAuthenticated ?? true);
   const aiStatus = safeTrim((state as any)?.aiAnalysisStatus) || getMetaStatus(normalizedAiAnalysis);
 
-  // If user already has an industry from server, keep it as fallback for Step3b when pending isn't set.
   const fallbackIndustryKey =
     safeTrim((state as any)?.industryKey) ||
     safeTrim((state as any)?.selectedIndustryKey) ||
@@ -367,9 +362,7 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              We’ll tailor your quoting experience in just a few steps.
-            </div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -436,7 +429,6 @@ export default function OnboardingWizard() {
               industryKey={effectiveIndustryKey}
               aiAnalysis={normalizedAiAnalysis}
               onBack={() => go(3)}
-              // legacy prop; Step3b doesn’t call it anymore (intent skip is handled internally)
               onSkip={async () => {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
@@ -450,7 +442,6 @@ export default function OnboardingWizard() {
                 const finalSub = safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : null;
 
                 await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
-
                 setPendingIndustryKey("");
               }}
               onError={(m) => setErr(m)}
