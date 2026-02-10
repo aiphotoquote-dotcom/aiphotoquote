@@ -79,7 +79,9 @@ function normalizeKey(raw: string) {
 
 /**
  * We use sessionStorage to pass "sub-industry intent" to Step3b without touching the server.
- * Step3b reads and clears "apq_onboarding_sub_intent".
+ * Step3b reads apq_onboarding_sub_intent:
+ *  - "refine" -> auto run sub-industry interview
+ *  - "skip"   -> auto continue without sub-industry
  */
 function setSubIntent(v: "refine" | "skip" | "unknown") {
   try {
@@ -103,13 +105,14 @@ export function Step3(props: {
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<IndustryItem[]>([]);
   const [selectedKey, setSelectedKey] = useState<string>("");
-
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // defaults preview
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
+  // UX state
   const [showDisagree, setShowDisagree] = useState(false);
 
   // Mode A interview (source of truth)
@@ -122,7 +125,11 @@ export function Step3(props: {
 
   const isLocked = safeTrim(interview?.status) === "locked";
 
-  const suggestedKey = useMemo(() => normalizeKey(interview?.proposedIndustry?.key ?? ""), [interview?.proposedIndustry?.key]);
+  const suggestedKey = useMemo(
+    () => normalizeKey(interview?.proposedIndustry?.key ?? ""),
+    [interview?.proposedIndustry?.key]
+  );
+
   const suggestedConfidence = useMemo(() => (interview ? clamp01(interview.confidenceScore) : null), [interview]);
   const fitScore = useMemo(() => (interview ? clamp01(interview.fitScore) : null), [interview]);
 
@@ -242,8 +249,7 @@ export function Step3(props: {
 
   const canSave = Boolean(selectedKey);
 
-  // No amber warning; we only show AI card if there is any signal
-  const showAiCard = Boolean(suggestedKey) || topCandidates.length > 0 || Boolean(interview);
+  const showAiCard = Boolean(interview) || topCandidates.length > 0 || Boolean(suggestedKey);
   const showThreeWay = Boolean(suggestedKey);
 
   async function commitIndustry(key: string, intent: "refine" | "skip" | "unknown") {
@@ -260,6 +266,7 @@ export function Step3(props: {
         This locks in your default prompts, customer questions, and photo requests.
       </div>
 
+      {/* AI summary card */}
       {showAiCard ? (
         <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
           <div className="flex items-start justify-between gap-3">
@@ -279,9 +286,9 @@ export function Step3(props: {
                     </>
                   )
                 ) : topCandidates.length ? (
-                  <span className="opacity-90">A few close matches surfaced — pick one below or choose from the dropdown.</span>
+                  <span className="opacity-90">A few close matches surfaced — pick one below or restart the interview.</span>
                 ) : (
-                  <span className="opacity-90">Pick an industry below (or click “Improve match” to refine).</span>
+                  <span className="opacity-90">Restart the interview to improve the match.</span>
                 )}
               </div>
 
@@ -291,12 +298,12 @@ export function Step3(props: {
                   <div className="mt-2 flex flex-wrap gap-2">
                     {topCandidates
                       .filter((c) => c.key && c.key !== normalizeKey(selectedKey))
-                      .slice(0, 4)
+                      .slice(0, 6)
                       .map((c) => (
                         <button
                           key={c.key}
                           type="button"
-                          className="inline-flex items-center rounded-full border border-emerald-300/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-emerald-950 hover:bg-white dark:bg-black/20 dark:text-emerald-100"
+                          className="inline-flex items-center rounded-full border border-emerald-300/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-emerald-950 hover:bg-white disabled:opacity-50 dark:bg-black/20 dark:text-emerald-100"
                           onClick={() => {
                             setSelectedKey(c.key);
                             setShowDisagree(true);
@@ -406,7 +413,7 @@ export function Step3(props: {
                 <div className="mt-3 rounded-2xl border border-emerald-300/40 bg-white/50 p-3 text-xs text-emerald-950 dark:bg-black/20 dark:text-emerald-100">
                   <div className="font-semibold">No problem.</div>
                   <div className="mt-1 opacity-90">
-                    Try one of the alternatives above, choose from the dropdown below, or restart the interview so we can ask better questions.
+                    Try one of the alternatives above, or restart the interview so we can ask better questions.
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -424,7 +431,7 @@ export function Step3(props: {
             </div>
           ) : (
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="text-xs opacity-90">Pick an industry below — or click “Improve match” to refine the interview.</div>
+              <div className="text-xs opacity-90">Restart the interview to get a confident industry suggestion.</div>
               <button
                 type="button"
                 className="rounded-xl border border-emerald-300/50 bg-transparent px-3 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
@@ -440,7 +447,7 @@ export function Step3(props: {
         <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
           <div className="font-semibold">Choose an industry</div>
           <div className="mt-1 opacity-90">
-            Select the closest match below. If it’s not obvious, click “Improve match” to answer a few more questions.
+            We don’t have a suggestion yet. Click “Improve match” to answer a few more questions.
           </div>
           <div className="mt-3">
             <button
@@ -461,117 +468,72 @@ export function Step3(props: {
         </div>
       ) : null}
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        {/* LEFT */}
-        <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Choose from platform industries</div>
-            <button
-              type="button"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
-              onClick={props.onReInterview}
-              disabled={saving}
-              title="If you don’t see the right fit, we’ll ask more questions and refine."
-            >
-              Improve match
-            </button>
+      {/* Starter pack (full width now) */}
+      <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
+        <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          This is the “instant experience” we can provide even with no website.
+        </div>
+
+        {loading ? (
+          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading industries…</div>
+        ) : !selectedKey ? (
+          <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+            Choose an industry to preview defaults.
           </div>
-
-          {loading ? (
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading industries…</div>
-          ) : (
-            <div className="mt-4 grid gap-3">
-              <label className="block">
-                <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Industry</div>
-                <select
-                  value={selectedKey}
-                  onChange={(e) => setSelectedKey(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                >
-                  {items.map((x) => (
-                    <option key={x.id} value={x.key}>
-                      {x.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              {selectedKey ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
-                  <div className="font-semibold text-gray-900 dark:text-gray-100">Selected</div>
-                  <div className="mt-1">
-                    <span className="font-semibold">{selectedLabel || selectedKey}</span>{" "}
-                    <span className="font-mono text-xs opacity-80">({selectedKey})</span>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="rounded-2xl border border-gray-200 bg-white p-4 text-xs text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-                <div className="font-semibold text-gray-900 dark:text-gray-100">Tip</div>
-                <div className="mt-1">
-                  If you’re a niche within an industry, you’ll be able to refine that next (sub-industry) — but first we choose the broad industry bucket.
-                </div>
+        ) : defaultsLoading ? (
+          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading defaults…</div>
+        ) : defaults ? (
+          <div className="mt-4 grid gap-3">
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Selected industry</div>
+              <div className="mt-1">
+                <span className="font-semibold">{selectedLabel || selectedKey}</span>{" "}
+                <span className="font-mono text-xs opacity-80">({selectedKey})</span>
               </div>
             </div>
-          )}
-        </div>
 
-        {/* RIGHT */}
-        <div className="rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
-          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            This is the “instant experience” we can provide even with no website.
+            {defaults.commonServices?.length ? (
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Common services</div>
+                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
+                  {defaults.commonServices.slice(0, 6).map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {defaults.commonPhotoRequests?.length ? (
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Photos we’ll ask for</div>
+                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
+                  {defaults.commonPhotoRequests.slice(0, 6).map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {defaults.defaultCustomerQuestions?.length ? (
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Default customer questions</div>
+                <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
+                  {defaults.defaultCustomerQuestions.slice(0, 5).map((x, i) => (
+                    <li key={i}>{x}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
-
-          {!selectedKey ? (
-            <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-              Select an industry to preview default services + questions.
-            </div>
-          ) : defaultsLoading ? (
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading defaults…</div>
-          ) : defaults ? (
-            <div className="mt-4 grid gap-3">
-              {defaults.commonServices?.length ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Common services</div>
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
-                    {defaults.commonServices.slice(0, 6).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-
-              {defaults.commonPhotoRequests?.length ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Photos we’ll ask for</div>
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
-                    {defaults.commonPhotoRequests.slice(0, 6).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-
-              {defaults.defaultCustomerQuestions?.length ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Default customer questions</div>
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
-                    {defaults.defaultCustomerQuestions.slice(0, 5).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-              Defaults aren’t available yet for this industry. That’s okay — next step is adding the defaults table + API.
-            </div>
-          )}
-        </div>
+        ) : (
+          <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+            Defaults aren’t available yet for this industry. That’s okay — next step is adding the defaults table + API.
+          </div>
+        )}
       </div>
 
+      {/* Bottom nav */}
       <div className="mt-6 grid grid-cols-2 gap-3">
         <button
           type="button"
@@ -592,6 +554,7 @@ export function Step3(props: {
             try {
               const key = safeTrim(selectedKey);
               if (!key) throw new Error("Choose an industry.");
+              // bottom button = normal flow; don’t auto-run sub interview
               await commitIndustry(key, "unknown");
             } catch (e: any) {
               setErr(e?.message ?? String(e));
