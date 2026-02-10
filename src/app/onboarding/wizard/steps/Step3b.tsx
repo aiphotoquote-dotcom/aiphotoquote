@@ -96,16 +96,13 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
 
 export function Step3b(props: {
   tenantId: string | null;
-  industryKey: string; // confirmed industry from Step3
+  industryKey: string;
   aiAnalysis: any | null | undefined;
 
   onBack: () => void;
-
   onSkip: () => void;
 
-  // Save + continue (label may be null if they skip)
   onSubmit: (args: { subIndustryLabel: string | null }) => Promise<void>;
-
   onError: (m: string) => void;
 }) {
   const tid = safeTrim(props.tenantId);
@@ -154,8 +151,8 @@ export function Step3b(props: {
   }, []);
   const [lastApi, setLastApi] = useState<any>(null);
 
-  // ✅ use "unknown" instead of "" to avoid TS narrowing traps
-  const [wantsSub, setWantsSub] = useState<"unknown" | "yes" | "no">("unknown");
+  // ✅ Use null/yes/no so TS never “locks” the value inside a branch
+  const [wantsSub, setWantsSub] = useState<"yes" | "no" | null>(null);
 
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
@@ -166,7 +163,6 @@ export function Step3b(props: {
 
   const isLocked = status === "locked";
 
-  // Reset answer box when question changes
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -196,7 +192,6 @@ export function Step3b(props: {
     setWorking(true);
     setErr(null);
     try {
-      // ✅ include mode in case server schema expects it
       const out = await postSubInterview({ mode: "SUB", tenantId: tid, industryKey, action: "start" });
       setState(out.subIndustryInterview);
       if (debugOn) setLastApi(out);
@@ -209,7 +204,7 @@ export function Step3b(props: {
     }
   }
 
-  // Hydrate Step3 intent once
+  // Hydrate intent from Step3 exactly once
   useEffect(() => {
     if (didHydrateIntentRef.current) return;
     didHydrateIntentRef.current = true;
@@ -217,18 +212,11 @@ export function Step3b(props: {
     const intent = readAndClearSubIntent();
     intentRef.current = intent;
 
-    if (intent === "refine") {
-      setWantsSub("yes");
-      return;
-    }
-
-    if (intent === "skip") {
-      setWantsSub("no");
-      return;
-    }
+    if (intent === "refine") setWantsSub("yes");
+    if (intent === "skip") setWantsSub("no");
   }, []);
 
-  // If Step3 asked to skip, persist null once we have tid + industryKey
+  // Auto-skip: persist null once we have tid + industryKey
   useEffect(() => {
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
@@ -241,7 +229,7 @@ export function Step3b(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, industryKey, wantsSub, nextQ?.id, isLocked, state]);
 
-  // Auto-start interview when wantsSub yes
+  // Auto-start when wantsSub yes
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !industryKey) return;
@@ -302,8 +290,11 @@ export function Step3b(props: {
     }
   }
 
-  const showPrompt = wantsSub === "unknown";
-  const yesNoOptions: Array<"yes" | "no"> = ["yes", "no"];
+  const showPrompt = wantsSub === null;
+  const options: Array<{ v: "yes" | "no"; label: string }> = [
+    { v: "yes", label: "Yes — let’s narrow it down" },
+    { v: "no", label: "No — keep it broad for now" },
+  ];
 
   return (
     <div>
@@ -345,25 +336,23 @@ export function Step3b(props: {
           </div>
 
           <div className="mt-3 grid gap-2">
-            {yesNoOptions.map((v) => {
-              const active = wantsSub === v;
-              return (
-                <button
-                  key={v}
-                  type="button"
-                  className={cn(
-                    "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                    active
-                      ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                      : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-                  )}
-                  onClick={() => setWantsSub(v)}
-                  disabled={working}
-                >
-                  {v === "yes" ? "Yes — let’s narrow it down" : "No — keep it broad for now"}
-                </button>
-              );
-            })}
+            {options.map((o) => (
+              <button
+                key={o.v}
+                type="button"
+                className={cn(
+                  "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                  // ✅ no wantsSub===o.v comparison needed here
+                  o.v === "yes"
+                    ? "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                    : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                )}
+                onClick={() => setWantsSub(o.v)}
+                disabled={working}
+              >
+                {o.label}
+              </button>
+            ))}
           </div>
         </div>
       ) : null}
