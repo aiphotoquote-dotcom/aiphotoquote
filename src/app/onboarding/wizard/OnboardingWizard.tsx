@@ -22,33 +22,54 @@ import { Step5Branding } from "./steps/Step5Branding";
 import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function tryParseJsonObject(x: any): any | null {
+  if (!x) return null;
+  if (typeof x === "object") return x;
+  if (typeof x !== "string") return null;
+
+  const s = x.trim();
+  if (!s) return null;
+  if (!(s.startsWith("{") || s.startsWith("["))) return null;
+
+  try {
+    const out = JSON.parse(s);
+    return out && typeof out === "object" ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Some of our API routes may return AI analysis under different keys/shapes
  * depending on which table/view they read from (tenant_onboarding.ai_analysis vs state.aiAnalysis).
  * Step2/Step3/Step3b must receive a stable aiAnalysis object.
+ *
+ * ✅ Hardened: supports json object OR stringified json.
  */
 function getAiAnalysis(state: OnboardingState | null): any | null {
   if (!state) return null;
-
   const s: any = state as any;
 
-  // Preferred / expected
-  if (s.aiAnalysis && typeof s.aiAnalysis === "object") return s.aiAnalysis;
+  const direct =
+    tryParseJsonObject(s.aiAnalysis) ||
+    tryParseJsonObject(s.ai_analysis) ||
+    tryParseJsonObject(s.aiAnalysisJson);
 
-  // Common alternates
-  if (s.ai_analysis && typeof s.ai_analysis === "object") return s.ai_analysis;
-  if (s.aiAnalysisJson && typeof s.aiAnalysisJson === "object") return s.aiAnalysisJson;
+  if (direct) return direct;
 
-  // Nested alternates (if state endpoint returns tenant_onboarding row as nested object)
-  if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
-  if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
+  const nested =
+    tryParseJsonObject(s.tenantOnboarding?.aiAnalysis) ||
+    tryParseJsonObject(s.tenantOnboarding?.ai_analysis) ||
+    tryParseJsonObject(s.tenantOnboarding?.aiAnalysisJson);
+
+  if (nested) return nested;
 
   return null;
-}
-
-function safeTrim(v: any) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
 }
 
 /**
@@ -281,7 +302,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Industry saved.");
-    go(5); // ✅ next is now step 5 (AI & Pricing Policy)
+    go(5);
   }
 
   async function ensureActiveTenant(tid: string) {
@@ -332,7 +353,7 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 6, // ✅ branding is now step 6
+        step: 6,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -344,7 +365,7 @@ export default function OnboardingWizard() {
 
     await refresh({ tenantId: tid });
     setLastAction("Saved branding & lead routing.");
-    go(7); // ✅ plan is now step 7
+    go(7);
   }
 
   if (loading) {
@@ -358,11 +379,8 @@ export default function OnboardingWizard() {
   }
 
   const existingUserContext = Boolean((state as any)?.isAuthenticated ?? true);
-
   const aiStatus = safeTrim((state as any)?.aiAnalysisStatus) || getMetaStatus(normalizedAiAnalysis);
 
-  // If Step3b is entered directly (URL), but we don’t have a pending industry key,
-  // fall back to whatever the server already has (best-effort).
   const fallbackIndustryKey =
     safeTrim((state as any)?.industryKey) ||
     safeTrim((state as any)?.selectedIndustryKey) ||
@@ -434,16 +452,14 @@ export default function OnboardingWizard() {
               onBack={() => go(2)}
               onReInterview={() => go(2)}
               onSubmit={async ({ industryKey }) => {
-                // ✅ Do NOT save to server yet. Hand off to Step3b.
                 const key = safeTrim(industryKey);
                 if (!key) throw new Error("Choose an industry.");
 
                 setPendingIndustryKey(key);
-                // Step3 no longer passes subIndustryLabel; Step3b handles it.
                 setPendingSubIndustryLabel(null);
 
                 setLastAction("Industry selected — refining focus…");
-                go(4); // ✅ Step3b
+                go(4);
               }}
             />
           ) : step === 4 ? (
