@@ -78,14 +78,39 @@ function normalizeKey(raw: string) {
 }
 
 /**
- * We use sessionStorage to pass "sub-industry intent" to Step3b without touching the server.
- * Step3b reads apq_onboarding_sub_intent:
- *  - "refine" -> auto run sub-industry interview
- *  - "skip"   -> auto continue without sub-industry
+ * Pass "sub-industry intent" to Step3b
  */
 function setSubIntent(v: "refine" | "skip" | "unknown") {
   try {
     window.sessionStorage.setItem("apq_onboarding_sub_intent", v);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * ✅ Persist AI interview per-tenant so Step3 doesn't "forget" on refresh/rerender.
+ */
+function interviewCacheKey(tenantId: string) {
+  return `apq_industry_interview:${tenantId}`;
+}
+
+function readCachedInterview(tenantId: string): ModeA_Interview | null {
+  try {
+    const raw = window.sessionStorage.getItem(interviewCacheKey(tenantId));
+    if (!raw) return null;
+    const j = JSON.parse(raw);
+    if (!j || typeof j !== "object") return null;
+    if (j.mode !== "A") return null;
+    return j as ModeA_Interview;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedInterview(tenantId: string, interview: ModeA_Interview) {
+  try {
+    window.sessionStorage.setItem(interviewCacheKey(tenantId), JSON.stringify(interview));
   } catch {
     // ignore
   }
@@ -98,8 +123,6 @@ export function Step3(props: {
   onBack: () => void;
   onReInterview: () => void;
 
-  // Mode A: Step3 commits industry selection only.
-  // Wizard hands off to Step3b after this.
   onSubmit: (args: { industryKey: string }) => Promise<void>;
 }) {
   const [loading, setLoading] = useState(true);
@@ -108,20 +131,47 @@ export function Step3(props: {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // defaults preview
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
-  // UX state
   const [showDisagree, setShowDisagree] = useState(false);
 
-  // Mode A interview (source of truth)
-  const interview: ModeA_Interview | null = useMemo(() => {
+  // ✅ cached interview fallback
+  const [cachedInterview, setCachedInterview] = useState<ModeA_Interview | null>(null);
+
+  const tid = safeTrim(props.tenantId);
+
+  // Load cached interview when tenant changes
+  useEffect(() => {
+    if (!tid) {
+      setCachedInterview(null);
+      return;
+    }
+    setCachedInterview(readCachedInterview(tid));
+  }, [tid]);
+
+  // Extract Mode A interview from props
+  const propInterview: ModeA_Interview | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
     if (!x || typeof x !== "object") return null;
     if ((x as any).mode !== "A") return null;
     return x as ModeA_Interview;
   }, [props.aiAnalysis]);
+
+  // ✅ source of truth: props interview if present else cached
+  const interview: ModeA_Interview | null = propInterview ?? cachedInterview;
+
+  // If props interview exists, persist it
+  useEffect(() => {
+    if (!tid) return;
+    if (!propInterview) return;
+    writeCachedInterview(tid, propInterview);
+    setCachedInterview((prev) => {
+      const prevRound = Number(prev?.round ?? 0) || 0;
+      const nextRound = Number(propInterview.round ?? 0) || 0;
+      return nextRound >= prevRound ? propInterview : prev;
+    });
+  }, [tid, propInterview]);
 
   const isLocked = safeTrim(interview?.status) === "locked";
 
@@ -167,7 +217,6 @@ export function Step3(props: {
     setErr(null);
     setLoading(true);
     try {
-      const tid = safeTrim(props.tenantId);
       if (!tid) throw new Error("NO_TENANT: missing tenantId for industries load.");
 
       const res = await fetch(buildIndustriesUrl(tid), { method: "GET", cache: "no-store" });
@@ -196,9 +245,9 @@ export function Step3(props: {
   useEffect(() => {
     loadIndustries();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.tenantId]);
+  }, [tid]);
 
-  // If suggestion arrives after industries load, adopt it (especially if locked)
+  // If suggestion arrives after industries load, adopt it
   useEffect(() => {
     if (!items.length) return;
     if (!suggestedKey) return;
@@ -218,7 +267,6 @@ export function Step3(props: {
   }, [suggestedKey, items.length, isLocked]);
 
   useEffect(() => {
-    const tid = safeTrim(props.tenantId);
     if (!tid) return;
     if (!selectedKey) {
       setDefaults(null);
@@ -245,7 +293,7 @@ export function Step3(props: {
     return () => {
       alive = false;
     };
-  }, [props.tenantId, selectedKey]);
+  }, [tid, selectedKey]);
 
   const canSave = Boolean(selectedKey);
 
@@ -266,7 +314,6 @@ export function Step3(props: {
         This locks in your default prompts, customer questions, and photo requests.
       </div>
 
-      {/* AI summary card */}
       {showAiCard ? (
         <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
           <div className="flex items-start justify-between gap-3">
@@ -288,7 +335,7 @@ export function Step3(props: {
                 ) : topCandidates.length ? (
                   <span className="opacity-90">A few close matches surfaced — pick one below or restart the interview.</span>
                 ) : (
-                  <span className="opacity-90">Restart the interview to improve the match.</span>
+                  <span className="opacity-90">Restart the interview to get a confident industry suggestion.</span>
                 )}
               </div>
 
@@ -346,7 +393,6 @@ export function Step3(props: {
             </div>
           </div>
 
-          {/* 3-way decision */}
           {showThreeWay ? (
             <div className="mt-4">
               <div className="text-sm opacity-90">
@@ -394,7 +440,6 @@ export function Step3(props: {
                       setSaving(false);
                     }
                   }}
-                  title="Lock the industry, then refine with an optional sub-industry interview"
                 >
                   Yes — but I’m more focused
                 </button>
@@ -468,7 +513,7 @@ export function Step3(props: {
         </div>
       ) : null}
 
-      {/* Starter pack (full width now) */}
+      {/* Starter pack */}
       <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
         <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -476,7 +521,7 @@ export function Step3(props: {
         </div>
 
         {loading ? (
-          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading industries…</div>
+          <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading…</div>
         ) : !selectedKey ? (
           <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
             Choose an industry to preview defaults.
@@ -528,7 +573,7 @@ export function Step3(props: {
           </div>
         ) : (
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-            Defaults aren’t available yet for this industry. That’s okay — next step is adding the defaults table + API.
+            Defaults aren’t available yet for this industry.
           </div>
         )}
       </div>
@@ -554,7 +599,6 @@ export function Step3(props: {
             try {
               const key = safeTrim(selectedKey);
               if (!key) throw new Error("Choose an industry.");
-              // bottom button = normal flow; don’t auto-run sub interview
               await commitIndustry(key, "unknown");
             } catch (e: any) {
               setErr(e?.message ?? String(e));
