@@ -2,6 +2,7 @@
 import React from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { headers } from "next/headers";
 
 import { requirePlatformRole } from "@/lib/rbac/guards";
 
@@ -14,9 +15,7 @@ type PreviewResp =
       mode?: "archive" | "delete";
       expectedConfirm?: string;
       tenant: { id: string; name: string; slug: string | null; status?: string | null };
-      counts:
-        | Array<{ key: string; label: string; count: number }>
-        | Record<string, number>;
+      counts: Array<{ key: string; label: string; count: number }> | Record<string, number>;
       notes?: string[];
     }
   | { ok: false; error: string; message?: string; issues?: any };
@@ -25,12 +24,9 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function normalizeCounts(
-  counts: PreviewResp extends { ok: true } ? any : any
-): Array<{ key: string; label: string; count: number }> {
+function normalizeCounts(counts: any): Array<{ key: string; label: string; count: number }> {
   if (!counts) return [];
 
-  // If API already returns the UI-friendly array
   if (Array.isArray(counts)) {
     return counts.map((c) => ({
       key: String(c.key),
@@ -39,7 +35,6 @@ function normalizeCounts(
     }));
   }
 
-  // If API returns a record of counts (current archive route does this)
   const labelMap: Record<string, string> = {
     tenantMembers: "Tenant members",
     tenantSettings: "Tenant settings",
@@ -57,11 +52,24 @@ function normalizeCounts(
   }));
 }
 
+function getBaseUrlFromHeaders(h: Headers) {
+  const proto = h.get("x-forwarded-proto") || "https";
+  const host = h.get("x-forwarded-host") || h.get("host");
+  if (!host) return null;
+  return `${proto}://${host}`;
+}
+
 async function getPreview(tenantId: string): Promise<PreviewResp> {
-  // Prefer relative URL in Server Components so cookies/session behave as expected on Vercel
-  const res = await fetch(`/api/pcc/tenants/${encodeURIComponent(tenantId)}/delete`, {
+  const h = await headers();
+  const base = getBaseUrlFromHeaders(h);
+  if (!base) return { ok: false, error: "NO_HOST" };
+
+  const cookie = h.get("cookie") || "";
+
+  const res = await fetch(`${base}/api/pcc/tenants/${encodeURIComponent(tenantId)}/delete`, {
     method: "GET",
     cache: "no-store",
+    headers: cookie ? { cookie } : undefined,
   }).catch(() => null);
 
   if (!res) return { ok: false, error: "PREVIEW_FETCH_FAILED" };
@@ -101,8 +109,7 @@ export default async function PccTenantArchivePage({
   }
 
   const slug = preview.tenant.slug ?? "(unknown)";
-  const expectedConfirm = String(preview.expectedConfirm ?? `ARCHIVE ${slug}`);
-  const confirmPhrase = expectedConfirm;
+  const confirmPhrase = String(preview.expectedConfirm ?? `ARCHIVE ${slug}`);
 
   const countsList = normalizeCounts((preview as any).counts);
 
@@ -116,14 +123,24 @@ export default async function PccTenantArchivePage({
 
     if (!tid) redirect("/pcc/tenants");
 
-    // Server-side safety: require exact phrase
     if (!expected || typed !== expected) {
       redirect(`/pcc/tenants/${encodeURIComponent(tid)}/delete?err=confirm`);
     }
 
-    const res = await fetch(`/api/pcc/tenants/${encodeURIComponent(tid)}/delete`, {
+    const h = await headers();
+    const base = getBaseUrlFromHeaders(h);
+    if (!base) {
+      redirect(`/pcc/tenants/${encodeURIComponent(tid)}/delete?err=NO_HOST`);
+    }
+
+    const cookie = h.get("cookie") || "";
+
+    const res = await fetch(`${base!}/api/pcc/tenants/${encodeURIComponent(tid)}/delete`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(cookie ? { cookie } : {}),
+      },
       body: JSON.stringify({
         confirm: typed,
         expected,
@@ -148,8 +165,7 @@ export default async function PccTenantArchivePage({
           <div>
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Archive tenant</h1>
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              This will <span className="font-semibold">disable</span> the tenant and preserve all historical data.
-              No records are deleted.
+              This will <span className="font-semibold">disable</span> the tenant and preserve all historical data. No records are deleted.
             </p>
           </div>
 
@@ -231,10 +247,7 @@ export default async function PccTenantArchivePage({
             rows={3}
           />
 
-          <button
-            type="submit"
-            className="w-full rounded-xl bg-amber-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
-          >
+          <button type="submit" className="w-full rounded-xl bg-amber-600 px-4 py-3 text-sm font-semibold text-white hover:opacity-90">
             Yes, archive this tenant
           </button>
 
