@@ -57,7 +57,7 @@ async function postSubInterview(payload: any) {
     headers: { "content-type": "application/json" },
     cache: "no-store",
     credentials: "include",
-    body: JSON.stringify(payload гармони??),
+    body: JSON.stringify(payload),
   });
 
   const txt = await res.text().catch(() => "");
@@ -154,7 +154,7 @@ export function Step3b(props: {
   }, []);
   const [lastApi, setLastApi] = useState<any>(null);
 
-  // IMPORTANT: don't render-map in a scope where TS has narrowed wantsSub to ""
+  // ✅ use "unknown" instead of "" to avoid TS narrowing traps
   const [wantsSub, setWantsSub] = useState<"unknown" | "yes" | "no">("unknown");
 
   const [textAnswer, setTextAnswer] = useState("");
@@ -235,7 +235,6 @@ export function Step3b(props: {
     if (!tid || !industryKey) return;
     if (nextQ?.id || isLocked) return;
 
-    // Only auto-continue if we haven't already started an interview
     if (!state) {
       saveAndContinue(null).catch(() => null);
     }
@@ -274,7 +273,6 @@ export function Step3b(props: {
     setErr(null);
 
     try {
-      // ✅ include mode in case server schema expects it
       const out = await postSubInterview({
         mode: "SUB",
         tenantId: tid,
@@ -305,7 +303,7 @@ export function Step3b(props: {
   }
 
   const showPrompt = wantsSub === "unknown";
-  const yesNoOptions: Array<"yes" | "no"> = ["yes", "no"]; // avoid TS narrowing traps
+  const yesNoOptions: Array<"yes" | "no"> = ["yes", "no"];
 
   return (
     <div>
@@ -339,7 +337,6 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -349,7 +346,7 @@ export function Step3b(props: {
 
           <div className="mt-3 grid gap-2">
             {yesNoOptions.map((v) => {
-              const active = String(wantsSub) === v; // ✅ avoid TS narrowing
+              const active = wantsSub === v;
               return (
                 <button
                   key={v}
@@ -371,7 +368,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Manual NO path (only when user chose it, not auto-skip intent) */}
+      {/* Manual NO path */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
