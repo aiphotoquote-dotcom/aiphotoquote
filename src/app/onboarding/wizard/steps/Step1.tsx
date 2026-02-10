@@ -1,3 +1,4 @@
+// src/app/onboarding/wizard/steps/Step1.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
@@ -49,6 +50,11 @@ function normalizeWebsiteInputLive(raw: string) {
   return String(raw ?? "").replace(/\s+/g, "");
 }
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 export function Step1(props: {
   existingUser: boolean;
   onSubmit: (payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) => Promise<void>;
@@ -58,6 +64,7 @@ export function Step1(props: {
   const [ownerEmail, setOwnerEmail] = useState("");
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const can = useMemo(() => {
     const bnOk = businessName.trim().length >= 2;
@@ -73,11 +80,20 @@ export function Step1(props: {
         This helps us personalize your estimates, emails, and branding.
       </div>
 
+      {err ? (
+        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          {err}
+        </div>
+      ) : null}
+
       <div className="mt-6 grid gap-4">
         <Field
           label="Business name"
           value={businessName}
-          onChange={(v) => setBusinessName(toTitleCase(v))}
+          onChange={(v) => {
+            setErr(null);
+            setBusinessName(toTitleCase(v));
+          }}
           placeholder="Maggio Upholstery"
           autoCapitalize="words"
         />
@@ -91,18 +107,33 @@ export function Step1(props: {
             <Field
               label="Your name"
               value={ownerName}
-              onChange={(v) => setOwnerName(toTitleCase(v))}
+              onChange={(v) => {
+                setErr(null);
+                setOwnerName(toTitleCase(v));
+              }}
               placeholder="Joe Maggio"
               autoCapitalize="words"
             />
-            <Field label="Your email" value={ownerEmail} onChange={setOwnerEmail} placeholder="you@shop.com" type="email" />
+            <Field
+              label="Your email"
+              value={ownerEmail}
+              onChange={(v) => {
+                setErr(null);
+                setOwnerEmail(v);
+              }}
+              placeholder="you@shop.com"
+              type="email"
+            />
           </div>
         )}
 
         <Field
           label="Website (optional)"
           value={website}
-          onChange={(v) => setWebsite(normalizeWebsiteInputLive(v))}
+          onChange={(v) => {
+            setErr(null);
+            setWebsite(normalizeWebsiteInputLive(v));
+          }}
           placeholder="https://yourshop.com"
           type="url"
           inputMode="url"
@@ -117,14 +148,31 @@ export function Step1(props: {
         className="mt-6 w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
         disabled={!can || saving}
         onClick={async () => {
+          if (saving) return;
+
+          setErr(null);
           setSaving(true);
+
+          const payload = {
+            businessName: toTitleCase(businessName).trim(),
+            website: normalizeWebsiteInputLive(website).trim() || undefined,
+            ownerName: props.existingUser ? undefined : toTitleCase(ownerName).trim(),
+            ownerEmail: props.existingUser ? undefined : ownerEmail.trim(),
+          };
+
           try {
-            await props.onSubmit({
-              businessName: toTitleCase(businessName).trim(),
-              website: normalizeWebsiteInputLive(website).trim() || undefined,
-              ownerName: props.existingUser ? undefined : toTitleCase(ownerName).trim(),
-              ownerEmail: props.existingUser ? undefined : ownerEmail.trim(),
-            });
+            // Basic client-side guardrails (keeps server errors cleaner)
+            if (payload.businessName.length < 2) throw new Error("Business name is required.");
+            if (!props.existingUser) {
+              if (!safeTrim(payload.ownerName).length || safeTrim(payload.ownerName).length < 2) throw new Error("Your name is required.");
+              if (!safeTrim(payload.ownerEmail).includes("@")) throw new Error("Enter a valid email.");
+            }
+
+            await props.onSubmit(payload);
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            console.error("Step1 submit failed:", e);
+            setErr(msg);
           } finally {
             setSaving(false);
           }
