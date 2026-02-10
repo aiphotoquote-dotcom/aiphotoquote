@@ -293,10 +293,10 @@ async function readTenantOnboarding(tenantId: string) {
   const website = row?.website ?? null;
   const hasWebsite = Boolean(safeTrim(website));
 
-  // Kept for backward compatibility (older Step3 / older interview modes)
+  // Kept for backward compatibility
   const industryInference = (aiAnalysis as any)?.industryInference ?? null;
 
-  // ✅ NEW: Mode A interview state, consumed by Step2
+  // Mode A interview state, consumed by Step2
   const industryInterview = (aiAnalysis as any)?.industryInterview ?? null;
 
   const planTierRaw = safeTrim(row?.plan_tier);
@@ -426,10 +426,10 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // placeholder industry_key; Mode A will refine later
+        // ✅ Do NOT force industry_key here. Keep existing/default behavior elsewhere.
         await db.execute(sql`
-          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
-          values (${tenantId}::uuid, 'service', ${businessName}, now())
+          insert into tenant_settings (tenant_id, business_name, updated_at)
+          values (${tenantId}::uuid, ${businessName}, now())
           on conflict (tenant_id) do update
             set business_name = excluded.business_name,
                 updated_at = now()
@@ -441,16 +441,17 @@ export async function POST(req: Request) {
           where id = ${tenantId}::uuid
         `);
 
+        // ✅ Do NOT overwrite industry_key on updates either.
         await db.execute(sql`
-          insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
-          values (${tenantId}::uuid, 'service', ${businessName}, now())
+          insert into tenant_settings (tenant_id, business_name, updated_at)
+          values (${tenantId}::uuid, ${businessName}, now())
           on conflict (tenant_id) do update
             set business_name = excluded.business_name,
                 updated_at = now()
         `);
       }
 
-      // ✅ If no website, skip website analysis and go to interview/industry step
+      // If no website, skip website analysis and go to industry confirmation flow
       const nextStep = website ? 2 : 3;
 
       await db.execute(sql`
@@ -465,13 +466,8 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId }, 200);
     }
 
-    /**
-     * ---------------- Branding save ----------------
-     * Backward compatible:
-     *  - old code used step=5
-     *  - current wizard uses step=6
-     */
-    if (step === 5 || step === 6) {
+    // ---------------- STEP 6: branding save (matches UI) ----------------
+    if (step === 6) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
@@ -487,10 +483,10 @@ export async function POST(req: Request) {
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
       const platformFrom = "no-reply@aiphotoquote.com";
 
+      // ✅ CRITICAL: Do not overwrite industry_key here.
       await db.execute(sql`
         insert into tenant_settings (
           tenant_id,
-          industry_key,
           lead_to_email,
           brand_logo_url,
           resend_from_email,
@@ -498,7 +494,6 @@ export async function POST(req: Request) {
         )
         values (
           ${tid}::uuid,
-          'service',
           ${leadToEmail},
           ${brandLogoUrl},
           ${platformFrom},
@@ -511,34 +506,26 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
-      // Wizard treats branding as step 6
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
-        values (${tid}::uuid, 6, false, now(), now())
+        values (${tid}::uuid, 7, false, now(), now())
         on conflict (tenant_id) do update
-          set current_step = greatest(tenant_onboarding.current_step, 6),
+          set current_step = greatest(tenant_onboarding.current_step, 7),
               updated_at = now()
       `);
 
       return noCacheJson({ ok: true, tenantId: tid }, 200);
     }
 
-    /**
-     * ---------------- Plan selection ----------------
-     * Backward compatible:
-     *  - some older code may send step=6
-     *  - current UI is step 7
-     */
-    if (step === 6 || step === 7) {
+    // ---------------- STEP 7: plan selection (matches UI) ----------------
+    if (step === 7) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
       await requireMembership(clerkUserId, tid);
 
       const plan = safePlan(body?.plan);
-      if (!plan) {
-        return noCacheJson({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, 400);
-      }
+      if (!plan) return noCacheJson({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, 400);
 
       const monthlyLimit = plan === "tier0" ? 5 : plan === "tier1" ? 50 : null;
       const graceCredits = plan === "tier0" ? 20 : 30;
@@ -555,7 +542,6 @@ export async function POST(req: Request) {
         where tenant_id = ${tid}::uuid
       `);
 
-      // Wizard final is step 7
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
         values (${tid}::uuid, 7, true, now(), now())
