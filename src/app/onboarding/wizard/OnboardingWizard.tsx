@@ -55,8 +55,8 @@ export default function OnboardingWizard() {
 
   const [lastAction, setLastAction] = useState<string | null>(null);
 
-  // Step3 selects an industry key; Step4 (Step3b) finalizes with optional subIndustry.
   const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
+  const [pendingSubIndustryLabel, setPendingSubIndustryLabel] = useState<string | null>(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -241,6 +241,7 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
+  // ✅ FIX: do not send subIndustryLabel: null to API (omit instead)
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
     setErr(null);
     setLastAction(null);
@@ -250,6 +251,7 @@ export default function OnboardingWizard() {
 
     const body: any = { tenantId: tid, ...args };
 
+    // Omit null/empty to avoid zod "invalid request body"
     if (body.subIndustryLabel === null || safeTrim(body.subIndustryLabel) === "") {
       delete body.subIndustryLabel;
     }
@@ -316,9 +318,7 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        // ✅ IMPORTANT: server expects Branding as step 5 (plan/tier is step 6 on backend)
-        // UI step is 6 because we inserted the AI Policy handoff step.
-        step: 5,
+        step: 6,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -412,6 +412,8 @@ export default function OnboardingWizard() {
             <Step3
               tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               aiAnalysis={normalizedAiAnalysis}
+              // ✅ ensures Step3 never "falls back" to Service after a real selection exists
+              currentIndustryKey={effectiveIndustryKey || null}
               onBack={() => go(2)}
               onReInterview={() => go(2)}
               onSubmit={async ({ industryKey }) => {
@@ -419,7 +421,9 @@ export default function OnboardingWizard() {
                 if (!key) throw new Error("Choose an industry.");
 
                 setPendingIndustryKey(key);
-                setLastAction("Industry selected.");
+                setPendingSubIndustryLabel(null);
+
+                setLastAction("Industry selected — refining focus…");
                 go(4);
               }}
             />
@@ -432,17 +436,27 @@ export default function OnboardingWizard() {
               onSkip={async () => {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
-                await saveIndustrySelection({ industryKey: key, subIndustryLabel: null });
+
+                const finalSub = safeTrim(pendingSubIndustryLabel) ? safeTrim(pendingSubIndustryLabel) : null;
+                await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
+
                 setPendingIndustryKey("");
+                setPendingSubIndustryLabel(null);
               }}
               onSubmit={async ({ subIndustryLabel }) => {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");
 
-                const finalSub = safeTrim(subIndustryLabel) ? safeTrim(subIndustryLabel) : null;
+                const finalSub = safeTrim(subIndustryLabel)
+                  ? safeTrim(subIndustryLabel)
+                  : safeTrim(pendingSubIndustryLabel)
+                  ? safeTrim(pendingSubIndustryLabel)
+                  : null;
 
                 await saveIndustrySelection({ industryKey: key, subIndustryLabel: finalSub });
+
                 setPendingIndustryKey("");
+                setPendingSubIndustryLabel(null);
               }}
               onError={(m) => setErr(m)}
             />

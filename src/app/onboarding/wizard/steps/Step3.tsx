@@ -57,14 +57,15 @@ function safeTrim(v: any) {
   return s ? s : "";
 }
 
-function clamp01(n: any) {
+function clamp01Nullable(n: any): number | null {
   const x = Number(n);
-  if (!Number.isFinite(x)) return 0;
+  if (!Number.isFinite(x)) return null;
   return Math.max(0, Math.min(1, x));
 }
 
-function pct(n: number) {
-  return Math.max(0, Math.min(100, Math.round(n * 100)));
+function pct(n: number | null) {
+  if (n === null) return "—";
+  return `${Math.max(0, Math.min(100, Math.round(n * 100)))}%`;
 }
 
 function normalizeKey(raw: string) {
@@ -92,6 +93,9 @@ function setSubIntent(v: "refine" | "skip" | "unknown") {
 export function Step3(props: {
   tenantId: string | null;
   aiAnalysis: any | null | undefined;
+
+  // ✅ NEW: wizard can pass the tenant's current/saved industry key
+  currentIndustryKey?: string | null;
 
   onBack: () => void;
   onReInterview: () => void;
@@ -122,12 +126,8 @@ export function Step3(props: {
   const isLocked = safeTrim(interview?.status) === "locked";
 
   const suggestedKey = useMemo(() => normalizeKey(interview?.proposedIndustry?.key ?? ""), [interview?.proposedIndustry?.key]);
-  const suggestedConfidence = useMemo(() => (interview ? clamp01(interview.confidenceScore) : null), [interview]);
-
-  // IMPORTANT: fit is often not computed yet; avoid showing "0%" which looks broken.
-  const fitScoreRaw = useMemo(() => (interview ? Number(interview.fitScore) : NaN), [interview]);
-  const fitScore01 = Number.isFinite(fitScoreRaw) ? clamp01(fitScoreRaw) : null;
-  const fitDisplay = fitScore01 === null || fitScore01 === 0 ? "—" : `${pct(fitScore01)}%`;
+  const suggestedConfidence = useMemo(() => (interview ? clamp01Nullable(interview.confidenceScore) : null), [interview]);
+  const fitScore = useMemo(() => (interview ? clamp01Nullable(interview.fitScore) : null), [interview]);
 
   const aiStatus = useMemo(() => safeTrim(interview?.status) || "", [interview]);
   const debugReason = useMemo(() => safeTrim(interview?.meta?.debug?.reason) || "", [interview]);
@@ -142,7 +142,7 @@ export function Step3(props: {
       .map((c: any) => ({
         key: normalizeKey(safeTrim(c?.key ?? "")),
         label: safeTrim(c?.label ?? ""),
-        score: clamp01(c?.score),
+        score: clamp01Nullable(c?.score) ?? 0,
       }))
       .filter((c) => c.key)
       .slice(0, 6);
@@ -173,13 +173,32 @@ export function Step3(props: {
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      const serverSel = normalizeKey(safeTrim((j as any).selectedKey));
-      const hasSuggested = Boolean(suggestedKey) && list.some((x) => x.key === suggestedKey);
+      // ✅ Prefer: wizard-provided current industry, then server, then AI suggested.
+      const wizardSel = normalizeKey(safeTrim(props.currentIndustryKey));
+      const serverSel =
+        normalizeKey(safeTrim((j as any).selectedKey)) ||
+        normalizeKey(safeTrim((j as any).industryKey)) ||
+        normalizeKey(safeTrim((j as any).tenantIndustryKey)) ||
+        "";
 
-      const next =
+      const hasWizard = wizardSel && list.some((x) => x.key === wizardSel);
+      const hasServer = serverSel && list.some((x) => x.key === serverSel);
+      const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
+
+      // Choose next:
+      // - if tenant already has a real industry, keep it (never revert to "service")
+      // - else if AI has a suggestion, adopt it
+      // - else fall back to something that isn't "service" if possible
+      let next =
+        (hasWizard ? wizardSel : "") ||
+        (hasServer ? serverSel : "") ||
         (hasSuggested ? suggestedKey : "") ||
-        (serverSel && list.some((x) => x.key === serverSel) ? serverSel : "") ||
-        (list[0]?.key ?? "");
+        "";
+
+      if (!next) {
+        const nonGeneric = list.find((x) => x.key && x.key !== "service");
+        next = nonGeneric?.key ?? list[0]?.key ?? "";
+      }
 
       setSelectedKey(next);
     } catch (e: any) {
@@ -194,7 +213,7 @@ export function Step3(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tenantId]);
 
-  // If suggestion arrives later, adopt it
+  // If suggestion arrives later, adopt it ONLY if we are still generic/empty.
   useEffect(() => {
     if (!items.length) return;
     if (!suggestedKey) return;
@@ -254,7 +273,7 @@ export function Step3(props: {
     await props.onSubmit({ industryKey: k });
   }
 
-  const showFallbackPicker = !showThreeWay; // only show dropdown selection if no proposed industry key yet
+  const showFallbackPicker = !showThreeWay;
 
   return (
     <div>
@@ -310,7 +329,7 @@ export function Step3(props: {
                           title="Switch to this industry"
                         >
                           {c.label || c.key}
-                          <span className="ml-2 font-mono opacity-70">{pct(c.score)}%</span>
+                          <span className="ml-2 font-mono opacity-70">{pct(clamp01Nullable(c.score))}</span>
                         </button>
                       ))}
                   </div>
@@ -331,13 +350,11 @@ export function Step3(props: {
             </div>
 
             <div className="shrink-0 text-right text-xs">
-              {Number.isFinite(suggestedConfidence as any) ? (
-                <div>
-                  Confidence: <span className="font-mono">{pct(suggestedConfidence as number)}%</span>
-                </div>
-              ) : null}
+              <div>
+                Confidence: <span className="font-mono">{pct(suggestedConfidence)}</span>
+              </div>
               <div className="mt-1">
-                Fit: <span className="font-mono">{fitDisplay}</span>
+                Fit: <span className="font-mono">{pct(fitScore)}</span>
               </div>
             </div>
           </div>
@@ -521,7 +538,6 @@ export function Step3(props: {
           )}
         </div>
       ) : (
-        // When we do have a proposed industry: show only the starter pack preview
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
