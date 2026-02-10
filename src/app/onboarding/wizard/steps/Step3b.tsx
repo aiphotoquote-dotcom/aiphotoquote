@@ -73,8 +73,8 @@ function cn(...xs: Array<string | false | null | undefined>) {
 }
 
 /**
- * ✅ Critical: send BOTH camelCase and snake_case so the API route schema
- * accepts the body regardless of which naming convention it currently validates.
+ * ✅ Send BOTH camelCase and snake_case so the API route schema accepts the body
+ * regardless of which naming convention it currently validates.
  */
 function buildApiPayload(input: any) {
   const tenantId = safeTrim(input?.tenantId ?? input?.tenant_id);
@@ -98,7 +98,6 @@ function buildApiPayload(input: any) {
     mode: "SUB",
   };
 
-  // Only include answer fields when present
   if (questionId) {
     base.questionId = questionId;
     base.question_id = questionId;
@@ -130,7 +129,6 @@ async function postSubInterview(payloadIn: any) {
   try {
     j = txt ? JSON.parse(txt) : null;
   } catch {
-    // If API returned non-JSON (e.g., HTML), surface first chunk to debug
     throw new Error(`Invalid response from server: ${txt?.slice(0, 160) || "(empty)"}`);
   }
 
@@ -212,6 +210,9 @@ export function Step3b(props: {
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
 
   const isLocked = status === "locked";
+
+  // ✅ Avoid TS narrowing issues inside JSX:
+  // prompt is only shown when wantsSub is still empty (nothing chosen yet)
   const showPrompt = wantsSub === "";
 
   // Reset answer box when question changes
@@ -381,6 +382,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
+      {/* Prompt (only when they haven't chosen yet AND no intent forced state) */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -394,10 +396,9 @@ export function Step3b(props: {
                 key={v}
                 type="button"
                 className={cn(
+                  // ✅ No selection exists yet, so don't compare wantsSub === v here (TS narrows wantsSub to "")
                   "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                  wantsSub === v
-                    ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                    : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
                 )}
                 onClick={() => setWantsSub(v)}
                 disabled={working}
@@ -409,6 +410,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
+      {/* If they chose "no" manually (not the auto-skip), show action buttons */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
@@ -430,6 +432,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
+      {/* Sub-industry interview */}
       {wantsSub === "yes" ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3">
