@@ -253,12 +253,14 @@ function applyModeACompat(ai: any | null): any | null {
   // Only fill if missing — never overwrite other paths
   const next = { ...ai };
 
-  if (!safeTrim(next.suggestedIndustryKey) && proposedKey) next.suggestedIndustryKey = proposedKey;
-  if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf)) next.confidenceScore = conf;
-  if (next.needsConfirmation === undefined || next.needsConfirmation === null) next.needsConfirmation = true;
-
-  // Optional: a friendly label hint for Step3 if you want it later
-  if (!safeTrim(next.suggestedIndustryLabel) && proposedLabel) next.suggestedIndustryLabel = proposedLabel;
+  if (!safeTrim((next as any).suggestedIndustryKey) && proposedKey) (next as any).suggestedIndustryKey = proposedKey;
+  if (((next as any).confidenceScore === undefined || (next as any).confidenceScore === null) && Number.isFinite(conf)) {
+    (next as any).confidenceScore = conf;
+  }
+  if ((next as any).needsConfirmation === undefined || (next as any).needsConfirmation === null) {
+    (next as any).needsConfirmation = true;
+  }
+  if (!safeTrim((next as any).suggestedIndustryLabel) && proposedLabel) (next as any).suggestedIndustryLabel = proposedLabel;
 
   return next;
 }
@@ -292,10 +294,10 @@ async function readTenantOnboarding(tenantId: string) {
   const hasWebsite = Boolean(safeTrim(website));
 
   // Kept for backward compatibility (older Step3 / older interview modes)
-  const industryInference = aiAnalysis?.industryInference ?? null;
+  const industryInference = (aiAnalysis as any)?.industryInference ?? null;
 
   // ✅ NEW: Mode A interview state, consumed by Step2
-  const industryInterview = aiAnalysis?.industryInterview ?? null;
+  const industryInterview = (aiAnalysis as any)?.industryInterview ?? null;
 
   const planTierRaw = safeTrim(row?.plan_tier);
   const planTier = safePlan(planTierRaw);
@@ -350,24 +352,13 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return noCacheJson(
-        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
-        400
-      );
+      return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." }, 400);
     }
 
     await requireMembership(clerkUserId, tenantId);
     const data = await readTenantOnboarding(tenantId);
 
-    return noCacheJson(
-      {
-        ok: true,
-        isAuthenticated: true,
-        tenantId,
-        ...data,
-      },
-      200
-    );
+    return noCacheJson({ ok: true, isAuthenticated: true, tenantId, ...data }, 200);
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -388,9 +379,7 @@ export async function POST(req: Request) {
       const businessName = safeTrim(body?.businessName);
       const website = safeTrim(body?.website);
 
-      if (businessName.length < 2) {
-        return noCacheJson({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, 400);
-      }
+      if (businessName.length < 2) return noCacheJson({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, 400);
 
       const { appUserId } = await ensureAppUser(clerkUserId);
 
@@ -405,12 +394,8 @@ export async function POST(req: Request) {
         ownerEmail = safeTrim(ownerEmail);
       }
 
-      if (ownerName.length < 2) {
-        return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
-      }
-      if (!ownerEmail.includes("@")) {
-        return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
-      }
+      if (ownerName.length < 2) return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
+      if (!ownerEmail.includes("@")) return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
 
       let tenantId: string | null = null;
 
@@ -441,7 +426,7 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // NOTE: leaving placeholder industry_key for now (Mode A will propose/create later)
+        // placeholder industry_key; Mode A will refine later
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -480,8 +465,13 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId }, 200);
     }
 
-    // ---------------- STEP 5: branding save ----------------
-    if (step === 5) {
+    /**
+     * ---------------- Branding save ----------------
+     * Backward compatible:
+     *  - old code used step=5
+     *  - current wizard uses step=6
+     */
+    if (step === 5 || step === 6) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
@@ -491,14 +481,10 @@ export async function POST(req: Request) {
       const brandLogoUrlRaw = safeTrim(body?.brand_logo_url);
 
       if (!leadToEmail.includes("@")) {
-        return noCacheJson(
-          { ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." },
-          400
-        );
+        return noCacheJson({ ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." }, 400);
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
-
       const platformFrom = "no-reply@aiphotoquote.com";
 
       await db.execute(sql`
@@ -525,6 +511,7 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
+      // Wizard treats branding as step 6
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
         values (${tid}::uuid, 6, false, now(), now())
@@ -536,8 +523,13 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId: tid }, 200);
     }
 
-    // ---------------- STEP 6: plan selection ----------------
-    if (step === 6) {
+    /**
+     * ---------------- Plan selection ----------------
+     * Backward compatible:
+     *  - some older code may send step=6
+     *  - current UI is step 7
+     */
+    if (step === 6 || step === 7) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
@@ -563,11 +555,12 @@ export async function POST(req: Request) {
         where tenant_id = ${tid}::uuid
       `);
 
+      // Wizard final is step 7
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
-        values (${tid}::uuid, 6, true, now(), now())
+        values (${tid}::uuid, 7, true, now(), now())
         on conflict (tenant_id) do update
-          set current_step = greatest(tenant_onboarding.current_step, 6),
+          set current_step = greatest(tenant_onboarding.current_step, 7),
               completed = true,
               updated_at = now()
       `);
