@@ -81,10 +81,15 @@ async function postInterview(payload: any) {
   });
 
   const txt = await res.text().catch(() => "");
-  const j = txt ? JSON.parse(txt) : null;
+  let j: any = null;
+  try {
+    j = txt ? JSON.parse(txt) : null;
+  } catch {
+    j = null;
+  }
 
   if (!res.ok || !j?.ok) {
-    throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+    throw new Error(j?.message || j?.error || (txt ? txt : `HTTP ${res.status}`));
   }
   return j as { ok: true; tenantId: string; industryInterview: IndustryInterviewA };
 }
@@ -106,6 +111,35 @@ function pick(obj: any, paths: string[]): any {
     if (ok) return cur;
   }
   return null;
+}
+
+function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
+  if (!aiAnalysis || typeof aiAnalysis !== "object") return false;
+
+  // Strong signals that analysis actually produced something useful.
+  const proposedKey = safeTrim(pick(aiAnalysis, ["industryInterview.proposedIndustry.key"]));
+  const proposedLabel = safeTrim(pick(aiAnalysis, ["industryInterview.proposedIndustry.label"]));
+
+  const suggestedKey =
+    safeTrim(pick(aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
+    safeTrim(pick(aiAnalysis, ["suggestedIndustry.key"]));
+
+  const suggestedLabel =
+    safeTrim(pick(aiAnalysis, ["suggestedIndustryLabel"])) ||
+    safeTrim(pick(aiAnalysis, ["suggestedIndustry.label"])) ||
+    safeTrim(pick(aiAnalysis, ["businessGuess"])) ||
+    safeTrim(pick(aiAnalysis, ["business_guess"]));
+
+  const conf =
+    pick(aiAnalysis, ["confidenceScore", "confidence_score"]) ??
+    pick(aiAnalysis, ["industryInterview.confidenceScore"]) ??
+    null;
+
+  // If we have a guess OR a confidence that looks populated, we treat it as "analysis exists".
+  const confNum = Number(conf);
+  const hasConf = Number.isFinite(confNum) && confNum > 0;
+
+  return Boolean(proposedKey || proposedLabel || suggestedKey || suggestedLabel || hasConf);
 }
 
 export function Step2(props: {
@@ -132,13 +166,10 @@ export function Step2(props: {
   const aiStatus = aiStatusRaw.toLowerCase();
   const aiErr = safeTrim(props.aiAnalysisError);
 
-  // “Do we have any meaningful analysis yet?”
-  const hasAnalysis = useMemo(() => {
-    const a = props.aiAnalysis;
-    if (!a || typeof a !== "object") return false;
-    const keys = Object.keys(a);
-    return keys.length > 0;
-  }, [props.aiAnalysis]);
+  const isRunning = aiStatus === "running";
+
+  // ✅ IMPORTANT: do NOT treat a non-empty aiAnalysis object as "done" unless it has real signals.
+  const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
   const suggestedLabel =
     safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
@@ -166,20 +197,18 @@ export function Step2(props: {
   const conf = clamp01Nullable(confidenceScore);
   const fit = clamp01Nullable(fitScore);
 
-  const [err, setErr] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
 
   // Controls whether we’re showing the interview UI.
   const [showInterview, setShowInterview] = useState<boolean>(() => !hasWebsite);
 
-  // Auto-run analysis ONCE when website exists and we don't have analysis yet.
+  // Auto-run analysis ONCE per (tenantId + website) when website exists and we don't have meaningful analysis yet.
   const didAutoRunRef = useRef(false);
+  const autoRunKeyRef = useRef<string>("");
 
   // Progress UI for "analysis running"
   const runStartRef = useRef<number | null>(null);
   const [runTick, setRunTick] = useState(0);
-
-  const isRunning = aiStatus === "running";
 
   useEffect(() => {
     // mark start moment when we see "running"
@@ -217,33 +246,54 @@ export function Step2(props: {
     return msgs[idx] ?? "Analyzing…";
   }, [isRunning, runProgress]);
 
+  // ✅ Reset auto-run guard whenever tenantId or website changes
   useEffect(() => {
-    setErr(null);
+    const k = `${tid || "(no-tenant)"}|${website || "(no-website)"}`;
+    if (autoRunKeyRef.current !== k) {
+      autoRunKeyRef.current = k;
+      didAutoRunRef.current = false;
+    }
+  }, [tid, website]);
 
-    // If no website, we should interview immediately.
+  async function runAnalysisSafely() {
+    if (!tid) {
+      props.onError("NO_TENANT: missing tenantId for analysis.");
+      return;
+    }
+    if (working) return;
+
+    setWorking(true);
+    try {
+      await props.onRun();
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      props.onError(msg);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  useEffect(() => {
+    // If no website, interview immediately.
     if (!hasWebsite) {
       setShowInterview(true);
       return;
     }
 
-    // If website exists, we start in analysis mode.
+    // Website exists -> analysis mode by default.
     setShowInterview(false);
 
     // If analysis already exists or is currently running, do nothing.
     if (hasAnalysis) return;
-    if (aiStatus === "running") return;
+    if (isRunning) return;
 
-    // Auto-run analysis once.
-    if (!didAutoRunRef.current) {
+    // ✅ Auto-run analysis once (per tenant+website), only if we have tenantId.
+    if (!didAutoRunRef.current && tid) {
       didAutoRunRef.current = true;
-      props.onRun().catch((e: any) => {
-        const msg = e?.message ?? String(e);
-        setErr(msg);
-        props.onError(msg);
-      });
+      runAnalysisSafely().catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, hasAnalysis, aiStatus]);
+  }, [hasWebsite, hasAnalysis, isRunning, tid]);
 
   /* -------------------- Interview state (unchanged, but gated) -------------------- */
 
@@ -305,7 +355,6 @@ export function Step2(props: {
   const lastSubmitRef = useRef<string>("");
 
   useEffect(() => {
-    setErr(null);
     setTextAnswer("");
     setChoiceAnswer("");
     lastSubmitRef.current = "";
@@ -317,15 +366,12 @@ export function Step2(props: {
     if (nextQ?.id) return;
 
     setWorking(true);
-    setErr(null);
-
     try {
       const out = await postInterview({ tenantId: tid, action: "start" });
       setInterviewState(out.industryInterview);
       if (debugOn) setLastApi(out);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
-      setErr(msg);
       props.onError(msg);
     } finally {
       setWorking(false);
@@ -346,19 +392,18 @@ export function Step2(props: {
   }
 
   async function submitAnswer() {
-    if (!tid) return setErr("Missing tenantId.");
+    if (!tid) return props.onError("Missing tenantId.");
     if (isLocked) return;
-    if (!nextQ?.id) return setErr("No active question yet. Tap ‘Start interview’.");
+    if (!nextQ?.id) return props.onError("No active question yet. Tap ‘Start interview’.");
 
     const ans = buildAnswerPayload();
-    if (!ans) return setErr("Please answer the question to continue.");
+    if (!ans) return props.onError("Please answer the question to continue.");
 
     const dupeKey = `${tid}:${nextQ.id}:${ans}`;
     if (lastSubmitRef.current === dupeKey) return;
     lastSubmitRef.current = dupeKey;
 
     setWorking(true);
-    setErr(null);
 
     try {
       const out = await postInterview({
@@ -377,11 +422,10 @@ export function Step2(props: {
       setInterviewState(out.industryInterview);
 
       if (returnedNextId && returnedNextId === currentId) {
-        setErr("Server returned the same question again (no progression). Check debug output (?debug=1).");
+        props.onError("Server returned the same question again (no progression). Check debug output (?debug=1).");
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
-      setErr(msg);
       props.onError(msg);
       lastSubmitRef.current = "";
     } finally {
@@ -394,14 +438,12 @@ export function Step2(props: {
   /* -------------------- Analysis UI actions -------------------- */
 
   async function handleConfirmYes() {
-    setErr(null);
     setWorking(true);
     try {
       await props.onConfirm({ answer: "yes" });
       props.onNext();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
-      setErr(msg);
       props.onError(msg);
     } finally {
       setWorking(false);
@@ -409,14 +451,12 @@ export function Step2(props: {
   }
 
   async function handleConfirmNo() {
-    setErr(null);
     setWorking(true);
     try {
       await props.onConfirm({ answer: "no" });
       setShowInterview(true);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
-      setErr(msg);
       props.onError(msg);
     } finally {
       setWorking(false);
@@ -441,14 +481,14 @@ export function Step2(props: {
               <span
                 className={cn(
                   "inline-flex items-center rounded-full border px-2 py-1 font-semibold",
-                  aiStatus === "running"
+                  isRunning
                     ? "border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-800 dark:bg-black dark:text-slate-200"
                     : hasAnalysis
                     ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
                     : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
                 )}
               >
-                {aiStatus === "running" ? "Analysis running" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
+                {isRunning ? "Analysis running" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
               </span>
 
               {aiErr ? (
@@ -458,8 +498,8 @@ export function Step2(props: {
               ) : null}
             </div>
 
-            {/* ✅ Running details: progress + explanation */}
-            {aiStatus === "running" ? (
+            {/* Running details: progress + explanation */}
+            {isRunning ? (
               <div className="mt-4">
                 <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
                   <div
@@ -476,10 +516,10 @@ export function Step2(props: {
                 <button
                   type="button"
                   className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                  onClick={() => props.onRun().catch((e: any) => props.onError(e?.message ?? String(e)))}
-                  disabled={working || aiStatus === "running" || !tid}
+                  onClick={() => runAnalysisSafely().catch(() => null)}
+                  disabled={working || isRunning || !tid}
                 >
-                  {aiStatus === "running" ? "Analyzing…" : "Run analysis now"}
+                  {isRunning ? "Analyzing…" : "Run analysis now"}
                 </button>
               ) : (
                 <>
@@ -546,12 +586,6 @@ export function Step2(props: {
               )}
             </div>
           </div>
-
-          {err ? (
-            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-              {err}
-            </div>
-          ) : null}
         </>
       ) : (
         /* -------------------- Interview UI -------------------- */
@@ -573,7 +607,9 @@ export function Step2(props: {
               <div className="mt-1">
                 nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span>
               </div>
-              <div className="mt-2 whitespace-pre-wrap break-words font-mono">{lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}</div>
+              <div className="mt-2 whitespace-pre-wrap break-words font-mono">
+                {lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}
+              </div>
             </div>
           ) : null}
 
@@ -624,12 +660,6 @@ export function Step2(props: {
 
             {reason ? <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">{reason}</div> : null}
           </div>
-
-          {err ? (
-            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-              {err}
-            </div>
-          ) : null}
 
           {/* Ready/Locked panel (dominant) */}
           {showReady ? (
