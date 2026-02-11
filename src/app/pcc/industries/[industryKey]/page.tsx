@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import ConfirmIndustryButton from "./ConfirmIndustryButton";
+import CreateCanonicalIndustryButton from "./CreateCanonicalIndustryButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -204,10 +205,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   const confirmedIds = new Set(confirmed.map((t: any) => t.tenantId));
 
   // -----------------------------
-  // AI-suggested tenants
-  // - include ai_analysis JSON
-  // - exclude tenants who have rejected this industry key (ai_analysis.rejectedIndustryKeys contains key)
-  // NOTE: alias "to" breaks Postgres parsing in some contexts. Use "ob".
+  // AI-suggested tenants (excluding explicit rejections)
   // -----------------------------
   const aiR = await db.execute(sql`
     select
@@ -330,7 +328,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   const aiAlsoConfirmed = aiSuggestedAll.filter((t: any) => confirmedIds.has(t.tenantId));
 
   // -----------------------------
-  // Tenants who explicitly rejected THIS industry key (for visibility)
+  // Tenants who rejected THIS industry key (for visibility)
   // -----------------------------
   const rejectedR = await db.execute(sql`
     select
@@ -401,13 +399,25 @@ export default async function PccIndustryDetailPage({ params }: Props) {
           <div className="min-w-0">
             <div className="text-xs text-gray-500 dark:text-gray-400">PCC • Industries</div>
 
-            <h1 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">{industry.label}</h1>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{industry.label}</h1>
+
+              {industry.isCanonical ? (
+                <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                  canonical
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                  derived
+                </span>
+              )}
+            </div>
 
             <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Key: <span className="font-mono text-xs">{industry.key}</span>
               {!industry.isCanonical ? (
                 <span className="ml-2 text-[11px] text-amber-700 dark:text-amber-200">
-                  (derived — industries table has no row for this key yet)
+                  (industries table has no row for this key yet)
                 </span>
               ) : null}
             </div>
@@ -445,24 +455,38 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                 </span>
               ) : null}
             </div>
+
+            {industry.createdAt ? (
+              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Created: {fmtDate(industry.createdAt)}</div>
+            ) : null}
           </div>
 
-          <div className="shrink-0 flex gap-2">
-            <Link
-              href="/pcc/industries"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            >
-              Back
-            </Link>
+          <div className="shrink-0 flex flex-col items-end gap-2">
+            <div className="flex gap-2">
+              <Link
+                href="/pcc/industries"
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                Back
+              </Link>
 
-            <button
-              type="button"
-              disabled
-              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-              title="PCC v1 is read-only"
-            >
-              Edit industry (soon)
-            </button>
+              <button
+                type="button"
+                disabled
+                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+                title="PCC v1 is read-only"
+              >
+                Edit industry (soon)
+              </button>
+            </div>
+
+            {!industry.isCanonical ? (
+              <CreateCanonicalIndustryButton
+                industryKey={industry.key}
+                defaultLabel={industry.label}
+                defaultDescription={industry.description}
+              />
+            ) : null}
           </div>
         </div>
       </div>
@@ -570,9 +594,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
           We split this into <span className="font-semibold">AI-only</span> (not yet confirmed) and{" "}
           <span className="font-semibold">also confirmed</span> (useful to measure AI accuracy).
           {rejectedTenants.length ? (
-            <span className="ml-1">
-              Rejected tenants are excluded from this list and shown in a separate section below.
-            </span>
+            <span className="ml-1">Rejected tenants are excluded from this list and shown below.</span>
           ) : null}
         </div>
 
@@ -644,7 +666,6 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                         ) : null}
                       </div>
 
-                      {/* Evidence block */}
                       <div className="mt-3 space-y-2">
                         {t.suggestedLabel ? (
                           <div className="text-sm text-gray-800 dark:text-gray-200">
@@ -765,7 +786,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
         </div>
       </div>
 
-      {/* Rejected tenants (excluded from AI list) */}
+      {/* Rejected tenants */}
       {rejectedTenants.length ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900/40 dark:bg-amber-950/30">
           <div className="flex items-center justify-between gap-3">
@@ -852,7 +873,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
         </div>
       </div>
 
-      {/* Tenant overrides (scoped to confirmed tenants) */}
+      {/* Tenant overrides */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant overrides (summary)</div>

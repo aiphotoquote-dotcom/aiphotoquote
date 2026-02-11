@@ -20,6 +20,11 @@ function fmtDate(d: any) {
   }
 }
 
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 function normalizePlan(v: any) {
   const s = String(v ?? "").trim().toLowerCase();
   if (!s) return "free";
@@ -37,6 +42,13 @@ function clamp01(n: any) {
 
 function pct(n: number) {
   return Math.max(0, Math.min(100, Math.round(clamp01(n) * 100)));
+}
+
+function toBool(v: any) {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v ?? "").toLowerCase().trim();
+  return s === "true" || s === "t" || s === "1" || s === "yes";
 }
 
 function StatusPill({ status, archivedAt }: { status: string; archivedAt: any }) {
@@ -66,7 +78,43 @@ function PlanPill({ plan }: { plan: string }) {
       ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
       : "border-indigo-200 bg-indigo-50 text-indigo-900 dark:border-indigo-900/40 dark:bg-indigo-950/30 dark:text-indigo-100";
 
-  return <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold", tone)}>{label}</span>;
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold", tone)}>
+      {label}
+    </span>
+  );
+}
+
+function SmallPill({
+  label,
+  tone = "neutral",
+  title,
+}: {
+  label: string;
+  tone?: "neutral" | "good" | "warn" | "bad" | "info" | "purple";
+  title?: string;
+}) {
+  const cls =
+    tone === "good"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+      : tone === "warn"
+      ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+      : tone === "bad"
+      ? "border-red-200 bg-red-50 text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200"
+      : tone === "info"
+      ? "border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100"
+      : tone === "purple"
+      ? "border-purple-200 bg-purple-50 text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100"
+      : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200";
+
+  return (
+    <span
+      className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold", cls)}
+      title={title}
+    >
+      {label}
+    </span>
+  );
 }
 
 type Row = {
@@ -84,6 +132,13 @@ type Row = {
   monthlyQuoteLimit?: any;
   activationGraceCredits?: any;
   activationGraceUsed?: any;
+
+  // OPTIONAL (future-ready): if server includes these, we’ll show richer PCC info.
+  industryKey?: string | null; // from tenant_settings.industry_key
+  aiSuggestedIndustryKey?: string | null; // from tenant_onboarding.ai_analysis.suggestedIndustryKey
+  aiNeedsConfirmation?: any; // from tenant_onboarding.ai_analysis.needsConfirmation
+  aiStatus?: string | null; // from tenant_onboarding.ai_analysis.meta.status (running|error|done|etc)
+  aiConfidenceScore?: any; // from tenant_onboarding.ai_analysis.confidenceScore (0..1)
 };
 
 export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]; showArchived: boolean }) {
@@ -108,7 +163,10 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
   const [working, setWorking] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const confirmPhrase = useMemo(() => `ARCHIVE ${selectedCount} TENANT${selectedCount === 1 ? "" : "S"}`, [selectedCount]);
+  const confirmPhrase = useMemo(
+    () => `ARCHIVE ${selectedCount} TENANT${selectedCount === 1 ? "" : "S"}`,
+    [selectedCount]
+  );
   const canConfirm = selectedCount > 0 && confirmText.trim() === confirmPhrase;
 
   function toggleAll() {
@@ -171,9 +229,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
       {selectedCount ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/40 dark:bg-amber-950/30">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">
-              {selectedCount} selected
-            </div>
+            <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">{selectedCount} selected</div>
 
             <div className="flex items-center gap-2">
               <button
@@ -223,7 +279,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
           </div>
           <div className="col-span-3">Tenant</div>
           <div className="col-span-3">Slug</div>
-          <div className="col-span-3">Plan / Credits</div>
+          <div className="col-span-3">Plan / Credits / AI</div>
           <div className="col-span-2 text-right">Actions</div>
         </div>
 
@@ -240,11 +296,41 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                 : "—";
 
               const plan = normalizePlan(t.planTier ?? "free");
-              const limit = t.monthlyQuoteLimit === null || t.monthlyQuoteLimit === undefined ? "∞" : String(t.monthlyQuoteLimit);
+              const limit =
+                t.monthlyQuoteLimit === null || t.monthlyQuoteLimit === undefined ? "∞" : String(t.monthlyQuoteLimit);
 
               const graceTotal = Number(t.activationGraceCredits ?? 0);
               const graceUsed = Number(t.activationGraceUsed ?? 0);
               const graceLeft = Math.max(0, graceTotal - graceUsed);
+
+              // Optional AI/Industry signals (only show if present)
+              const settingsIndustryKey = safeTrim(t.industryKey ?? "");
+              const aiKey = safeTrim(t.aiSuggestedIndustryKey ?? "");
+              const needsConfirm = toBool(t.aiNeedsConfirmation);
+              const aiStatus = safeTrim(t.aiStatus ?? "");
+              const confPct =
+                t.aiConfidenceScore === null || t.aiConfidenceScore === undefined
+                  ? null
+                  : `${pct(Number(t.aiConfidenceScore))}%`;
+
+              const hasAnyAi = Boolean(aiKey || aiStatus || confPct || needsConfirm);
+              const hasIndustry = Boolean(settingsIndustryKey || aiKey);
+
+              let correctness: "correct" | "mismatch" | "unknown" = "unknown";
+              if (settingsIndustryKey && aiKey) {
+                correctness = settingsIndustryKey === aiKey ? "correct" : "mismatch";
+              }
+
+              const aiStatusTone =
+                !aiStatus
+                  ? null
+                  : aiStatus.toLowerCase() === "running"
+                  ? "info"
+                  : aiStatus.toLowerCase() === "error"
+                  ? "bad"
+                  : aiStatus.toLowerCase() === "rejected"
+                  ? "warn"
+                  : "good";
 
               return (
                 <div key={id} className="grid grid-cols-12 gap-0 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-900">
@@ -271,7 +357,9 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                     </div>
                   </div>
 
-                  <div className="col-span-3 min-w-0 truncate text-sm text-gray-700 dark:text-gray-200">{t.slug ?? "—"}</div>
+                  <div className="col-span-3 min-w-0 truncate text-sm text-gray-700 dark:text-gray-200">
+                    {t.slug ?? "—"}
+                  </div>
 
                   <div className="col-span-3 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
@@ -282,9 +370,52 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                       <span className="text-xs text-gray-600 dark:text-gray-300">
                         Grace: <span className="font-mono">{graceLeft}</span>
                       </span>
+
+                      {/* Optional AI/Industry chips */}
+                      {hasAnyAi ? (
+                        <span className="hidden sm:inline-flex items-center">
+                          <span className="mx-1 text-gray-300 dark:text-gray-700">•</span>
+                        </span>
+                      ) : null}
+
+                      {aiStatus ? (
+                        <SmallPill label={`AI: ${aiStatus}`} tone={(aiStatusTone as any) ?? "neutral"} />
+                      ) : null}
+
+                      {confPct ? <SmallPill label={`conf ${confPct}`} tone="neutral" /> : null}
+
+                      {needsConfirm ? <SmallPill label="needs confirm" tone="warn" /> : null}
+
+                      {hasIndustry ? (
+                        correctness === "correct" ? (
+                          <SmallPill
+                            label="AI match"
+                            tone="good"
+                            title={`settings.industry_key matches ai_analysis.suggestedIndustryKey (${settingsIndustryKey})`}
+                          />
+                        ) : correctness === "mismatch" ? (
+                          <SmallPill
+                            label="AI mismatch"
+                            tone="bad"
+                            title={`settings.industry_key=${settingsIndustryKey} vs ai_analysis.suggestedIndustryKey=${aiKey}`}
+                          />
+                        ) : null
+                      ) : null}
                     </div>
+
                     <div className="mt-1 truncate text-xs text-gray-500 dark:text-gray-400">
                       Owner: <span className="font-mono">{owner}</span>
+                      {settingsIndustryKey ? (
+                        <>
+                          {" "}
+                          · Industry: <span className="font-mono">{settingsIndustryKey}</span>
+                        </>
+                      ) : aiKey ? (
+                        <>
+                          {" "}
+                          · AI: <span className="font-mono">{aiKey}</span>
+                        </>
+                      ) : null}
                     </div>
                   </div>
 
