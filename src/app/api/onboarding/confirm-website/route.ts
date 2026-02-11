@@ -14,7 +14,8 @@ export const dynamic = "force-dynamic";
 /* --------------------- utils --------------------- */
 
 function safeTrim(v: unknown) {
-  return String(v ?? "").trim();
+  const s = String(v ?? "").trim();
+  return s ? s : "";
 }
 
 function normalizeUrl(raw: string) {
@@ -24,12 +25,12 @@ function normalizeUrl(raw: string) {
   return s;
 }
 
-// Drizzle RowList can be array-like; avoid `.rows`
 function firstRow(r: any): any | null {
   try {
     if (!r) return null;
     if (Array.isArray(r)) return r[0] ?? null;
     if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
     return null;
   } catch {
     return null;
@@ -50,21 +51,8 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
       and clerk_user_id = ${clerkUserId}
     limit 1
   `);
-
   const row = firstRow(r);
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
-}
-
-function safeJsonParseObject(txt: string): any | null {
-  const s = safeTrim(txt);
-  if (!s) return null;
-  try {
-    const v = JSON.parse(s);
-    if (!v || typeof v !== "object") return null;
-    return v;
-  } catch {
-    return null;
-  }
 }
 
 /* --------------------- schema --------------------- */
@@ -163,6 +151,17 @@ Return ONLY valid JSON.
 `.trim();
 }
 
+function pickIndustryKeyFromAnalysis(a: any): string {
+  const direct = safeTrim(a?.suggestedIndustryKey);
+  if (direct) return direct;
+
+  // Mode A compatibility: allow proposedIndustry.key
+  const modeA = safeTrim(a?.industryInterview?.proposedIndustry?.key);
+  if (modeA) return modeA;
+
+  return "";
+}
+
 /* --------------------- handler --------------------- */
 
 export async function POST(req: Request) {
@@ -203,8 +202,10 @@ export async function POST(req: Request) {
     const prevRound = Number(priorMeta?.round ?? 0) || 0;
     const nextRound = prevRound + 1;
 
-    // ✅ YES = lock it in
+    // ✅ YES = lock it in (AND persist industry_key so it cannot revert to 'service')
     if (answer === "yes") {
+      const keyToLock = pickIndustryKeyFromAnalysis(priorAnalysis);
+
       const bumpedConfidence = Math.max(Number(priorAnalysis?.confidenceScore ?? 0) || 0, 0.9);
 
       const updated = {
@@ -221,13 +222,25 @@ export async function POST(req: Request) {
         },
       };
 
+      // 1) persist ai_analysis + move to step 3
       await db.execute(sql`
         update tenant_onboarding
         set ai_analysis = ${JSON.stringify(updated)}::jsonb,
-            current_step = greatest(current_step, 2),
+            current_step = greatest(current_step, 3),
             updated_at = now()
         where tenant_id = ${tenantId}::uuid
       `);
+
+      // 2) persist industry_key if we have one (do NOT leave it as 'service')
+      if (keyToLock) {
+        await db.execute(sql`
+          insert into tenant_settings (tenant_id, industry_key, updated_at)
+          values (${tenantId}::uuid, ${keyToLock}, now())
+          on conflict (tenant_id) do update
+            set industry_key = excluded.industry_key,
+                updated_at = now()
+        `);
+      }
 
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: updated }, { status: 200 });
     }
@@ -259,8 +272,8 @@ export async function POST(req: Request) {
 
     const cfg = await loadPlatformLlmConfig();
     const model =
-      (cfg as any)?.models?.onboardingModel ||
-      (cfg as any)?.models?.estimatorModel ||
+      safeTrim((cfg as any)?.models?.onboardingModel) ||
+      safeTrim((cfg as any)?.models?.estimatorModel) ||
       "gpt-4.1";
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -276,7 +289,7 @@ export async function POST(req: Request) {
       input: websiteIntelPrompt(website),
     });
 
-    const rawIntel = String(intelResp.output_text ?? "").trim();
+    const rawIntel = safeTrim(intelResp.output_text ?? "");
     if (!rawIntel) throw new Error("EMPTY_WEB_RESULT");
 
     // PASS 2 (json)
@@ -287,26 +300,27 @@ export async function POST(req: Request) {
       input: feedback ? normalizeWithUserFeedbackPrompt(rawIntel, feedback) : normalizePrompt(rawIntel),
     });
 
-    const jsonText = String(normalizedResp.output_text ?? "");
-    const obj = safeJsonParseObject(jsonText);
-    const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
+    const jsonText = safeTrim(normalizedResp.output_text ?? "");
+    const parsed = AnalysisSchema.safeParse(JSON.parse(jsonText));
 
-    // ✅ IMPORTANT: if rerun output is invalid, DO NOT overwrite the last-good suggestion with "service".
-    // Preserve priorAnalysis and just mark that we need a guided interview to correct it.
-    if (!parsed || !parsed.success) {
-      const preserved = {
-        ...priorAnalysis,
-        // steer the UI back to “needs confirmation / interview”
-        needsConfirmation: true,
-        confidenceScore: Math.min(0.5, Math.max(0, Number(priorAnalysis?.confidenceScore ?? 0) || 0)),
-        // overwrite questions to be maximally useful for correction
+    if (!parsed.success) {
+      // IMPORTANT: keep this safe fallback, but do NOT write tenant_settings.industry_key here.
+      const fallback = {
+        businessGuess:
+          "We re-checked your website with your feedback, but couldn’t reliably structure the output. Please describe what you service and your top services.",
+        fit: "maybe" as const,
+        fitReason: "Model output could not be confidently validated against the required schema.",
+        suggestedIndustryKey: pickIndustryKeyFromAnalysis(priorAnalysis) || "service",
         questions: [
-          "In one sentence, what do you do?",
-          "What do you work on most (homes/cars/boats/commercial/other)?",
+          "What do you work on most (boats/cars/homes/other)?",
           "What are your top 3 services?",
           "Do customers typically send photos before you quote?",
-        ].slice(0, 6),
-        source: "web_tools_two_pass_parse_fail_preserved_prior",
+        ],
+        confidenceScore: 0.25,
+        needsConfirmation: true,
+        detectedServices: [],
+        billingSignals: [],
+        source: "web_tools_two_pass_parse_fail",
         website,
         analyzedAt: new Date().toISOString(),
         meta: {
@@ -315,8 +329,6 @@ export async function POST(req: Request) {
           round: nextRound,
           lastAction: "User corrected; rerun completed but output was invalid.",
           userCorrection: { answer: "no", feedback: feedback || null },
-          // capture a hint for debugging without breaking UI
-          error: "RERUN_OUTPUT_INVALID",
           finishedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         },
@@ -324,13 +336,13 @@ export async function POST(req: Request) {
 
       await db.execute(sql`
         update tenant_onboarding
-        set ai_analysis = ${JSON.stringify(preserved)}::jsonb,
+        set ai_analysis = ${JSON.stringify(fallback)}::jsonb,
             current_step = greatest(current_step, 2),
             updated_at = now()
         where tenant_id = ${tenantId}::uuid
       `);
 
-      return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
+      return NextResponse.json({ ok: true, tenantId, aiAnalysis: fallback }, { status: 200 });
     }
 
     const nextAnalysis = {
