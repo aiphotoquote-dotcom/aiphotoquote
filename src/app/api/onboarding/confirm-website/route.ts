@@ -55,6 +55,18 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
+function safeJsonParseObject(txt: string): any | null {
+  const s = safeTrim(txt);
+  if (!s) return null;
+  try {
+    const v = JSON.parse(s);
+    if (!v || typeof v !== "object") return null;
+    return v;
+  } catch {
+    return null;
+  }
+}
+
 /* --------------------- schema --------------------- */
 
 const AnalysisSchema = z.object({
@@ -187,7 +199,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const priorMeta = (priorAnalysis?.meta && typeof priorAnalysis.meta === "object") ? priorAnalysis.meta : {};
+    const priorMeta = priorAnalysis?.meta && typeof priorAnalysis.meta === "object" ? priorAnalysis.meta : {};
     const prevRound = Number(priorMeta?.round ?? 0) || 0;
     const nextRound = prevRound + 1;
 
@@ -222,10 +234,7 @@ export async function POST(req: Request) {
 
     // ✅ NO = re-run using web tools + user feedback
     if (!website) {
-      return NextResponse.json(
-        { ok: false, error: "NO_WEBSITE", message: "No website on file." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "NO_WEBSITE", message: "No website on file." }, { status: 400 });
     }
 
     // mark running so UI shows real progress
@@ -279,25 +288,25 @@ export async function POST(req: Request) {
     });
 
     const jsonText = String(normalizedResp.output_text ?? "");
-    const parsed = AnalysisSchema.safeParse(JSON.parse(jsonText));
+    const obj = safeJsonParseObject(jsonText);
+    const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
 
-    if (!parsed.success) {
-      const fallback = {
-        businessGuess:
-          "We re-checked your website with your feedback, but couldn’t reliably structure the output. Please describe what you service and your top services.",
-        fit: "maybe" as const,
-        fitReason: "Model output could not be confidently validated against the required schema.",
-        suggestedIndustryKey: "service",
+    // ✅ IMPORTANT: if rerun output is invalid, DO NOT overwrite the last-good suggestion with "service".
+    // Preserve priorAnalysis and just mark that we need a guided interview to correct it.
+    if (!parsed || !parsed.success) {
+      const preserved = {
+        ...priorAnalysis,
+        // steer the UI back to “needs confirmation / interview”
+        needsConfirmation: true,
+        confidenceScore: Math.min(0.5, Math.max(0, Number(priorAnalysis?.confidenceScore ?? 0) || 0)),
+        // overwrite questions to be maximally useful for correction
         questions: [
-          "What do you work on most (boats/cars/homes/other)?",
+          "In one sentence, what do you do?",
+          "What do you work on most (homes/cars/boats/commercial/other)?",
           "What are your top 3 services?",
           "Do customers typically send photos before you quote?",
-        ],
-        confidenceScore: 0.25,
-        needsConfirmation: true,
-        detectedServices: [],
-        billingSignals: [],
-        source: "web_tools_two_pass_parse_fail",
+        ].slice(0, 6),
+        source: "web_tools_two_pass_parse_fail_preserved_prior",
         website,
         analyzedAt: new Date().toISOString(),
         meta: {
@@ -306,19 +315,22 @@ export async function POST(req: Request) {
           round: nextRound,
           lastAction: "User corrected; rerun completed but output was invalid.",
           userCorrection: { answer: "no", feedback: feedback || null },
+          // capture a hint for debugging without breaking UI
+          error: "RERUN_OUTPUT_INVALID",
           finishedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
         },
       };
 
       await db.execute(sql`
         update tenant_onboarding
-        set ai_analysis = ${JSON.stringify(fallback)}::jsonb,
+        set ai_analysis = ${JSON.stringify(preserved)}::jsonb,
             current_step = greatest(current_step, 2),
             updated_at = now()
         where tenant_id = ${tenantId}::uuid
       `);
 
-      return NextResponse.json({ ok: true, tenantId, aiAnalysis: fallback }, { status: 200 });
+      return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
     const nextAnalysis = {

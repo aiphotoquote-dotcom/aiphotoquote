@@ -11,7 +11,7 @@ import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/* --------------------- utils --------------------- */
+/* --------------------- tiny utils --------------------- */
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -27,17 +27,19 @@ function normalizeUrl(raw: string) {
 
 function clamp(s: string, max: number) {
   const t = String(s ?? "");
-  if (t.length <= max) return t;
-  return t.slice(0, max);
+  return t.length <= max ? t : t.slice(0, max);
 }
 
-// Drizzle RowList is often array-like but may not expose `.rows` in typings.
 function firstRow(r: any): any | null {
-  if (!r) return null;
-  if (Array.isArray(r)) return r[0] ?? null;
-  if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
-  if (typeof r === "object" && r !== null && "length" in r) return (r as any)[0] ?? null;
-  return null;
+  try {
+    if (!r) return null;
+    if (Array.isArray(r)) return r[0] ?? null;
+    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
@@ -54,17 +56,37 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
       and clerk_user_id = ${clerkUserId}
     limit 1
   `);
-
   const row = firstRow(r);
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-function safeJsonParse(s: string) {
+function safeJsonParseObject(txt: string): any | null {
+  const s = safeTrim(txt);
+  if (!s) return null;
   try {
-    return JSON.parse(s);
+    const v = JSON.parse(s);
+    if (!v || typeof v !== "object") return null;
+    return v;
   } catch {
     return null;
   }
+}
+
+function mergeMeta(prior: any, patch: any) {
+  const prev = prior?.meta && typeof prior.meta === "object" ? prior.meta : {};
+  return { ...prev, ...patch };
+}
+
+async function upsertAnalysis(tenantId: string, website: string | null, analysis: any, currentStep = 2) {
+  await db.execute(sql`
+    insert into tenant_onboarding (tenant_id, website, ai_analysis, current_step, completed, created_at, updated_at)
+    values (${tenantId}::uuid, ${website}, ${JSON.stringify(analysis)}::jsonb, ${currentStep}, false, now(), now())
+    on conflict (tenant_id) do update
+      set website = coalesce(excluded.website, tenant_onboarding.website),
+          ai_analysis = excluded.ai_analysis,
+          current_step = greatest(tenant_onboarding.current_step, excluded.current_step),
+          updated_at = now()
+  `);
 }
 
 /* --------------------- schema --------------------- */
@@ -127,76 +149,11 @@ Return ONLY valid JSON.
 /* --------------------- model pick --------------------- */
 
 function pickOnboardingModel(cfg: any) {
-  const m =
-    String((cfg as any)?.models?.onboardingModel ?? "").trim() ||
-    String(cfg?.models?.estimatorModel ?? "").trim() ||
-    "gpt-4.1";
-  return m;
-}
-
-/* --------------------- phases --------------------- */
-
-type Phase =
-  | "reachability"
-  | "discover"
-  | "extract"
-  | "classify"
-  | "questions"
-  | "finalize";
-
-function mergeMeta(priorAnalysis: any, patch: any) {
-  const prevMeta = priorAnalysis?.meta && typeof priorAnalysis.meta === "object" ? priorAnalysis.meta : {};
-  return { ...prevMeta, ...patch };
-}
-
-async function writeRunning(
-  tenantId: string,
-  priorAnalysis: any,
-  website: string,
-  nextRound: number,
-  phase: Phase,
-  lastAction: string,
-  extra: Record<string, any> = {}
-) {
-  const base = typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {};
-  const meta = mergeMeta(priorAnalysis, {
-    status: "running",
-    round: nextRound,
-    phase,
-    lastAction,
-    error: null,
-    ...extra,
-  });
-
-  const stub = {
-    ...base,
-    website,
-    meta,
-  };
-
-  await db.execute(sql`
-    insert into tenant_onboarding (tenant_id, ai_analysis, current_step, completed, created_at, updated_at)
-    values (${tenantId}::uuid, ${JSON.stringify(stub)}::jsonb, 2, false, now(), now())
-    on conflict (tenant_id) do update
-    set ai_analysis = excluded.ai_analysis,
-        current_step = greatest(tenant_onboarding.current_step, 2),
-        updated_at = now()
-  `);
-
-  return stub;
-}
-
-async function writeUpdate(
-  tenantId: string,
-  analysis: any
-) {
-  await db.execute(sql`
-    update tenant_onboarding
-    set ai_analysis = ${JSON.stringify(analysis)}::jsonb,
-        current_step = greatest(current_step, 2),
-        updated_at = now()
-    where tenant_id = ${tenantId}::uuid
-  `);
+  return (
+    safeTrim(cfg?.models?.onboardingModel) ||
+    safeTrim(cfg?.models?.estimatorModel) ||
+    "gpt-4.1"
+  );
 }
 
 /* --------------------- handler --------------------- */
@@ -209,9 +166,7 @@ export async function POST(req: Request) {
 
     const body = await req.json().catch(() => null);
     tenantId = safeTrim(body?.tenantId);
-    if (!tenantId) {
-      return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
-    }
+    if (!tenantId) return NextResponse.json({ ok: false, error: "TENANT_ID_REQUIRED" }, { status: 400 });
 
     await requireMembership(clerkUserId, tenantId);
 
@@ -228,46 +183,36 @@ export async function POST(req: Request) {
 
     const row = firstRow(r);
     const website = normalizeUrl(safeTrim(row?.website));
-    const priorAnalysis = row?.ai_analysis ?? null;
+    const prior = row?.ai_analysis ?? null;
 
     if (!website) {
-      return NextResponse.json(
-        { ok: false, error: "NO_WEBSITE", message: "No website on file." },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "NO_WEBSITE", message: "No website on file." }, { status: 400 });
     }
 
-    const prevMeta = priorAnalysis?.meta && typeof priorAnalysis.meta === "object" ? priorAnalysis.meta : {};
-    const prevRound = Number(prevMeta?.round ?? 0) || 0;
+    const priorMeta = prior?.meta && typeof prior.meta === "object" ? prior.meta : {};
+    const prevRound = Number(priorMeta?.round ?? 0) || 0;
     const nextRound = prevRound + 1;
 
-    // Phase 1: reachability / kickoff
-    await writeRunning(
-      tenantId,
-      priorAnalysis,
+    // Mark running so UI updates immediately
+    const running = {
+      ...(typeof prior === "object" && prior ? prior : {}),
       website,
-      nextRound,
-      "reachability",
-      "Checking that your website is reachable…",
-      { startedAt: new Date().toISOString() }
-    );
+      meta: mergeMeta(prior, {
+        status: "running",
+        round: nextRound,
+        lastAction: "Analyzing website…",
+        error: null,
+        startedAt: new Date().toISOString(),
+      }),
+    };
+
+    await upsertAnalysis(tenantId, website, running, 2);
 
     const cfg = await loadPlatformLlmConfig();
     const model = pickOnboardingModel(cfg);
-
     const client = new OpenAI({ apiKey });
 
-    // Phase 2: discover (pass 1 starts)
-    await writeRunning(
-      tenantId,
-      priorAnalysis,
-      website,
-      nextRound,
-      "discover",
-      "Finding key pages (services, gallery, contact)…"
-    );
-
-    /* ---------- PASS 1: web browsing (NO JSON MODE) ---------- */
+    // PASS 1: web_search (no JSON)
     const intelResp = await client.responses.create({
       model,
       tools: [{ type: "web_search" }],
@@ -275,41 +220,23 @@ export async function POST(req: Request) {
       input: websiteIntelPrompt(website),
     });
 
-    const rawIntel = String(intelResp.output_text ?? "").trim();
+    const rawIntel = safeTrim(intelResp.output_text ?? "");
     if (!rawIntel) throw new Error("EMPTY_WEB_RESULT");
 
-    // Phase 3: extract (we got content, now extracting signals)
     const mid = {
-      ...(typeof priorAnalysis === "object" && priorAnalysis ? priorAnalysis : {}),
-      website,
-      meta: mergeMeta(priorAnalysis, {
-        status: "running",
-        round: nextRound,
-        phase: "extract" as Phase,
-        lastAction: "Extracting services and billing signals…",
-        error: null,
-      }),
+      ...running,
       rawWebIntelPreview: clamp(rawIntel, 1200),
-    };
-
-    await writeUpdate(tenantId, mid);
-
-    // Phase 4: classify/questions (pass 2 normalization)
-    const preJson = {
-      ...mid,
-      meta: {
-        ...(mid.meta ?? {}),
+      meta: mergeMeta(prior, {
         status: "running",
         round: nextRound,
-        phase: "classify" as Phase,
         lastAction: "Converting website intel into structured onboarding data…",
         error: null,
-      },
+      }),
     };
 
-    await writeUpdate(tenantId, preJson);
+    await upsertAnalysis(tenantId, website, mid, 2);
 
-    /* ---------- PASS 2: JSON normalization (STRICT JSON) ---------- */
+    // PASS 2: strict JSON
     const normalizedResp = await client.responses.create({
       model,
       temperature: 0.2,
@@ -317,104 +244,107 @@ export async function POST(req: Request) {
       input: normalizePrompt(rawIntel),
     });
 
-    const jsonText = String(normalizedResp.output_text ?? "").trim();
-    const json = safeJsonParse(jsonText);
-    const parsed = json ? AnalysisSchema.safeParse(json) : null;
+    const jsonText = safeTrim(normalizedResp.output_text ?? "");
+    const obj = safeJsonParseObject(jsonText);
+    const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
 
-    if (!parsed?.success) {
-      const fallback = {
-        businessGuess:
-          "We analyzed your website using web tools, but couldn’t reliably convert the result into structured data.",
-        fit: "maybe" as const,
-        fitReason: "Website intelligence was available, but structured parsing failed.",
-        suggestedIndustryKey: "service",
+    // ✅ CRITICAL: if parsing fails, DO NOT overwrite the last-good industry with "service".
+    if (!parsed || !parsed.success) {
+      const preserved = {
+        ...(typeof prior === "object" && prior ? prior : {}),
+        // If there was no prior analysis at all, we still need a safe starter.
+        ...(typeof prior === "object" && prior
+          ? {}
+          : {
+              businessGuess:
+                "We analyzed your website using web tools, but couldn’t reliably convert the result into structured data.",
+              fit: "maybe" as const,
+              fitReason: "Website intelligence was available, but structured parsing failed.",
+              suggestedIndustryKey: "service",
+              detectedServices: [],
+              billingSignals: [],
+            }),
+        website,
+        analyzedAt: new Date().toISOString(),
+        source: "web_tools_two_pass_parse_fail_preserved_prior",
+        modelUsed: model,
+        // Always provide helpful questions for correction, without nuking prior suggestedIndustryKey.
         questions: [
-          "What do you primarily work on (boats/cars/homes/etc.)?",
+          "In one sentence, what do you do?",
+          "What do you primarily work on (boats/cars/homes/commercial/etc.)?",
           "What are your top 3 services?",
           "Do customers usually send photos before you quote?",
-        ],
-        confidenceScore: 0.3,
+        ].slice(0, 6),
         needsConfirmation: true,
-        detectedServices: [],
-        billingSignals: [],
-        analyzedAt: new Date().toISOString(),
-        source: "web_tools_two_pass_parse_fail",
-        modelUsed: model,
-        website,
-        meta: mergeMeta(priorAnalysis, {
-          status: "complete",
-          round: nextRound,
-          phase: "finalize" as Phase,
-          lastAction: "AI analysis complete (needs confirmation).",
-          error: null,
-          finishedAt: new Date().toISOString(),
-        }),
+        confidenceScore: Math.min(0.5, Math.max(0, Number(prior?.confidenceScore ?? 0) || 0)),
         rawWebIntelPreview: clamp(rawIntel, 1200),
         rawModelJsonPreview: clamp(jsonText, 1200),
+        meta: mergeMeta(prior, {
+          status: "complete",
+          round: nextRound,
+          lastAction: "AI analysis complete (needs confirmation).",
+          error: "PARSE_FAIL",
+          finishedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
       };
 
-      await writeUpdate(tenantId, fallback);
-      return NextResponse.json({ ok: true, tenantId, aiAnalysis: fallback }, { status: 200 });
+      await upsertAnalysis(tenantId, website, preserved, 2);
+      return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
-    // Phase 5: questions (we have structured data; we’re effectively finalizing questions+summary)
     const analysis = {
       ...parsed.data,
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
       modelUsed: model,
-      meta: mergeMeta(priorAnalysis, {
+      rawWebIntelPreview: clamp(rawIntel, 1200),
+      meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,
-        phase: "finalize" as Phase,
         lastAction: "AI analysis complete.",
         error: null,
         finishedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       }),
-      rawWebIntelPreview: clamp(rawIntel, 1200),
     };
 
-    await writeUpdate(tenantId, analysis);
-
+    await upsertAnalysis(tenantId, website, analysis, 2);
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
 
-    // best-effort: store error meta so UI shows meaningful status
+    // Best-effort: persist error meta so UI shows something useful
     try {
       if (tenantId) {
         const r = await db.execute(sql`
-          select ai_analysis
+          select website, ai_analysis
           from tenant_onboarding
           where tenant_id = ${tenantId}::uuid
           limit 1
         `);
         const row = firstRow(r);
+        const website = normalizeUrl(safeTrim(row?.website));
         const prior = row?.ai_analysis ?? null;
-        const prevMeta = prior?.meta && typeof prior.meta === "object" ? prior.meta : {};
-        const prevRound = Number(prevMeta?.round ?? 0) || 0;
+        const priorMeta = prior?.meta && typeof prior.meta === "object" ? prior.meta : {};
+        const prevRound = Number(priorMeta?.round ?? 0) || 0;
 
         const errored = {
           ...(typeof prior === "object" && prior ? prior : {}),
+          website: website || (typeof prior === "object" && prior ? prior.website : null),
           meta: {
-            ...prevMeta,
+            ...priorMeta,
             status: "error",
             round: prevRound || 1,
-            phase: (prevMeta?.phase as any) || "finalize",
             lastAction: "AI analysis failed.",
             error: msg,
             failedAt: new Date().toISOString(),
           },
         };
 
-        await db.execute(sql`
-          update tenant_onboarding
-          set ai_analysis = ${JSON.stringify(errored)}::jsonb,
-              updated_at = now()
-          where tenant_id = ${tenantId}::uuid
-        `);
+        await upsertAnalysis(tenantId, website || null, errored, 2);
       }
     } catch {
       // swallow
