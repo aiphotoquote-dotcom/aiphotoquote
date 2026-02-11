@@ -63,7 +63,7 @@ function titleFromKey(key: string) {
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const industryKey = params?.industryKey ?? "";
+  const industryKey = params?.industryKey;
   const key = decodeURIComponent(industryKey || "").trim();
 
   if (!key) {
@@ -170,15 +170,15 @@ export default async function PccIndustryDetailPage({ params }: Props) {
       t.status::text as "tenantStatus",
       t.created_at as "createdAt",
 
-      (o.ai_analysis->>'businessGuess')::text as "businessGuess",
-      (o.ai_analysis->>'fit')::text as "fit",
-      (o.ai_analysis->>'confidenceScore')::text as "confidenceScore",
-      (o.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
-      (o.ai_analysis->'meta'->>'status')::text as "aiStatus",
-      (o.ai_analysis->'meta'->>'round')::text as "aiRound"
-    from tenant_onboarding o
-    join tenants t on t.id = o.tenant_id
-    where (o.ai_analysis->>'suggestedIndustryKey') = ${key}
+      (to.ai_analysis->>'businessGuess')::text as "businessGuess",
+      (to.ai_analysis->>'fit')::text as "fit",
+      (to.ai_analysis->>'confidenceScore')::text as "confidenceScore",
+      (to.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
+      (to.ai_analysis->'meta'->>'status')::text as "aiStatus",
+      (to.ai_analysis->'meta'->>'round')::text as "aiRound"
+    from tenant_onboarding to
+    join tenants t on t.id = to.tenant_id
+    where (to.ai_analysis->>'suggestedIndustryKey') = ${key}
     order by t.created_at desc
     limit 500
   `);
@@ -250,9 +250,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
               ) : null}
             </div>
 
-            {industry.description ? (
-              <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p>
-            ) : null}
+            {industry.description ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p> : null}
 
             <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
               <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
@@ -442,9 +440,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                         ) : null}
                       </div>
 
-                      {t.businessGuess ? (
-                        <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{t.businessGuess}</div>
-                      ) : null}
+                      {t.businessGuess ? <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{t.businessGuess}</div> : null}
                     </div>
 
                     <div className="shrink-0 text-right space-y-2">
@@ -526,8 +522,8 @@ export default async function PccIndustryDetailPage({ params }: Props) {
         </div>
 
         <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-          Next step: add a global defaults table (ex: <span className="font-mono text-xs">industry_sub_industries</span>)
-          so tenants start from a standard list and can override/extend.
+          Next step: add a global defaults table (ex: <span className="font-mono text-xs">industry_sub_industries</span>) so tenants
+          start from a standard list and can override/extend.
         </div>
       </div>
 
@@ -547,8 +543,8 @@ export default async function PccIndustryDetailPage({ params }: Props) {
 
         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
           Scoped to tenants where <span className="font-mono">tenant_settings.industry_key</span> ={" "}
-          <span className="font-mono">{key}</span> (because <span className="font-mono">tenant_sub_industries</span> has
-          no industry column yet).
+          <span className="font-mono">{key}</span> (because <span className="font-mono">tenant_sub_industries</span> has no industry
+          column yet).
         </p>
 
         <div className="mt-3 overflow-x-auto">
