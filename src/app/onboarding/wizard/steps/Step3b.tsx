@@ -8,6 +8,16 @@ function safeTrim(v: any) {
   return s ? s : "";
 }
 
+function normalizeKey(raw: any) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
+
 function clamp01(n: any) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
@@ -81,7 +91,7 @@ function cn(...xs: Array<string | false | null | undefined>) {
 /**
  * Step3 can set sessionStorage "apq_onboarding_sub_intent":
  *  - "refine"  -> auto select Yes and auto-start interview
- *  - "skip"    -> immediately persist null and continue
+ *  - "skip"    -> auto select No and auto-continue
  */
 function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   try {
@@ -100,20 +110,37 @@ export function Step3b(props: {
   aiAnalysis: any | null | undefined;
 
   onBack: () => void; // back to Step3 (industry confirm)
-  onSkip: () => void; // (legacy) not used, but kept for compatibility
+  onSkip: () => void; // legacy prop (not used here, kept for compatibility)
 
   onSubmit: (args: { subIndustryLabel: string | null }) => Promise<void>;
   onError: (m: string) => void;
 }) {
   const tid = safeTrim(props.tenantId);
-  const industryKey = safeTrim(props.industryKey);
+
+  /**
+   * ✅ CRITICAL:
+   * If the wizard ever hands us an empty/placeholder industryKey (or a stale "service"),
+   * fall back to AI-proposed keys so we never start/submit against the wrong industry.
+   */
+  const resolvedIndustryKey = useMemo(() => {
+    const fromProps = normalizeKey(props.industryKey);
+    const fromAiInterview = normalizeKey(props.aiAnalysis?.industryInterview?.proposedIndustry?.key);
+    const fromAiSuggested = normalizeKey(props.aiAnalysis?.suggestedIndustryKey);
+    const pick = fromProps && fromProps !== "service" ? fromProps : fromAiInterview || fromAiSuggested || fromProps;
+    return pick;
+  }, [props.industryKey, props.aiAnalysis]);
 
   const existingFromAi: SubInterview | null = useMemo(() => {
     const x = props.aiAnalysis?.subIndustryInterview;
     if (!x || typeof x !== "object") return null;
     if ((x as any).mode !== "SUB") return null;
+
+    // Only accept if it matches our resolved industry (prevents cross-industry bleed)
+    const ik = normalizeKey((x as any).industryKey);
+    if (ik && resolvedIndustryKey && ik !== normalizeKey(resolvedIndustryKey)) return null;
+
     return x as SubInterview;
-  }, [props.aiAnalysis]);
+  }, [props.aiAnalysis, resolvedIndustryKey]);
 
   const [state, setState] = useState<SubInterview | null>(existingFromAi);
 
@@ -151,6 +178,7 @@ export function Step3b(props: {
       return false;
     }
   }, []);
+
   const [lastApi, setLastApi] = useState<any>(null);
 
   // null => haven't answered prompt yet
@@ -162,8 +190,6 @@ export function Step3b(props: {
   const lastSubmitRef = useRef<string>("");
   const didHydrateIntentRef = useRef(false);
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
-
-  // Prevent multiple auto-skip submits
   const didAutoSkipRef = useRef(false);
 
   useEffect(() => {
@@ -189,13 +215,18 @@ export function Step3b(props: {
 
   async function start() {
     if (!tid) return;
-    if (!industryKey) return setErr("Missing industryKey.");
+    if (!resolvedIndustryKey) {
+      const msg = "Missing industryKey. Go back and re-confirm your industry.";
+      setErr(msg);
+      props.onError(msg);
+      return;
+    }
     if (nextQ?.id || isLocked) return;
 
     setWorking(true);
     setErr(null);
     try {
-      const out = await postSubInterview({ mode: "SUB", tenantId: tid, industryKey, action: "start" });
+      const out = await postSubInterview({ mode: "SUB", tenantId: tid, industryKey: resolvedIndustryKey, action: "start" });
       setState(out.subIndustryInterview);
       if (debugOn) setLastApi(out);
     } catch (e: any) {
@@ -219,31 +250,28 @@ export function Step3b(props: {
     if (intent === "skip") setWantsSub("no");
   }, []);
 
-  /**
-   * ✅ Auto-skip MUST happen even if state exists,
-   * as long as we aren't mid-interview (no nextQ) and not locked.
-   */
+  // Auto-skip when intent === skip and wantsSub is "no"
   useEffect(() => {
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
-    if (!tid || !industryKey) return;
+    if (!tid || !resolvedIndustryKey) return;
     if (nextQ?.id || isLocked) return;
     if (didAutoSkipRef.current) return;
 
     didAutoSkipRef.current = true;
     saveAndContinue(null).catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tid, industryKey, wantsSub, nextQ?.id, isLocked]);
+  }, [tid, resolvedIndustryKey, wantsSub, nextQ?.id, isLocked]);
 
   // Auto-start when wantsSub yes
   useEffect(() => {
     if (wantsSub !== "yes") return;
-    if (!tid || !industryKey) return;
+    if (!tid || !resolvedIndustryKey) return;
     if (isLocked) return;
     if (nextQ?.id) return;
     start().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wantsSub, tid, industryKey, isLocked, nextQ?.id]);
+  }, [wantsSub, tid, resolvedIndustryKey, isLocked, nextQ?.id]);
 
   function buildAnswerPayload(): string {
     if (!nextQ) return "";
@@ -253,7 +281,7 @@ export function Step3b(props: {
 
   async function submitAnswer() {
     if (!tid) return setErr("Missing tenantId.");
-    if (!industryKey) return setErr("Missing industryKey.");
+    if (!resolvedIndustryKey) return setErr("Missing industryKey.");
     if (!nextQ?.id) return setErr("No active question yet.");
     if (isLocked) return;
 
@@ -271,7 +299,7 @@ export function Step3b(props: {
       const out = await postSubInterview({
         mode: "SUB",
         tenantId: tid,
-        industryKey,
+        industryKey: resolvedIndustryKey,
         action: "answer",
         questionId: nextQ.id,
         questionText: nextQ.question,
@@ -314,7 +342,10 @@ export function Step3b(props: {
             tenantId: <span className="font-mono">{tid || "(none)"}</span>
           </div>
           <div className="mt-1">
-            industryKey: <span className="font-mono">{industryKey || "(none)"}</span>
+            industryKey (props): <span className="font-mono">{normalizeKey(props.industryKey) || "(none)"}</span>
+          </div>
+          <div className="mt-1">
+            industryKey (resolved): <span className="font-mono">{resolvedIndustryKey || "(none)"}</span>
           </div>
           <div className="mt-1">
             intent: <span className="font-mono">{intentRef.current}</span>
@@ -392,10 +423,10 @@ export function Step3b(props: {
               type="button"
               className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
               onClick={() => {
-                // If user hasn't chosen yet, default to skip (broad) is safer than starting an interview.
+                // default to "no" so the user can continue without interview friction
                 setWantsSub("no");
               }}
-              disabled={working || !tid || !industryKey}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
               Continue →
             </button>
@@ -403,7 +434,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Manual NO path (only when not auto-skip intent) */}
+      {/* NO path */}
       {wantsSub === "no" && intentRef.current !== "skip" ? (
         <div className="mt-5 flex gap-3">
           <button
@@ -418,7 +449,7 @@ export function Step3b(props: {
             type="button"
             className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
             onClick={() => saveAndContinue(null)}
-            disabled={working || !tid || !industryKey}
+            disabled={working || !tid || !resolvedIndustryKey}
           >
             Continue →
           </button>
@@ -435,13 +466,12 @@ export function Step3b(props: {
               type="button"
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
               onClick={() => start().catch(() => null)}
-              disabled={working || !tid || !industryKey || Boolean(nextQ?.id) || isLocked}
+              disabled={working || !tid || !resolvedIndustryKey || Boolean(nextQ?.id) || isLocked}
             >
               {isLocked ? "Locked" : nextQ?.id ? "Running" : "Start"}
             </button>
           </div>
 
-          {/* Live card */}
           <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -478,7 +508,6 @@ export function Step3b(props: {
             <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">{working ? "Thinking…" : "Tap Start to begin…"}</div>
           ) : null}
 
-          {/* Locked */}
           {isLocked ? (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
               <div className="font-semibold">Nice — this helps.</div>
@@ -508,7 +537,6 @@ export function Step3b(props: {
             </div>
           ) : null}
 
-          {/* Question */}
           {!isLocked && nextQ ? (
             <div className="mt-4">
               <div className="text-base font-semibold text-gray-900 dark:text-gray-100">{nextQ.question}</div>
@@ -561,7 +589,7 @@ export function Step3b(props: {
                   type="button"
                   className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
                   onClick={() => submitAnswer().catch(() => null)}
-                  disabled={working || !tid || !industryKey || !nextQ?.id}
+                  disabled={working || !tid || !resolvedIndustryKey || !nextQ?.id}
                 >
                   {working ? "Thinking…" : "Continue →"}
                 </button>

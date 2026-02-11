@@ -1,4 +1,3 @@
-// src/app/onboarding/wizard/steps/Step3.tsx
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -76,6 +75,10 @@ function normalizeKey(raw: string) {
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, 64);
+}
+
+function isPlaceholder(key: string) {
+  return !key || key === "service";
 }
 
 /**
@@ -173,26 +176,30 @@ export function Step3(props: {
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      // ✅ Prefer: wizard-provided current industry, then server, then AI suggested.
+      // ✅ Prefer: wizard-provided current industry, then AI suggested, then server selection (if non-placeholder).
       const wizardSel = normalizeKey(safeTrim(props.currentIndustryKey));
-      const serverSel =
+
+      const rawServerSel =
         normalizeKey(safeTrim((j as any).selectedKey)) ||
         normalizeKey(safeTrim((j as any).industryKey)) ||
         normalizeKey(safeTrim((j as any).tenantIndustryKey)) ||
         "";
 
+      const serverSel = isPlaceholder(rawServerSel) ? "" : rawServerSel;
+
       const hasWizard = wizardSel && list.some((x) => x.key === wizardSel);
-      const hasServer = serverSel && list.some((x) => x.key === serverSel);
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
+      const hasServer = serverSel && list.some((x) => x.key === serverSel);
 
       // Choose next:
       // - if tenant already has a real industry, keep it (never revert to "service")
       // - else if AI has a suggestion, adopt it
+      // - else accept server selection if it's non-placeholder
       // - else fall back to something that isn't "service" if possible
       let next =
         (hasWizard ? wizardSel : "") ||
-        (hasServer ? serverSel : "") ||
         (hasSuggested ? suggestedKey : "") ||
+        (hasServer ? serverSel : "") ||
         "";
 
       if (!next) {
@@ -221,7 +228,7 @@ export function Step3(props: {
     if (!exists) return;
 
     const cur = normalizeKey(safeTrim(selectedKey));
-    const isGeneric = !cur || cur === "service";
+    const isGeneric = isPlaceholder(cur);
 
     if (isLocked && (isGeneric || cur === suggestedKey)) {
       setSelectedKey(suggestedKey);

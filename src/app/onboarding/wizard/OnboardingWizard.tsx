@@ -21,6 +21,8 @@ import { Step5Branding } from "./steps/Step5Branding";
 import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
+/* --------------------- small utils --------------------- */
+
 function getAiAnalysis(state: OnboardingState | null): any | null {
   if (!state) return null;
   const s: any = state as any;
@@ -55,6 +57,7 @@ export default function OnboardingWizard() {
 
   const [lastAction, setLastAction] = useState<string | null>(null);
 
+  // step 3 -> 3b handoff state
   const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
   const [pendingSubIndustryLabel, setPendingSubIndustryLabel] = useState<string | null>(null);
 
@@ -123,7 +126,7 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
-      // ✅ never allow a stale URL step to drag us backwards.
+      // never allow URL step to drag backwards vs server step
       const p = getUrlParams();
       const urlStepRaw = (p as any)?.step;
       const urlStep = urlStepRaw ? clampStep(urlStepRaw) : null;
@@ -175,6 +178,8 @@ export default function OnboardingWizard() {
     }
   }
 
+  /* --------------------- step actions --------------------- */
+
   async function saveStep1(payload: { businessName: string; website?: string; ownerName?: string; ownerEmail?: string }) {
     setErr(null);
     setLastAction(null);
@@ -195,13 +200,11 @@ export default function OnboardingWizard() {
     const newTenantId = safeTrim(j.tenantId);
     if (newTenantId) setTenantInNav(newTenantId);
 
+    const next = payload.website ? 2 : 3;
+
     await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
     setLastAction("Saved business identity.");
-
-    // ✅ ALWAYS go to Step 2:
-    // Step2 renders Website Analysis when website exists,
-    // and renders Interview when website is missing.
-    go(2);
+    go(next);
   }
 
   async function runWebsiteAnalysis() {
@@ -252,6 +255,35 @@ export default function OnboardingWizard() {
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
   }
 
+  /**
+   * ✅ CRITICAL FIX:
+   * Step3 must persist the chosen industry to the server BEFORE moving to Step3b.
+   * Otherwise a refresh (or any fallback logic) can snap back to "service".
+   */
+  async function persistIndustryOnly(industryKey: string) {
+    setErr(null);
+    setLastAction(null);
+
+    const tid = safeTrim((state as any)?.tenantId ?? tenantId);
+    if (!tid) throw new Error("NO_TENANT: missing tenantId for industry save.");
+
+    const key = safeTrim(industryKey);
+    if (!key) throw new Error("Choose an industry.");
+
+    const res = await fetch("/api/onboarding/industries", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: tid, industryKey: key }),
+    });
+
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) throw new Error(formatHttpError(j, res));
+
+    await refresh({ tenantId: tid });
+    setLastAction("Industry saved.");
+  }
+
+  // Step3b finalizes optional sub-industry and then advances to step 5
   async function saveIndustrySelection(args: { industryKey?: string; industryLabel?: string; subIndustryLabel?: string | null }) {
     setErr(null);
     setLastAction(null);
@@ -261,6 +293,7 @@ export default function OnboardingWizard() {
 
     const body: any = { tenantId: tid, ...args };
 
+    // omit null/empty subIndustryLabel
     if (body.subIndustryLabel === null || safeTrim(body.subIndustryLabel) === "") {
       delete body.subIndustryLabel;
     }
@@ -327,8 +360,6 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        // ✅ MUST match src/app/api/onboarding/state/route.ts
-        // branding is step 6, plan is step 7
         step: 6,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
@@ -343,6 +374,8 @@ export default function OnboardingWizard() {
     setLastAction("Saved branding & lead routing.");
     go(7);
   }
+
+  /* --------------------- render --------------------- */
 
   if (loading) {
     return (
@@ -429,6 +462,9 @@ export default function OnboardingWizard() {
               onSubmit={async ({ industryKey }) => {
                 const key = safeTrim(industryKey);
                 if (!key) throw new Error("Choose an industry.");
+
+                // ✅ persist immediately (prevents snapback to service)
+                await persistIndustryOnly(key);
 
                 setPendingIndustryKey(key);
                 setPendingSubIndustryLabel(null);
