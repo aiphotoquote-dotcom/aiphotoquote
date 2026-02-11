@@ -11,8 +11,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
-  // ✅ Next 16 can pass params as a Promise in Server Components
-  params: Promise<{ industryKey: string }>;
+  params: { industryKey: string };
 };
 
 function rows(r: any): any[] {
@@ -51,6 +50,11 @@ function toNum(v: any, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 function titleFromKey(key: string) {
   const s = String(key ?? "").trim();
   if (!s) return "";
@@ -61,10 +65,45 @@ function titleFromKey(key: string) {
     .join(" ");
 }
 
+function safeJsonParse(v: any): any | null {
+  try {
+    if (!v) return null;
+    if (typeof v === "object") return v;
+    const s = String(v);
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+}
+
+function pick(obj: any, paths: string[]): any {
+  for (const p of paths) {
+    const parts = p.split(".");
+    let cur = obj;
+    let ok = true;
+    for (const k of parts) {
+      if (!cur || typeof cur !== "object" || !(k in cur)) {
+        ok = false;
+        break;
+      }
+      cur = cur[k];
+    }
+    if (ok) return cur;
+  }
+  return null;
+}
+
+function normalizeUrl(u: string | null) {
+  const s = safeTrim(u);
+  if (!s) return null;
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  return `https://${s}`;
+}
+
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const { industryKey } = await params;
+  const industryKey = params?.industryKey;
   const key = decodeURIComponent(industryKey || "").trim();
 
   if (!key) {
@@ -88,7 +127,6 @@ export default async function PccIndustryDetailPage({ params }: Props) {
 
   // -----------------------------
   // Industry metadata (optional)
-  // If industries table is empty, we still render the page using key-derived label.
   // -----------------------------
   const industryR = await db.execute(sql`
     select
@@ -161,8 +199,8 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   const confirmedIds = new Set(confirmed.map((t: any) => t.tenantId));
 
   // -----------------------------
-  // AI-suggested tenants (tenant_onboarding.ai_analysis.suggestedIndustryKey)
-  // ✅ IMPORTANT: do NOT alias tenant_onboarding as "to" (Postgres parses "to" as a keyword in some contexts)
+  // AI-suggested tenants
+  // NOTE: alias "to" breaks Postgres parsing in some contexts. Use "ob".
   // -----------------------------
   const aiR = await db.execute(sql`
     select
@@ -172,12 +210,22 @@ export default async function PccIndustryDetailPage({ params }: Props) {
       t.status::text as "tenantStatus",
       t.created_at as "createdAt",
 
+      ob.website::text as "website",
+      ob.ai_analysis as "aiAnalysis",
+
       (ob.ai_analysis->>'businessGuess')::text as "businessGuess",
+      (ob.ai_analysis->>'suggestedIndustryLabel')::text as "suggestedIndustryLabel",
       (ob.ai_analysis->>'fit')::text as "fit",
       (ob.ai_analysis->>'confidenceScore')::text as "confidenceScore",
       (ob.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
+
       (ob.ai_analysis->'meta'->>'status')::text as "aiStatus",
-      (ob.ai_analysis->'meta'->>'round')::text as "aiRound"
+      (ob.ai_analysis->'meta'->>'round')::text as "aiRound",
+      (ob.ai_analysis->'meta'->>'updatedAt')::text as "aiUpdatedAt",
+      (ob.ai_analysis->'meta'->'model'->>'name')::text as "aiModel",
+
+      (ob.ai_analysis->'industryInterview'->'meta'->'debug'->>'reason')::text as "aiReason",
+      (ob.ai_analysis->'industryInterview'->'proposedIndustry'->>'label')::text as "proposedLabel"
     from tenant_onboarding ob
     join tenants t on t.id = ob.tenant_id
     where (ob.ai_analysis->>'suggestedIndustryKey') = ${key}
@@ -185,20 +233,79 @@ export default async function PccIndustryDetailPage({ params }: Props) {
     limit 500
   `);
 
-  const aiSuggestedAll = rows(aiR).map((r: any) => ({
-    tenantId: String(r.tenantId),
-    name: String(r.name ?? ""),
-    slug: String(r.slug ?? ""),
-    tenantStatus: String(r.tenantStatus ?? "active"),
-    createdAt: r.createdAt ?? null,
+  const aiSuggestedAll = rows(aiR).map((r: any) => {
+    const aiObj = safeJsonParse(r.aiAnalysis);
 
-    businessGuess: r.businessGuess ? String(r.businessGuess) : null,
-    fit: r.fit ? String(r.fit) : null,
-    confidenceScore: toNum(r.confidenceScore, 0),
-    needsConfirmation: toBool(r.needsConfirmation),
-    aiStatus: r.aiStatus ? String(r.aiStatus) : null,
-    aiRound: r.aiRound ? toNum(r.aiRound, 0) : null,
-  }));
+    const rejectedKeys =
+      (Array.isArray(pick(aiObj, ["rejectedIndustryKeys"])) ? pick(aiObj, ["rejectedIndustryKeys"]) : null) ?? [];
+
+    const candidateLabels =
+      (Array.isArray(pick(aiObj, ["industryInterview.candidates"])) ? pick(aiObj, ["industryInterview.candidates"]) : null) ?? [];
+
+    const topCandidates = Array.isArray(candidateLabels)
+      ? candidateLabels
+          .map((c: any) => ({
+            label: safeTrim(c?.label),
+            key: safeTrim(c?.key),
+            score: toNum(c?.score, 0),
+          }))
+          .filter((x: any) => x.label && x.key)
+          .slice(0, 4)
+      : [];
+
+    const website = normalizeUrl(r.website ? String(r.website) : null);
+
+    const suggestedLabel =
+      safeTrim(r.proposedLabel) ||
+      safeTrim(r.suggestedIndustryLabel) ||
+      safeTrim(pick(aiObj, ["suggestedIndustryLabel"])) ||
+      safeTrim(pick(aiObj, ["industryInterview.proposedIndustry.label"])) ||
+      "";
+
+    const reason =
+      safeTrim(r.aiReason) ||
+      safeTrim(pick(aiObj, ["industryInterview.meta.debug.reason"])) ||
+      safeTrim(pick(aiObj, ["meta.debug.reason"])) ||
+      "";
+
+    const model =
+      safeTrim(r.aiModel) ||
+      safeTrim(pick(aiObj, ["meta.model.name"])) ||
+      safeTrim(pick(aiObj, ["industryInterview.meta.model.name"])) ||
+      "";
+
+    const updatedAt =
+      safeTrim(r.aiUpdatedAt) ||
+      safeTrim(pick(aiObj, ["meta.updatedAt"])) ||
+      safeTrim(pick(aiObj, ["industryInterview.meta.updatedAt"])) ||
+      "";
+
+    return {
+      tenantId: String(r.tenantId),
+      name: String(r.name ?? ""),
+      slug: String(r.slug ?? ""),
+      tenantStatus: String(r.tenantStatus ?? "active"),
+      createdAt: r.createdAt ?? null,
+
+      website,
+      businessGuess: r.businessGuess ? String(r.businessGuess) : null,
+      suggestedLabel: suggestedLabel || null,
+
+      fit: r.fit ? String(r.fit) : null,
+      confidenceScore: toNum(r.confidenceScore, 0),
+      needsConfirmation: toBool(r.needsConfirmation),
+
+      aiStatus: r.aiStatus ? String(r.aiStatus) : null,
+      aiRound: r.aiRound ? toNum(r.aiRound, 0) : null,
+
+      aiUpdatedAt: updatedAt || null,
+      aiModel: model || null,
+      aiReason: reason || null,
+
+      rejectedIndustryKeys: Array.isArray(rejectedKeys) ? rejectedKeys.map((x: any) => String(x)) : [],
+      topCandidates,
+    };
+  });
 
   const aiUnconfirmed = aiSuggestedAll.filter((t: any) => !confirmedIds.has(t.tenantId));
   const aiAlsoConfirmed = aiSuggestedAll.filter((t: any) => confirmedIds.has(t.tenantId));
@@ -417,31 +524,96 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                   key={t.tenantId}
                   className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black"
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
                       <div className="font-mono text-[11px] text-gray-600 dark:text-gray-300 truncate">{t.slug}</div>
 
-                      <div className="mt-1 flex flex-wrap gap-2 text-[11px]">
+                      <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
                         <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
                           fit: {t.fit ?? "—"}
                         </span>
+
                         <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
                           confidence: {Math.round((t.confidenceScore ?? 0) * 100)}%
                         </span>
+
                         {t.needsConfirmation ? (
                           <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
                             needs confirmation
                           </span>
                         ) : null}
+
                         {t.aiStatus ? (
                           <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
                             status: {t.aiStatus}
                           </span>
                         ) : null}
+
+                        {t.aiRound ? (
+                          <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                            round: {t.aiRound}
+                          </span>
+                        ) : null}
+
+                        {t.aiModel ? (
+                          <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                            model: {t.aiModel}
+                          </span>
+                        ) : null}
+
+                        {t.aiUpdatedAt ? (
+                          <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                            updated: {fmtDate(t.aiUpdatedAt)}
+                          </span>
+                        ) : null}
                       </div>
 
-                      {t.businessGuess ? <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{t.businessGuess}</div> : null}
+                      {/* Evidence block */}
+                      <div className="mt-3 space-y-2">
+                        {t.suggestedLabel ? (
+                          <div className="text-sm text-gray-800 dark:text-gray-200">
+                            <span className="font-semibold">AI label:</span> {t.suggestedLabel}
+                          </div>
+                        ) : null}
+
+                        {t.businessGuess ? (
+                          <div className="text-sm text-gray-700 dark:text-gray-200">
+                            <span className="font-semibold">Business guess:</span> {t.businessGuess}
+                          </div>
+                        ) : null}
+
+                        {t.website ? (
+                          <div className="text-[11px] text-gray-600 dark:text-gray-300">
+                            <span className="font-semibold">Website:</span>{" "}
+                            <a href={t.website} className="underline" target="_blank" rel="noreferrer">
+                              {t.website}
+                            </a>
+                          </div>
+                        ) : null}
+
+                        {t.aiReason ? (
+                          <div className="text-[11px] text-gray-600 dark:text-gray-300">
+                            <span className="font-semibold">Reason:</span> {t.aiReason}
+                          </div>
+                        ) : null}
+
+                        {Array.isArray(t.topCandidates) && t.topCandidates.length ? (
+                          <div className="text-[11px] text-gray-600 dark:text-gray-300">
+                            <span className="font-semibold">Other candidates:</span>{" "}
+                            {t.topCandidates
+                              .map((c: any) => `${c.label} (${Math.round((c.score ?? 0) * 100)}%)`)
+                              .join(" · ")}
+                          </div>
+                        ) : null}
+
+                        {Array.isArray(t.rejectedIndustryKeys) && t.rejectedIndustryKeys.length ? (
+                          <div className="text-[11px] text-gray-600 dark:text-gray-300">
+                            <span className="font-semibold">Rejected keys:</span>{" "}
+                            <span className="font-mono">{t.rejectedIndustryKeys.join(", ")}</span>
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
 
                     <div className="shrink-0 text-right space-y-2">
@@ -451,8 +623,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
 
                       <div className="text-[11px] text-gray-500 dark:text-gray-400">{t.createdAt ? fmtDate(t.createdAt) : ""}</div>
 
-                      {/* ✅ Do NOT pass callback props from a Server Component (cannot serialize functions). */}
-                      <ConfirmIndustryButton tenantId={t.tenantId} industryKey={key} />
+                      <ConfirmIndustryButton tenantId={t.tenantId} tenantName={t.name} industryKey={key} />
                     </div>
                   </div>
                 </div>
