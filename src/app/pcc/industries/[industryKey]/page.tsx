@@ -11,9 +11,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
-  // Be defensive: some code paths previously treated params like a Promise.
-  // Types don’t affect runtime, but this keeps the implementation robust.
-  params: { industryKey?: string } | Promise<{ industryKey?: string }>;
+  params: { industryKey: string };
 };
 
 function rows(r: any): any[] {
@@ -62,22 +60,11 @@ function titleFromKey(key: string) {
     .join(" ");
 }
 
-async function resolveParams(p: Props["params"]): Promise<{ industryKey?: string }> {
-  // Support both object and Promise forms
-  const anyP: any = p as any;
-  if (anyP && typeof anyP.then === "function") {
-    return (await anyP) as any;
-  }
-  return (p as any) ?? {};
-}
-
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const p = await resolveParams(params);
-  const industryKeyRaw = p?.industryKey;
-
-  const key = decodeURIComponent(String(industryKeyRaw ?? "")).trim();
+  const industryKey = params?.industryKey;
+  const key = decodeURIComponent(industryKey || "").trim();
 
   if (!key) {
     return (
@@ -92,12 +79,6 @@ export default async function PccIndustryDetailPage({ params }: Props) {
             >
               Back to industries
             </Link>
-          </div>
-
-          {/* Optional tiny diagnostic (safe): shows what params looked like */}
-          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-            <div className="font-semibold">Debug</div>
-            <div className="mt-1 font-mono break-all">params.industryKey: {String(industryKeyRaw ?? "(undefined)")}</div>
           </div>
         </div>
       </div>
@@ -181,6 +162,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   // -----------------------------
   // AI-suggested tenants (tenant_onboarding.ai_analysis.suggestedIndustryKey)
   // -----------------------------
+  // IMPORTANT: Do not alias as "to" (postgres parser error). Use "ob".
   const aiR = await db.execute(sql`
     select
       t.id::text as "tenantId",
@@ -189,15 +171,15 @@ export default async function PccIndustryDetailPage({ params }: Props) {
       t.status::text as "tenantStatus",
       t.created_at as "createdAt",
 
-      (to.ai_analysis->>'businessGuess')::text as "businessGuess",
-      (to.ai_analysis->>'fit')::text as "fit",
-      (to.ai_analysis->>'confidenceScore')::text as "confidenceScore",
-      (to.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
-      (to.ai_analysis->'meta'->>'status')::text as "aiStatus",
-      (to.ai_analysis->'meta'->>'round')::text as "aiRound"
-    from tenant_onboarding to
-    join tenants t on t.id = to.tenant_id
-    where (to.ai_analysis->>'suggestedIndustryKey') = ${key}
+      (ob.ai_analysis->>'businessGuess')::text as "businessGuess",
+      (ob.ai_analysis->>'fit')::text as "fit",
+      (ob.ai_analysis->>'confidenceScore')::text as "confidenceScore",
+      (ob.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
+      (ob.ai_analysis->'meta'->>'status')::text as "aiStatus",
+      (ob.ai_analysis->'meta'->>'round')::text as "aiRound"
+    from tenant_onboarding ob
+    join tenants t on t.id = ob.tenant_id
+    where (ob.ai_analysis->>'suggestedIndustryKey') = ${key}
     order by t.created_at desc
     limit 500
   `);
@@ -375,8 +357,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                     </td>
 
                     <td className="py-3 pr-3 text-xs text-gray-700 dark:text-gray-200">
-                      <span className="font-mono">{t.graceTotal}</span> total ·{" "}
-                      <span className="font-mono">{t.graceUsed}</span> used ·{" "}
+                      <span className="font-mono">{t.graceTotal}</span> total · <span className="font-mono">{t.graceUsed}</span> used ·{" "}
                       <span className="font-mono">{t.graceRemaining}</span> left
                     </td>
 
