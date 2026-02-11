@@ -11,6 +11,21 @@ import TenantsTableClient from "./TenantsTableClient";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function titleFromKey(key: string) {
+  const s = safeTrim(key);
+  if (!s) return "";
+  return s
+    .split(/[_\-]+/g)
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 export default async function PccTenantsPage(props: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
@@ -22,7 +37,10 @@ export default async function PccTenantsPage(props: {
     sp.archived === "true" ||
     (Array.isArray(sp.archived) && sp.archived.includes("1"));
 
-  const rows = await db
+  // NOTE:
+  // - We keep the original drizzle select for base tenant rows.
+  // - Then we attach onboarding/industry intelligence via a single SQL query keyed by tenantId.
+  const baseRows = await db
     .select({
       id: tenants.id,
       name: tenants.name,
@@ -38,12 +56,124 @@ export default async function PccTenantsPage(props: {
       monthlyQuoteLimit: tenantSettings.monthlyQuoteLimit,
       activationGraceCredits: tenantSettings.activationGraceCredits,
       activationGraceUsed: tenantSettings.activationGraceUsed,
+
+      // confirmed industry from settings
+      industryKey: (tenantSettings as any).industryKey ?? (tenantSettings as any).industry_key,
     })
     .from(tenants)
     .leftJoin(tenantSettings, sql`${tenantSettings.tenantId} = ${tenants.id}`)
     .where(showArchived ? sql`true` : sql`coalesce(${(tenants as any).status}, 'active') <> 'archived'`)
     .orderBy(desc(tenants.createdAt))
     .limit(200);
+
+  const tenantIds = baseRows.map((r) => String(r.id)).filter(Boolean);
+
+  // Attach onboarding AI signals + canonical labels
+  // We use a single query over the visible tenantIds, so this page stays fast.
+  let aiByTenant = new Map<
+    string,
+    {
+      suggestedIndustryKey: string | null;
+      suggestedIndustryLabel: string | null;
+      needsConfirmation: boolean;
+      aiStatus: string | null;
+      aiSource: string | null;
+      aiUpdatedAt: string | null;
+      rejectedCount: number;
+      confirmedIndustryLabel: string | null;
+      suggestedIndustryCanonicalLabel: string | null;
+    }
+  >();
+
+  if (tenantIds.length) {
+    const r = await db.execute(sql`
+      with visible as (
+        select unnest(${tenantIds}::uuid[]) as tenant_id
+      )
+      select
+        v.tenant_id::text as "tenantId",
+
+        -- confirmed industry label (industries table)
+        i1.label::text as "confirmedIndustryLabel",
+
+        -- suggested industry key
+        (ob.ai_analysis->>'suggestedIndustryKey')::text as "suggestedIndustryKey",
+
+        -- suggested industry label candidates
+        (ob.ai_analysis->>'suggestedIndustryLabel')::text as "suggestedIndustryLabel",
+        (ob.ai_analysis->'industryInterview'->'proposedIndustry'->>'label')::text as "suggestedIndustryCanonicalLabel",
+
+        -- confirmation state
+        case
+          when (ob.ai_analysis->>'needsConfirmation')::text = 'true' then true
+          when (ob.ai_analysis->>'needsConfirmation')::text = 't' then true
+          when (ob.ai_analysis->>'needsConfirmation')::text = '1' then true
+          else false
+        end as "needsConfirmation",
+
+        -- meta/status/source/updatedAt
+        (ob.ai_analysis->'meta'->>'status')::text as "aiStatus",
+        (ob.ai_analysis->'meta'->>'source')::text as "aiSource",
+        (ob.ai_analysis->'meta'->>'updatedAt')::text as "aiUpdatedAt",
+
+        -- rejected keys count
+        coalesce(jsonb_array_length(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)), 0)::int as "rejectedCount"
+      from visible v
+      left join tenant_onboarding ob on ob.tenant_id = v.tenant_id
+      left join tenant_settings ts on ts.tenant_id = v.tenant_id
+      left join industries i1 on i1.key = ts.industry_key
+    `);
+
+    const rows = (r as any)?.rows ?? (Array.isArray(r) ? r : []);
+    for (const x of rows) {
+      const tid = String(x.tenantId ?? "");
+      if (!tid) continue;
+
+      aiByTenant.set(tid, {
+        suggestedIndustryKey: x.suggestedIndustryKey ? String(x.suggestedIndustryKey) : null,
+        suggestedIndustryLabel: x.suggestedIndustryLabel ? String(x.suggestedIndustryLabel) : null,
+        suggestedIndustryCanonicalLabel: x.suggestedIndustryCanonicalLabel ? String(x.suggestedIndustryCanonicalLabel) : null,
+        needsConfirmation: Boolean(x.needsConfirmation),
+        aiStatus: x.aiStatus ? String(x.aiStatus) : null,
+        aiSource: x.aiSource ? String(x.aiSource) : null,
+        aiUpdatedAt: x.aiUpdatedAt ? String(x.aiUpdatedAt) : null,
+        rejectedCount: Number(x.rejectedCount ?? 0),
+        confirmedIndustryLabel: x.confirmedIndustryLabel ? String(x.confirmedIndustryLabel) : null,
+      });
+    }
+  }
+
+  const rows = baseRows.map((r: any) => {
+    const tid = String(r.id);
+    const ai = aiByTenant.get(tid);
+
+    const confirmedIndustryKey = r.industryKey ? String(r.industryKey) : null;
+    const confirmedIndustryLabel =
+      ai?.confirmedIndustryLabel || (confirmedIndustryKey ? titleFromKey(confirmedIndustryKey) : null);
+
+    const suggestedIndustryKey = ai?.suggestedIndustryKey ?? null;
+    const suggestedIndustryLabel =
+      ai?.suggestedIndustryCanonicalLabel ||
+      ai?.suggestedIndustryLabel ||
+      (suggestedIndustryKey ? titleFromKey(suggestedIndustryKey) : null);
+
+    return {
+      ...r,
+
+      // confirmed industry (settings)
+      industryKey: confirmedIndustryKey,
+      industryLabel: confirmedIndustryLabel,
+
+      // AI suggestion signals
+      aiSuggestedIndustryKey: suggestedIndustryKey,
+      aiSuggestedIndustryLabel: suggestedIndustryLabel,
+      aiNeedsConfirmation: ai?.needsConfirmation ?? false,
+      aiStatus: ai?.aiStatus ?? null,
+      aiSource: ai?.aiSource ?? null,
+      aiUpdatedAt: ai?.aiUpdatedAt ?? null,
+      aiRejectedCount: ai?.rejectedCount ?? 0,
+    };
+  });
 
   return (
     <div className="space-y-4">
@@ -53,6 +183,9 @@ export default async function PccTenantsPage(props: {
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Tenants</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               PCC tenant list. Use <span className="font-semibold">Archive</span> to safely disable a tenant while preserving history (no data is deleted).
+              <span className="ml-2">
+                This view also includes <span className="font-semibold">AI onboarding signals</span> (suggested industry, needs-confirm, status).
+              </span>
             </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
