@@ -1,4 +1,4 @@
-// src/app/api/pcc/tenants/[tenantId]/confirm-industry/route.ts
+// src/app/api/pcc/tenants/[tenantId]/set-industry/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -11,6 +11,8 @@ export const dynamic = "force-dynamic";
 
 const Body = z.object({
   industryKey: z.string().min(1),
+  source: z.string().optional(),
+  previousSuggestedIndustryKey: z.string().nullable().optional(),
 });
 
 function safeKey(v: string) {
@@ -34,15 +36,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ tenantId: stri
   }
 
   const industryKey = safeKey(parsed.data.industryKey);
+  const source = safeKey(parsed.data.source ?? "pcc_set_industry");
+  const prev = parsed.data.previousSuggestedIndustryKey ? safeKey(parsed.data.previousSuggestedIndustryKey) : null;
+
+  if (!tenantId) return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
   if (!isReasonableIndustryKey(industryKey)) {
     return NextResponse.json({ ok: false, error: "INVALID_INDUSTRY_KEY" }, { status: 400 });
   }
 
-  if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
-  }
-
-  // Ensure tenant_settings row exists, then set industry_key
   await db.execute(sql`
     insert into tenant_settings (tenant_id, industry_key, updated_at)
     values (${tenantId}::uuid, ${industryKey}, now())
@@ -50,17 +51,43 @@ export async function POST(req: Request, ctx: { params: Promise<{ tenantId: stri
     do update set industry_key = excluded.industry_key, updated_at = now()
   `);
 
-  // Mark onboarding AI as no longer needing confirmation (best-effort, even if onboarding row doesn't exist)
+  // Update onboarding markers so PCC reflects that this tenant is now assigned.
+  // We do NOT overwrite the whole ai_analysis; we just set a couple safe fields.
   await db.execute(sql`
     update tenant_onboarding
-    set ai_analysis = jsonb_set(
-      coalesce(ai_analysis, '{}'::jsonb),
-      '{needsConfirmation}',
-      'false'::jsonb,
-      true
-    )
+    set ai_analysis =
+      jsonb_set(
+        jsonb_set(
+          jsonb_set(
+            coalesce(ai_analysis, '{}'::jsonb),
+            '{needsConfirmation}',
+            'false'::jsonb,
+            true
+          ),
+          '{meta,status}',
+          '"reassigned"'::jsonb,
+          true
+        ),
+        '{meta,source}',
+        to_jsonb(${source}::text),
+        true
+      )
     where tenant_id = ${tenantId}::uuid
   `);
+
+  // Optional breadcrumb: store the previous suggested industry key (if provided)
+  if (prev) {
+    await db.execute(sql`
+      update tenant_onboarding
+      set ai_analysis = jsonb_set(
+        coalesce(ai_analysis, '{}'::jsonb),
+        '{meta,previousSuggestedIndustryKey}',
+        to_jsonb(${prev}::text),
+        true
+      )
+      where tenant_id = ${tenantId}::uuid
+    `);
+  }
 
   return NextResponse.json({ ok: true });
 }
