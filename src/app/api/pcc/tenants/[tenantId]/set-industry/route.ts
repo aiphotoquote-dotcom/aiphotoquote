@@ -23,10 +23,12 @@ function isReasonableIndustryKey(k: string) {
   return /^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(k);
 }
 
-export async function POST(req: NextRequest, context: { params: { tenantId: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ tenantId: string }> }) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const tenantId = safeKey(context.params.tenantId || "");
+  const { tenantId: rawTenantId } = await ctx.params;
+  const tenantId = safeKey(rawTenantId);
+
   if (!tenantId) return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
 
   const json = await req.json().catch(() => ({}));
@@ -50,7 +52,6 @@ export async function POST(req: NextRequest, context: { params: { tenantId: stri
     do update set industry_key = excluded.industry_key, updated_at = now()
   `);
 
-  // Update onboarding markers so PCC reflects that this tenant is now assigned.
   await db.execute(sql`
     update tenant_onboarding
     set ai_analysis =

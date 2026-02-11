@@ -21,10 +21,12 @@ function isReasonableIndustryKey(k: string) {
   return /^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(k);
 }
 
-export async function POST(req: NextRequest, context: { params: { tenantId: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ tenantId: string }> }) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const tenantId = safeKey(context.params.tenantId || "");
+  const { tenantId: rawTenantId } = await ctx.params;
+  const tenantId = safeKey(rawTenantId);
+
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
   }
@@ -40,7 +42,6 @@ export async function POST(req: NextRequest, context: { params: { tenantId: stri
     return NextResponse.json({ ok: false, error: "INVALID_INDUSTRY_KEY" }, { status: 400 });
   }
 
-  // Ensure tenant_settings row exists, then set industry_key
   await db.execute(sql`
     insert into tenant_settings (tenant_id, industry_key, updated_at)
     values (${tenantId}::uuid, ${industryKey}, now())
@@ -48,7 +49,6 @@ export async function POST(req: NextRequest, context: { params: { tenantId: stri
     do update set industry_key = excluded.industry_key, updated_at = now()
   `);
 
-  // Mark onboarding AI as no longer needing confirmation (best-effort)
   await db.execute(sql`
     update tenant_onboarding
     set ai_analysis = jsonb_set(
