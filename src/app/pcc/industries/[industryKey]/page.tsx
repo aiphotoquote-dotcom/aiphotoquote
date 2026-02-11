@@ -11,7 +11,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
-  params: { industryKey: string };
+  // ✅ Next 16 can pass params as a Promise in Server Components
+  params: Promise<{ industryKey: string }>;
 };
 
 function rows(r: any): any[] {
@@ -63,7 +64,7 @@ function titleFromKey(key: string) {
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const industryKey = params?.industryKey;
+  const { industryKey } = await params;
   const key = decodeURIComponent(industryKey || "").trim();
 
   if (!key) {
@@ -161,8 +162,8 @@ export default async function PccIndustryDetailPage({ params }: Props) {
 
   // -----------------------------
   // AI-suggested tenants (tenant_onboarding.ai_analysis.suggestedIndustryKey)
+  // ✅ IMPORTANT: do NOT alias tenant_onboarding as "to" (Postgres parses "to" as a keyword in some contexts)
   // -----------------------------
-  // IMPORTANT: Do not alias as "to" (postgres parser error). Use "ob".
   const aiR = await db.execute(sql`
     select
       t.id::text as "tenantId",
@@ -412,7 +413,10 @@ export default async function PccIndustryDetailPage({ params }: Props) {
           {aiUnconfirmed.length ? (
             <div className="mt-2 grid gap-2">
               {aiUnconfirmed.map((t: any) => (
-                <div key={t.tenantId} className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+                <div
+                  key={t.tenantId}
+                  className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black"
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
@@ -447,7 +451,8 @@ export default async function PccIndustryDetailPage({ params }: Props) {
 
                       <div className="text-[11px] text-gray-500 dark:text-gray-400">{t.createdAt ? fmtDate(t.createdAt) : ""}</div>
 
-                      <ConfirmIndustryButton tenantId={t.tenantId} industryKey={key} onDone={() => window.location.reload()} />
+                      {/* ✅ Do NOT pass callback props from a Server Component (cannot serialize functions). */}
+                      <ConfirmIndustryButton tenantId={t.tenantId} industryKey={key} />
                     </div>
                   </div>
                 </div>
