@@ -240,24 +240,22 @@ function applyModeACompat(ai: any | null): any | null {
   const ii = (ai as any)?.industryInterview;
   if (!ii || typeof ii !== "object") return ai;
 
-  const mode = String((ii as any)?.mode ?? "").trim();
+  const mode = String(ii?.mode ?? "").trim();
   if (mode !== "A") return ai;
 
-  const proposed = (ii as any)?.proposedIndustry;
-  const proposedKey = proposed && typeof proposed === "object" ? safeTrim((proposed as any).key) : "";
-  const proposedLabel = proposed && typeof proposed === "object" ? safeTrim((proposed as any).label) : "";
+  const proposed = ii?.proposedIndustry;
+  const proposedKey = proposed && typeof proposed === "object" ? safeTrim(proposed.key) : "";
+  const proposedLabel = proposed && typeof proposed === "object" ? safeTrim(proposed.label) : "";
 
-  const confidenceScore = Number((ii as any)?.confidenceScore ?? 0);
+  const confidenceScore = Number(ii?.confidenceScore ?? 0);
   const conf = Number.isFinite(confidenceScore) ? confidenceScore : 0;
 
-  // Only fill if missing — never overwrite other paths
   const next: any = { ...(ai as any) };
 
   if (!safeTrim(next.suggestedIndustryKey) && proposedKey) next.suggestedIndustryKey = proposedKey;
   if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf)) next.confidenceScore = conf;
   if (next.needsConfirmation === undefined || next.needsConfirmation === null) next.needsConfirmation = true;
 
-  // Optional: a friendly label hint for Step3 if you want it later
   if (!safeTrim(next.suggestedIndustryLabel) && proposedLabel) next.suggestedIndustryLabel = proposedLabel;
 
   return next;
@@ -283,27 +281,24 @@ async function readTenantOnboarding(tenantId: string) {
 
   const row = firstRow(r);
 
-  const aiAnalysis0 = coerceAiAnalysis((row as any)?.ai_analysis ?? null);
+  const aiAnalysis0 = coerceAiAnalysis(row?.ai_analysis ?? null);
   const aiAnalysis = applyModeACompat(aiAnalysis0);
 
   const derived = deriveAiMeta(aiAnalysis);
 
-  const website = (row as any)?.website ?? null;
+  const website = row?.website ?? null;
   const hasWebsite = Boolean(safeTrim(website));
 
-  // Kept for backward compatibility (older Step3 / older interview modes)
   const industryInference = (aiAnalysis as any)?.industryInference ?? null;
-
-  // ✅ NEW: Mode A interview state, consumed by Step2
   const industryInterview = (aiAnalysis as any)?.industryInterview ?? null;
 
-  const planTierRaw = safeTrim((row as any)?.plan_tier);
+  const planTierRaw = safeTrim(row?.plan_tier);
   const planTier = safePlan(planTierRaw);
 
   return {
-    tenantName: (row as any)?.tenant_name ?? null,
-    currentStep: (row as any)?.current_step ?? 1,
-    completed: (row as any)?.completed ?? false,
+    tenantName: row?.tenant_name ?? null,
+    currentStep: row?.current_step ?? 1,
+    completed: row?.completed ?? false,
     website,
     hasWebsite,
     onboardingPath: (hasWebsite ? "website" : "interview") as "website" | "interview",
@@ -350,7 +345,10 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." }, 400);
+      return noCacheJson(
+        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
+        400
+      );
     }
 
     await requireMembership(clerkUserId, tenantId);
@@ -378,12 +376,12 @@ export async function POST(req: Request) {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-    const step = Number((body as any)?.step);
+    const step = Number(body?.step);
 
     // ---------------- STEP 1 ----------------
     if (step === 1) {
-      const businessName = safeTrim((body as any)?.businessName);
-      const website = safeTrim((body as any)?.website);
+      const businessName = safeTrim(body?.businessName);
+      const website = safeTrim(body?.website);
 
       if (businessName.length < 2) {
         return noCacheJson({ ok: false, error: "BUSINESS_NAME_REQUIRED" }, 400);
@@ -391,8 +389,8 @@ export async function POST(req: Request) {
 
       const { appUserId } = await ensureAppUser(clerkUserId);
 
-      let ownerName = safeTrim((body as any)?.ownerName);
-      let ownerEmail = safeTrim((body as any)?.ownerEmail);
+      let ownerName = safeTrim(body?.ownerName);
+      let ownerEmail = safeTrim(body?.ownerEmail);
 
       if (!ownerName || !ownerEmail) {
         const u = await currentUser();
@@ -412,7 +410,7 @@ export async function POST(req: Request) {
       let tenantId: string | null = null;
 
       if (mode === "update" || mode === "existing") {
-        const t = safeTrim((body as any)?.tenantId) || safeTrim(queryTenantId);
+        const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
         if (!t) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
         await requireMembership(clerkUserId, t);
         tenantId = t;
@@ -438,7 +436,6 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // NOTE: leaving placeholder industry_key for now (Mode A will propose/create later)
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -462,8 +459,9 @@ export async function POST(req: Request) {
         `);
       }
 
-      // ✅ If no website, skip website analysis and go to interview/industry step
-      const nextStep = website ? 2 : 3;
+      // ✅ CRITICAL: ALWAYS go to step 2.
+      // Step 2 will choose: website analysis path vs interview path.
+      const nextStep = 2;
 
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, website, current_step, completed, created_at, updated_at)
@@ -477,63 +475,31 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId }, 200);
     }
 
-    /**
-     * ✅ STEP NUMBER COMPATIBILITY (no drift / no breaking):
-     * We previously had:
-     *   - Branding save as step=5
-     *   - Plan selection as step=6
-     *
-     * Your UI is now showing:
-     *   - Branding & lead routing as Step 6 / 7
-     *   - Plan as Step 7 / 7
-     *
-     * So we support BOTH step numbers:
-     *   Branding: step 5 OR 6 (based on presence of lead_to_email / lead_to_email-ish fields)
-     *   Plan:     step 6 OR 7 (based on presence of plan)
-     */
-
-    // Detect intent from payload (safer than trusting step number alone)
-    const bodyLeadToEmail =
-      safeTrim((body as any)?.lead_to_email) ||
-      safeTrim((body as any)?.leadToEmail) ||
-      safeTrim((body as any)?.leadEmail) ||
-      "";
-    const bodyBrandLogoUrl =
-      safeTrim((body as any)?.brand_logo_url) ||
-      safeTrim((body as any)?.brandLogoUrl) ||
-      safeTrim((body as any)?.logoUrl) ||
-      "";
-
-    const bodyPlanRaw = (body as any)?.plan;
-
-    const looksLikeBranding = Boolean(bodyLeadToEmail || bodyBrandLogoUrl);
-    const looksLikePlan = Boolean(safePlan(bodyPlanRaw));
-
-    // ---------------- BRANDING SAVE (supports step 5 OR 6) ----------------
-    if ((step === 5 || step === 6) && looksLikeBranding && !looksLikePlan) {
-      const tid = safeTrim((body as any)?.tenantId) || safeTrim(queryTenantId);
+    // ---------------- STEP 5: branding save ----------------
+    if (step === 5) {
+      const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
       await requireMembership(clerkUserId, tid);
 
-      const leadToEmail = bodyLeadToEmail;
+      const leadToEmail = safeTrim(body?.lead_to_email);
+      const brandLogoUrlRaw = safeTrim(body?.brand_logo_url);
+
       if (!leadToEmail.includes("@")) {
-        return noCacheJson({ ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." }, 400);
+        return noCacheJson(
+          { ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." },
+          400
+        );
       }
 
-      const brandLogoUrl = bodyBrandLogoUrl ? bodyBrandLogoUrl : null;
+      const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
 
-      // Keep platform default; tenant can personalize later
       const platformFrom = "no-reply@aiphotoquote.com";
 
-      /**
-       * ✅ CRITICAL: do NOT touch industry_key here.
-       * Industry selection is handled by /api/onboarding/industries (Step3),
-       * and we must not revert it back to "service" during branding save.
-       */
       await db.execute(sql`
         insert into tenant_settings (
           tenant_id,
+          industry_key,
           lead_to_email,
           brand_logo_url,
           resend_from_email,
@@ -541,6 +507,7 @@ export async function POST(req: Request) {
         )
         values (
           ${tid}::uuid,
+          'service',
           ${leadToEmail},
           ${brandLogoUrl},
           ${platformFrom},
@@ -553,28 +520,25 @@ export async function POST(req: Request) {
               updated_at = now()
       `);
 
-      // Branding is Step 6 in the current UI, but keep compatibility:
-      const brandingStepFloor = 6;
-
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
-        values (${tid}::uuid, ${brandingStepFloor}, false, now(), now())
+        values (${tid}::uuid, 6, false, now(), now())
         on conflict (tenant_id) do update
-          set current_step = greatest(tenant_onboarding.current_step, ${brandingStepFloor}),
+          set current_step = greatest(tenant_onboarding.current_step, 6),
               updated_at = now()
       `);
 
       return noCacheJson({ ok: true, tenantId: tid }, 200);
     }
 
-    // ---------------- PLAN SELECTION (supports step 6 OR 7) ----------------
-    if ((step === 6 || step === 7) && looksLikePlan) {
-      const tid = safeTrim((body as any)?.tenantId) || safeTrim(queryTenantId);
+    // ---------------- STEP 6: plan selection ----------------
+    if (step === 6) {
+      const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
       await requireMembership(clerkUserId, tid);
 
-      const plan = safePlan(bodyPlanRaw);
+      const plan = safePlan(body?.plan);
       if (!plan) {
         return noCacheJson({ ok: false, error: "PLAN_REQUIRED", message: "Choose a valid tier." }, 400);
       }
@@ -594,14 +558,11 @@ export async function POST(req: Request) {
         where tenant_id = ${tid}::uuid
       `);
 
-      // Plan is Step 7 (final) in the current UI
-      const planStepFloor = 7;
-
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
-        values (${tid}::uuid, ${planStepFloor}, true, now(), now())
+        values (${tid}::uuid, 6, true, now(), now())
         on conflict (tenant_id) do update
-          set current_step = greatest(tenant_onboarding.current_step, ${planStepFloor}),
+          set current_step = greatest(tenant_onboarding.current_step, 6),
               completed = true,
               updated_at = now()
       `);
@@ -609,9 +570,6 @@ export async function POST(req: Request) {
       return noCacheJson({ ok: true, tenantId: tid, planTier: plan }, 200);
     }
 
-    // ---------------- Legacy fallback (keep old behavior alive if needed) ----------------
-    // If someone still sends EXACTLY step=5 with branding fields, or step=6 with plan,
-    // the above handlers already catch it. Anything else is truly unsupported.
     return noCacheJson({ ok: false, error: "UNSUPPORTED_STEP" }, 400);
   } catch (e: any) {
     const base = e?.message ?? String(e);
