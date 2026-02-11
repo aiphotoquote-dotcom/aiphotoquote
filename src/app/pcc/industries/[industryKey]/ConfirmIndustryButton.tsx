@@ -1,7 +1,7 @@
 // src/app/pcc/industries/[industryKey]/ConfirmIndustryButton.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 
 function safeTrim(v: any) {
@@ -51,14 +51,15 @@ export default function ConfirmIndustryButton(props: {
   const tenantId = safeTrim(props.tenantId);
   const suggestedKey = safeTrim(props.industryKey);
 
+  const canAct = Boolean(tenantId && suggestedKey);
+
   const [saving, setSaving] = useState<"confirm" | "reject" | "reassign" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<null | "confirmed" | "rejected" | "reassigned">(null);
 
-  const canAct = useMemo(() => Boolean(tenantId && suggestedKey), [tenantId, suggestedKey]);
-
   async function confirm() {
-    if (!canAct) return;
+    if (!canAct || saving) return;
+
     setErr(null);
     setSaving("confirm");
 
@@ -78,7 +79,7 @@ export default function ConfirmIndustryButton(props: {
   }
 
   async function reject() {
-    if (!canAct) return;
+    if (!canAct || saving) return;
 
     const label = props.tenantName ? ` for ${props.tenantName}` : "";
     const yn = window.confirm(
@@ -105,7 +106,7 @@ export default function ConfirmIndustryButton(props: {
   }
 
   async function reassign() {
-    if (!tenantId) return;
+    if (!tenantId || saving) return;
 
     const current = suggestedKey || "";
     const next = safeTrim(
@@ -116,6 +117,7 @@ export default function ConfirmIndustryButton(props: {
     ).toLowerCase();
 
     if (!next) return;
+
     if (!isReasonableIndustryKey(next)) {
       setErr("Invalid industry key format. Use snake_case like: roofing_services");
       return;
