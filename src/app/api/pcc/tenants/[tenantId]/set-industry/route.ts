@@ -15,8 +15,16 @@ const Body = z.object({
   previousSuggestedIndustryKey: z.string().nullable().optional(),
 });
 
-function safeKey(v: string) {
-  return decodeURIComponent(String(v ?? "")).trim().toLowerCase();
+function safeStr(v: unknown) {
+  return decodeURIComponent(String(v ?? "")).trim();
+}
+
+function safeIndustryKey(v: unknown) {
+  return safeStr(v).toLowerCase();
+}
+
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
 function isReasonableIndustryKey(k: string) {
@@ -27,28 +35,37 @@ export async function POST(req: Request, ctx: { params: Promise<{ tenantId: stri
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
   const { tenantId: rawTenantId } = await ctx.params;
-  const tenantId = safeKey(rawTenantId);
+  const tenantId = safeStr(rawTenantId);
 
   const json = await req.json().catch(() => ({}));
   const parsed = Body.safeParse(json);
-  if (!parsed.success) {
-    return NextResponse.json({ ok: false, error: "INVALID_BODY" }, { status: 400 });
-  }
+  if (!parsed.success) return NextResponse.json({ ok: false, error: "INVALID_BODY" }, { status: 400 });
 
-  const industryKey = safeKey(parsed.data.industryKey);
-  const source = safeKey(parsed.data.source ?? "pcc_set_industry");
-  const prev = parsed.data.previousSuggestedIndustryKey ? safeKey(parsed.data.previousSuggestedIndustryKey) : null;
+  const industryKey = safeIndustryKey(parsed.data.industryKey);
+  const source = safeStr(parsed.data.source ?? "pcc_set_industry");
+  const prev = parsed.data.previousSuggestedIndustryKey ? safeIndustryKey(parsed.data.previousSuggestedIndustryKey) : null;
 
   if (!tenantId) return NextResponse.json({ ok: false, error: "MISSING_TENANT_ID" }, { status: 400 });
+  if (!isUuid(tenantId)) return NextResponse.json({ ok: false, error: "INVALID_TENANT_ID" }, { status: 400 });
+
+  if (!industryKey) return NextResponse.json({ ok: false, error: "MISSING_INDUSTRY_KEY" }, { status: 400 });
   if (!isReasonableIndustryKey(industryKey)) {
     return NextResponse.json({ ok: false, error: "INVALID_INDUSTRY_KEY" }, { status: 400 });
   }
 
+  // Ensure tenant_settings row exists, then set industry_key
   await db.execute(sql`
     insert into tenant_settings (tenant_id, industry_key, updated_at)
     values (${tenantId}::uuid, ${industryKey}, now())
     on conflict (tenant_id)
     do update set industry_key = excluded.industry_key, updated_at = now()
+  `);
+
+  // Ensure onboarding row exists (best-effort)
+  await db.execute(sql`
+    insert into tenant_onboarding (tenant_id, ai_analysis)
+    values (${tenantId}::uuid, '{}'::jsonb)
+    on conflict (tenant_id) do nothing
   `);
 
   // Update onboarding markers so PCC reflects that this tenant is now assigned.
@@ -59,34 +76,64 @@ export async function POST(req: Request, ctx: { params: Promise<{ tenantId: stri
       jsonb_set(
         jsonb_set(
           jsonb_set(
-            coalesce(ai_analysis, '{}'::jsonb),
-            '{needsConfirmation}',
-            'false'::jsonb,
+            jsonb_set(
+              coalesce(ai_analysis, '{}'::jsonb),
+              '{needsConfirmation}',
+              'false'::jsonb,
+              true
+            ),
+            '{meta,status}',
+            '"reassigned"'::jsonb,
             true
           ),
-          '{meta,status}',
-          '"reassigned"'::jsonb,
+          '{meta,source}',
+          to_jsonb(${source}::text),
           true
         ),
-        '{meta,source}',
-        to_jsonb(${source}::text),
+        '{meta,previousSuggestedIndustryKey}',
+        case
+          when ${prev}::text is null then (ai_analysis->'meta'->'previousSuggestedIndustryKey')
+          else to_jsonb(${prev}::text)
+        end,
         true
-      )
+      ),
+      updated_at = now()
     where tenant_id = ${tenantId}::uuid
   `);
 
-  // Optional breadcrumb: store the previous suggested industry key (if provided)
+  // Optional: clearing suggestedIndustryKey can be useful so the tenant no longer appears under an AI-suggested bucket
+  // that doesn’t match their new assignment. We only do this when a prev suggested key was provided (meaning we are
+  // explicitly correcting a prior suggestion).
   if (prev) {
     await db.execute(sql`
       update tenant_onboarding
       set ai_analysis = jsonb_set(
         coalesce(ai_analysis, '{}'::jsonb),
-        '{meta,previousSuggestedIndustryKey}',
-        to_jsonb(${prev}::text),
+        '{suggestedIndustryKey}',
+        'null'::jsonb,
         true
       )
       where tenant_id = ${tenantId}::uuid
     `);
+  }
+
+  // Optional audit log (don’t fail the request if table doesn’t exist)
+  try {
+    await db.execute(sql`
+      insert into tenant_audit_log (tenant_id, action, meta, created_at)
+      values (
+        ${tenantId}::uuid,
+        'pcc_set_industry',
+        jsonb_build_object(
+          'industryKey', ${industryKey},
+          'source', ${source},
+          'previousSuggestedIndustryKey', ${prev}
+        ),
+        now()
+      )
+    `);
+  } catch {
+    // ignore
   }
 
   return NextResponse.json({ ok: true });
