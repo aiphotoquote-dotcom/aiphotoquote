@@ -84,35 +84,43 @@ const PostSchema = z.object({
   industryKey: z.string().optional(),
   industryLabel: z.string().optional(),
 
-  // Current UI might send either:
-  // - subIndustryLabel (wizard)
-  // - subIndustryKey/subIndustryLabel (future)
+  // Wizard sends subIndustryLabel (optional)
+  // Future may send subIndustryKey/subIndustryLabel
   subIndustryKey: z.string().optional(),
   subIndustryLabel: z.string().optional(),
 });
 
 /* --------------------- db helpers --------------------- */
 
-async function readTenantIndustryKey(tenantId: string): Promise<string> {
+async function readTenantState(tenantId: string): Promise<{ savedKey: string; currentStep: number; ai: any | null }> {
   const r = await db.execute(sql`
-    select industry_key
-    from tenant_settings
-    where tenant_id = ${tenantId}::uuid
+    select
+      ts.industry_key as saved_industry_key,
+      o.current_step as current_step,
+      o.ai_analysis as ai_analysis
+    from tenants t
+    left join tenant_settings ts on ts.tenant_id = t.id
+    left join tenant_onboarding o on o.tenant_id = t.id
+    where t.id = ${tenantId}::uuid
     limit 1
   `);
-  const row = firstRow(r);
-  return normalizeKey(row?.industry_key ?? "");
-}
 
-async function readAiAnalysis(tenantId: string): Promise<any | null> {
-  const r = await db.execute(sql`
-    select ai_analysis
-    from tenant_onboarding
-    where tenant_id = ${tenantId}::uuid
-    limit 1
-  `);
   const row = firstRow(r);
-  return row?.ai_analysis ?? null;
+  const savedKey = normalizeKey(row?.saved_industry_key ?? "");
+  const currentStep = Number(row?.current_step ?? 1) || 1;
+
+  const ai0 = row?.ai_analysis ?? null;
+  let ai: any | null = null;
+  if (ai0 && typeof ai0 === "object") ai = ai0;
+  if (typeof ai0 === "string") {
+    try {
+      ai = JSON.parse(ai0);
+    } catch {
+      ai = null;
+    }
+  }
+
+  return { savedKey, currentStep, ai };
 }
 
 async function ensureIndustryExists(industryKeyOrLabelRaw: string, explicitLabel?: string) {
@@ -206,6 +214,31 @@ function getSuggestedSubIndustryLabel(ai: any): string {
   );
 }
 
+function getSuggestedIndustryKey(ai: any): string {
+  if (!ai || typeof ai !== "object") return "";
+
+  // Prefer Mode A interview proposal if present
+  const modeAKey =
+    safeTrim((ai as any)?.industryInterview?.proposedIndustry?.key) ||
+    safeTrim((ai as any)?.industryInterview?.proposedIndustryKey) ||
+    "";
+
+  if (modeAKey) return normalizeKey(modeAKey);
+
+  // Normal website analysis output
+  const direct = safeTrim((ai as any)?.suggestedIndustryKey) || safeTrim((ai as any)?.industryKey) || "";
+  if (direct) return normalizeKey(direct);
+
+  // Legacy inference fallback
+  const inf = (ai as any)?.industryInference;
+  if (inf && typeof inf === "object") {
+    const k = safeTrim((inf as any)?.suggestedIndustryKey) || safeTrim((inf as any)?.industryKey) || "";
+    if (k) return normalizeKey(k);
+  }
+
+  return "";
+}
+
 /* --------------------- handlers --------------------- */
 
 export async function GET(req: Request) {
@@ -221,18 +254,20 @@ export async function GET(req: Request) {
     const tenantId = parsed.data.tenantId;
     await requireMembership(clerkUserId, tenantId);
 
-    const savedKey = await readTenantIndustryKey(tenantId);
+    const { savedKey, currentStep, ai } = await readTenantState(tenantId);
 
-    const ai = await readAiAnalysis(tenantId);
-    const aiSuggestedKey = normalizeKey(ai?.suggestedIndustryKey ?? "");
+    // ✅ KEY FIX:
+    // Treat tenant_settings.industry_key as "unselected" until onboarding reaches step >= 3.
+    // (Your POST /api/onboarding/industries sets onboarding step to 3/4 when the user selects.)
+    const savedIsUsable = currentStep >= 3 && Boolean(savedKey);
 
-    // Ensure suggested exists (so it can appear in dropdown), but do not auto-select/persist here.
+    const aiSuggestedKey = getSuggestedIndustryKey(ai);
     const ensuredSuggestedKey = aiSuggestedKey ? await ensureIndustryExists(aiSuggestedKey) : "";
 
     const industries = await listIndustries();
 
     const selectedKey =
-      (savedKey && industries.some((x) => x.key === savedKey) ? savedKey : "") ||
+      (savedIsUsable && savedKey && industries.some((x) => x.key === savedKey) ? savedKey : "") ||
       (ensuredSuggestedKey && industries.some((x) => x.key === ensuredSuggestedKey) ? ensuredSuggestedKey : "") ||
       (industries.find((x) => x.key && x.key !== "service")?.key ?? industries[0]?.key ?? "");
 
@@ -251,6 +286,10 @@ export async function GET(req: Request) {
         suggestedKey: ensuredSuggestedKey || null,
         subIndustries,
         suggestedSubIndustryLabel: suggestedSubIndustryLabel || null,
+
+        // Helpful debug / UI decisions (additive)
+        tenantIndustryKey: savedKey || null,
+        onboardingStep: currentStep,
       },
       { status: 200 }
     );
@@ -277,7 +316,6 @@ export async function POST(req: Request) {
     const industryKeyRaw = safeTrim(parsed.data.industryKey);
     const industryLabelRaw = safeTrim(parsed.data.industryLabel);
 
-    // Accept wizard field name: subIndustryLabel (optional)
     const subIndustryLabelRaw = safeTrim(parsed.data.subIndustryLabel);
     const subIndustryKeyRaw = safeTrim(parsed.data.subIndustryKey);
 
@@ -298,8 +336,6 @@ export async function POST(req: Request) {
     const savedKey = await upsertTenantIndustryKey(tenantId, ensuredIndustryKey);
 
     // Move onboarding forward so refresh() doesn't drag the UI back.
-    // - Industry chosen => step >= 3
-    // - Sub-industry chosen => step >= 4
     const stepFloor = subIndustryLabelRaw || subIndustryKeyRaw ? 4 : 3;
     await db.execute(sql`
       insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
