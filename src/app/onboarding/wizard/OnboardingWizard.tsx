@@ -200,7 +200,9 @@ export default function OnboardingWizard() {
     const newTenantId = safeTrim(j.tenantId);
     if (newTenantId) setTenantInNav(newTenantId);
 
-    const next = payload.website ? 2 : 3;
+    // ✅ ALWAYS go to Step 2.
+    // Step2 will decide: website analysis path vs interview path.
+    const next = 2;
 
     await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
     setLastAction("Saved business identity.");
@@ -360,7 +362,8 @@ export default function OnboardingWizard() {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        step: 6,
+        // ✅ API expects branding = step 5 (per your state route)
+        step: 5,
         tenantId: tid,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
@@ -463,7 +466,6 @@ export default function OnboardingWizard() {
                 const key = safeTrim(industryKey);
                 if (!key) throw new Error("Choose an industry.");
 
-                // ✅ persist immediately (prevents snapback to service)
                 await persistIndustryOnly(key);
 
                 setPendingIndustryKey(key);
