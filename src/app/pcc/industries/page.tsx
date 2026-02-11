@@ -29,8 +29,8 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-type SortKey = "label" | "confirmed" | "needsConfirm" | "aiSuggested";
-type FilterKey = "all" | "needsConfirm" | "aiOnly" | "confirmedOnly";
+type SortKey = "label" | "confirmed" | "needsConfirm" | "aiSuggested" | "rejected";
+type FilterKey = "all" | "needsConfirm" | "aiOnly" | "confirmedOnly" | "hasRejected";
 
 function buildHref(
   base: string,
@@ -67,12 +67,20 @@ export default async function PccIndustriesPage(props: {
   const rawQ = Array.isArray(sp.q) ? sp.q[0] : sp.q;
 
   const sort: SortKey =
-    rawSort === "confirmed" || rawSort === "needsConfirm" || rawSort === "aiSuggested" || rawSort === "label"
+    rawSort === "confirmed" ||
+    rawSort === "needsConfirm" ||
+    rawSort === "aiSuggested" ||
+    rawSort === "label" ||
+    rawSort === "rejected"
       ? rawSort
       : "label";
 
   const filter: FilterKey =
-    rawFilter === "needsConfirm" || rawFilter === "aiOnly" || rawFilter === "confirmedOnly" || rawFilter === "all"
+    rawFilter === "needsConfirm" ||
+    rawFilter === "aiOnly" ||
+    rawFilter === "confirmedOnly" ||
+    rawFilter === "hasRejected" ||
+    rawFilter === "all"
       ? rawFilter
       : "all";
 
@@ -116,6 +124,7 @@ export default async function PccIndustriesPage(props: {
   }
 
   // Counts by AI suggested industry + needsConfirmation
+  // Excludes tenants that have rejected that industry (ai_analysis.rejectedIndustryKeys contains key)
   const aiCountsR = await db.execute(sql`
     select
       (ob.ai_analysis->>'suggestedIndustryKey')::text as "key",
@@ -130,6 +139,7 @@ export default async function PccIndustriesPage(props: {
     from tenant_onboarding ob
     where (ob.ai_analysis->>'suggestedIndustryKey') is not null
       and (ob.ai_analysis->>'suggestedIndustryKey') <> ''
+      and not (coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? (ob.ai_analysis->>'suggestedIndustryKey'))
     group by (ob.ai_analysis->>'suggestedIndustryKey')
   `);
 
@@ -141,6 +151,26 @@ export default async function PccIndustriesPage(props: {
     needsConfirmCounts.set(k, Number(r.needsConfirmCount || 0));
   }
 
+  // Counts by rejected industry key (any tenant where rejectedIndustryKeys contains key)
+  // NOTE: jsonb_array_elements_text is safe and indexable later with GIN if you want.
+  const rejectedCountsR = await db.execute(sql`
+    select
+      x.key::text as "key",
+      count(*)::int as "rejectedCount"
+    from (
+      select
+        jsonb_array_elements_text(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) as key
+      from tenant_onboarding ob
+    ) x
+    where x.key is not null and x.key <> ''
+    group by x.key
+  `);
+
+  const rejectedCounts = new Map<string, number>();
+  for (const r of rows(rejectedCountsR)) {
+    rejectedCounts.set(String(r.key ?? ""), Number(r.rejectedCount || 0));
+  }
+
   // Fallback list if industries table is empty
   let list: Array<{ key: string; label: string; description: string | null }> = canonical;
 
@@ -148,6 +178,7 @@ export default async function PccIndustriesPage(props: {
     const discoveredKeys = new Set<string>();
     for (const k of confirmedCounts.keys()) discoveredKeys.add(k);
     for (const k of aiSuggestedCounts.keys()) discoveredKeys.add(k);
+    for (const k of rejectedCounts.keys()) discoveredKeys.add(k);
 
     list = Array.from(discoveredKeys)
       .filter(Boolean)
@@ -160,6 +191,7 @@ export default async function PccIndustriesPage(props: {
     const confirmed = confirmedCounts.get(it.key) ?? 0;
     const aiSuggested = aiSuggestedCounts.get(it.key) ?? 0;
     const needsConfirm = needsConfirmCounts.get(it.key) ?? 0;
+    const rejected = rejectedCounts.get(it.key) ?? 0;
 
     const label = it.label || titleFromKey(it.key) || it.key;
     const hay = `${label} ${it.key}`.toLowerCase();
@@ -170,8 +202,10 @@ export default async function PccIndustriesPage(props: {
       confirmed,
       aiSuggested,
       needsConfirm,
+      rejected,
       _hay: hay,
       _isAiOnly: aiSuggested > 0 && confirmed === 0,
+      _hasRejected: rejected > 0,
     };
   });
 
@@ -182,6 +216,7 @@ export default async function PccIndustriesPage(props: {
   if (filter === "needsConfirm") filtered = filtered.filter((x) => x.aiSuggested > 0 && x.needsConfirm > 0);
   if (filter === "aiOnly") filtered = filtered.filter((x) => x._isAiOnly);
   if (filter === "confirmedOnly") filtered = filtered.filter((x) => x.confirmed > 0);
+  if (filter === "hasRejected") filtered = filtered.filter((x) => x._hasRejected);
 
   // Sort
   filtered.sort((a, b) => {
@@ -189,6 +224,7 @@ export default async function PccIndustriesPage(props: {
     if (sort === "confirmed") return b.confirmed - a.confirmed || a.label.localeCompare(b.label);
     if (sort === "needsConfirm") return b.needsConfirm - a.needsConfirm || a.label.localeCompare(b.label);
     if (sort === "aiSuggested") return b.aiSuggested - a.aiSuggested || a.label.localeCompare(b.label);
+    if (sort === "rejected") return b.rejected - a.rejected || a.label.localeCompare(b.label);
     return a.label.localeCompare(b.label);
   });
 
@@ -201,7 +237,7 @@ export default async function PccIndustriesPage(props: {
           <div className="min-w-0">
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industries</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Canonical industry list + onboarding AI signals (suggested industry + confirmation state).
+              Canonical industry list + onboarding AI signals (suggested industry + confirmation state + rejections).
               {!canonical.length ? (
                 <>
                   {" "}
@@ -245,6 +281,12 @@ export default async function PccIndustriesPage(props: {
                   >
                     Confirmed only
                   </Link>
+                  <Link
+                    href={buildHref("/pcc/industries", { filter: "hasRejected" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(filter === "hasRejected")}`}
+                  >
+                    Has rejected
+                  </Link>
                 </div>
               </div>
 
@@ -275,6 +317,12 @@ export default async function PccIndustriesPage(props: {
                   >
                     AI suggested
                   </Link>
+                  <Link
+                    href={buildHref("/pcc/industries", { sort: "rejected" }, currentParams)}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold ${pill(sort === "rejected")}`}
+                  >
+                    Rejected
+                  </Link>
                 </div>
               </div>
             </div>
@@ -292,6 +340,7 @@ export default async function PccIndustriesPage(props: {
                 <th className="py-3 px-4">Industry</th>
                 <th className="py-3 px-4">Key</th>
                 <th className="py-3 px-4">Onboarding state</th>
+                <th className="py-3 px-4 text-right">Rejected</th>
                 <th className="py-3 px-4 text-right">Confirmed</th>
               </tr>
             </thead>
@@ -340,16 +389,23 @@ export default async function PccIndustriesPage(props: {
                               AI-only
                             </span>
                           ) : null}
+
+                          {it.rejected > 0 ? (
+                            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                              rejected: {it.rejected}
+                            </span>
+                          ) : null}
                         </div>
                       </td>
 
+                      <td className="py-3 px-4 text-right font-semibold text-gray-900 dark:text-gray-100">{it.rejected}</td>
                       <td className="py-3 px-4 text-right font-semibold text-gray-900 dark:text-gray-100">{it.confirmed}</td>
                     </tr>
                   );
                 })
               ) : (
                 <tr>
-                  <td colSpan={4} className="py-10 text-center text-sm text-gray-600 dark:text-gray-300">
+                  <td colSpan={5} className="py-10 text-center text-sm text-gray-600 dark:text-gray-300">
                     No industries match this view. Try clearing filters/search.
                   </td>
                 </tr>
