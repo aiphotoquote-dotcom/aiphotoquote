@@ -50,9 +50,18 @@ function clamp01(n: number) {
 function toPct(v: unknown): string | null {
   const n = Number(v);
   if (!Number.isFinite(n)) return null;
-  // ai_analysis confidenceScore is 0..1 (per your sample: 0.9)
   const pct = Math.round(clamp01(n) * 100);
   return `${pct}%`;
+}
+
+function toBool(v: any): boolean | null {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return null;
+  if (s === "true" || s === "t" || s === "1" || s === "yes") return true;
+  if (s === "false" || s === "f" || s === "0" || s === "no") return false;
+  return null;
 }
 
 type MemberRow = {
@@ -219,6 +228,12 @@ function asStringArray(v: any): string[] {
   return v.map((x) => String(x ?? "").trim()).filter(Boolean);
 }
 
+function keyLink(k: string) {
+  const kk = safeTrim(k);
+  if (!kk) return null;
+  return `/pcc/industries/${encodeURIComponent(kk)}`;
+}
+
 export default async function TenantDetailPage(props: { params: Promise<{ tenantId: string }> }) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
@@ -260,7 +275,7 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
   const graceUsed = settings?.activationGraceUsed ?? 0;
   const graceRemaining = Math.max(0, graceTotal - graceUsed);
 
-  // ✅ Match your real ai_analysis shape
+  // ✅ Common ai_analysis fields (your current shape)
   const businessGuess = pick(onboarding, ["businessGuess", "business_guess", "analysis.businessGuess"]) ?? null;
   const confidenceScore = pick(onboarding, ["confidenceScore", "confidence_score"]) ?? null;
   const confidencePct = toPct(confidenceScore);
@@ -269,17 +284,38 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
   const fitReason = pick(onboarding, ["fitReason", "fit_reason"]) ?? null;
 
   const website = pick(onboarding, ["website", "url", "site"]) ?? null;
-  const suggestedIndustryKey = pick(onboarding, ["suggestedIndustryKey", "suggested_industry_key"]) ?? null;
+
+  const suggestedIndustryKey =
+    pick(onboarding, ["suggestedIndustryKey", "suggested_industry_key"]) ??
+    pick(onboarding, ["industryInterview.proposedIndustry.key"]) ??
+    null;
+
+  const needsConfirmation =
+    toBool(pick(onboarding, ["needsConfirmation", "needs_confirmation"])) ??
+    toBool(pick(onboarding, ["industryInterview.status"])) ??
+    null;
+
+  // ✅ PCC “actions” metadata (written by our routes)
+  const metaStatus = safeTrim(pick(onboarding, ["meta.status"])) || "";
+  const metaSource = safeTrim(pick(onboarding, ["meta.source"])) || "";
+  const metaPrevSuggested = safeTrim(pick(onboarding, ["meta.previousSuggestedIndustryKey"])) || "";
+
+  const aiRoundRaw = pick(onboarding, ["meta.round", "industryInterview.round"]);
+  const aiRound = Number.isFinite(Number(aiRoundRaw)) ? Number(aiRoundRaw) : null;
 
   const detectedServices = asStringArray(pick(onboarding, ["detectedServices", "detected_services"]));
   const billingSignals = asStringArray(pick(onboarding, ["billingSignals", "billing_signals"]));
 
+  const rejectedIndustryKeys = asStringArray(pick(onboarding, ["rejectedIndustryKeys"]));
+
   const analyzedAt = pick(onboarding, ["analyzedAt", "meta.finishedAt", "meta.updatedAt"]) ?? null;
-  const modelUsed = pick(onboarding, ["modelUsed", "model_used"]) ?? null;
-  const source = pick(onboarding, ["source"]) ?? null;
+  const modelUsed = pick(onboarding, ["modelUsed", "model_used", "meta.model.name"]) ?? null;
+
   const lastAction = pick(onboarding, ["meta.lastAction"]) ?? null;
 
   const rawPreview = pick(onboarding, ["rawWebIntelPreview"]) ?? null;
+
+  const confirmedIndustryKey = settings?.industryKey ?? null;
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10 space-y-4">
@@ -405,15 +441,41 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {confidencePct ? (
               <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
                 confidence {confidencePct}
               </span>
             ) : null}
+
             {fit ? (
               <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
                 fit: {String(fit)}
+              </span>
+            ) : null}
+
+            {needsConfirmation !== null ? (
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                  needsConfirmation
+                    ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                )}
+              >
+                {needsConfirmation ? "needs confirmation" : "confirmed/clean"}
+              </span>
+            ) : null}
+
+            {metaStatus ? (
+              <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+                status: {metaStatus}
+              </span>
+            ) : null}
+
+            {aiRound !== null ? (
+              <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                round: {aiRound}
               </span>
             ) : null}
           </div>
@@ -443,20 +505,95 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
             ) : null}
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Industry (settings)</div>
-              <div className="mt-1 font-mono text-xs text-gray-700 dark:text-gray-200">
-                {settings?.industryKey ?? "—"}
+          {/* Industry signals (PCC-focused) */}
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Industry signals</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  Confirmed industry comes from <span className="font-mono">tenant_settings.industry_key</span>. AI suggestion comes
+                  from <span className="font-mono">tenant_onboarding.ai_analysis</span>.
+                </div>
+              </div>
+
+              <Link
+                href="/pcc/industries"
+                className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px] font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Industries →
+              </Link>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Confirmed (settings)</div>
+                <div className="mt-1 font-mono text-xs text-gray-800 dark:text-gray-100">
+                  {confirmedIndustryKey ? (
+                    <Link href={keyLink(confirmedIndustryKey) ?? "#"} className="underline">
+                      {confirmedIndustryKey}
+                    </Link>
+                  ) : (
+                    "—"
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Suggested (AI)</div>
+                <div className="mt-1 font-mono text-xs text-gray-800 dark:text-gray-100">
+                  {suggestedIndustryKey ? (
+                    <Link href={keyLink(String(suggestedIndustryKey)) ?? "#"} className="underline">
+                      {String(suggestedIndustryKey)}
+                    </Link>
+                  ) : (
+                    "—"
+                  )}
+                </div>
+                {metaPrevSuggested ? (
+                  <div className="mt-2 text-[11px] text-gray-600 dark:text-gray-300">
+                    Previous suggested:{" "}
+                    <span className="font-mono">
+                      <Link href={keyLink(metaPrevSuggested) ?? "#"} className="underline">
+                        {metaPrevSuggested}
+                      </Link>
+                    </span>
+                  </div>
+                ) : null}
               </div>
             </div>
 
-            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Industry (AI suggested)</div>
-              <div className="mt-1 font-mono text-xs text-gray-700 dark:text-gray-200">
-                {suggestedIndustryKey ? String(suggestedIndustryKey) : "—"}
+            {(metaSource || metaStatus) ? (
+              <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                {metaStatus ? (
+                  <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+                    meta.status: {metaStatus}
+                  </span>
+                ) : null}
+                {metaSource ? (
+                  <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                    meta.source: <span className="ml-1 font-mono">{metaSource}</span>
+                  </span>
+                ) : null}
               </div>
-            </div>
+            ) : null}
+
+            {rejectedIndustryKeys.length ? (
+              <div className="mt-4">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Rejected industry keys</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {rejectedIndustryKeys.slice(0, 24).map((k) => (
+                    <Link
+                      key={k}
+                      href={keyLink(k) ?? "#"}
+                      className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900 hover:bg-amber-100 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100 dark:hover:bg-amber-950/50"
+                      title="This tenant explicitly rejected this industry as a suggested match"
+                    >
+                      {k}
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {(detectedServices.length || billingSignals.length) ? (
@@ -489,14 +626,30 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
             </div>
           ) : null}
 
-          {(analyzedAt || modelUsed || source || lastAction) ? (
+          {(analyzedAt || modelUsed || metaSource || lastAction) ? (
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
               <div className="font-semibold text-gray-700 dark:text-gray-200">Analysis metadata</div>
               <div className="mt-2 grid gap-1">
-                {analyzedAt ? <div>Analyzed: <span className="font-mono">{String(analyzedAt)}</span></div> : null}
-                {source ? <div>Source: <span className="font-mono">{String(source)}</span></div> : null}
-                {modelUsed ? <div>Model: <span className="font-mono">{String(modelUsed)}</span></div> : null}
-                {lastAction ? <div>Last action: <span className="font-mono">{String(lastAction)}</span></div> : null}
+                {analyzedAt ? (
+                  <div>
+                    Analyzed: <span className="font-mono">{String(analyzedAt)}</span>
+                  </div>
+                ) : null}
+                {metaSource ? (
+                  <div>
+                    Source: <span className="font-mono">{String(metaSource)}</span>
+                  </div>
+                ) : null}
+                {modelUsed ? (
+                  <div>
+                    Model: <span className="font-mono">{String(modelUsed)}</span>
+                  </div>
+                ) : null}
+                {lastAction ? (
+                  <div>
+                    Last action: <span className="font-mono">{String(lastAction)}</span>
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
