@@ -37,9 +37,7 @@ export default async function PccTenantsPage(props: {
     sp.archived === "true" ||
     (Array.isArray(sp.archived) && sp.archived.includes("1"));
 
-  // NOTE:
-  // - We keep the original drizzle select for base tenant rows.
-  // - Then we attach onboarding/industry intelligence via a single SQL query keyed by tenantId.
+  // Base tenant rows (existing behavior)
   const baseRows = await db
     .select({
       id: tenants.id,
@@ -57,7 +55,7 @@ export default async function PccTenantsPage(props: {
       activationGraceCredits: tenantSettings.activationGraceCredits,
       activationGraceUsed: tenantSettings.activationGraceUsed,
 
-      // confirmed industry from settings
+      // confirmed industry from settings (handle snake/camel)
       industryKey: (tenantSettings as any).industryKey ?? (tenantSettings as any).industry_key,
     })
     .from(tenants)
@@ -68,9 +66,8 @@ export default async function PccTenantsPage(props: {
 
   const tenantIds = baseRows.map((r) => String(r.id)).filter(Boolean);
 
-  // Attach onboarding AI signals + canonical labels
-  // We use a single query over the visible tenantIds, so this page stays fast.
-  let aiByTenant = new Map<
+  // AI attach map (best-effort)
+  const aiByTenant = new Map<
     string,
     {
       suggestedIndustryKey: string | null;
@@ -86,60 +83,72 @@ export default async function PccTenantsPage(props: {
   >();
 
   if (tenantIds.length) {
-    const r = await db.execute(sql`
-      with visible as (
-        select unnest(${tenantIds}::uuid[]) as tenant_id
-      )
-      select
-        v.tenant_id::text as "tenantId",
+    // Build a real uuid[] expression: array['..'::uuid, '..'::uuid]::uuid[]
+    const uuidArray = sql`array[${sql.join(
+      tenantIds.map((id) => sql`${id}::uuid`),
+      sql`, `
+    )}]::uuid[]`;
 
-        -- confirmed industry label (industries table)
-        i1.label::text as "confirmedIndustryLabel",
+    try {
+      const r = await db.execute(sql`
+        with visible as (
+          select unnest(${uuidArray}) as tenant_id
+        )
+        select
+          v.tenant_id::text as "tenantId",
 
-        -- suggested industry key
-        (ob.ai_analysis->>'suggestedIndustryKey')::text as "suggestedIndustryKey",
+          -- confirmed industry label (industries table)
+          i1.label::text as "confirmedIndustryLabel",
 
-        -- suggested industry label candidates
-        (ob.ai_analysis->>'suggestedIndustryLabel')::text as "suggestedIndustryLabel",
-        (ob.ai_analysis->'industryInterview'->'proposedIndustry'->>'label')::text as "suggestedIndustryCanonicalLabel",
+          -- suggested industry key
+          (ob.ai_analysis->>'suggestedIndustryKey')::text as "suggestedIndustryKey",
 
-        -- confirmation state
-        case
-          when (ob.ai_analysis->>'needsConfirmation')::text = 'true' then true
-          when (ob.ai_analysis->>'needsConfirmation')::text = 't' then true
-          when (ob.ai_analysis->>'needsConfirmation')::text = '1' then true
-          else false
-        end as "needsConfirmation",
+          -- suggested industry label candidates
+          (ob.ai_analysis->>'suggestedIndustryLabel')::text as "suggestedIndustryLabel",
+          (ob.ai_analysis->'industryInterview'->'proposedIndustry'->>'label')::text as "suggestedIndustryCanonicalLabel",
 
-        -- meta/status/source/updatedAt
-        (ob.ai_analysis->'meta'->>'status')::text as "aiStatus",
-        (ob.ai_analysis->'meta'->>'source')::text as "aiSource",
-        (ob.ai_analysis->'meta'->>'updatedAt')::text as "aiUpdatedAt",
+          -- confirmation state
+          case
+            when (ob.ai_analysis->>'needsConfirmation')::text = 'true' then true
+            when (ob.ai_analysis->>'needsConfirmation')::text = 't' then true
+            when (ob.ai_analysis->>'needsConfirmation')::text = '1' then true
+            else false
+          end as "needsConfirmation",
 
-        -- rejected keys count
-        coalesce(jsonb_array_length(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)), 0)::int as "rejectedCount"
-      from visible v
-      left join tenant_onboarding ob on ob.tenant_id = v.tenant_id
-      left join tenant_settings ts on ts.tenant_id = v.tenant_id
-      left join industries i1 on i1.key = ts.industry_key
-    `);
+          -- meta/status/source/updatedAt
+          (ob.ai_analysis->'meta'->>'status')::text as "aiStatus",
+          (ob.ai_analysis->'meta'->>'source')::text as "aiSource",
+          (ob.ai_analysis->'meta'->>'updatedAt')::text as "aiUpdatedAt",
 
-    const rows = (r as any)?.rows ?? (Array.isArray(r) ? r : []);
-    for (const x of rows) {
-      const tid = String(x.tenantId ?? "");
-      if (!tid) continue;
+          -- rejected keys count
+          coalesce(jsonb_array_length(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)), 0)::int as "rejectedCount"
+        from visible v
+        left join tenant_onboarding ob on ob.tenant_id = v.tenant_id
+        left join tenant_settings ts on ts.tenant_id = v.tenant_id
+        left join industries i1 on i1.key = ts.industry_key
+      `);
 
-      aiByTenant.set(tid, {
-        suggestedIndustryKey: x.suggestedIndustryKey ? String(x.suggestedIndustryKey) : null,
-        suggestedIndustryLabel: x.suggestedIndustryLabel ? String(x.suggestedIndustryLabel) : null,
-        suggestedIndustryCanonicalLabel: x.suggestedIndustryCanonicalLabel ? String(x.suggestedIndustryCanonicalLabel) : null,
-        needsConfirmation: Boolean(x.needsConfirmation),
-        aiStatus: x.aiStatus ? String(x.aiStatus) : null,
-        aiSource: x.aiSource ? String(x.aiSource) : null,
-        aiUpdatedAt: x.aiUpdatedAt ? String(x.aiUpdatedAt) : null,
-        rejectedCount: Number(x.rejectedCount ?? 0),
-        confirmedIndustryLabel: x.confirmedIndustryLabel ? String(x.confirmedIndustryLabel) : null,
-      });
+      const rows = (r as any)?.rows ?? (Array.isArray(r) ? r : []);
+      for (const x of rows) {
+        const tid = String(x.tenantId ?? "");
+        if (!tid) continue;
+
+        aiByTenant.set(tid, {
+          suggestedIndustryKey: x.suggestedIndustryKey ? String(x.suggestedIndustryKey) : null,
+          suggestedIndustryLabel: x.suggestedIndustryLabel ? String(x.suggestedIndustryLabel) : null,
+          suggestedIndustryCanonicalLabel: x.suggestedIndustryCanonicalLabel ? String(x.suggestedIndustryCanonicalLabel) : null,
+          needsConfirmation: Boolean(x.needsConfirmation),
+          aiStatus: x.aiStatus ? String(x.aiStatus) : null,
+          aiSource: x.aiSource ? String(x.aiSource) : null,
+          aiUpdatedAt: x.aiUpdatedAt ? String(x.aiUpdatedAt) : null,
+          rejectedCount: Number(x.rejectedCount ?? 0),
+          confirmedIndustryLabel: x.confirmedIndustryLabel ? String(x.confirmedIndustryLabel) : null,
+        });
+      }
+    } catch (e: any) {
+      // ✅ This is the key: Vercel logs will show the real DB error
+      console.error("[PCC] Tenants AI attach query failed", e);
+      // We intentionally continue with baseRows only
     }
   }
 
@@ -184,7 +193,7 @@ export default async function PccTenantsPage(props: {
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               PCC tenant list. Use <span className="font-semibold">Archive</span> to safely disable a tenant while preserving history (no data is deleted).
               <span className="ml-2">
-                This view also includes <span className="font-semibold">AI onboarding signals</span> (suggested industry, needs-confirm, status).
+                Includes <span className="font-semibold">AI onboarding signals</span> (suggested industry, needs-confirm, status).
               </span>
             </p>
 
