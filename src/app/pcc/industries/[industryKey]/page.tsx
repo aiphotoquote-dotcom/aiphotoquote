@@ -11,7 +11,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
-  params: { industryKey: string };
+  // Be defensive: some code paths previously treated params like a Promise.
+  // Types don’t affect runtime, but this keeps the implementation robust.
+  params: { industryKey?: string } | Promise<{ industryKey?: string }>;
 };
 
 function rows(r: any): any[] {
@@ -60,11 +62,22 @@ function titleFromKey(key: string) {
     .join(" ");
 }
 
+async function resolveParams(p: Props["params"]): Promise<{ industryKey?: string }> {
+  // Support both object and Promise forms
+  const anyP: any = p as any;
+  if (anyP && typeof anyP.then === "function") {
+    return (await anyP) as any;
+  }
+  return (p as any) ?? {};
+}
+
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const industryKey = params?.industryKey;
-  const key = decodeURIComponent(industryKey || "").trim();
+  const p = await resolveParams(params);
+  const industryKeyRaw = p?.industryKey;
+
+  const key = decodeURIComponent(String(industryKeyRaw ?? "")).trim();
 
   if (!key) {
     return (
@@ -79,6 +92,12 @@ export default async function PccIndustryDetailPage({ params }: Props) {
             >
               Back to industries
             </Link>
+          </div>
+
+          {/* Optional tiny diagnostic (safe): shows what params looked like */}
+          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+            <div className="font-semibold">Debug</div>
+            <div className="mt-1 font-mono break-all">params.industryKey: {String(industryKeyRaw ?? "(undefined)")}</div>
           </div>
         </div>
       </div>
@@ -412,10 +431,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
           {aiUnconfirmed.length ? (
             <div className="mt-2 grid gap-2">
               {aiUnconfirmed.map((t: any) => (
-                <div
-                  key={t.tenantId}
-                  className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black"
-                >
+                <div key={t.tenantId} className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
