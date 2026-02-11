@@ -11,7 +11,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
-  params: Promise<{ industryKey: string }>;
+  params: { industryKey: string };
 };
 
 function rows(r: any): any[] {
@@ -63,7 +63,7 @@ function titleFromKey(key: string) {
 export default async function PccIndustryDetailPage({ params }: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const { industryKey } = await params;
+  const industryKey = params?.industryKey ?? "";
   const key = decodeURIComponent(industryKey || "").trim();
 
   if (!key) {
@@ -170,15 +170,15 @@ export default async function PccIndustryDetailPage({ params }: Props) {
       t.status::text as "tenantStatus",
       t.created_at as "createdAt",
 
-      (to.ai_analysis->>'businessGuess')::text as "businessGuess",
-      (to.ai_analysis->>'fit')::text as "fit",
-      (to.ai_analysis->>'confidenceScore')::text as "confidenceScore",
-      (to.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
-      (to.ai_analysis->'meta'->>'status')::text as "aiStatus",
-      (to.ai_analysis->'meta'->>'round')::text as "aiRound"
-    from tenant_onboarding to
-    join tenants t on t.id = to.tenant_id
-    where (to.ai_analysis->>'suggestedIndustryKey') = ${key}
+      (o.ai_analysis->>'businessGuess')::text as "businessGuess",
+      (o.ai_analysis->>'fit')::text as "fit",
+      (o.ai_analysis->>'confidenceScore')::text as "confidenceScore",
+      (o.ai_analysis->>'needsConfirmation')::text as "needsConfirmation",
+      (o.ai_analysis->'meta'->>'status')::text as "aiStatus",
+      (o.ai_analysis->'meta'->>'round')::text as "aiRound"
+    from tenant_onboarding o
+    join tenants t on t.id = o.tenant_id
+    where (o.ai_analysis->>'suggestedIndustryKey') = ${key}
     order by t.created_at desc
     limit 500
   `);
@@ -454,11 +454,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
 
                       <div className="text-[11px] text-gray-500 dark:text-gray-400">{t.createdAt ? fmtDate(t.createdAt) : ""}</div>
 
-                      <ConfirmIndustryButton
-                        tenantId={t.tenantId}
-                        industryKey={key}
-                        onDone={() => window.location.reload()}
-                      />
+                      <ConfirmIndustryButton tenantId={t.tenantId} industryKey={key} onDone={() => window.location.reload()} />
                     </div>
                   </div>
                 </div>
