@@ -201,6 +201,38 @@ async function upsertTenantSubIndustry(args: { tenantId: string; label: string; 
   return key;
 }
 
+async function listDefaultSubIndustries(industryKeyRaw: string) {
+  const industryKey = normalizeKey(industryKeyRaw);
+  if (!industryKey) return [];
+
+  const r = await db.execute(sql`
+    select
+      id::text as "id",
+      industry_key::text as "industryKey",
+      key::text as "key",
+      label::text as "label",
+      description::text as "description",
+      sort_order::int as "sortOrder",
+      is_active as "isActive",
+      updated_at as "updatedAt"
+    from industry_sub_industries
+    where industry_key = ${industryKey}
+      and coalesce(is_active, true) = true
+    order by sort_order asc, label asc
+    limit 500
+  `);
+
+  return rowsOf(r).map((x: any) => ({
+    id: String(x.id ?? ""),
+    industryKey: String(x.industryKey ?? industryKey),
+    key: String(x.key ?? ""),
+    label: String(x.label ?? ""),
+    description: x.description == null ? null : String(x.description),
+    sortOrder: Number.isFinite(Number(x.sortOrder)) ? Number(x.sortOrder) : 0,
+    updatedAt: x.updatedAt ?? null,
+  }));
+}
+
 function getSuggestedSubIndustryLabel(ai: any): string {
   if (!ai || typeof ai !== "object") return "";
   return (
@@ -258,7 +290,6 @@ export async function GET(req: Request) {
 
     // ✅ KEY FIX:
     // Treat tenant_settings.industry_key as "unselected" until onboarding reaches step >= 3.
-    // (Your POST /api/onboarding/industries sets onboarding step to 3/4 when the user selects.)
     const savedIsUsable = currentStep >= 3 && Boolean(savedKey);
 
     const aiSuggestedKey = getSuggestedIndustryKey(ai);
@@ -276,6 +307,9 @@ export async function GET(req: Request) {
     const subIndustries = await listTenantSubIndustries(tenantId);
     const suggestedSubIndustryLabel = getSuggestedSubIndustryLabel(ai);
 
+    // ✅ NEW (additive): defaults for the currently-selected industry
+    const defaultSubIndustries = selectedKey ? await listDefaultSubIndustries(selectedKey) : [];
+
     return NextResponse.json(
       {
         ok: true,
@@ -284,8 +318,15 @@ export async function GET(req: Request) {
         selectedKey: selectedKey || null,
         selectedLabel,
         suggestedKey: ensuredSuggestedKey || null,
+
+        // tenant overrides / tenant picks (existing behavior)
         subIndustries,
+
+        // AI hint (existing behavior)
         suggestedSubIndustryLabel: suggestedSubIndustryLabel || null,
+
+        // ✅ NEW (additive)
+        defaultSubIndustries,
 
         // Helpful debug / UI decisions (additive)
         tenantIndustryKey: savedKey || null,
