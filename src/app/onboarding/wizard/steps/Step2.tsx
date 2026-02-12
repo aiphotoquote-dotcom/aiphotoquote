@@ -113,16 +113,6 @@ function pick(obj: any, paths: string[]): any {
   return null;
 }
 
-function titleFromKey(key: string) {
-  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
-  if (!s) return "";
-  return s
-    .split(" ")
-    .filter(Boolean)
-    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   if (!aiAnalysis || typeof aiAnalysis !== "object") return false;
 
@@ -136,7 +126,8 @@ function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   const suggestedLabel =
     safeTrim(pick(aiAnalysis, ["suggestedIndustryLabel"])) ||
     safeTrim(pick(aiAnalysis, ["suggestedIndustry.label"])) ||
-    "";
+    safeTrim(pick(aiAnalysis, ["businessGuess"])) ||
+    safeTrim(pick(aiAnalysis, ["business_guess"]));
 
   const conf =
     pick(aiAnalysis, ["confidenceScore", "confidence_score"]) ??
@@ -147,6 +138,36 @@ function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   const hasConf = Number.isFinite(confNum) && confNum > 0;
 
   return Boolean(proposedKey || proposedLabel || suggestedKey || suggestedLabel || hasConf);
+}
+
+function compactUrl(raw: string) {
+  const s = safeTrim(raw);
+  if (!s) return "";
+  try {
+    const u = new URL(s);
+    const host = u.host.replace(/^www\./, "");
+    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
+    const shortPath = path.length > 28 ? `${path.slice(0, 28)}…` : path;
+    return `${host}${shortPath}${u.search ? "…" : ""}`;
+  } catch {
+    // fallback
+    return s.length > 42 ? `${s.slice(0, 42)}…` : s;
+  }
+}
+
+function scoreLabel(conf: number | null) {
+  if (conf == null) return "Working…";
+  if (conf >= 0.9) return "Very confident";
+  if (conf >= 0.75) return "Confident";
+  if (conf >= 0.6) return "Decent match";
+  return "Low confidence";
+}
+
+function confColor(conf: number | null) {
+  if (conf == null) return "bg-gray-100 text-gray-800 border-gray-200 dark:bg-black dark:text-gray-200 dark:border-gray-800";
+  if (conf >= 0.85) return "bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-100 dark:border-emerald-900/40";
+  if (conf >= 0.7) return "bg-sky-50 text-sky-900 border-sky-200 dark:bg-sky-950/30 dark:text-sky-100 dark:border-sky-900/40";
+  return "bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/40";
 }
 
 export function Step2(props: {
@@ -177,25 +198,17 @@ export function Step2(props: {
 
   const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
-  // ✅ Key: always pull a REAL industry key if available
-  const suggestedKey =
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.key"])) ||
-    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
-    safeTrim(pick(props.aiAnalysis, ["suggestedIndustry.key"])) ||
-    "";
-
-  // ✅ Label: DO NOT fall back to businessGuess (that’s the long paragraph)
   const suggestedLabel =
     safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
-    (suggestedKey ? titleFromKey(suggestedKey) : "") ||
+    safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
+    safeTrim(pick(props.aiAnalysis, ["business_guess"])) ||
     "";
 
-  // Optional “why” / summary (this is where the long paragraph belongs)
-  const suggestedWhy =
-    safeTrim(pick(props.aiAnalysis, ["businessGuess", "business_guess"])) ||
-    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryReason", "suggestedIndustry.reason"])) ||
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.meta.debug.reason"])) ||
+  // keep key internally (not shown)
+  const suggestedKey =
+    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.key"])) ||
+    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
     "";
 
   const confidenceScore =
@@ -225,6 +238,9 @@ export function Step2(props: {
   const runStartRef = useRef<number | null>(null);
   const [runTick, setRunTick] = useState(0);
 
+  // Optional: show a simple “why we think so” panel (collapsed by default)
+  const [showWhy, setShowWhy] = useState(false);
+
   useEffect(() => {
     if (isRunning && !runStartRef.current) runStartRef.current = Date.now();
     if (!isRunning) runStartRef.current = null;
@@ -251,26 +267,15 @@ export function Step2(props: {
     if (!isRunning) return "";
     const msgs = [
       "Fetching website content…",
-      "Extracting signals (services, locations, keywords)…",
-      "Comparing against known industry patterns…",
-      "Building your suggested setup…",
-      "Finalizing…",
+      "Extracting services & keywords…",
+      "Comparing against industry patterns…",
+      "Choosing the best match…",
+      "Finalizing recommendation…",
     ];
     const idx = Math.min(msgs.length - 1, Math.floor(runProgress * msgs.length));
     return msgs[idx] ?? "Analyzing…";
   }, [isRunning, runProgress]);
 
-  // Debug support on mobile: add ?debug=1
-  const debugOn = useMemo(() => {
-    try {
-      const u = new URL(window.location.href);
-      return u.searchParams.get("debug") === "1";
-    } catch {
-      return false;
-    }
-  }, []);
-
-  // ✅ Reset auto-run guard whenever tenantId or website changes
   useEffect(() => {
     const k = `${tid || "(no-tenant)"}|${website || "(no-website)"}`;
     if (autoRunKeyRef.current !== k) {
@@ -359,6 +364,14 @@ export function Step2(props: {
         .slice(0, 5)
     : [];
 
+  const debugOn = useMemo(() => {
+    try {
+      const u = new URL(window.location.href);
+      return u.searchParams.get("debug") === "1";
+    } catch {
+      return false;
+    }
+  }, []);
   const [lastApi, setLastApi] = useState<any>(null);
 
   const [textAnswer, setTextAnswer] = useState("");
@@ -450,8 +463,6 @@ export function Step2(props: {
   async function handleConfirmYes() {
     setWorking(true);
     try {
-      // NOTE: Step2 is the confirmation moment.
-      // We should later make Step3 auto-skip if the industry was already confirmed.
       await props.onConfirm({ answer: "yes" });
       props.onNext();
     } catch (e: any) {
@@ -475,8 +486,13 @@ export function Step2(props: {
     }
   }
 
-  const heroLabel = safeTrim(suggestedLabel) || "your industry";
-  const heroKey = safeTrim(suggestedKey);
+  const statusPill = useMemo(() => {
+    if (isRunning) return { text: "Analyzing", cls: "bg-slate-50 text-slate-800 border-slate-200 dark:bg-black dark:text-slate-200 dark:border-slate-800" };
+    if (hasAnalysis) return { text: "Analysis ready", cls: "bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-100 dark:border-emerald-900/40" };
+    return { text: "Not analyzed yet", cls: "bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/40" };
+  }, [isRunning, hasAnalysis]);
+
+  const headline = suggestedLabel ? suggestedLabel : hasAnalysis ? "Industry detected" : "Website analysis";
 
   return (
     <div>
@@ -488,127 +504,229 @@ export function Step2(props: {
             We’ll analyze your website to predict your industry — then you can confirm or correct it.
           </div>
 
-          <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
-            <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">Website</div>
-            <div className="mt-1 break-all font-mono text-xs text-gray-800 dark:text-gray-200">{website}</div>
+          <div className="mt-4 rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+            {/* Top row: website + status */}
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Website</div>
+                <div className="mt-1 break-words font-mono text-xs text-gray-800 dark:text-gray-200">
+                  {compactUrl(website)}
+                </div>
+              </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
               <span
                 className={cn(
-                  "inline-flex items-center rounded-full border px-2 py-1 font-semibold",
-                  isRunning
-                    ? "border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-800 dark:bg-black dark:text-slate-200"
-                    : hasAnalysis
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                    : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+                  "shrink-0 inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+                  statusPill.cls
                 )}
               >
-                {isRunning ? "Analysis running" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
+                {statusPill.text}
               </span>
-
-              {aiErr ? (
-                <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-1 font-semibold text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                  {aiErr}
-                </span>
-              ) : null}
             </div>
 
-            {/* Running details: progress + explanation */}
+            {aiErr ? (
+              <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+                {aiErr}
+              </div>
+            ) : null}
+
+            {/* RUNNING: progress + messaging */}
             {isRunning ? (
-              <div className="mt-4">
-                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+              <div className="mt-4 rounded-3xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Analyzing your site</div>
+                  <div className="text-xs font-mono text-gray-600 dark:text-gray-300">{Math.round(runProgress * 100)}%</div>
+                </div>
+
+                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
                   <div
                     className="h-full bg-emerald-600 transition-[width] duration-300"
                     style={{ width: `${Math.round(runProgress * 100)}%` }}
                   />
                 </div>
+
                 <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
               </div>
             ) : null}
 
-            <div className="mt-4 grid gap-2">
-              {!hasAnalysis ? (
+            {/* NOT READY: CTA */}
+            {!hasAnalysis ? (
+              <div className="mt-4">
+                <div className="rounded-3xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">What we look for</div>
+                  <div className="mt-3 grid gap-3">
+                    <div className="flex gap-3">
+                      <div className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-xs font-bold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                        1
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold">Services & keywords</div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">
+                          We scan page text to understand what you sell and how you describe it.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-3">
+                      <div className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-xs font-bold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                        2
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold">Industry signals</div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">
+                          We compare your signals against known patterns to find the best match.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-3">
+                      <div className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-xs font-bold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                        3
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-semibold">A suggested setup</div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">
+                          We produce an industry suggestion so your defaults feel right from day one.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
+                    You can always correct it in the next step.
+                  </div>
+                </div>
+
                 <button
                   type="button"
-                  className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  className="mt-4 w-full rounded-2xl bg-black py-3.5 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
                   onClick={() => runAnalysisSafely().catch(() => null)}
                   disabled={working || isRunning || !tid}
                 >
                   {isRunning ? "Analyzing…" : "Run analysis now"}
                 </button>
-              ) : (
-                <>
-                  {/* ✅ Proud moment card */}
-                  <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-5 dark:border-emerald-900/40 dark:bg-emerald-950/25">
-                    <div className="text-xs font-semibold text-emerald-800 dark:text-emerald-200">We think you are in</div>
-                    <div className="mt-2 text-2xl font-extrabold leading-tight text-emerald-950 dark:text-emerald-100">
-                      {heroLabel}
+
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    onClick={props.onBack}
+                    disabled={working}
+                  >
+                    Back
+                  </button>
+
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 opacity-60 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    onClick={() => {
+                      // no-op: user must run analysis or go back
+                    }}
+                    disabled
+                    title="Run analysis to continue"
+                  >
+                    Continue →
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* READY: proud moment + confirm */
+              <div className="mt-4">
+                <div className="rounded-3xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+                  <div className="text-center">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                      Identified industry
                     </div>
 
-                    <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-emerald-900/80 dark:text-emerald-100/80">
-                      <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-2 py-1 font-semibold dark:border-emerald-900/40 dark:bg-black">
-                        Confidence: <span className="ml-1 font-mono">{pct(conf)}</span>
-                      </span>
-                      <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-2 py-1 font-semibold dark:border-emerald-900/40 dark:bg-black">
-                        Fit: <span className="ml-1 font-mono">{pct(fit)}</span>
+                    <div className="mt-2 text-2xl font-extrabold leading-tight text-gray-900 dark:text-gray-100">
+                      {headline}
+                    </div>
+
+                    <div className="mt-3 flex items-center justify-center gap-2">
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
+                          confColor(conf)
+                        )}
+                      >
+                        {scoreLabel(conf)} • {pct(conf)}
                       </span>
 
-                      {/* Hide the technical key unless debug is on */}
-                      {debugOn && heroKey ? (
-                        <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-2 py-1 font-semibold dark:border-emerald-900/40 dark:bg-black">
-                          key: <span className="ml-1 font-mono">{heroKey}</span>
+                      {fit !== null ? (
+                        <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                          Fit {pct(fit)}
                         </span>
                       ) : null}
                     </div>
 
-                    {/* Optional why */}
-                    {safeTrim(suggestedWhy) ? (
-                      <details className="mt-4">
-                        <summary className="cursor-pointer select-none text-xs font-semibold text-emerald-900 dark:text-emerald-100">
-                          Why we think this
-                        </summary>
-                        <div className="mt-2 rounded-2xl border border-emerald-200 bg-white p-3 text-xs text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
-                          {suggestedWhy}
+                    <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+                      Based on your website content, services, and keywords.
+                    </div>
+
+                    {/* Optional “why” panel */}
+                    <div className="mt-4">
+                      <button
+                        type="button"
+                        className="text-xs font-semibold text-gray-700 underline underline-offset-4 hover:opacity-80 dark:text-gray-300"
+                        onClick={() => setShowWhy((v) => !v)}
+                      >
+                        {showWhy ? "Hide details" : "Show details"}
+                      </button>
+
+                      {showWhy ? (
+                        <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 text-left text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                          <div className="font-semibold text-gray-900 dark:text-gray-100">What we saw</div>
+                          <ul className="mt-2 list-disc space-y-1 pl-5">
+                            <li>Service terms and descriptions that match this industry</li>
+                            <li>Navigation and page structure common to similar businesses</li>
+                            <li>Keyword patterns consistent with a known industry profile</li>
+                          </ul>
+
+                          {debugOn && suggestedKey ? (
+                            <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                              debug.key: {suggestedKey}
+                            </div>
+                          ) : null}
                         </div>
-                      </details>
-                    ) : null}
+                      ) : null}
+                    </div>
                   </div>
+                </div>
 
-                  <div className="mt-3 grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                      onClick={props.onBack}
-                      disabled={working}
-                    >
-                      Back
-                    </button>
-
-                    <button
-                      type="button"
-                      className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                      onClick={() => handleConfirmYes().catch(() => null)}
-                      disabled={working || !tid}
-                    >
-                      Yes, that’s right →
-                    </button>
-                  </div>
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    onClick={props.onBack}
+                    disabled={working}
+                  >
+                    Back
+                  </button>
 
                   <button
                     type="button"
-                    className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-                    onClick={() => handleConfirmNo().catch(() => null)}
+                    className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                    onClick={() => handleConfirmYes().catch(() => null)}
                     disabled={working || !tid}
                   >
-                    Not quite — improve match
+                    Yes, that’s right →
                   </button>
+                </div>
 
-                  <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                    If you disagree, we’ll ask a few quick questions to lock the correct industry.
-                  </div>
-                </>
-              )}
-            </div>
+                <button
+                  type="button"
+                  className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  onClick={() => handleConfirmNo().catch(() => null)}
+                  disabled={working || !tid}
+                >
+                  Not quite — improve match
+                </button>
+
+                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                  If you disagree, we’ll ask a few quick questions to lock the correct industry.
+                </div>
+              </div>
+            )}
           </div>
         </>
       ) : (
@@ -626,7 +744,7 @@ export function Step2(props: {
                 tenantId: <span className="font-mono">{tid || "(none)"}</span>
               </div>
               <div className="mt-1">
-                status: <span className="font-mono">{safeTrim(interviewState?.status) || "(none)"}</span>
+                status: <span className="font-mono">{status || "(none)"}</span>
               </div>
               <div className="mt-1">
                 nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span>
@@ -647,7 +765,7 @@ export function Step2(props: {
                   {hypothesis ? (
                     <>
                       <span className="font-semibold">{hypothesis}</span>
-                      {debugOn && proposedKey ? <span className="ml-2 font-mono text-xs opacity-70">({proposedKey})</span> : null}
+                      {proposedKey ? <span className="ml-2 font-mono text-xs opacity-70">({proposedKey})</span> : null}
                     </>
                   ) : (
                     <span className="text-gray-600 dark:text-gray-300">Building context…</span>
@@ -691,7 +809,7 @@ export function Step2(props: {
               <div className="text-base font-semibold">We’re ready.</div>
               <div className="mt-1">
                 Suggested industry: <span className="font-semibold">{hypothesis}</span>{" "}
-                {debugOn && proposedKey ? <span className="font-mono text-xs opacity-70">({proposedKey})</span> : null}
+                {proposedKey ? <span className="font-mono text-xs opacity-70">({proposedKey})</span> : null}
               </div>
 
               <div className="mt-4 grid grid-cols-2 gap-3">
