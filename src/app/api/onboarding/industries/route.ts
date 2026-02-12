@@ -170,11 +170,51 @@ async function upsertTenantIndustryKey(tenantId: string, industryKeyRaw: string)
   return key;
 }
 
-async function listTenantSubIndustries(tenantId: string) {
+/**
+ * ✅ Normalize sub-industry to platform defaults first
+ * - If key exists in industry_sub_industries for this industry, use canonical key+label
+ * - Else allow tenant override insert
+ */
+async function resolveSubIndustryAgainstDefaults(args: {
+  industryKey: string;
+  subIndustryKey?: string;
+  subIndustryLabel?: string;
+}): Promise<{ key: string; label: string } | null> {
+  const industryKey = normalizeKey(args.industryKey);
+  if (!industryKey) return null;
+
+  const keyGuess = normalizeKey(args.subIndustryKey || args.subIndustryLabel || "");
+  const labelGuess = safeTrim(args.subIndustryLabel || "");
+
+  if (!keyGuess) return null;
+
+  const r = await db.execute(sql`
+    select key::text as "key", label::text as "label"
+    from industry_sub_industries
+    where industry_key = ${industryKey}
+      and key = ${keyGuess}
+      and is_active = true
+    limit 1
+  `);
+
+  const row = firstRow(r);
+  if (row?.key) {
+    return { key: String(row.key), label: String(row.label || titleFromKey(String(row.key))) };
+  }
+
+  // Not a platform default — allow tenant override using their label if provided
+  return { key: keyGuess, label: labelGuess || titleFromKey(keyGuess) };
+}
+
+async function listTenantSubIndustries(tenantId: string, industryKey: string) {
+  const ik = normalizeKey(industryKey);
+  if (!ik) return [];
+
   const r = await db.execute(sql`
     select id, key, label
     from tenant_sub_industries
     where tenant_id = ${tenantId}::uuid
+      and industry_key = ${ik}
     order by label asc
   `);
 
@@ -185,52 +225,22 @@ async function listTenantSubIndustries(tenantId: string) {
   }));
 }
 
-async function upsertTenantSubIndustry(args: { tenantId: string; label: string; key?: string }) {
+async function upsertTenantSubIndustry(args: { tenantId: string; industryKey: string; key: string; label: string }) {
+  const industryKey = normalizeKey(args.industryKey);
   const label = safeTrim(args.label);
-  const key = normalizeKey(args.key || label);
-  if (!label || !key) return "";
+  const key = normalizeKey(args.key);
+
+  if (!industryKey || !label || !key) return "";
 
   await db.execute(sql`
-    insert into tenant_sub_industries (id, tenant_id, key, label, updated_at)
-    values (gen_random_uuid(), ${args.tenantId}::uuid, ${key}, ${label}, now())
-    on conflict (tenant_id, key) do update
+    insert into tenant_sub_industries (id, tenant_id, industry_key, key, label, updated_at)
+    values (gen_random_uuid(), ${args.tenantId}::uuid, ${industryKey}, ${key}, ${label}, now())
+    on conflict (tenant_id, industry_key, key) do update
       set label = excluded.label,
           updated_at = now()
   `);
 
   return key;
-}
-
-async function listDefaultSubIndustries(industryKeyRaw: string) {
-  const industryKey = normalizeKey(industryKeyRaw);
-  if (!industryKey) return [];
-
-  const r = await db.execute(sql`
-    select
-      id::text as "id",
-      industry_key::text as "industryKey",
-      key::text as "key",
-      label::text as "label",
-      description::text as "description",
-      sort_order::int as "sortOrder",
-      is_active as "isActive",
-      updated_at as "updatedAt"
-    from industry_sub_industries
-    where industry_key = ${industryKey}
-      and coalesce(is_active, true) = true
-    order by sort_order asc, label asc
-    limit 500
-  `);
-
-  return rowsOf(r).map((x: any) => ({
-    id: String(x.id ?? ""),
-    industryKey: String(x.industryKey ?? industryKey),
-    key: String(x.key ?? ""),
-    label: String(x.label ?? ""),
-    description: x.description == null ? null : String(x.description),
-    sortOrder: Number.isFinite(Number(x.sortOrder)) ? Number(x.sortOrder) : 0,
-    updatedAt: x.updatedAt ?? null,
-  }));
 }
 
 function getSuggestedSubIndustryLabel(ai: any): string {
@@ -288,7 +298,6 @@ export async function GET(req: Request) {
 
     const { savedKey, currentStep, ai } = await readTenantState(tenantId);
 
-    // ✅ KEY FIX:
     // Treat tenant_settings.industry_key as "unselected" until onboarding reaches step >= 3.
     const savedIsUsable = currentStep >= 3 && Boolean(savedKey);
 
@@ -304,11 +313,9 @@ export async function GET(req: Request) {
 
     const selectedLabel = selectedKey ? industries.find((x) => x.key === selectedKey)?.label ?? null : null;
 
-    const subIndustries = await listTenantSubIndustries(tenantId);
+    // ✅ NOW SCOPED to the selected industry
+    const subIndustries = selectedKey ? await listTenantSubIndustries(tenantId, selectedKey) : [];
     const suggestedSubIndustryLabel = getSuggestedSubIndustryLabel(ai);
-
-    // ✅ NEW (additive): defaults for the currently-selected industry
-    const defaultSubIndustries = selectedKey ? await listDefaultSubIndustries(selectedKey) : [];
 
     return NextResponse.json(
       {
@@ -319,16 +326,9 @@ export async function GET(req: Request) {
         selectedLabel,
         suggestedKey: ensuredSuggestedKey || null,
 
-        // tenant overrides / tenant picks (existing behavior)
         subIndustries,
-
-        // AI hint (existing behavior)
         suggestedSubIndustryLabel: suggestedSubIndustryLabel || null,
 
-        // ✅ NEW (additive)
-        defaultSubIndustries,
-
-        // Helpful debug / UI decisions (additive)
         tenantIndustryKey: savedKey || null,
         onboardingStep: currentStep,
       },
@@ -386,17 +386,26 @@ export async function POST(req: Request) {
             updated_at = now()
     `);
 
-    // --- Sub-industry: optional ---
+    // --- Sub-industry: optional (✅ normalized) ---
     let savedSubIndustryKey = "";
     if (subIndustryLabelRaw || subIndustryKeyRaw) {
-      savedSubIndustryKey = await upsertTenantSubIndustry({
-        tenantId,
-        label: subIndustryLabelRaw || subIndustryKeyRaw,
-        key: subIndustryKeyRaw || undefined,
+      const resolved = await resolveSubIndustryAgainstDefaults({
+        industryKey: savedKey,
+        subIndustryKey: subIndustryKeyRaw || undefined,
+        subIndustryLabel: subIndustryLabelRaw || undefined,
       });
+
+      if (resolved) {
+        savedSubIndustryKey = await upsertTenantSubIndustry({
+          tenantId,
+          industryKey: savedKey,
+          key: resolved.key,
+          label: resolved.label,
+        });
+      }
     }
 
-    const subIndustries = await listTenantSubIndustries(tenantId);
+    const subIndustries = await listTenantSubIndustries(tenantId, savedKey);
 
     return NextResponse.json(
       {
