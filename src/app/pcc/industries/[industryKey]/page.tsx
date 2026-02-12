@@ -6,6 +6,7 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import ConfirmIndustryButton from "./ConfirmIndustryButton";
+import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -290,7 +291,10 @@ export default async function PccIndustryDetailPage(props: Props) {
       "";
 
     const aiStatus =
-      safeTrim(r.aiStatus) || safeTrim(pick(aiObj, ["meta.status"])) || safeTrim(pick(aiObj, ["industryInterview.meta.status"])) || "";
+      safeTrim(r.aiStatus) ||
+      safeTrim(pick(aiObj, ["meta.status"])) ||
+      safeTrim(pick(aiObj, ["industryInterview.meta.status"])) ||
+      "";
 
     const aiSource = safeTrim(r.aiSource) || safeTrim(pick(aiObj, ["meta.source"])) || "";
     const aiPrevSuggested = safeTrim(r.aiPrevSuggested) || safeTrim(pick(aiObj, ["meta.previousSuggestedIndustryKey"])) || "";
@@ -365,7 +369,6 @@ export default async function PccIndustryDetailPage(props: Props) {
   // -----------------------------
   // ✅ Default sub-industries (global)
   // - inUseCount: how many confirmed tenants are using that subKey
-  // - this works even if industries table is empty (key is just text)
   // -----------------------------
   const defaultsR = await db.execute(sql`
     select
@@ -448,7 +451,9 @@ export default async function PccIndustryDetailPage(props: Props) {
             <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Key: <span className="font-mono text-xs">{industry.key}</span>
               {!industry.isCanonical ? (
-                <span className="ml-2 text-[11px] text-amber-700 dark:text-amber-200">(derived — industries table has no row for this key yet)</span>
+                <span className="ml-2 text-[11px] text-amber-700 dark:text-amber-200">
+                  (derived — industries table has no row for this key yet)
+                </span>
               ) : null}
             </div>
 
@@ -619,10 +624,7 @@ export default async function PccIndustryDetailPage(props: Props) {
           {aiUnconfirmed.length ? (
             <div className="mt-2 grid gap-2">
               {aiUnconfirmed.map((t: any) => (
-                <div
-                  key={t.tenantId}
-                  className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black"
-                >
+                <div key={t.tenantId} className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
@@ -744,7 +746,8 @@ export default async function PccIndustryDetailPage(props: Props) {
           <div className="flex items-center justify-between gap-3">
             <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">Rejected tenants</div>
             <div className="text-xs text-amber-800/80 dark:text-amber-100/80">
-              Tenants who rejected <span className="font-mono">{key}</span> (stored in <span className="font-mono">ai_analysis.rejectedIndustryKeys</span>)
+              Tenants who rejected <span className="font-mono">{key}</span> (stored in{" "}
+              <span className="font-mono">ai_analysis.rejectedIndustryKeys</span>)
             </div>
           </div>
 
@@ -807,21 +810,21 @@ export default async function PccIndustryDetailPage(props: Props) {
       {/* ✅ Default sub-industries (global) */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Default sub-industries</div>
-          <button
-            type="button"
-            disabled
-            className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-            title="We’ll add create/edit flows next"
-          >
-            Add default (next)
-          </button>
+          <div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Default sub-industries</div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              From <span className="font-mono">industry_sub_industries</span> where{" "}
+              <span className="font-mono">industry_key</span> = <span className="font-mono">{key}</span>
+            </div>
+          </div>
+
+          {/* ✅ wired */}
+          <AddDefaultSubIndustryButton industryKey={key} />
         </div>
 
-        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          From <span className="font-mono">industry_sub_industries</span> where <span className="font-mono">industry_key</span> ={" "}
-          <span className="font-mono">{key}</span>. Tenants can still override/extend via{" "}
-          <span className="font-mono">tenant_sub_industries</span>.
+        <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Tenants can still override/extend via <span className="font-mono">tenant_sub_industries</span>. “In use” counts only
+          confirmed tenants for this industry.
         </p>
 
         {defaultSubIndustries.length ? (
@@ -841,9 +844,7 @@ export default async function PccIndustryDetailPage(props: Props) {
                   <tr key={s.id} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
                     <td className="py-3 pr-3">
                       <div className="font-semibold text-gray-900 dark:text-gray-100">{s.subLabel}</div>
-                      {s.description ? (
-                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{s.description}</div>
-                      ) : null}
+                      {s.description ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{s.description}</div> : null}
                     </td>
                     <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{s.subKey}</td>
                     <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{s.sortOrder}</td>
@@ -855,16 +856,18 @@ export default async function PccIndustryDetailPage(props: Props) {
                             ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
                             : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200"
                         )}
-                        title={s.inUseCount > 0 ? "Confirmed tenants using this subKey (via tenant_sub_industries)" : "No confirmed tenants using this subKey yet"}
+                        title={
+                          s.inUseCount > 0
+                            ? "Confirmed tenants using this subKey (via tenant_sub_industries)"
+                            : "No confirmed tenants using this subKey yet"
+                        }
                       >
                         {s.inUseCount}
                       </span>
                     </td>
                     <td className="py-3 pr-0 text-right text-[11px] text-gray-500 dark:text-gray-400">
                       {s.updatedAt ? (
-                        <span title={`Created: ${s.createdAt ? fmtDate(s.createdAt) : "—"}`}>
-                          updated {fmtDate(s.updatedAt)}
-                        </span>
+                        <span title={`Created: ${s.createdAt ? fmtDate(s.createdAt) : "—"}`}>updated {fmtDate(s.updatedAt)}</span>
                       ) : (
                         "—"
                       )}
@@ -876,7 +879,8 @@ export default async function PccIndustryDetailPage(props: Props) {
           </div>
         ) : (
           <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-            No default sub-industries for this industry yet. Next we’ll add “Add default” + an edit UI.
+            No default sub-industries for this industry yet. Use <span className="font-semibold">Add default</span> to create the first
+            one.
           </div>
         )}
       </div>
@@ -896,8 +900,8 @@ export default async function PccIndustryDetailPage(props: Props) {
         </div>
 
         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          Scoped to tenants where <span className="font-mono">tenant_settings.industry_key</span> ={" "}
-          <span className="font-mono">{key}</span> (because <span className="font-mono">tenant_sub_industries</span> has no industry column yet).
+          Scoped to tenants where <span className="font-mono">tenant_settings.industry_key</span> = <span className="font-mono">{key}</span>{" "}
+          (because <span className="font-mono">tenant_sub_industries</span> has no industry column yet).
         </p>
 
         <div className="mt-3 overflow-x-auto">
@@ -916,7 +920,9 @@ export default async function PccIndustryDetailPage(props: Props) {
                   <tr key={`${r.subKey}:${r.subLabel}`} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
                     <td className="py-3 pr-3 font-semibold text-gray-900 dark:text-gray-100">{r.subLabel}</td>
                     <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{r.subKey}</td>
-                    <td className="py-3 pr-0 text-right font-semibold text-gray-900 dark:text-gray-100">{Number(r.tenantCount || 0)}</td>
+                    <td className="py-3 pr-0 text-right font-semibold text-gray-900 dark:text-gray-100">
+                      {Number(r.tenantCount || 0)}
+                    </td>
                   </tr>
                 ))
               ) : (
