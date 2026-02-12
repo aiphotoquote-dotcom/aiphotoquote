@@ -463,6 +463,8 @@ export function Step2(props: {
     }
   }
 
+  const showExplainCard = hasWebsite && !showInterview && !hasAnalysis;
+
   return (
     <div>
       {/* If we have a website and we're not interviewing, this is the Website Analysis step */}
@@ -498,16 +500,75 @@ export function Step2(props: {
               ) : null}
             </div>
 
+            {/* Idle explanation: what will happen */}
+            {showExplainCard && !isRunning ? (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">What we look for</div>
+
+                <div className="mt-2 grid gap-2 text-sm">
+                  <div className="flex gap-2">
+                    <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                      1
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-gray-900 dark:text-gray-100">Services & keywords</div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">
+                        We scan page text to understand what you sell and how you describe it.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                      2
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-gray-900 dark:text-gray-100">Industry signals</div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">
+                        We compare your signals against known industry patterns to find the best match.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                      3
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-semibold text-gray-900 dark:text-gray-100">A suggested setup</div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">
+                        We produce an industry suggestion so your defaults feel right from day one.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                  You’ll always be able to correct it in the next step.
+                </div>
+              </div>
+            ) : null}
+
             {/* Running details: progress + explanation */}
             {isRunning ? (
-              <div className="mt-4">
-                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+                <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-300">
+                  <div className="font-semibold">Analyzing…</div>
+                  <div className="font-mono">{Math.round(runProgress * 100)}%</div>
+                </div>
+
+                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
                   <div
                     className="h-full bg-emerald-600 transition-[width] duration-300"
                     style={{ width: `${Math.round(runProgress * 100)}%` }}
                   />
                 </div>
+
                 <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
+
+                <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
+                  Hang tight — we’ll bring you back here with a suggested industry when it’s ready.
+                </div>
               </div>
             ) : null}
 
