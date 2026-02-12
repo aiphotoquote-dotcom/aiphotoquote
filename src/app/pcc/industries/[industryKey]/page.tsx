@@ -1,4 +1,5 @@
 // src/app/pcc/industries/[industryKey]/page.tsx
+
 import React from "react";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
@@ -7,12 +8,14 @@ import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import ConfirmIndustryButton from "./ConfirmIndustryButton";
 import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
+import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
   params: Promise<{ industryKey: string }>;
+  searchParams?: Promise<{ showInactive?: string }>;
 };
 
 function rows(r: any): any[] {
@@ -109,8 +112,10 @@ function asStringArray(v: any): string[] {
 export default async function PccIndustryDetailPage(props: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  // ✅ Next 16: params is Promise-like in app router
   const p = await props.params;
+  const sp = (await props.searchParams) ?? {};
+  const showInactive = toBool(sp?.showInactive);
+
   const industryKey = p?.industryKey;
   const key = decodeURIComponent(industryKey || "").trim();
 
@@ -368,7 +373,7 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   // -----------------------------
   // ✅ Default sub-industries (global)
-  // - inUseCount: how many confirmed tenants are using that subKey
+  // - includes isActive + inUseCount
   // -----------------------------
   const defaultsR = await db.execute(sql`
     select
@@ -378,6 +383,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       isi.label::text as "subLabel",
       isi.description::text as "description",
       isi.sort_order::int as "sortOrder",
+      isi.is_active as "isActive",
       isi.created_at as "createdAt",
       isi.updated_at as "updatedAt",
       coalesce(ov."inUseCount", 0)::int as "inUseCount"
@@ -396,17 +402,24 @@ export default async function PccIndustryDetailPage(props: Props) {
     limit 500
   `);
 
-  const defaultSubIndustries = rows(defaultsR).map((r: any) => ({
+  const defaultSubIndustriesAll = rows(defaultsR).map((r: any) => ({
     id: String(r.id ?? ""),
     industryKey: String(r.industryKey ?? key),
     subKey: String(r.subKey ?? ""),
     subLabel: String(r.subLabel ?? ""),
     description: r.description ? String(r.description) : null,
     sortOrder: toNum(r.sortOrder, 1000),
+    isActive: toBool(r.isActive),
     createdAt: r.createdAt ?? null,
     updatedAt: r.updatedAt ?? null,
     inUseCount: toNum(r.inUseCount, 0),
   }));
+
+  const defaultSubIndustries = showInactive
+    ? defaultSubIndustriesAll
+    : defaultSubIndustriesAll.filter((s) => s.isActive);
+
+  const inactiveCount = defaultSubIndustriesAll.filter((s) => !s.isActive).length;
 
   // -----------------------------
   // Tenant sub-industry overrides summary (scoped to confirmed tenants)
@@ -818,8 +831,17 @@ export default async function PccIndustryDetailPage(props: Props) {
             </div>
           </div>
 
-          {/* ✅ wired */}
-          <AddDefaultSubIndustryButton industryKey={key} />
+          <div className="flex items-center gap-2">
+            <Link
+              href={`/pcc/industries/${encodeURIComponent(key)}?showInactive=${showInactive ? "0" : "1"}`}
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              title="Toggle inactive rows visibility"
+            >
+              {showInactive ? "Hide inactive" : `Show inactive (${inactiveCount})`}
+            </Link>
+
+            <AddDefaultSubIndustryButton industryKey={key} />
+          </div>
         </div>
 
         <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
@@ -836,12 +858,19 @@ export default async function PccIndustryDetailPage(props: Props) {
                   <th className="py-3 pr-3">Key</th>
                   <th className="py-3 pr-3">Sort</th>
                   <th className="py-3 pr-3">In use</th>
-                  <th className="py-3 pr-0 text-right">Meta</th>
+                  <th className="py-3 pr-3">Status</th>
+                  <th className="py-3 pr-0 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {defaultSubIndustries.map((s) => (
-                  <tr key={s.id} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
+                  <tr
+                    key={s.id}
+                    className={cn(
+                      "border-b border-gray-100 last:border-b-0 dark:border-gray-900",
+                      !s.isActive && "opacity-60"
+                    )}
+                  >
                     <td className="py-3 pr-3">
                       <div className="font-semibold text-gray-900 dark:text-gray-100">{s.subLabel}</div>
                       {s.description ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{s.description}</div> : null}
@@ -865,12 +894,35 @@ export default async function PccIndustryDetailPage(props: Props) {
                         {s.inUseCount}
                       </span>
                     </td>
-                    <td className="py-3 pr-0 text-right text-[11px] text-gray-500 dark:text-gray-400">
-                      {s.updatedAt ? (
-                        <span title={`Created: ${s.createdAt ? fmtDate(s.createdAt) : "—"}`}>updated {fmtDate(s.updatedAt)}</span>
-                      ) : (
-                        "—"
-                      )}
+                    <td className="py-3 pr-3">
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                          s.isActive
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                            : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200"
+                        )}
+                      >
+                        {s.isActive ? "ACTIVE" : "INACTIVE"}
+                      </span>
+                    </td>
+                    <td className="py-3 pr-0 text-right">
+                      <div className="flex items-center justify-end gap-3">
+                        <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                          {s.updatedAt ? (
+                            <span title={`Created: ${s.createdAt ? fmtDate(s.createdAt) : "—"}`}>updated {fmtDate(s.updatedAt)}</span>
+                          ) : (
+                            "—"
+                          )}
+                        </div>
+
+                        <ToggleDefaultSubIndustryActiveButton
+                          industryKey={key}
+                          subKey={s.subKey}
+                          subLabel={s.subLabel}
+                          isActive={s.isActive}
+                        />
+                      </div>
                     </td>
                   </tr>
                 ))}
