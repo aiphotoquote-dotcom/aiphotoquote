@@ -116,7 +116,6 @@ function pick(obj: any, paths: string[]): any {
 function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   if (!aiAnalysis || typeof aiAnalysis !== "object") return false;
 
-  // Strong signals that analysis actually produced something useful.
   const proposedKey = safeTrim(pick(aiAnalysis, ["industryInterview.proposedIndustry.key"]));
   const proposedLabel = safeTrim(pick(aiAnalysis, ["industryInterview.proposedIndustry.label"]));
 
@@ -135,7 +134,6 @@ function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
     pick(aiAnalysis, ["industryInterview.confidenceScore"]) ??
     null;
 
-  // If we have a guess OR a confidence that looks populated, we treat it as "analysis exists".
   const confNum = Number(conf);
   const hasConf = Number.isFinite(confNum) && confNum > 0;
 
@@ -168,7 +166,6 @@ export function Step2(props: {
 
   const isRunning = aiStatus === "running";
 
-  // ✅ IMPORTANT: do NOT treat a non-empty aiAnalysis object as "done" unless it has real signals.
   const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
   const suggestedLabel =
@@ -202,7 +199,7 @@ export function Step2(props: {
   // Controls whether we’re showing the interview UI.
   const [showInterview, setShowInterview] = useState<boolean>(() => !hasWebsite);
 
-  // Auto-run analysis ONCE per (tenantId + website) when website exists and we don't have meaningful analysis yet.
+  // Auto-run analysis ONCE per (tenantId + website)
   const didAutoRunRef = useRef(false);
   const autoRunKeyRef = useRef<string>("");
 
@@ -211,14 +208,13 @@ export function Step2(props: {
   const [runTick, setRunTick] = useState(0);
 
   useEffect(() => {
-    // mark start moment when we see "running"
     if (isRunning && !runStartRef.current) runStartRef.current = Date.now();
     if (!isRunning) runStartRef.current = null;
   }, [isRunning]);
 
   useEffect(() => {
     if (!isRunning) return;
-    const t = window.setInterval(() => setRunTick((x) => x + 1), 300);
+    const t = window.setInterval(() => setRunTick((x) => x + 1), 250);
     return () => window.clearInterval(t);
   }, [isRunning]);
 
@@ -227,26 +223,37 @@ export function Step2(props: {
     const start = runStartRef.current ?? Date.now();
     const elapsed = Date.now() - start;
 
-    // "Feels" like progress; caps at 95% until we flip to ready.
+    // Feel-like progress; caps at 95% until server flips to ready.
     const maxMs = 45_000;
-    const p = Math.min(0.95, Math.max(0.06, elapsed / maxMs));
+    const p = Math.min(0.95, Math.max(0.04, elapsed / maxMs));
     return p;
   }, [isRunning, runTick]);
 
-  const runMessage = useMemo(() => {
-    if (!isRunning) return "";
-    const msgs = [
-      "Fetching website content…",
-      "Extracting signals (services, locations, keywords)…",
-      "Comparing against known industry patterns…",
-      "Building a suggested industry + reasoning…",
-      "Finalizing onboarding data…",
-    ];
-    const idx = Math.min(msgs.length - 1, Math.floor(runProgress * msgs.length));
-    return msgs[idx] ?? "Analyzing…";
+  const runPhases = useMemo(() => {
+    // 4 phases for clean mobile UX
+    return [
+      { k: "fetch", label: "Fetching website content" },
+      { k: "extract", label: "Extracting services & keywords" },
+      { k: "match", label: "Matching industry signals" },
+      { k: "final", label: "Finalizing suggestion" },
+    ] as const;
+  }, []);
+
+  const runPhaseIndex = useMemo(() => {
+    // Map progress to phase 0..3
+    if (!isRunning) return 0;
+    if (runProgress < 0.25) return 0;
+    if (runProgress < 0.55) return 1;
+    if (runProgress < 0.82) return 2;
+    return 3;
   }, [isRunning, runProgress]);
 
-  // ✅ Reset auto-run guard whenever tenantId or website changes
+  const runMessage = useMemo(() => {
+    if (!isRunning) return "";
+    return runPhases[runPhaseIndex]?.label ?? "Analyzing…";
+  }, [isRunning, runPhases, runPhaseIndex]);
+
+  // Reset auto-run guard whenever tenantId or website changes
   useEffect(() => {
     const k = `${tid || "(no-tenant)"}|${website || "(no-website)"}`;
     if (autoRunKeyRef.current !== k) {
@@ -287,7 +294,7 @@ export function Step2(props: {
     if (hasAnalysis) return;
     if (isRunning) return;
 
-    // ✅ Auto-run analysis once (per tenant+website), only if we have tenantId.
+    // Auto-run analysis once (per tenant+website), only if we have tenantId.
     if (!didAutoRunRef.current && tid) {
       didAutoRunRef.current = true;
       runAnalysisSafely().catch(() => null);
@@ -295,7 +302,7 @@ export function Step2(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasWebsite, hasAnalysis, isRunning, tid]);
 
-  /* -------------------- Interview state (unchanged, but gated) -------------------- */
+  /* -------------------- Interview state -------------------- */
 
   const interviewFromProps: IndustryInterviewA | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
@@ -339,7 +346,6 @@ export function Step2(props: {
         .slice(0, 5)
     : [];
 
-  // Debug support on mobile: add ?debug=1
   const debugOn = useMemo(() => {
     try {
       const u = new URL(window.location.href);
@@ -378,7 +384,6 @@ export function Step2(props: {
     }
   }
 
-  // Only auto-start interview if we are in interview mode.
   useEffect(() => {
     if (!showInterview) return;
     startIfNeeded().catch(() => null);
@@ -463,8 +468,6 @@ export function Step2(props: {
     }
   }
 
-  const showExplainCard = hasWebsite && !showInterview && !hasAnalysis;
-
   return (
     <div>
       {/* If we have a website and we're not interviewing, this is the Website Analysis step */}
@@ -500,74 +503,52 @@ export function Step2(props: {
               ) : null}
             </div>
 
-            {/* Idle explanation: what will happen */}
-            {showExplainCard && !isRunning ? (
-              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">What we look for</div>
-
-                <div className="mt-2 grid gap-2 text-sm">
-                  <div className="flex gap-2">
-                    <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                      1
-                    </span>
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-900 dark:text-gray-100">Services & keywords</div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">
-                        We scan page text to understand what you sell and how you describe it.
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                      2
-                    </span>
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-900 dark:text-gray-100">Industry signals</div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">
-                        We compare your signals against known industry patterns to find the best match.
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                      3
-                    </span>
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-900 dark:text-gray-100">A suggested setup</div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">
-                        We produce an industry suggestion so your defaults feel right from day one.
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                  You’ll always be able to correct it in the next step.
-                </div>
-              </div>
-            ) : null}
-
-            {/* Running details: progress + explanation */}
+            {/* ✅ Only show progress + “what’s happening” WHILE running (no static box when idle) */}
             {isRunning ? (
               <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-                <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-300">
-                  <div className="font-semibold">Analyzing…</div>
-                  <div className="font-mono">{Math.round(runProgress * 100)}%</div>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">{runMessage}</div>
+                  <div className="text-[11px] font-mono text-gray-500 dark:text-gray-400">{Math.round(runProgress * 100)}%</div>
                 </div>
 
-                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
                   <div
                     className="h-full bg-emerald-600 transition-[width] duration-300"
                     style={{ width: `${Math.round(runProgress * 100)}%` }}
                   />
                 </div>
 
-                <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
-
-                <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
-                  Hang tight — we’ll bring you back here with a suggested industry when it’s ready.
+                {/* Optional: phase list, highlights current */}
+                <div className="mt-3 grid gap-2">
+                  {runPhases.map((p, i) => {
+                    const done = i < runPhaseIndex;
+                    const active = i === runPhaseIndex;
+                    return (
+                      <div
+                        key={p.k}
+                        className={cn(
+                          "flex items-center gap-2 rounded-xl border px-3 py-2 text-xs",
+                          active
+                            ? "border-emerald-200 bg-white text-emerald-900 dark:border-emerald-900/40 dark:bg-gray-950 dark:text-emerald-100"
+                            : "border-gray-200 bg-white text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "inline-flex h-5 w-5 items-center justify-center rounded-full border text-[11px] font-semibold",
+                            done
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                              : active
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                              : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300"
+                          )}
+                        >
+                          {i + 1}
+                        </span>
+                        <span className="font-semibold">{p.label}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ) : null}
@@ -674,7 +655,6 @@ export function Step2(props: {
             </div>
           ) : null}
 
-          {/* Live AI card */}
           <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 text-sm dark:border-gray-800 dark:bg-gray-950">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -722,7 +702,6 @@ export function Step2(props: {
             {reason ? <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">{reason}</div> : null}
           </div>
 
-          {/* Ready/Locked panel (dominant) */}
           {showReady ? (
             <div className="mt-5 rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
               <div className="text-base font-semibold">We’re ready.</div>
@@ -757,7 +736,6 @@ export function Step2(props: {
             </div>
           ) : null}
 
-          {/* Question card (only when collecting) */}
           {!showReady ? (
             <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex items-center justify-between gap-3">
