@@ -235,7 +235,7 @@ export function Step3b(props: {
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
   const didAutoSkipRef = useRef(false);
 
-  // ✅ NEW: load defaultSubIndustries (global defaults for this industry)
+  // ✅ load defaultSubIndustries (global defaults for this industry)
   const [defaultsLoading, setDefaultsLoading] = useState(false);
   const [defaultsErr, setDefaultsErr] = useState<string | null>(null);
   const [defaultSubs, setDefaultSubs] = useState<DefaultSubIndustry[]>([]);
@@ -300,7 +300,7 @@ export function Step3b(props: {
     if (intent === "skip") setWantsSub("no");
   }, []);
 
-  // ✅ Fetch defaults once we have tenantId (read-only; safe)
+  // Fetch defaults once we have tenantId (read-only; safe)
   useEffect(() => {
     if (!tid) return;
     if (didFetchDefaultsRef.current) return;
@@ -316,7 +316,6 @@ export function Step3b(props: {
         const defaults = Array.isArray(j.defaultSubIndustries) ? j.defaultSubIndustries : [];
         const subs = Array.isArray(j.subIndustries) ? j.subIndustries : [];
 
-        // If API returns defaults for selectedKey, great. If not, we still show what we got.
         setDefaultSubs(
           defaults
             .map((d) => ({
@@ -432,12 +431,11 @@ export function Step3b(props: {
 
   const showPrompt = wantsSub === null;
 
-  // ✅ Quick picks: combine platform defaults + tenant history (de-duped by label)
+  // Quick picks: combine platform defaults + tenant history (de-duped by label)
   const quickPicks = useMemo(() => {
     const out: Array<{ label: string; source: "default" | "tenant" }> = [];
     const seen = new Set<string>();
 
-    // prefer defaults first (global)
     for (const d of defaultSubs) {
       const label = safeTrim(d.label);
       const k = label.toLowerCase();
@@ -446,7 +444,6 @@ export function Step3b(props: {
       out.push({ label, source: "default" });
     }
 
-    // then tenant-created (their past picks)
     for (const t of tenantSubs) {
       const label = safeTrim(t.label);
       const k = label.toLowerCase();
@@ -457,6 +454,29 @@ export function Step3b(props: {
 
     return out.slice(0, 18);
   }, [defaultSubs, tenantSubs]);
+
+  // ✅ NEW: If we have NO quick picks after defaults load, auto-open the interview.
+  const didAutoOpenInterviewRef = useRef(false);
+  useEffect(() => {
+    if (didAutoOpenInterviewRef.current) return;
+    if (!tid || !resolvedIndustryKey) return;
+
+    // only when user hasn't chosen yet
+    if (wantsSub !== null) return;
+
+    // don't fight explicit Step3 intent behavior
+    if (intentRef.current === "skip") return;
+    if (intentRef.current === "refine") return; // Step3 already forces yes
+
+    // wait until defaults request settles (either success or error)
+    if (defaultsLoading) return;
+
+    // If quick picks exist, do nothing (show prompt + picks)
+    if (quickPicks.length > 0) return;
+
+    didAutoOpenInterviewRef.current = true;
+    setWantsSub("yes");
+  }, [tid, resolvedIndustryKey, wantsSub, defaultsLoading, quickPicks.length]);
 
   return (
     <div>
@@ -494,10 +514,7 @@ export function Step3b(props: {
             defaultsLoading: <span className="font-mono">{defaultsLoading ? "true" : "false"}</span>
           </div>
           <div className="mt-1">
-            defaultSubIndustries: <span className="font-mono">{defaultSubs.length}</span>
-          </div>
-          <div className="mt-1">
-            tenantSubIndustries: <span className="font-mono">{tenantSubs.length}</span>
+            quickPicks: <span className="font-mono">{quickPicks.length}</span>
           </div>
           <div className="mt-2 font-mono whitespace-pre-wrap break-words">
             {lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}
@@ -511,7 +528,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* ✅ Quick picks (platform defaults + tenant history) */}
+      {/* Quick picks */}
       {tid ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-start justify-between gap-3">
@@ -521,9 +538,7 @@ export function Step3b(props: {
                 Choose one to skip the interview and continue. (You can refine later.)
               </div>
             </div>
-            <div className="text-[11px] text-gray-500 dark:text-gray-400">
-              {defaultsLoading ? "Loading…" : defaultSubs.length ? "From platform defaults" : tenantSubs.length ? "From your history" : ""}
-            </div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">{defaultsLoading ? "Loading…" : ""}</div>
           </div>
 
           {defaultsErr ? (
@@ -554,7 +569,7 @@ export function Step3b(props: {
             </div>
           ) : (
             <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-              {defaultsLoading ? "Loading suggestions…" : "No quick picks available yet for this industry."}
+              {defaultsLoading ? "Loading suggestions…" : "No quick picks for this industry yet — we’ll jump into a quick interview below."}
             </div>
           )}
         </div>
@@ -612,7 +627,6 @@ export function Step3b(props: {
               type="button"
               className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
               onClick={() => {
-                // default to "no" so the user can continue without interview friction
                 setWantsSub("no");
               }}
               disabled={working || !tid || !resolvedIndustryKey}
