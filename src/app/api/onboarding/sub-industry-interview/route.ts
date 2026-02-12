@@ -17,6 +17,26 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function normalizeKey(raw: any) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
+
+function titleFromKey(key: string) {
+  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
+  if (!s) return "Service";
+  return s
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 function clamp01(n: any) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
@@ -28,6 +48,13 @@ function firstRow(r: any): any | null {
   if (Array.isArray(r)) return r[0] ?? null;
   if (Array.isArray((r as any).rows)) return (r as any).rows[0] ?? null;
   return null;
+}
+
+function rowsOf(r: any): any[] {
+  if (!r) return [];
+  if (Array.isArray(r)) return r;
+  if (Array.isArray((r as any).rows)) return (r as any).rows;
+  return [];
 }
 
 function noCacheJson(data: any, status = 200) {
@@ -73,6 +100,49 @@ async function requireMembership(clerkUserId: string, tenantId: string) {
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
+/* -------------------- defaults -------------------- */
+
+type DefaultSub = { key: string; label: string };
+
+async function listDefaultSubIndustries(industryKey: string): Promise<DefaultSub[]> {
+  const ik = normalizeKey(industryKey);
+  if (!ik) return [];
+
+  // NOTE: your PCC page expects industry_sub_industries has is_active + sort_order
+  const r = await db.execute(sql`
+    select
+      key::text as "key",
+      label::text as "label"
+    from industry_sub_industries
+    where industry_key = ${ik}
+      and is_active = true
+    order by sort_order asc, label asc
+    limit 200
+  `);
+
+  return rowsOf(r)
+    .map((x: any) => ({
+      key: normalizeKey(x?.key),
+      label: safeTrim(x?.label) || titleFromKey(String(x?.key ?? "")),
+    }))
+    .filter((x) => x.key && x.label);
+}
+
+function findDefaultByKeyOrLabel(defaults: DefaultSub[], raw: string): DefaultSub | null {
+  const s = safeTrim(raw);
+  if (!s) return null;
+
+  const k = normalizeKey(s);
+  if (k) {
+    const byKey = defaults.find((d) => normalizeKey(d.key) === k);
+    if (byKey) return byKey;
+  }
+
+  const sLower = s.toLowerCase();
+  const byLabel = defaults.find((d) => safeTrim(d.label).toLowerCase() === sLower);
+  return byLabel ?? null;
+}
+
 /* -------------------- state shapes -------------------- */
 
 type InterviewAnswer = {
@@ -82,7 +152,7 @@ type InterviewAnswer = {
   createdAt: string;
 };
 
-type Candidate = { label: string; score: number };
+type Candidate = { key?: string; label: string; score: number };
 
 type SubIndustryInterview = {
   mode: "SUB";
@@ -92,7 +162,10 @@ type SubIndustryInterview = {
   industryKey: string; // context
   confidenceScore: number; // 0..1
 
+  // ✅ now canonical-friendly (label stays for back-compat UI)
+  proposedSubIndustryKey?: string | null;
   proposedSubIndustryLabel: string | null;
+
   candidates: Candidate[];
 
   nextQuestion: {
@@ -114,6 +187,7 @@ type SubIndustryInterview = {
 
 const CONF_TARGET = 0.75;
 const MAX_ROUNDS = 8;
+const OTHER_OPTION = "Other / Not listed";
 
 /* -------------------- db helpers -------------------- */
 
@@ -154,58 +228,97 @@ async function writeAiAnalysis(tenantId: string, ai: any) {
 
 /* -------------------- inference state -------------------- */
 
-function freshState(industryKey: string): SubIndustryInterview {
+function firstQuestionFallback() {
+  return {
+    id: "sub_start",
+    question: "To tailor your setup, what kind of work do you focus on within this industry?",
+    help: "Examples: exterior only, interiors, cabinets, commercial, new construction, repaints, specialty work, etc.",
+    inputType: "text" as const,
+  };
+}
+
+function firstQuestionFromDefaults(defaults: DefaultSub[]) {
+  const opts = defaults.map((d) => d.label).slice(0, 12);
+  const options = [...opts, OTHER_OPTION];
+
+  return {
+    id: "sub_pick_default",
+    question: "Which sub-industry best matches your focus?",
+    help: "Pick the closest option. If yours isn’t listed, choose “Other / Not listed”.",
+    inputType: "select" as const,
+    options,
+  };
+}
+
+function freshState(industryKey: string, defaults: DefaultSub[]): SubIndustryInterview {
   const now = new Date().toISOString();
+  const ik = normalizeKey(industryKey) || safeTrim(industryKey);
+
   return {
     mode: "SUB",
     status: "collecting",
     round: 1,
-    industryKey: safeTrim(industryKey),
+    industryKey: ik,
     confidenceScore: 0,
+
+    proposedSubIndustryKey: null,
     proposedSubIndustryLabel: null,
-    candidates: [],
-    nextQuestion: firstQuestionFallback(),
+
+    candidates: defaults.slice(0, 6).map((d) => ({ key: d.key, label: d.label, score: 0 })),
+
+    nextQuestion: defaults.length ? firstQuestionFromDefaults(defaults) : firstQuestionFallback(),
     answers: [],
     meta: { updatedAt: now },
   };
 }
 
-function ensureSub(ai: any | null, industryKey: string): { ai: any; st: SubIndustryInterview } {
+function ensureSub(ai: any | null, industryKey: string, defaults: DefaultSub[]): { ai: any; st: SubIndustryInterview } {
   const now = new Date().toISOString();
   const baseAi = ai && typeof ai === "object" ? ai : {};
   const existing = baseAi?.subIndustryInterview;
 
-  if (existing && typeof existing === "object" && existing?.mode === "SUB") {
-    const proposed = safeTrim(existing.proposedSubIndustryLabel) || null;
+  const ik = normalizeKey(industryKey) || safeTrim(industryKey);
 
-    // ✅ Fix: don't allow "locked" with no proposed label (UI would stick)
-    const status: "collecting" | "locked" = existing.status === "locked" && proposed ? "locked" : "collecting";
+  if (existing && typeof existing === "object" && existing?.mode === "SUB") {
+    const proposedLabel = safeTrim(existing.proposedSubIndustryLabel) || null;
+    const proposedKey = normalizeKey((existing as any).proposedSubIndustryKey ?? "") || null;
+
+    // ✅ don't allow "locked" with no proposed label
+    const status: "collecting" | "locked" = existing.status === "locked" && proposedLabel ? "locked" : "collecting";
 
     const st: SubIndustryInterview = {
       mode: "SUB",
       status,
       round: Number(existing.round ?? 1) || 1,
-      industryKey: safeTrim(existing.industryKey) || safeTrim(industryKey),
+      industryKey: normalizeKey(existing.industryKey) || ik,
       confidenceScore: clamp01(existing.confidenceScore ?? 0),
-      proposedSubIndustryLabel: proposed,
+
+      proposedSubIndustryKey: proposedKey,
+      proposedSubIndustryLabel: proposedLabel,
+
       candidates: Array.isArray(existing.candidates) ? existing.candidates : [],
       nextQuestion: existing.nextQuestion ?? null,
       answers: Array.isArray(existing.answers) ? existing.answers : [],
       meta: { updatedAt: now, ...(existing.meta ?? {}) },
     };
 
-    // If industry changed, reset the sub-interview (different context)
-    if (safeTrim(st.industryKey) && safeTrim(industryKey) && safeTrim(st.industryKey) !== safeTrim(industryKey)) {
-      const fresh = freshState(industryKey);
+    // If industry changed, reset (different context)
+    if (normalizeKey(st.industryKey) && ik && normalizeKey(st.industryKey) !== ik) {
+      const fresh = freshState(ik, defaults);
       baseAi.subIndustryInterview = fresh;
       return { ai: baseAi, st: fresh };
+    }
+
+    // If we have defaults and the current nextQuestion is missing, give a deterministic one
+    if (defaults.length && !st.nextQuestion && st.status !== "locked") {
+      st.nextQuestion = firstQuestionFromDefaults(defaults);
     }
 
     baseAi.subIndustryInterview = st;
     return { ai: baseAi, st };
   }
 
-  const st = freshState(industryKey);
+  const st = freshState(ik, defaults);
   baseAi.subIndustryInterview = st;
   return { ai: baseAi, st };
 }
@@ -214,22 +327,15 @@ function buildTranscript(st: SubIndustryInterview) {
   return st.answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
 }
 
-function firstQuestionFallback() {
-  return {
-    id: "sub_start",
-    question: "To tailor your setup, what kind of work do you focus on within this industry?",
-    help: "Examples: exterior only, interiors, cabinets, commercial, new construction, repaints, specialty coatings, etc.",
-    inputType: "text" as const,
-  };
-}
-
 /* -------------------- LLM -------------------- */
 
 async function runLLM_Sub(args: {
   st: SubIndustryInterview;
   action: "start" | "answer";
+  defaults: DefaultSub[];
 }): Promise<{
   confidenceScore: number;
+  proposedSubIndustryKey: string | null;
   proposedSubIndustryLabel: string | null;
   candidates: Candidate[];
   nextQuestion: SubIndustryInterview["nextQuestion"];
@@ -244,23 +350,35 @@ async function runLLM_Sub(args: {
   const askedQuestions = new Set(args.st.answers.map((a) => safeTrim(a.question).toLowerCase()).filter(Boolean));
   const transcript = buildTranscript(args.st);
 
+  const defaultLines =
+    args.defaults.length > 0
+      ? args.defaults
+          .slice(0, 30)
+          .map((d) => `${d.key} = ${d.label}`)
+          .join("\n")
+      : "(none)";
+
   const system = [
     "You are the onboarding interviewer for a platform called AIPhotoQuote.",
-    "Goal: identify a concise sub-industry label that narrows the customer's focus within the given industry.",
+    "Goal: identify a concise sub-industry under the given industry key.",
     "",
     "Rules:",
     "- Output ONLY valid JSON (no markdown, no prose).",
     "- Never repeat a question that was already asked.",
     "- Keep the sub-industry label short, human-friendly (2–6 words).",
     "- Prefer labels that help tailor defaults (services, photos, questions).",
+    "- If platform defaults are provided, prefer one of them when it fits.",
     "",
-    "When you are confident enough (>=0.75), propose a final subIndustryLabel and stop asking questions (nextQuestion = null).",
+    "When you are confident enough (>=0.75), propose a final subIndustryKey + subIndustryLabel and stop asking questions (nextQuestion = null).",
     "Otherwise ask the next best targeted question.",
   ].join("\n");
 
   const user = [
     `Action: ${args.action}`,
     `Industry key context: ${safeTrim(args.st.industryKey) || "(unknown)"}`,
+    "",
+    "Platform default sub-industries (key = label):",
+    defaultLines,
     "",
     "Already asked questions (do not repeat):",
     Array.from(askedQuestions).slice(0, 50).join(" | ") || "(none)",
@@ -272,8 +390,9 @@ async function runLLM_Sub(args: {
     JSON.stringify(
       {
         confidenceScore: 0.0,
+        subIndustryKey: "interior_painting",
         subIndustryLabel: "Interior Painting",
-        candidates: [{ label: "Exterior Painting", score: 0.0 }],
+        candidates: [{ key: "exterior_painting", label: "Exterior Painting", score: 0.0 }],
         nextQuestion: {
           id: "short_id",
           question: "string",
@@ -303,15 +422,39 @@ async function runLLM_Sub(args: {
 
   const confidenceScore = clamp01((parsed as any).confidenceScore ?? 0);
 
+  const keyRaw = normalizeKey((parsed as any).subIndustryKey ?? "");
   const labelRaw = safeTrim((parsed as any).subIndustryLabel ?? "");
-  const proposedSubIndustryLabel = labelRaw ? labelRaw.slice(0, 64) : null;
+
+  // Try to map to platform defaults if possible (canonical)
+  const defaults = args.defaults;
+  const fromDefault =
+    (keyRaw ? defaults.find((d) => normalizeKey(d.key) === keyRaw) : null) ||
+    (labelRaw ? defaults.find((d) => safeTrim(d.label).toLowerCase() === labelRaw.toLowerCase()) : null);
+
+  const proposedSubIndustryKey = fromDefault ? fromDefault.key : keyRaw || (labelRaw ? normalizeKey(labelRaw) : "");
+  const proposedSubIndustryLabel = fromDefault
+    ? fromDefault.label
+    : labelRaw
+      ? labelRaw.slice(0, 64)
+      : proposedSubIndustryKey
+        ? titleFromKey(proposedSubIndustryKey)
+        : null;
 
   const candRaw = Array.isArray((parsed as any).candidates) ? (parsed as any).candidates : [];
   const candidates: Candidate[] = candRaw
-    .map((c: any) => ({
-      label: safeTrim(c?.label ?? ""),
-      score: clamp01(c?.score ?? 0),
-    }))
+    .map((c: any) => {
+      const ck = normalizeKey(c?.key ?? "");
+      const cl = safeTrim(c?.label ?? "");
+      const mapped =
+        (ck ? defaults.find((d) => normalizeKey(d.key) === ck) : null) ||
+        (cl ? defaults.find((d) => safeTrim(d.label).toLowerCase() === cl.toLowerCase()) : null);
+
+      return {
+        key: mapped ? mapped.key : ck || (cl ? normalizeKey(cl) : ""),
+        label: mapped ? mapped.label : cl || (ck ? titleFromKey(ck) : ""),
+        score: clamp01(c?.score ?? 0),
+      };
+    })
     .filter((c: Candidate) => Boolean(c.label))
     .slice(0, 6);
 
@@ -338,7 +481,8 @@ async function runLLM_Sub(args: {
 
   return {
     confidenceScore,
-    proposedSubIndustryLabel,
+    proposedSubIndustryKey: proposedSubIndustryKey ? proposedSubIndustryKey.slice(0, 64) : null,
+    proposedSubIndustryLabel: proposedSubIndustryLabel || null,
     candidates,
     nextQuestion,
     debugReason: safeTrim((parsed as any).debugReason ?? ""),
@@ -369,33 +513,61 @@ export async function POST(req: Request) {
     }
 
     const tenantId = safeTrim(parsed.data.tenantId);
-    const industryKey = safeTrim(parsed.data.industryKey);
+    const industryKeyInput = safeTrim(parsed.data.industryKey);
+    const industryKey = normalizeKey(industryKeyInput) || industryKeyInput;
 
     await requireMembership(clerkUserId, tenantId);
 
+    // ✅ pull defaults first (drives deterministic UX)
+    const defaults = await listDefaultSubIndustries(industryKey);
+
     const ai0 = await readAiAnalysis(tenantId);
-    const { ai, st: st0 } = ensureSub(ai0, industryKey);
+    const { ai, st: st0 } = ensureSub(ai0, industryKey, defaults);
 
     const now = new Date().toISOString();
     let st: SubIndustryInterview = { ...st0, meta: { ...(st0.meta ?? {}), updatedAt: now } };
 
     if (parsed.data.action === "reset") {
-      st = freshState(industryKey);
+      st = freshState(industryKey, defaults);
       ai.subIndustryInterview = st;
       await writeAiAnalysis(tenantId, ai);
       return noCacheJson({ ok: true, tenantId, subIndustryInterview: st }, 200);
     }
 
     if (parsed.data.action === "start") {
-      // ✅ Idempotent: if we already have an active question or we’re locked, don’t re-run the LLM
+      // ✅ Idempotent: if locked or already has a question, return it
       if (st.status === "locked" || st.nextQuestion?.id) {
         ai.subIndustryInterview = st;
         await writeAiAnalysis(tenantId, ai);
         return noCacheJson({ ok: true, tenantId, subIndustryInterview: st }, 200);
       }
 
+      // ✅ If defaults exist: do NOT call LLM. Ask deterministic select question.
+      if (defaults.length) {
+        st = {
+          ...st,
+          status: "collecting",
+          round: 1,
+          confidenceScore: 0,
+          proposedSubIndustryKey: null,
+          proposedSubIndustryLabel: null,
+          candidates: defaults.slice(0, 6).map((d) => ({ key: d.key, label: d.label, score: 0 })),
+          nextQuestion: firstQuestionFromDefaults(defaults),
+          meta: {
+            updatedAt: now,
+            model: { name: "defaults", status: "ok" },
+            debug: { reason: "Presented platform default sub-industries (no LLM call)." },
+          },
+        };
+
+        ai.subIndustryInterview = st;
+        await writeAiAnalysis(tenantId, ai);
+        return noCacheJson({ ok: true, tenantId, subIndustryInterview: st }, 200);
+      }
+
+      // ✅ No defaults: open the interview (LLM-driven)
       try {
-        const out = await runLLM_Sub({ st, action: "start" });
+        const out = await runLLM_Sub({ st, action: "start", defaults });
 
         const locked = out.confidenceScore >= CONF_TARGET && Boolean(out.proposedSubIndustryLabel);
 
@@ -404,11 +576,12 @@ export async function POST(req: Request) {
           status: locked ? "locked" : "collecting",
           round: 1,
           confidenceScore: out.confidenceScore,
+          proposedSubIndustryKey: locked ? out.proposedSubIndustryKey : null,
           proposedSubIndustryLabel: locked ? out.proposedSubIndustryLabel : null,
           candidates: out.candidates?.length
             ? out.candidates
             : out.proposedSubIndustryLabel
-              ? [{ label: out.proposedSubIndustryLabel, score: out.confidenceScore }]
+              ? [{ key: out.proposedSubIndustryKey || undefined, label: out.proposedSubIndustryLabel, score: out.confidenceScore }]
               : [],
           nextQuestion: locked ? null : out.nextQuestion ?? firstQuestionFallback(),
           meta: {
@@ -460,6 +633,59 @@ export async function POST(req: Request) {
       );
     }
 
+    // ✅ If we asked the defaults select question, and the user picked a default:
+    // lock immediately with canonical key+label (no LLM, perfect normalization).
+    if (normalizeKey(st.nextQuestion?.id) === "sub_pick_default" && defaults.length) {
+      const picked = safeTrim(ans);
+
+      if (picked && picked !== OTHER_OPTION) {
+        const d = findDefaultByKeyOrLabel(defaults, picked);
+
+        if (d) {
+          const answers = Array.isArray(st.answers) ? [...st.answers] : [];
+          const last = answers.length ? answers[answers.length - 1] : null;
+
+          const lastSame =
+            last &&
+            safeTrim(last.question).toLowerCase() === safeTrim(qText).toLowerCase() &&
+            safeTrim(last.answer).toLowerCase() === safeTrim(picked).toLowerCase();
+
+          if (!lastSame) {
+            answers.push({
+              id: qid || `suba_${Date.now()}`,
+              question: qText,
+              answer: picked,
+              createdAt: now,
+            });
+          }
+
+          st = {
+            ...st,
+            answers,
+            status: "locked",
+            confidenceScore: 0.95,
+            proposedSubIndustryKey: d.key,
+            proposedSubIndustryLabel: d.label,
+            candidates: [{ key: d.key, label: d.label, score: 0.95 }],
+            nextQuestion: null,
+            meta: {
+              updatedAt: now,
+              model: { name: "defaults", status: "ok" },
+              debug: { reason: "User selected platform default; locked without LLM." },
+            },
+          };
+
+          ai.subIndustryInterview = st;
+          await writeAiAnalysis(tenantId, ai);
+
+          return noCacheJson({ ok: true, tenantId, subIndustryInterview: st }, 200);
+        }
+      }
+
+      // If they chose "Other", fall through and treat it like a text interview next.
+      // We do NOT lock here.
+    }
+
     // ✅ Server-side dedupe: don’t append identical last turn (double-tap / retry)
     const answers = Array.isArray(st.answers) ? [...st.answers] : [];
     const last = answers.length ? answers[answers.length - 1] : null;
@@ -485,27 +711,35 @@ export async function POST(req: Request) {
       meta: { ...(st.meta ?? {}), updatedAt: now },
     };
 
-    // Optional safety: if we hit max rounds, stop asking and lock whatever best label we have
     const hitMax = st.round >= MAX_ROUNDS;
 
     try {
-      const out = await runLLM_Sub({ st, action: "answer" });
+      const out = await runLLM_Sub({ st, action: "answer", defaults });
 
       const locked = (out.confidenceScore >= CONF_TARGET && Boolean(out.proposedSubIndustryLabel)) || hitMax;
 
-      const finalLabel = out.proposedSubIndustryLabel || st.proposedSubIndustryLabel;
+      // pick best final label/key
+      const finalKey = out.proposedSubIndustryKey || st.proposedSubIndustryKey || null;
+      const finalLabel = out.proposedSubIndustryLabel || st.proposedSubIndustryLabel || (finalKey ? titleFromKey(finalKey) : null);
 
       st = {
         ...st,
         status: locked && finalLabel ? "locked" : "collecting",
         confidenceScore: out.confidenceScore,
+        proposedSubIndustryKey: locked && finalLabel ? finalKey : null,
         proposedSubIndustryLabel: locked && finalLabel ? finalLabel : null,
         candidates: out.candidates?.length
           ? out.candidates
           : finalLabel
-            ? [{ label: finalLabel, score: out.confidenceScore }]
+            ? [{ key: finalKey || undefined, label: finalLabel, score: out.confidenceScore }]
             : [],
-        nextQuestion: locked ? null : out.nextQuestion ?? firstQuestionFallback(),
+        nextQuestion:
+          locked
+            ? null
+            : // if defaults exist and we’re still collecting, prefer asking the deterministic picker again
+              defaults.length
+              ? firstQuestionFromDefaults(defaults)
+              : out.nextQuestion ?? firstQuestionFallback(),
         meta: {
           updatedAt: now,
           model: { name: process.env.OPENAI_ONBOARDING_MODEL || "gpt-4o-mini", status: "ok" },
@@ -521,7 +755,7 @@ export async function POST(req: Request) {
       st = {
         ...st,
         status: "collecting",
-        nextQuestion: firstQuestionFallback(),
+        nextQuestion: defaults.length ? firstQuestionFromDefaults(defaults) : firstQuestionFallback(),
         meta: {
           updatedAt: now,
           model: {

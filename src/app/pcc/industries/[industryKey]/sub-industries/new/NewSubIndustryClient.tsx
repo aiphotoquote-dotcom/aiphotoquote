@@ -55,21 +55,31 @@ export default function NewSubIndustryClient({ industryKey }: { industryKey: str
     setOkMsg(null);
 
     try {
-      const res = await fetch(`/api/pcc/industries/${encodeURIComponent(industryKey)}/sub-industries`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        cache: "no-store",
-        body: JSON.stringify({
-          key: subKey,
-          label: safeTrim(label),
-          description: safeTrim(description) || undefined,
-          sortOrder: Number(sortOrder),
-        }),
-      });
+      const res = await fetch(
+        `/api/pcc/industries/${encodeURIComponent(industryKey)}/sub-industries/add`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({
+            key: subKey,
+            label: safeTrim(label),
+            description: safeTrim(description) || null,
+            sortOrder: Number(sortOrder),
+          }),
+        }
+      );
 
-      const j = await res.json().catch(() => null);
+      const txt = await res.text().catch(() => "");
+      let j: any = null;
+      try {
+        j = txt ? JSON.parse(txt) : null;
+      } catch {
+        j = null;
+      }
+
       if (!res.ok || !j?.ok) {
-        throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+        throw new Error(j?.message || j?.error || (txt ? txt : `HTTP ${res.status}`));
       }
 
       setOkMsg("Saved. Returning to industry…");
@@ -85,10 +95,13 @@ export default function NewSubIndustryClient({ industryKey }: { industryKey: str
   return (
     <div className="space-y-4">
       <div>
-        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Default sub-industry details</div>
+        <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          Default sub-industry details
+        </div>
         <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
           Key should be stable. Example: <span className="font-mono">auto_upholstery</span>,{" "}
-          <span className="font-mono">marine_canvas</span>, <span className="font-mono">paving_residential</span>.
+          <span className="font-mono">marine_canvas</span>,{" "}
+          <span className="font-mono">paving_residential</span>.
         </div>
       </div>
 
@@ -106,7 +119,9 @@ export default function NewSubIndustryClient({ industryKey }: { industryKey: str
 
       <div className="grid gap-3">
         <label className="grid gap-1">
-          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Sub-industry key *</div>
+          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">
+            Sub-industry key *
+          </div>
           <input
             value={subKeyRaw}
             onChange={(e) => setSubKeyRaw(e.target.value)}
@@ -169,7 +184,9 @@ export default function NewSubIndustryClient({ industryKey }: { industryKey: str
             )}
             inputMode="numeric"
           />
-          <div className="text-[11px] text-gray-500 dark:text-gray-400">Lower numbers appear first. Typical defaults: 10, 20, 30…</div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">
+            Lower numbers appear first. Typical defaults: 10, 20, 30…
+          </div>
         </label>
       </div>
 
@@ -199,7 +216,7 @@ export default function NewSubIndustryClient({ industryKey }: { industryKey: str
       </div>
 
       <div className="pt-2 text-xs text-gray-500 dark:text-gray-400">
-        Next step: implement the POST API route + audit log entry.
+        Uses: <span className="font-mono">POST /api/pcc/industries/:industryKey/sub-industries/add</span>
       </div>
     </div>
   );

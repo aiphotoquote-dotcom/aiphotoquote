@@ -151,13 +151,22 @@ export const tenantSubIndustries = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
 
+    // ✅ NEW: scope overrides to an industry
+    industryKey: text("industry_key").notNull(),
+
     key: text("key").notNull(),
     label: text("label").notNull(),
 
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    tenantKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_key_uq").on(t.tenantId, t.key),
+    // ✅ NEW unique key includes industryKey
+    tenantIndustryKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_industry_key_key_uq").on(t.tenantId, t.industryKey, t.key),
+
+    // ✅ fast reads by tenant+industry
+    tenantIndustryIdx: index("tenant_sub_industries_tenant_id_industry_key_idx").on(t.tenantId, t.industryKey),
+
+    // keep tenant-only index for any legacy usage
     tenantIdx: index("tenant_sub_industries_tenant_id_idx").on(t.tenantId),
   })
 );

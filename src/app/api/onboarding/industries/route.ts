@@ -71,6 +71,13 @@ async function requireMembership(clerkUserId: string, tenantId: string): Promise
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
+function toBool(v: any) {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v ?? "").toLowerCase().trim();
+  return s === "true" || s === "t" || s === "1" || s === "yes";
+}
+
 /* --------------------- schema --------------------- */
 
 const GetSchema = z.object({
@@ -84,8 +91,6 @@ const PostSchema = z.object({
   industryKey: z.string().optional(),
   industryLabel: z.string().optional(),
 
-  // Wizard sends subIndustryLabel (optional)
-  // Future may send subIndustryKey/subIndustryLabel
   subIndustryKey: z.string().optional(),
   subIndustryLabel: z.string().optional(),
 });
@@ -170,10 +175,63 @@ async function upsertTenantIndustryKey(tenantId: string, industryKeyRaw: string)
   return key;
 }
 
+async function listDefaultSubIndustries(industryKey: string) {
+  const ik = normalizeKey(industryKey);
+  if (!ik) return [];
+
+  const r = await db.execute(sql`
+    select
+      id::text as "id",
+      industry_key::text as "industryKey",
+      key::text as "key",
+      label::text as "label",
+      description::text as "description",
+      sort_order::int as "sortOrder",
+      is_active as "isActive",
+      updated_at as "updatedAt"
+    from industry_sub_industries
+    where industry_key = ${ik}
+      and is_active = true
+    order by sort_order asc, label asc
+    limit 500
+  `);
+
+  return rowsOf(r)
+    .map((x: any) => ({
+      id: String(x.id ?? ""),
+      industryKey: String(x.industryKey ?? ik),
+      key: String(x.key ?? ""),
+      label: String(x.label ?? ""),
+      description: x.description == null ? null : String(x.description),
+      sortOrder: Number.isFinite(Number(x.sortOrder)) ? Number(x.sortOrder) : 0,
+      updatedAt: x.updatedAt ?? null,
+    }))
+    .filter((x: any) => x.key && x.label);
+}
+
+async function listTenantSubIndustries(tenantId: string, industryKey: string) {
+  const ik = normalizeKey(industryKey);
+  if (!ik) return [];
+
+  const r = await db.execute(sql`
+    select id, key, label
+    from tenant_sub_industries
+    where tenant_id = ${tenantId}::uuid
+      and industry_key = ${ik}
+    order by label asc
+  `);
+
+  return rowsOf(r).map((x: any) => ({
+    id: String(x.id),
+    key: String(x.key),
+    label: String(x.label),
+  }));
+}
+
 /**
- * ✅ Normalize sub-industry to platform defaults first
- * - If key exists in industry_sub_industries for this industry, use canonical key+label
- * - Else allow tenant override insert
+ * ✅ Normalize sub-industry to platform defaults first (ACTIVE ONLY)
+ * - If key exists in industry_sub_industries for this industry (and is_active=true), use canonical key+label
+ * - Else allow tenant override insert with normalized key and provided label
  */
 async function resolveSubIndustryAgainstDefaults(args: {
   industryKey: string;
@@ -199,30 +257,12 @@ async function resolveSubIndustryAgainstDefaults(args: {
 
   const row = firstRow(r);
   if (row?.key) {
-    return { key: String(row.key), label: String(row.label || titleFromKey(String(row.key))) };
+    const k = String(row.key);
+    const lbl = safeTrim(row.label) || titleFromKey(k);
+    return { key: k, label: lbl };
   }
 
-  // Not a platform default — allow tenant override using their label if provided
   return { key: keyGuess, label: labelGuess || titleFromKey(keyGuess) };
-}
-
-async function listTenantSubIndustries(tenantId: string, industryKey: string) {
-  const ik = normalizeKey(industryKey);
-  if (!ik) return [];
-
-  const r = await db.execute(sql`
-    select id, key, label
-    from tenant_sub_industries
-    where tenant_id = ${tenantId}::uuid
-      and industry_key = ${ik}
-    order by label asc
-  `);
-
-  return rowsOf(r).map((x: any) => ({
-    id: String(x.id),
-    key: String(x.key),
-    label: String(x.label),
-  }));
 }
 
 async function upsertTenantSubIndustry(args: { tenantId: string; industryKey: string; key: string; label: string }) {
@@ -259,7 +299,6 @@ function getSuggestedSubIndustryLabel(ai: any): string {
 function getSuggestedIndustryKey(ai: any): string {
   if (!ai || typeof ai !== "object") return "";
 
-  // Prefer Mode A interview proposal if present
   const modeAKey =
     safeTrim((ai as any)?.industryInterview?.proposedIndustry?.key) ||
     safeTrim((ai as any)?.industryInterview?.proposedIndustryKey) ||
@@ -267,11 +306,9 @@ function getSuggestedIndustryKey(ai: any): string {
 
   if (modeAKey) return normalizeKey(modeAKey);
 
-  // Normal website analysis output
   const direct = safeTrim((ai as any)?.suggestedIndustryKey) || safeTrim((ai as any)?.industryKey) || "";
   if (direct) return normalizeKey(direct);
 
-  // Legacy inference fallback
   const inf = (ai as any)?.industryInference;
   if (inf && typeof inf === "object") {
     const k = safeTrim((inf as any)?.suggestedIndustryKey) || safeTrim((inf as any)?.industryKey) || "";
@@ -313,8 +350,10 @@ export async function GET(req: Request) {
 
     const selectedLabel = selectedKey ? industries.find((x) => x.key === selectedKey)?.label ?? null : null;
 
-    // ✅ NOW SCOPED to the selected industry
+    // ✅ Defaults + tenant overrides scoped to selectedKey
+    const defaultSubIndustries = selectedKey ? await listDefaultSubIndustries(selectedKey) : [];
     const subIndustries = selectedKey ? await listTenantSubIndustries(tenantId, selectedKey) : [];
+
     const suggestedSubIndustryLabel = getSuggestedSubIndustryLabel(ai);
 
     return NextResponse.json(
@@ -325,6 +364,9 @@ export async function GET(req: Request) {
         selectedKey: selectedKey || null,
         selectedLabel,
         suggestedKey: ensuredSuggestedKey || null,
+
+        // ✅ NEW: used by Step3b quick picks
+        defaultSubIndustries,
 
         subIndustries,
         suggestedSubIndustryLabel: suggestedSubIndustryLabel || null,
