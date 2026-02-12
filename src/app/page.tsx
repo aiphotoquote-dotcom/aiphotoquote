@@ -47,7 +47,11 @@ function Icon({
             strokeWidth="1.8"
             strokeLinejoin="round"
           />
-          <path d="M12 18a4 4 0 100-8 4 4 0 000 8z" stroke="currentColor" strokeWidth="1.8" />
+          <path
+            d="M12 18a4 4 0 100-8 4 4 0 000 8z"
+            stroke="currentColor"
+            strokeWidth="1.8"
+          />
         </svg>
       );
     case "bolt":
@@ -70,13 +74,23 @@ function Icon({
             strokeWidth="1.8"
             strokeLinejoin="round"
           />
-          <path d="M22 8l-10 7L2 8" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+          <path
+            d="M22 8l-10 7L2 8"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
         </svg>
       );
     case "wand":
       return (
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path d="M4 20l10.5-10.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          <path
+            d="M4 20l10.5-10.5"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+          />
           <path
             d="M14.5 9.5L19 5a2 2 0 012.8 2.8l-4.5 4.5"
             stroke="currentColor"
@@ -139,7 +153,12 @@ function Badge({
       ? "border-emerald-200 bg-emerald-50 text-emerald-700"
       : "border-gray-200 bg-white text-gray-700";
   return (
-    <span className={cx("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold", toneClass)}>
+    <span
+      className={cx(
+        "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold",
+        toneClass
+      )}
+    >
       {children}
     </span>
   );
@@ -195,7 +214,9 @@ function PricingCard({
           </span>
         ) : null}
       </div>
-      <div className="mt-3 text-5xl font-extrabold tracking-tight text-gray-900">{price}</div>
+      <div className="mt-3 text-5xl font-extrabold tracking-tight text-gray-900">
+        {price}
+      </div>
       <div className="mt-2 text-sm text-gray-600">{note}</div>
 
       <ul className="mt-6 space-y-3 text-sm text-gray-700">
@@ -220,6 +241,116 @@ function PricingCard({
       </a>
 
       <div className="mt-3 text-xs text-gray-500">(Placeholder pricing)</div>
+    </div>
+  );
+}
+
+/**
+ * Card pop styling by "tone" so everything can have subtle color + definition.
+ * - top gradient accent
+ * - tinted background
+ * - stronger shadow + hover
+ * - icon badge tint
+ */
+function PopCard({
+  tone,
+  icon,
+  corner,
+  title,
+  desc,
+}: {
+  tone: "sky" | "indigo" | "emerald" | "amber" | "slate";
+  icon: React.ReactNode;
+  corner?: React.ReactNode;
+  title: string;
+  desc: string;
+}) {
+  const T: Record<
+    string,
+    {
+      cardBg: string;
+      ring: string;
+      top: string;
+      iconWrap: string;
+      corner: string;
+    }
+  > = {
+    sky: {
+      cardBg: "bg-gradient-to-b from-sky-50/70 to-white",
+      ring: "ring-sky-200",
+      top: "from-sky-500 to-indigo-500",
+      iconWrap: "border-sky-200 bg-sky-50 text-sky-700",
+      corner: "border-sky-200 bg-sky-50 text-sky-700",
+    },
+    indigo: {
+      cardBg: "bg-gradient-to-b from-indigo-50/70 to-white",
+      ring: "ring-indigo-200",
+      top: "from-indigo-500 to-violet-500",
+      iconWrap: "border-indigo-200 bg-indigo-50 text-indigo-700",
+      corner: "border-indigo-200 bg-indigo-50 text-indigo-700",
+    },
+    emerald: {
+      cardBg: "bg-gradient-to-b from-emerald-50/70 to-white",
+      ring: "ring-emerald-200",
+      top: "from-emerald-500 to-teal-500",
+      iconWrap: "border-emerald-200 bg-emerald-50 text-emerald-700",
+      corner: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    },
+    amber: {
+      cardBg: "bg-gradient-to-b from-amber-50/70 to-white",
+      ring: "ring-amber-200",
+      top: "from-amber-500 to-orange-500",
+      iconWrap: "border-amber-200 bg-amber-50 text-amber-700",
+      corner: "border-amber-200 bg-amber-50 text-amber-700",
+    },
+    slate: {
+      cardBg: "bg-gradient-to-b from-slate-50/70 to-white",
+      ring: "ring-gray-200",
+      top: "from-gray-700 to-gray-900",
+      iconWrap: "border-gray-200 bg-gray-50 text-gray-900",
+      corner: "border-gray-200 bg-gray-50 text-gray-700",
+    },
+  };
+
+  const st = T[tone] ?? T.slate;
+
+  return (
+    <div
+      className={cx(
+        "group relative rounded-3xl border border-gray-200 p-6 shadow-sm transition",
+        "hover:-translate-y-0.5 hover:shadow-md",
+        "ring-1 ring-black/5",
+        st.cardBg
+      )}
+    >
+      <div className={cx("absolute inset-x-0 top-0 h-1.5 rounded-t-3xl bg-gradient-to-r", st.top)} />
+
+      <div className="flex items-center justify-between">
+        <div
+          className={cx(
+            "inline-flex h-10 w-10 items-center justify-center rounded-2xl border",
+            st.iconWrap
+          )}
+        >
+          {icon}
+        </div>
+
+        {corner ? (
+          <span className={cx("rounded-full border px-2.5 py-1 text-xs font-semibold", st.corner)}>
+            {corner}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="mt-4 text-sm font-extrabold text-gray-900">{title}</div>
+      <div className="mt-2 text-sm text-gray-600">{desc}</div>
+
+      <div
+        className={cx(
+          "pointer-events-none absolute inset-0 rounded-3xl ring-2 opacity-0 transition group-hover:opacity-100",
+          st.ring
+        )}
+      />
     </div>
   );
 }
@@ -261,9 +392,9 @@ export default async function HomePage() {
               </h1>
 
               <p className="mt-5 max-w-xl text-lg text-gray-700">
-                Customers upload photos and answer a few quick questions. AI generates a quote-ready scope summary,
-                estimate range, and smart follow-ups — with optional “after” concept renderings to help you win
-                bigger jobs.
+                Customers upload photos and answer a few quick questions. AI generates a quote-ready scope
+                summary, estimate range, and smart follow-ups — with optional “after” concept renderings to help
+                you win bigger jobs.
               </p>
 
               <div className="mt-7 flex flex-wrap gap-3">
@@ -287,7 +418,10 @@ export default async function HomePage() {
                   ["Fewer wasted trips", "AI flags when inspection is needed."],
                   ["Close more jobs", "Fast replies stay top-of-mind."],
                 ].map(([t, d]) => (
-                  <div key={t} className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
+                  <div
+                    key={t}
+                    className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm"
+                  >
                     <div className="text-xs font-semibold text-gray-500">{t}</div>
                     <div className="mt-1 text-sm font-extrabold text-gray-900">{d}</div>
                   </div>
@@ -312,8 +446,12 @@ export default async function HomePage() {
             <div id="demo" className="relative">
               <div className="rounded-[34px] border border-gray-200 bg-white shadow-xl">
                 <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-                  <div className="text-sm font-extrabold text-gray-900">AI Estimate Preview</div>
-                  <div className="text-xs font-semibold text-gray-500">Example output</div>
+                  <div className="text-sm font-extrabold text-gray-900">
+                    AI Estimate Preview
+                  </div>
+                  <div className="text-xs font-semibold text-gray-500">
+                    Example output
+                  </div>
                 </div>
 
                 <div className="p-6">
@@ -331,12 +469,16 @@ export default async function HomePage() {
                           />
                         ))}
                       </div>
-                      <div className="mt-3 text-xs text-gray-500">Upload → AI analysis → draft estimate</div>
+                      <div className="mt-3 text-xs text-gray-500">
+                        Upload → AI analysis → draft estimate
+                      </div>
                     </div>
 
                     <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
                       <div className="flex items-center justify-between gap-2">
-                        <div className="text-sm font-semibold text-gray-700">AI assessment</div>
+                        <div className="text-sm font-semibold text-gray-700">
+                          AI assessment
+                        </div>
                         <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-extrabold text-emerald-700">
                           Confidence: High
                         </span>
@@ -344,27 +486,38 @@ export default async function HomePage() {
 
                       <div className="mt-3 space-y-3">
                         <div>
-                          <div className="text-sm font-extrabold text-gray-900">Scope summary</div>
+                          <div className="text-sm font-extrabold text-gray-900">
+                            Scope summary
+                          </div>
                           <div className="mt-1 text-sm text-gray-600">
                             Quote-ready scope, assumptions, and what to ask next — based on what’s visible.
                           </div>
                         </div>
 
                         <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
-                          <div className="text-xs font-semibold text-gray-500">Estimate range</div>
+                          <div className="text-xs font-semibold text-gray-500">
+                            Estimate range
+                          </div>
                           <div className="mt-1 text-2xl font-extrabold tracking-tight text-gray-900">
                             $1,250 – $1,950
                           </div>
-                          <div className="mt-1 text-xs text-gray-500">Includes assumptions + follow-ups</div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            Includes assumptions + follow-ups
+                          </div>
                         </div>
 
                         <div className="grid gap-2 text-sm text-gray-700">
-                          {["Inspection required flag", "Assumptions included", "Follow-up questions"].map((x) => (
-                            <div key={x} className="flex items-start gap-2">
-                              <Icon name="check" className="mt-0.5 h-4 w-4 text-gray-900" />
-                              <span>{x}</span>
-                            </div>
-                          ))}
+                          {["Inspection required flag", "Assumptions included", "Follow-up questions"].map(
+                            (x) => (
+                              <div key={x} className="flex items-start gap-2">
+                                <Icon
+                                  name="check"
+                                  className="mt-0.5 h-4 w-4 text-gray-900"
+                                />
+                                <span>{x}</span>
+                              </div>
+                            )
+                          )}
                         </div>
                       </div>
                     </div>
@@ -392,7 +545,10 @@ export default async function HomePage() {
                       ["Customer receipt", "Branded confirmation email."],
                       ["Dashboard", "Track stages, notes, follow-ups."],
                     ].map(([t, d]) => (
-                      <div key={t} className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
+                      <div
+                        key={t}
+                        className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm"
+                      >
                         <div className="text-sm font-extrabold text-gray-900">{t}</div>
                         <div className="mt-1 text-sm text-gray-600">{d}</div>
                       </div>
@@ -413,7 +569,7 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* HOW IT WORKS — horizontal “flow” that feels different */}
+      {/* HOW IT WORKS — now POP cards with subtle color accents */}
       <section id="how-it-works" className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -432,28 +588,39 @@ export default async function HomePage() {
 
         <div className="mt-8 rounded-[34px] border border-gray-200 bg-white p-6 shadow-sm">
           <div className="grid gap-4 lg:grid-cols-4">
-            {[
-              { t: "Customer uploads", d: "Photos + quick details.", i: "camera" as const },
-              { t: "AI analyzes", d: "Scope + range + questions.", i: "bolt" as const },
-              { t: "You review", d: "Approve and progress the lead.", i: "check" as const },
-              { t: "Send & close", d: "Branded receipt + optional render.", i: "mail" as const },
-            ].map((s, idx) => (
-              <div key={s.t} className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <div className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-gray-200 bg-gray-50 text-gray-900">
-                    <Icon name={s.i} className="h-5 w-5" />
-                  </div>
-                  <span className="text-xs font-semibold text-gray-500">{idx + 1}/4</span>
-                </div>
-                <div className="mt-4 text-sm font-extrabold text-gray-900">{s.t}</div>
-                <div className="mt-2 text-sm text-gray-600">{s.d}</div>
-              </div>
-            ))}
+            <PopCard
+              tone="sky"
+              icon={<Icon name="camera" className="h-5 w-5" />}
+              corner="1/4"
+              title="Customer uploads"
+              desc="Photos + quick details."
+            />
+            <PopCard
+              tone="indigo"
+              icon={<Icon name="bolt" className="h-5 w-5" />}
+              corner="2/4"
+              title="AI analyzes"
+              desc="Scope + range + questions."
+            />
+            <PopCard
+              tone="emerald"
+              icon={<Icon name="check" className="h-5 w-5" />}
+              corner="3/4"
+              title="You review"
+              desc="Approve and progress the lead."
+            />
+            <PopCard
+              tone="amber"
+              icon={<Icon name="mail" className="h-5 w-5" />}
+              corner="4/4"
+              title="Send & close"
+              desc="Branded receipt + optional render."
+            />
           </div>
         </div>
       </section>
 
-      {/* FEATURES — “benefit stacks” instead of a flat grid */}
+      {/* FEATURES — (kept as-is, but you can also convert to PopCard everywhere) */}
       <section id="features" className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-[34px] border border-gray-200 bg-white p-8 shadow-sm">
@@ -530,8 +697,18 @@ export default async function HomePage() {
           </div>
 
           <div className="mt-5 flex flex-wrap gap-2">
-            {["Marine & Auto Upholstery", "Roofing", "Paving & Concrete", "Remodeling", "Landscaping", "Specialty Trades"].map((x) => (
-              <span key={x} className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-700">
+            {[
+              "Marine & Auto Upholstery",
+              "Roofing",
+              "Paving & Concrete",
+              "Remodeling",
+              "Landscaping",
+              "Specialty Trades",
+            ].map((x) => (
+              <span
+                key={x}
+                className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-700"
+              >
                 {x}
               </span>
             ))}
@@ -579,10 +756,22 @@ export default async function HomePage() {
 
           <div className="mt-8 grid gap-4 lg:grid-cols-2">
             {[
-              ["Does AI replace my pricing?", "No. It accelerates a quote-ready draft. You stay in control of the final number."],
-              ["What if photos are bad?", "AI asks better follow-up questions and can flag inspection-required when confidence is low."],
-              ["Do I have to use AI renderings?", "No. It’s optional and can be toggled per business."],
-              ["What businesses does this work for?", "Any service business quoting from photos: upholstery, roofing, paving, remodeling, landscaping, and more."],
+              [
+                "Does AI replace my pricing?",
+                "No. It accelerates a quote-ready draft. You stay in control of the final number.",
+              ],
+              [
+                "What if photos are bad?",
+                "AI asks better follow-up questions and can flag inspection-required when confidence is low.",
+              ],
+              [
+                "Do I have to use AI renderings?",
+                "No. It’s optional and can be toggled per business.",
+              ],
+              [
+                "What businesses does this work for?",
+                "Any service business quoting from photos: upholstery, roofing, paving, remodeling, landscaping, and more.",
+              ],
             ].map(([q, a]) => (
               <div key={q} className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
                 <div className="text-sm font-extrabold text-gray-900">{q}</div>
