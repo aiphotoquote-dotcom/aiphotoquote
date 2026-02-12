@@ -1,4 +1,3 @@
-// src/app/pcc/industries/[industryKey]/page.tsx
 import React from "react";
 import Link from "next/link";
 import { sql } from "drizzle-orm";
@@ -6,13 +5,12 @@ import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import ConfirmIndustryButton from "./ConfirmIndustryButton";
-import CreateCanonicalIndustryButton from "./CreateCanonicalIndustryButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Props = {
-  params: { industryKey: string };
+  params: Promise<{ industryKey: string }>;
 };
 
 function rows(r: any): any[] {
@@ -106,10 +104,12 @@ function asStringArray(v: any): string[] {
   return v.map((x) => String(x ?? "").trim()).filter(Boolean);
 }
 
-export default async function PccIndustryDetailPage({ params }: Props) {
+export default async function PccIndustryDetailPage(props: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const industryKey = params?.industryKey;
+  // ✅ Next 16: params is Promise-like in app router
+  const p = await props.params;
+  const industryKey = p?.industryKey;
   const key = decodeURIComponent(industryKey || "").trim();
 
   if (!key) {
@@ -205,7 +205,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   const confirmedIds = new Set(confirmed.map((t: any) => t.tenantId));
 
   // -----------------------------
-  // AI-suggested tenants (excluding explicit rejections)
+  // AI-suggested tenants (exclude explicit rejections)
   // -----------------------------
   const aiR = await db.execute(sql`
     select
@@ -328,7 +328,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
   const aiAlsoConfirmed = aiSuggestedAll.filter((t: any) => confirmedIds.has(t.tenantId));
 
   // -----------------------------
-  // Tenants who rejected THIS industry key (for visibility)
+  // Tenants who explicitly rejected THIS industry key
   // -----------------------------
   const rejectedR = await db.execute(sql`
     select
@@ -399,25 +399,13 @@ export default async function PccIndustryDetailPage({ params }: Props) {
           <div className="min-w-0">
             <div className="text-xs text-gray-500 dark:text-gray-400">PCC • Industries</div>
 
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{industry.label}</h1>
-
-              {industry.isCanonical ? (
-                <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-                  canonical
-                </span>
-              ) : (
-                <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                  derived
-                </span>
-              )}
-            </div>
+            <h1 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">{industry.label}</h1>
 
             <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Key: <span className="font-mono text-xs">{industry.key}</span>
               {!industry.isCanonical ? (
                 <span className="ml-2 text-[11px] text-amber-700 dark:text-amber-200">
-                  (industries table has no row for this key yet)
+                  (derived — industries table has no row for this key yet)
                 </span>
               ) : null}
             </div>
@@ -455,38 +443,24 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                 </span>
               ) : null}
             </div>
-
-            {industry.createdAt ? (
-              <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400">Created: {fmtDate(industry.createdAt)}</div>
-            ) : null}
           </div>
 
-          <div className="shrink-0 flex flex-col items-end gap-2">
-            <div className="flex gap-2">
-              <Link
-                href="/pcc/industries"
-                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                Back
-              </Link>
+          <div className="shrink-0 flex gap-2">
+            <Link
+              href="/pcc/industries"
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            >
+              Back
+            </Link>
 
-              <button
-                type="button"
-                disabled
-                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-                title="PCC v1 is read-only"
-              >
-                Edit industry (soon)
-              </button>
-            </div>
-
-            {!industry.isCanonical ? (
-              <CreateCanonicalIndustryButton
-                industryKey={industry.key}
-                defaultLabel={industry.label}
-                defaultDescription={industry.description}
-              />
-            ) : null}
+            <button
+              type="button"
+              disabled
+              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+              title="PCC v1 is read-only"
+            >
+              Edit industry (soon)
+            </button>
           </div>
         </div>
       </div>
@@ -594,7 +568,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
           We split this into <span className="font-semibold">AI-only</span> (not yet confirmed) and{" "}
           <span className="font-semibold">also confirmed</span> (useful to measure AI accuracy).
           {rejectedTenants.length ? (
-            <span className="ml-1">Rejected tenants are excluded from this list and shown below.</span>
+            <span className="ml-1">Rejected tenants are excluded from this list and shown in a separate section below.</span>
           ) : null}
         </div>
 
@@ -632,18 +606,6 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                         {t.aiStatus ? (
                           <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
                             status: {t.aiStatus}
-                          </span>
-                        ) : null}
-
-                        {t.aiSource ? (
-                          <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                            source: <span className="ml-1 font-mono">{t.aiSource}</span>
-                          </span>
-                        ) : null}
-
-                        {t.aiPrevSuggested ? (
-                          <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 font-semibold text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
-                            prev: <span className="ml-1 font-mono">{t.aiPrevSuggested}</span>
                           </span>
                         ) : null}
 
@@ -754,16 +716,6 @@ export default async function PccIndustryDetailPage({ params }: Props) {
                       <td className="py-3 pr-3">
                         <div className="font-semibold text-gray-900 dark:text-gray-100">{t.name}</div>
                         <div className="font-mono text-[11px] text-gray-600 dark:text-gray-300">{t.slug}</div>
-                        {t.aiStatus || t.aiSource ? (
-                          <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                            {t.aiStatus ? <span className="mr-2">status: {t.aiStatus}</span> : null}
-                            {t.aiSource ? (
-                              <span>
-                                source: <span className="font-mono">{t.aiSource}</span>
-                              </span>
-                            ) : null}
-                          </div>
-                        ) : null}
                       </td>
                       <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{t.fit ?? "—"}</td>
                       <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">
@@ -873,7 +825,7 @@ export default async function PccIndustryDetailPage({ params }: Props) {
         </div>
       </div>
 
-      {/* Tenant overrides */}
+      {/* Tenant overrides (summary) */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant overrides (summary)</div>
