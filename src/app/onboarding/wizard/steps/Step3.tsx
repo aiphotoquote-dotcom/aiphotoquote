@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { IndustriesResponse, IndustryItem } from "../types";
 import { buildIndustriesUrl } from "../utils";
 
@@ -12,24 +12,14 @@ type IndustryDefaults = {
   defaultCustomerQuestions: string[];
 };
 
-type Candidate = { key: string; label?: string; score?: number };
-
 type ModeA_Interview = {
   mode: "A";
   status: "collecting" | "locked";
   round: number;
   confidenceScore: number;
   fitScore: number;
-  proposedIndustry: {
-    key: string;
-    label: string;
-    description?: string | null;
-    exists: boolean;
-    shouldCreate: boolean;
-  } | null;
+  proposedIndustry: { key: string; label: string } | null;
   candidates: Array<{ key: string; label: string; score: number; exists?: boolean }>;
-  nextQuestion: any | null;
-  answers: Array<any>;
   meta?: any;
 };
 
@@ -39,11 +29,7 @@ function cn(...xs: Array<string | false | null | undefined>) {
 
 async function fetchIndustryDefaults(args: { tenantId: string; industryKey: string }): Promise<IndustryDefaults | null> {
   const qs = new URLSearchParams({ tenantId: args.tenantId, industryKey: args.industryKey });
-  const res = await fetch(`/api/onboarding/industry-defaults?${qs.toString()}`, {
-    method: "GET",
-    cache: "no-store",
-  });
-
+  const res = await fetch(`/api/onboarding/industry-defaults?${qs.toString()}`, { method: "GET", cache: "no-store" });
   if (res.status === 404 || res.status === 405) return null;
 
   const j = await res.json().catch(() => null);
@@ -54,17 +40,6 @@ async function fetchIndustryDefaults(args: { tenantId: string; industryKey: stri
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
-}
-
-function clamp01Nullable(n: any): number | null {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return null;
-  return Math.max(0, Math.min(1, x));
-}
-
-function pct(n: number | null) {
-  if (n === null) return "—";
-  return `${Math.max(0, Math.min(100, Math.round(n * 100)))}%`;
 }
 
 function normalizeKey(raw: string) {
@@ -97,7 +72,7 @@ export function Step3(props: {
   tenantId: string | null;
   aiAnalysis: any | null | undefined;
 
-  // ✅ NEW: wizard can pass the tenant's current/saved industry key
+  // wizard-provided saved industry key (preferred)
   currentIndustryKey?: string | null;
 
   onBack: () => void;
@@ -116,8 +91,10 @@ export function Step3(props: {
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
 
-  // UX
-  const [showDisagree, setShowDisagree] = useState(false);
+  // prevent auto-submit loops
+  const autoCommittedRef = useRef(false);
+
+  const tid = safeTrim(props.tenantId);
 
   const interview: ModeA_Interview | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
@@ -126,47 +103,25 @@ export function Step3(props: {
     return x as ModeA_Interview;
   }, [props.aiAnalysis]);
 
-  const isLocked = safeTrim(interview?.status) === "locked";
-
   const suggestedKey = useMemo(() => normalizeKey(interview?.proposedIndustry?.key ?? ""), [interview?.proposedIndustry?.key]);
-  const suggestedConfidence = useMemo(() => (interview ? clamp01Nullable(interview.confidenceScore) : null), [interview]);
-  const fitScore = useMemo(() => (interview ? clamp01Nullable(interview.fitScore) : null), [interview]);
 
-  const aiStatus = useMemo(() => safeTrim(interview?.status) || "", [interview]);
-  const debugReason = useMemo(() => safeTrim(interview?.meta?.debug?.reason) || "", [interview]);
-
-  const candidates: Candidate[] = useMemo(() => {
-    if (Array.isArray(interview?.candidates)) return interview!.candidates;
-    return [];
-  }, [interview?.candidates]);
-
-  const topCandidates = useMemo(() => {
-    return candidates
-      .map((c: any) => ({
-        key: normalizeKey(safeTrim(c?.key ?? "")),
-        label: safeTrim(c?.label ?? ""),
-        score: clamp01Nullable(c?.score) ?? 0,
-      }))
-      .filter((c) => c.key)
-      .slice(0, 6);
-  }, [candidates]);
-
-  const suggestedLabel = useMemo(() => {
-    if (!suggestedKey) return "";
-    const hit = items.find((x) => x.key === suggestedKey);
-    return hit?.label ?? "";
-  }, [items, suggestedKey]);
+  const wizardSel = useMemo(() => normalizeKey(safeTrim(props.currentIndustryKey)), [props.currentIndustryKey]);
 
   const selectedLabel = useMemo(() => {
     const hit = items.find((x) => x.key === selectedKey);
     return hit?.label ?? "";
   }, [items, selectedKey]);
 
+  const wizardLabel = useMemo(() => {
+    if (!wizardSel) return "";
+    const hit = items.find((x) => x.key === wizardSel);
+    return hit?.label ?? "";
+  }, [items, wizardSel]);
+
   async function loadIndustries() {
     setErr(null);
     setLoading(true);
     try {
-      const tid = safeTrim(props.tenantId);
       if (!tid) throw new Error("NO_TENANT: missing tenantId for industries load.");
 
       const res = await fetch(buildIndustriesUrl(tid), { method: "GET", cache: "no-store" });
@@ -175,9 +130,6 @@ export function Step3(props: {
 
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
-
-      // ✅ Prefer: wizard-provided current industry, then AI suggested, then server selection (if non-placeholder).
-      const wizardSel = normalizeKey(safeTrim(props.currentIndustryKey));
 
       const rawServerSel =
         normalizeKey(safeTrim((j as any).selectedKey)) ||
@@ -191,15 +143,11 @@ export function Step3(props: {
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const hasServer = serverSel && list.some((x) => x.key === serverSel);
 
-      // Choose next:
-      // - if tenant already has a real industry, keep it (never revert to "service")
-      // - else if AI has a suggestion, adopt it
-      // - else accept server selection if it's non-placeholder
-      // - else fall back to something that isn't "service" if possible
+      // choose selection (but Step3 may auto-commit below)
       let next =
         (hasWizard ? wizardSel : "") ||
-        (hasSuggested ? suggestedKey : "") ||
         (hasServer ? serverSel : "") ||
+        (hasSuggested ? suggestedKey : "") ||
         "";
 
       if (!next) {
@@ -220,26 +168,8 @@ export function Step3(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.tenantId]);
 
-  // If suggestion arrives later, adopt it ONLY if we are still generic/empty.
+  // defaults preview
   useEffect(() => {
-    if (!items.length) return;
-    if (!suggestedKey) return;
-    const exists = items.some((x) => x.key === suggestedKey);
-    if (!exists) return;
-
-    const cur = normalizeKey(safeTrim(selectedKey));
-    const isGeneric = isPlaceholder(cur);
-
-    if (isLocked && (isGeneric || cur === suggestedKey)) {
-      setSelectedKey(suggestedKey);
-      return;
-    }
-    if (isGeneric) setSelectedKey(suggestedKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggestedKey, items.length, isLocked]);
-
-  useEffect(() => {
-    const tid = safeTrim(props.tenantId);
     if (!tid) return;
     if (!selectedKey) {
       setDefaults(null);
@@ -266,21 +196,58 @@ export function Step3(props: {
     return () => {
       alive = false;
     };
-  }, [props.tenantId, selectedKey]);
-
-  const canSave = Boolean(selectedKey);
-
-  const showAiCard = Boolean(interview) || Boolean(suggestedKey) || topCandidates.length > 0;
-  const showThreeWay = Boolean(suggestedKey);
+  }, [tid, selectedKey]);
 
   async function commitIndustry(industryKey: string, intent: "refine" | "skip" | "unknown") {
     const k = safeTrim(industryKey);
     if (!k) throw new Error("Choose an industry.");
-    setSubIntent(intent === "unknown" ? "unknown" : intent);
+    setSubIntent(intent);
     await props.onSubmit({ industryKey: k });
   }
 
-  const showFallbackPicker = !showThreeWay;
+  /**
+   * ✅ Key behavior change:
+   * If the tenant already has a real industry (wizardSel) we should not “ask again”.
+   * We auto-commit (skip) and let the wizard advance to Step3b immediately.
+   */
+  useEffect(() => {
+    if (autoCommittedRef.current) return;
+    if (loading) return;
+    if (!tid) return;
+    if (!items.length) return;
+
+    const hasRealSaved = wizardSel && !isPlaceholder(wizardSel) && items.some((x) => x.key === wizardSel);
+    if (!hasRealSaved) return;
+
+    autoCommittedRef.current = true;
+
+    // ensure UI selection reflects saved value (for the brief moment it’s visible)
+    setSelectedKey(wizardSel);
+
+    // auto-advance; Step3b will see intent=skip
+    setSaving(true);
+    setErr(null);
+
+    commitIndustry(wizardSel, "skip")
+      .catch((e: any) => {
+        // If commit fails, unlock the page so user can proceed manually.
+        autoCommittedRef.current = false;
+        setErr(e?.message ?? String(e));
+      })
+      .finally(() => {
+        setSaving(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, tid, items.length, wizardSel]);
+
+  const showManualUI = useMemo(() => {
+    // show manual UI when we DON'T have a real saved industry
+    if (loading) return false;
+    if (!wizardSel) return true;
+    if (isPlaceholder(wizardSel)) return true;
+    if (!items.some((x) => x.key === wizardSel)) return true;
+    return false;
+  }, [loading, wizardSel, items]);
 
   return (
     <div>
@@ -289,191 +256,56 @@ export function Step3(props: {
         This locks in your default prompts, customer questions, and photo requests.
       </div>
 
-      {/* AI card */}
-      {showAiCard ? (
-        <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="font-semibold">AI interview result</div>
+      {/* Auto-locking state (the “don’t ask again” fix) */}
+      {!showManualUI ? (
+        <div className="mt-5 overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950 shadow-sm dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+          <div className="text-[11px] font-semibold tracking-wide opacity-80">LOCKED IN</div>
 
-              <div className="mt-1">
-                {suggestedKey ? (
-                  suggestedLabel ? (
-                    <>
-                      <span className="font-semibold">{suggestedLabel}</span>{" "}
-                      <span className="font-mono text-xs opacity-90">({suggestedKey})</span>
-                    </>
-                  ) : (
-                    <>
-                      Suggested industry key: <span className="font-mono text-xs">{suggestedKey}</span>
-                    </>
-                  )
-                ) : (
-                  <span className="opacity-90">
-                    We don’t have a suggestion yet. Use “Improve match” to answer a few more questions — or pick the closest match
-                    below.
-                  </span>
-                )}
-              </div>
-
-              {topCandidates.length ? (
-                <div className="mt-3">
-                  <div className="text-xs font-semibold opacity-90">Alternative industries</div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {topCandidates
-                      .filter((c) => c.key && c.key !== normalizeKey(selectedKey))
-                      .slice(0, 4)
-                      .map((c) => (
-                        <button
-                          key={c.key}
-                          type="button"
-                          className="inline-flex items-center rounded-full border border-emerald-300/50 bg-white/60 px-2 py-1 text-[11px] font-semibold text-emerald-950 hover:bg-white dark:bg-black/20 dark:text-emerald-100"
-                          onClick={() => {
-                            setSelectedKey(c.key);
-                            setShowDisagree(true);
-                          }}
-                          disabled={saving}
-                          title="Switch to this industry"
-                        >
-                          {c.label || c.key}
-                          <span className="ml-2 font-mono opacity-70">{pct(clamp01Nullable(c.score))}</span>
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {debugReason ? (
-                <div className="mt-3 text-[11px] opacity-80">
-                  <span className="font-semibold">Why:</span> {debugReason}
-                </div>
-              ) : null}
-
-              {aiStatus ? (
-                <div className="mt-2 text-[11px] opacity-80">
-                  <span className="font-semibold">Status:</span> <span className="font-mono">{aiStatus}</span>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="shrink-0 text-right text-xs">
-              <div>
-                Confidence: <span className="font-mono">{pct(suggestedConfidence)}</span>
-              </div>
-              <div className="mt-1">
-                Fit: <span className="font-mono">{pct(fitScore)}</span>
-              </div>
-            </div>
+          <div className="mt-2 text-3xl font-extrabold leading-tight">
+            {wizardLabel || selectedLabel || "Industry selected"}
           </div>
 
-          {/* 3-way decision */}
-          {showThreeWay ? (
-            <div className="mt-4">
-              <div className="text-sm opacity-90">
-                This looks like <span className="font-semibold">{suggestedLabel || suggestedKey}</span>. What do you want to do?
-              </div>
+          <div className="mt-2 text-sm opacity-90">
+            We’ll use this industry to generate your starter defaults. You can change it anytime later in Admin settings.
+          </div>
 
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                <button
-                  type="button"
-                  className="rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                  disabled={saving || !suggestedKey}
-                  onClick={async () => {
-                    if (!suggestedKey) return;
-                    setSaving(true);
-                    setErr(null);
-                    try {
-                      setSelectedKey(suggestedKey);
-                      setShowDisagree(false);
-                      await commitIndustry(suggestedKey, "skip");
-                    } catch (e: any) {
-                      setErr(e?.message ?? String(e));
-                    } finally {
-                      setSaving(false);
-                    }
-                  }}
-                >
-                  Yes — use {suggestedLabel || "this industry"}
-                </button>
-
-                <button
-                  type="button"
-                  className="rounded-xl border border-emerald-300/50 bg-white/60 px-4 py-2 text-xs font-semibold text-emerald-950 hover:bg-white disabled:opacity-50 dark:bg-black/20 dark:text-emerald-100"
-                  disabled={saving || !suggestedKey}
-                  onClick={async () => {
-                    if (!suggestedKey) return;
-                    setSaving(true);
-                    setErr(null);
-                    try {
-                      setSelectedKey(suggestedKey);
-                      setShowDisagree(false);
-                      await commitIndustry(suggestedKey, "refine");
-                    } catch (e: any) {
-                      setErr(e?.message ?? String(e));
-                    } finally {
-                      setSaving(false);
-                    }
-                  }}
-                  title="Lock the industry, then refine with an optional sub-industry interview"
-                >
-                  Yes — but I’m more focused
-                </button>
-
-                <button
-                  type="button"
-                  className="rounded-xl border border-emerald-300/50 bg-transparent px-4 py-2 text-xs font-semibold text-emerald-950 disabled:opacity-50 dark:text-emerald-100"
-                  disabled={saving}
-                  onClick={() => setShowDisagree((v) => !v)}
-                >
-                  Not quite
-                </button>
-              </div>
-
-              {showDisagree ? (
-                <div className="mt-3 rounded-2xl border border-emerald-300/40 bg-white/50 p-3 text-xs text-emerald-950 dark:bg-black/20 dark:text-emerald-100">
-                  <div className="font-semibold">No problem.</div>
-                  <div className="mt-1 opacity-90">
-                    Try one of the alternatives above, or restart the interview so we can ask better questions.
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className="rounded-xl border border-emerald-300/50 bg-transparent px-3 py-2 text-xs font-semibold"
-                      onClick={props.onReInterview}
-                      disabled={saving}
-                    >
-                      Restart interview →
-                    </button>
-                  </div>
-                </div>
-              ) : null}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <div
+              className={cn(
+                "rounded-full border px-3 py-1 text-xs font-semibold",
+                saving
+                  ? "border-emerald-200 bg-white text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100"
+                  : "border-emerald-200 bg-white text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100"
+              )}
+            >
+              {saving ? "Saving & continuing…" : "Continuing…"}
             </div>
-          ) : (
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <button
-                type="button"
-                className="rounded-xl border border-emerald-300/50 bg-transparent px-3 py-2 text-xs font-semibold text-emerald-950 dark:text-emerald-100"
-                disabled={saving}
-                onClick={props.onReInterview}
-              >
-                Improve match →
-              </button>
+
+            <button
+              type="button"
+              className="rounded-full border border-emerald-200 bg-transparent px-3 py-1 text-xs font-semibold hover:bg-white/50 dark:border-emerald-900/40 dark:hover:bg-black/20"
+              onClick={props.onReInterview}
+              disabled={saving}
+              title="Answer a few questions to change the industry suggestion"
+            >
+              Change / improve match
+            </button>
+          </div>
+
+          {err ? (
+            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+              {err}
+              <div className="mt-2 text-xs opacity-80">You can still select an industry manually below.</div>
             </div>
-          )}
+          ) : null}
         </div>
       ) : null}
 
-      {err ? (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-          {err}
-        </div>
-      ) : null}
-
-      {/* Fallback picker only when we don't have a proposed industry yet */}
-      {showFallbackPicker ? (
-        <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry</div>
+      {/* Manual selection UI (only when we truly need it) */}
+      {showManualUI ? (
+        <div className="mt-5 overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-4 dark:border-gray-900">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Choose the best match</div>
             <button
               type="button"
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
@@ -484,121 +316,119 @@ export function Step3(props: {
             </button>
           </div>
 
-          {loading ? (
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading industries…</div>
-          ) : (
-            <div className="mt-4 grid gap-3">
-              <select
-                value={selectedKey}
-                onChange={(e) => setSelectedKey(e.target.value)}
-                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                {items.map((x) => (
-                  <option key={x.id} value={x.key}>
-                    {x.label}
-                  </option>
-                ))}
-              </select>
-
-              {selectedKey ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
-                  <div className="font-semibold text-gray-900 dark:text-gray-100">Selected</div>
-                  <div className="mt-1">
-                    <span className="font-semibold">{selectedLabel || selectedKey}</span>{" "}
-                    <span className="font-mono text-xs opacity-80">({selectedKey})</span>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="mt-2 grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  onClick={props.onBack}
-                  disabled={saving}
-                >
-                  Back
-                </button>
-
-                <button
-                  type="button"
-                  className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                  disabled={!canSave || saving}
-                  onClick={async () => {
-                    setSaving(true);
-                    setErr(null);
-                    try {
-                      const key = safeTrim(selectedKey);
-                      if (!key) throw new Error("Choose an industry.");
-                      await commitIndustry(key, "unknown");
-                    } catch (e: any) {
-                      setErr(e?.message ?? String(e));
-                    } finally {
-                      setSaving(false);
-                    }
-                  }}
-                >
-                  {saving ? "Saving…" : "Continue →"}
-                </button>
+          <div className="px-4 py-4">
+            {err ? (
+              <div className="mb-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+                {err}
               </div>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry starter pack</div>
-          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            This is the “instant experience” we can provide even with no website.
+            ) : null}
+
+            {loading ? (
+              <div className="text-sm text-gray-600 dark:text-gray-300">Loading industries…</div>
+            ) : (
+              <div className="grid gap-3">
+                <label className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">INDUSTRY</label>
+                <select
+                  value={selectedKey}
+                  onChange={(e) => setSelectedKey(e.target.value)}
+                  className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                >
+                  {items.map((x) => (
+                    <option key={x.id} value={x.key}>
+                      {x.label}
+                    </option>
+                  ))}
+                </select>
+
+                {selectedKey ? (
+                  <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+                    <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">SELECTED</div>
+                    <div className="mt-1 text-lg font-bold text-gray-900 dark:text-gray-100">{selectedLabel || "Selected industry"}</div>
+                  </div>
+                ) : null}
+
+                {/* Starter pack preview */}
+                <div className="mt-2">
+                  {defaultsLoading ? (
+                    <div className="text-sm text-gray-600 dark:text-gray-300">Loading starter defaults…</div>
+                  ) : defaults ? (
+                    <div className="grid gap-3">
+                      {defaults.commonServices?.length ? (
+                        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Common services</div>
+                          <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
+                            {defaults.commonServices.slice(0, 6).map((x, i) => (
+                              <li key={i}>{x}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+
+                      {defaults.commonPhotoRequests?.length ? (
+                        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Photos we’ll ask for</div>
+                          <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
+                            {defaults.commonPhotoRequests.slice(0, 6).map((x, i) => (
+                              <li key={i}>{x}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+
+                      {defaults.defaultCustomerQuestions?.length ? (
+                        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Default customer questions</div>
+                          <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
+                            {defaults.defaultCustomerQuestions.slice(0, 5).map((x, i) => (
+                              <li key={i}>{x}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                      Defaults aren’t available yet for this industry.
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-2 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    onClick={props.onBack}
+                    disabled={saving}
+                  >
+                    Back
+                  </button>
+
+                  <button
+                    type="button"
+                    className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                    disabled={!selectedKey || saving}
+                    onClick={async () => {
+                      setSaving(true);
+                      setErr(null);
+                      try {
+                        const key = safeTrim(selectedKey);
+                        if (!key) throw new Error("Choose an industry.");
+                        await commitIndustry(key, "unknown");
+                      } catch (e: any) {
+                        setErr(e?.message ?? String(e));
+                      } finally {
+                        setSaving(false);
+                      }
+                    }}
+                  >
+                    {saving ? "Saving…" : "Continue →"}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-
-          {!selectedKey ? (
-            <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-              Waiting for an industry selection…
-            </div>
-          ) : defaultsLoading ? (
-            <div className="mt-4 text-sm text-gray-600 dark:text-gray-300">Loading defaults…</div>
-          ) : defaults ? (
-            <div className="mt-4 grid gap-3">
-              {defaults.commonServices?.length ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Common services</div>
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
-                    {defaults.commonServices.slice(0, 6).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-
-              {defaults.commonPhotoRequests?.length ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Photos we’ll ask for</div>
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
-                    {defaults.commonPhotoRequests.slice(0, 6).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-
-              {defaults.defaultCustomerQuestions?.length ? (
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Default customer questions</div>
-                  <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200">
-                    {defaults.defaultCustomerQuestions.slice(0, 5).map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-              Defaults aren’t available yet for this industry.
-            </div>
-          )}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
