@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { buildIndustriesUrl } from "../utils";
 
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
@@ -70,30 +71,7 @@ type IndustryInterviewA = {
   };
 };
 
-async function postInterview(payload: any) {
-  const res = await fetch("/api/onboarding/industry-interview", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    cache: "no-store",
-    credentials: "include",
-    body: JSON.stringify(payload),
-  });
-
-  const txt = await res.text().catch(() => "");
-  let j: any = null;
-  try {
-    j = txt ? JSON.parse(txt) : null;
-  } catch {
-    j = null;
-  }
-
-  if (!res.ok || !j?.ok) {
-    throw new Error(j?.message || j?.error || (txt ? txt : `HTTP ${res.status}`));
-  }
-  return j as { ok: true; tenantId: string; industryInterview: IndustryInterviewA };
-}
-
-/* -------------------- Helpers for AI analysis -------------------- */
+/* -------------------- Helpers -------------------- */
 
 function pick(obj: any, paths: string[]): any {
   for (const p of paths) {
@@ -112,29 +90,6 @@ function pick(obj: any, paths: string[]): any {
   return null;
 }
 
-/**
- * IMPORTANT:
- * - For display, we only want a *label* (e.g. "Roofing Contracting").
- * - Avoid pulling giant narrative fields like businessGuess.
- */
-function getIndustryLabelForDisplay(aiAnalysis: any): string {
-  return (
-    safeTrim(pick(aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
-    safeTrim(pick(aiAnalysis, ["suggestedIndustryLabel"])) ||
-    safeTrim(pick(aiAnalysis, ["suggestedIndustry.label"])) ||
-    ""
-  );
-}
-
-function getIndustryKeyForDisplay(aiAnalysis: any): string {
-  return (
-    safeTrim(pick(aiAnalysis, ["industryInterview.proposedIndustry.key"])) ||
-    safeTrim(pick(aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
-    safeTrim(pick(aiAnalysis, ["suggestedIndustry.key"])) ||
-    ""
-  );
-}
-
 function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   if (!aiAnalysis || typeof aiAnalysis !== "object") return false;
 
@@ -146,7 +101,10 @@ function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
     safeTrim(pick(aiAnalysis, ["suggestedIndustry.key"]));
 
   const suggestedLabel =
-    safeTrim(pick(aiAnalysis, ["suggestedIndustryLabel"])) || safeTrim(pick(aiAnalysis, ["suggestedIndustry.label"]));
+    safeTrim(pick(aiAnalysis, ["suggestedIndustryLabel"])) ||
+    safeTrim(pick(aiAnalysis, ["suggestedIndustry.label"])) ||
+    safeTrim(pick(aiAnalysis, ["businessGuess"])) ||
+    safeTrim(pick(aiAnalysis, ["business_guess"]));
 
   const conf =
     pick(aiAnalysis, ["confidenceScore", "confidence_score"]) ??
@@ -159,7 +117,15 @@ function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   return Boolean(proposedKey || proposedLabel || suggestedKey || suggestedLabel || hasConf);
 }
 
-/* -------------------- Component -------------------- */
+function normalizeKey(raw: string) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
 
 export function Step2(props: {
   tenantId: string | null;
@@ -187,17 +153,23 @@ export function Step2(props: {
 
   const isRunning = aiStatus === "running";
 
-  // local “starting analysis…” so the UI doesn’t flash “Run analysis now”
-  const [localStarting, setLocalStarting] = useState(false);
+  const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
-  // Only “ready” if it’s meaningful AND there’s no parse/error flag.
-  const hasAnalysis = useMemo(() => {
-    if (aiErr) return false;
-    return hasMeaningfulAnalysis(props.aiAnalysis);
-  }, [props.aiAnalysis, aiErr]);
+  // suggested key (canonical-ish)
+  const suggestedKey =
+    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.key"])) ||
+    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
+    "";
 
-  const suggestedLabel = useMemo(() => getIndustryLabelForDisplay(props.aiAnalysis), [props.aiAnalysis]);
-  const suggestedKey = useMemo(() => getIndustryKeyForDisplay(props.aiAnalysis), [props.aiAnalysis]);
+  const suggestedKeyNorm = useMemo(() => normalizeKey(suggestedKey), [suggestedKey]);
+
+  // raw long summary often lives here (this is what was blowing up the UI)
+  const rawSummary =
+    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
+    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
+    safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
+    safeTrim(pick(props.aiAnalysis, ["business_guess"])) ||
+    "";
 
   const confidenceScore =
     pick(props.aiAnalysis, ["confidenceScore", "confidence_score"]) ??
@@ -218,23 +190,68 @@ export function Step2(props: {
   // Controls whether we’re showing the interview UI.
   const [showInterview, setShowInterview] = useState<boolean>(() => !hasWebsite);
 
-  // Auto-run analysis ONCE per (tenantId + website) when website exists and we don't have meaningful analysis yet.
+  // Auto-run analysis ONCE per (tenantId + website)
   const didAutoRunRef = useRef(false);
   const autoRunKeyRef = useRef<string>("");
+
+  // show a "starting" state immediately when autorun triggers (prevents “button implies I must press it”)
+  const [autoStarting, setAutoStarting] = useState(false);
 
   // Progress UI for "analysis running"
   const runStartRef = useRef<number | null>(null);
   const [runTick, setRunTick] = useState(0);
 
-  // “Details” toggle (hide keys + long stuff by default)
-  const [showDetails, setShowDetails] = useState(false);
+  // Industry label lookup so we can show “Roofing Contracting” instead of the key or the AI essay
+  const [industryLabelMap, setIndustryLabelMap] = useState<Record<string, string>>({});
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   useEffect(() => {
-    // clear “starting” once server reports running, or we become ready, or we error
-    if (localStarting && (isRunning || hasAnalysis || Boolean(aiErr))) {
-      setLocalStarting(false);
-    }
-  }, [localStarting, isRunning, hasAnalysis, aiErr]);
+    if (!tid) return;
+    let alive = true;
+
+    fetch(buildIndustriesUrl(tid), { method: "GET", cache: "no-store" })
+      .then((r) => r.json().catch(() => null))
+      .then((j) => {
+        if (!alive) return;
+        if (!j?.ok || !Array.isArray(j?.industries)) return;
+
+        const m: Record<string, string> = {};
+        for (const it of j.industries) {
+          const k = normalizeKey(safeTrim(it?.key));
+          const label = safeTrim(it?.label);
+          if (k && label) m[k] = label;
+        }
+        setIndustryLabelMap(m);
+      })
+      .catch(() => null);
+
+    return () => {
+      alive = false;
+    };
+  }, [tid]);
+
+  const canonicalIndustryLabel = useMemo(() => {
+    if (!suggestedKeyNorm) return "";
+    return industryLabelMap[suggestedKeyNorm] || "";
+  }, [industryLabelMap, suggestedKeyNorm]);
+
+  // Treat this as the “industry name” we show in the proud moment:
+  // Prefer canonical label; fallback to a short version of rawSummary if no map hit.
+  const displayIndustryName = useMemo(() => {
+    if (canonicalIndustryLabel) return canonicalIndustryLabel;
+    // fallback: if AI returned something short like "Roofing Contracting" use it; otherwise fallback to key
+    const s = safeTrim(rawSummary);
+    if (s && s.length <= 42) return s;
+    if (suggestedKeyNorm) return suggestedKeyNorm.replace(/_/g, " ");
+    return "your industry";
+  }, [canonicalIndustryLabel, rawSummary, suggestedKeyNorm]);
+
+  const reasoningLine = useMemo(() => {
+    if (!hasWebsite) return "";
+    if (conf !== null && conf >= 0.85) return "High confidence based on services and keywords found on your site.";
+    if (conf !== null && conf >= 0.6) return "Based on your website content, services, and keywords.";
+    return "We matched your website content against known industry patterns.";
+  }, [hasWebsite, conf]);
 
   useEffect(() => {
     if (isRunning && !runStartRef.current) runStartRef.current = Date.now();
@@ -242,64 +259,62 @@ export function Step2(props: {
   }, [isRunning]);
 
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning && !autoStarting) return;
     const t = window.setInterval(() => setRunTick((x) => x + 1), 300);
     return () => window.clearInterval(t);
-  }, [isRunning]);
+  }, [isRunning, autoStarting]);
 
   const runProgress = useMemo(() => {
-    if (!isRunning && !localStarting) return 0;
+    // While autoStarting, show gentle ramp until server flips to running
     const start = runStartRef.current ?? Date.now();
     const elapsed = Date.now() - start;
 
-    // “Feels like progress”; cap at 95% until completion
     const maxMs = 45_000;
-    const p = Math.min(0.95, Math.max(0.08, elapsed / maxMs));
+    const p = Math.min(0.95, Math.max(0.06, elapsed / maxMs));
     return p;
-  }, [isRunning, localStarting, runTick]);
+  }, [runTick]);
 
   const runMessage = useMemo(() => {
-    if (!isRunning && !localStarting) return "";
     const msgs = [
-      "Starting analysis…",
-      "Fetching website content…",
-      "Extracting services & keywords…",
-      "Matching against industry patterns…",
-      "Generating your recommended setup…",
-      "Finalizing…",
+      "Opening your website…",
+      "Reading services & keywords…",
+      "Comparing signals to industry patterns…",
+      "Choosing best-fit industry…",
+      "Finalizing recommendation…",
     ];
     const idx = Math.min(msgs.length - 1, Math.floor(runProgress * msgs.length));
     return msgs[idx] ?? "Analyzing…";
-  }, [isRunning, localStarting, runProgress]);
+  }, [runProgress]);
 
-  // Reset auto-run guard whenever tenantId or website changes
+  // Reset auto-run guard when tenantId or website changes
   useEffect(() => {
     const k = `${tid || "(no-tenant)"}|${website || "(no-website)"}`;
     if (autoRunKeyRef.current !== k) {
       autoRunKeyRef.current = k;
       didAutoRunRef.current = false;
-      setShowDetails(false);
+      setAutoStarting(false);
+      setDetailsOpen(false);
     }
   }, [tid, website]);
 
-  async function runAnalysisSafely() {
+  async function runAnalysisSafely(origin: "auto" | "manual") {
     if (!tid) {
       props.onError("NO_TENANT: missing tenantId for analysis.");
       return;
     }
-    if (working || isRunning) return;
+    if (working) return;
+
+    if (origin === "auto") setAutoStarting(true);
 
     setWorking(true);
-    setLocalStarting(true);
-
     try {
       await props.onRun();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       props.onError(msg);
-      setLocalStarting(false);
     } finally {
       setWorking(false);
+      setAutoStarting(false);
     }
   }
 
@@ -311,20 +326,17 @@ export function Step2(props: {
 
     setShowInterview(false);
 
-    // If analysis exists or is currently running/starting, do nothing.
     if (hasAnalysis) return;
     if (isRunning) return;
-    if (localStarting) return;
 
-    // Auto-run once per tenant+website (only if we have tenantId).
     if (!didAutoRunRef.current && tid) {
       didAutoRunRef.current = true;
-      runAnalysisSafely().catch(() => null);
+      runAnalysisSafely("auto").catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, hasAnalysis, isRunning, tid, localStarting]);
+  }, [hasWebsite, hasAnalysis, isRunning, tid]);
 
-  /* -------------------- Interview state -------------------- */
+  /* -------------------- Interview mode (unchanged) -------------------- */
 
   const interviewFromProps: IndustryInterviewA | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
@@ -377,6 +389,29 @@ export function Step2(props: {
     }
   }, []);
   const [lastApi, setLastApi] = useState<any>(null);
+
+  async function postInterview(payload: any) {
+    const res = await fetch("/api/onboarding/industry-interview", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      cache: "no-store",
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+
+    const txt = await res.text().catch(() => "");
+    let j: any = null;
+    try {
+      j = txt ? JSON.parse(txt) : null;
+    } catch {
+      j = null;
+    }
+
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || (txt ? txt : `HTTP ${res.status}`));
+    }
+    return j as { ok: true; tenantId: string; industryInterview: IndustryInterviewA };
+  }
 
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
@@ -490,150 +525,144 @@ export function Step2(props: {
     }
   }
 
-  const showProgress = Boolean(hasWebsite && !showInterview && (isRunning || localStarting) && !hasAnalysis);
+  const showBusy = (isRunning || autoStarting) && !hasAnalysis;
 
   return (
     <div>
-      {/* Website Analysis */}
+      {/* Website analysis */}
       {hasWebsite && !showInterview ? (
         <>
           <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Website analysis</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            We’ll analyze your website and recommend the best-fit industry setup — then you can confirm or correct it.
+            We’ll analyze your website to recommend the best-fit industry — then you can confirm or correct it.
           </div>
 
-          <div className="mt-4 overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            {/* header strip */}
-            <div className="flex items-start justify-between gap-3 border-b border-gray-100 px-4 py-4 dark:border-gray-900">
+          <div className="mt-4 rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+            <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400">WEBSITE</div>
-                <div className="mt-1 truncate font-mono text-xs text-gray-800 dark:text-gray-200">{website}</div>
+                <div className="mt-1 truncate text-sm font-mono text-gray-800 dark:text-gray-200">{website.replace(/^https?:\/\//, "")}</div>
               </div>
 
               <span
                 className={cn(
-                  "shrink-0 rounded-full border px-3 py-1 text-xs font-semibold",
-                  aiErr
-                    ? "border-red-200 bg-red-50 text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200"
-                    : showProgress
+                  "inline-flex shrink-0 items-center rounded-full border px-3 py-1 text-xs font-semibold",
+                  showBusy
                     ? "border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-800 dark:bg-black dark:text-slate-200"
                     : hasAnalysis
                     ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
                     : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
                 )}
               >
-                {aiErr ? safeTrim(aiErr) || "Analysis error" : showProgress ? "Analyzing" : hasAnalysis ? "Ready" : "Waiting"}
+                {showBusy ? "Analyzing…" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
               </span>
             </div>
 
-            {/* progress */}
-            {showProgress ? (
-              <div className="px-4 py-4">
+            {aiErr ? (
+              <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+                {aiErr}
+              </div>
+            ) : null}
+
+            {/* Busy state: progress bar + message */}
+            {showBusy ? (
+              <div className="mt-4">
                 <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
                   <div className="h-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${Math.round(runProgress * 100)}%` }} />
                 </div>
                 <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
-
-                <div className="mt-4 grid gap-2 rounded-2xl border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">What we’re looking for</div>
-                  <div className="grid gap-2 text-xs text-gray-600 dark:text-gray-300">
-                    <div>• Services & keywords</div>
-                    <div>• Industry signals & patterns</div>
-                    <div>• A recommended setup for your prompts & defaults</div>
-                  </div>
+                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                  This usually takes under a minute. You don’t need to press anything.
                 </div>
               </div>
             ) : null}
 
-            {/* error state */}
-            {aiErr ? (
-              <div className="px-4 pb-4">
-                <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                  We couldn’t reliably convert the website result into structured data.
-                  <div className="mt-2 text-xs opacity-80">You can retry, or switch to a quick interview to lock the right industry.</div>
-                </div>
+            {/* Not yet analyzed: show softer CTA (not scary “must press”) */}
+            {!hasAnalysis && !showBusy ? (
+              <div className="mt-4">
+                <button
+                  type="button"
+                  className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  onClick={() => runAnalysisSafely("manual").catch(() => null)}
+                  disabled={working || isRunning || !tid}
+                >
+                  Run analysis
+                </button>
 
-                <div className="mt-3 grid gap-2">
-                  <button
-                    type="button"
-                    className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                    onClick={() => runAnalysisSafely().catch(() => null)}
-                    disabled={working || isRunning || !tid}
-                  >
-                    Retry analysis
-                  </button>
-
-                  <button
-                    type="button"
-                    className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    onClick={() => setShowInterview(true)}
-                    disabled={working}
-                  >
-                    Use quick questions instead
-                  </button>
-                </div>
-
-                <div className="mt-3">
-                  <button
-                    type="button"
-                    className="text-xs font-semibold text-gray-600 underline underline-offset-4 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
-                    onClick={() => setShowDetails((v) => !v)}
-                  >
-                    {showDetails ? "Hide details" : "Show details"}
-                  </button>
-
-                  {showDetails ? (
-                    <pre className="mt-2 max-h-56 overflow-auto rounded-2xl border border-gray-200 bg-gray-50 p-3 text-[11px] text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                      {JSON.stringify(props.aiAnalysis, null, 2)}
-                    </pre>
-                  ) : null}
+                <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+                  <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">What we look for</div>
+                  <ul className="mt-2 grid gap-2 text-sm">
+                    <li className="flex gap-2">
+                      <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-bold dark:border-gray-800 dark:bg-gray-950">
+                        1
+                      </span>
+                      <span>
+                        <span className="font-semibold">Services & keywords</span> — what you sell and how you describe it.
+                      </span>
+                    </li>
+                    <li className="flex gap-2">
+                      <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-bold dark:border-gray-800 dark:bg-gray-950">
+                        2
+                      </span>
+                      <span>
+                        <span className="font-semibold">Industry signals</span> — patterns that match your business type.
+                      </span>
+                    </li>
+                    <li className="flex gap-2">
+                      <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-bold dark:border-gray-800 dark:bg-gray-950">
+                        3
+                      </span>
+                      <span>
+                        <span className="font-semibold">A recommended setup</span> — so your defaults feel right from day one.
+                      </span>
+                    </li>
+                  </ul>
                 </div>
               </div>
             ) : null}
 
-            {/* ready state */}
-            {!aiErr && hasAnalysis ? (
-              <div className="px-4 py-5">
-                <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+            {/* Analysis ready: clean proud moment */}
+            {hasAnalysis && !showBusy ? (
+              <div className="mt-4">
+                <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950 shadow-sm dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
                   <div className="text-[11px] font-semibold tracking-wide opacity-80">RECOMMENDED INDUSTRY</div>
 
-                  <div className="mt-2 text-3xl font-extrabold leading-tight">
-                    {suggestedLabel ? suggestedLabel : "Industry suggestion ready"}
-                  </div>
+                  <div className="mt-2 text-2xl font-extrabold leading-tight">{displayIndustryName}</div>
 
-                  <div className="mt-2 text-sm opacity-90">Based on your website content, services, and keywords.</div>
-
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                    <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
-                      Confidence: {pct(conf)}
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold dark:border-emerald-900/40 dark:bg-black">
+                      Confidence: <span className="ml-2 font-mono">{pct(conf)}</span>
                     </span>
-                    <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
-                      Fit: {pct(fit)}
+                    <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-3 py-1 text-xs font-semibold dark:border-emerald-900/40 dark:bg-black">
+                      Fit: <span className="ml-2 font-mono">{pct(fit)}</span>
                     </span>
                   </div>
 
-                  <div className="mt-4">
-                    <button
-                      type="button"
-                      className="text-xs font-semibold underline underline-offset-4 opacity-80 hover:opacity-100"
-                      onClick={() => setShowDetails((v) => !v)}
-                    >
-                      {showDetails ? "Hide details" : "Show details"}
-                    </button>
+                  <div className="mt-3 text-sm opacity-90">{reasoningLine}</div>
 
-                    {showDetails ? (
-                      <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-3 text-xs text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
-                        {suggestedKey ? (
-                          <div>
-                            Internal key: <span className="font-mono opacity-80">{suggestedKey}</span>
-                          </div>
-                        ) : null}
-                        <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-emerald-50 p-3 text-[11px] text-emerald-950 dark:bg-emerald-950/20 dark:text-emerald-100">
-                          {JSON.stringify(props.aiAnalysis, null, 2)}
-                        </pre>
+                  <button
+                    type="button"
+                    className="mt-4 inline-flex items-center justify-center rounded-xl border border-emerald-200 bg-white px-4 py-2 text-xs font-semibold text-emerald-950 hover:bg-emerald-50 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100 dark:hover:bg-emerald-950/20"
+                    onClick={() => setDetailsOpen((v) => !v)}
+                  >
+                    {detailsOpen ? "Hide details" : "Show details"}
+                  </button>
+
+                  {detailsOpen ? (
+                    <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
+                      <div className="text-xs font-semibold opacity-80">Why we think this</div>
+                      <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
+                        {rawSummary ? rawSummary : "No additional details were provided by the analyzer."}
                       </div>
-                    ) : null}
-                  </div>
+
+                      {/* keep key only for debugging, not as the “moment” */}
+                      {suggestedKeyNorm ? (
+                        <div className="mt-3 text-[11px] opacity-70">
+                          Internal key: <span className="font-mono">{suggestedKeyNorm}</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
@@ -652,7 +681,7 @@ export function Step2(props: {
                     onClick={() => handleConfirmYes().catch(() => null)}
                     disabled={working || !tid}
                   >
-                    Yes, lock it in →
+                    Yes, that’s right →
                   </button>
                 </div>
 
@@ -664,39 +693,9 @@ export function Step2(props: {
                 >
                   Not quite — improve match
                 </button>
-              </div>
-            ) : null}
 
-            {/* initial idle state (no analysis, no error, not running/starting) */}
-            {!aiErr && !hasAnalysis && !showProgress ? (
-              <div className="px-4 py-5">
-                <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">We’ll start automatically</div>
-                  <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                    If this doesn’t begin in a few seconds, you can manually kick it off.
-                  </div>
-
-                  <div className="mt-4">
-                    <button
-                      type="button"
-                      className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                      onClick={() => runAnalysisSafely().catch(() => null)}
-                      disabled={working || isRunning || !tid}
-                    >
-                      Start analysis
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-4 flex items-center justify-start">
-                  <button
-                    type="button"
-                    className="rounded-2xl border border-gray-200 bg-white px-5 py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    onClick={props.onBack}
-                    disabled={working}
-                  >
-                    Back
-                  </button>
+                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                  If you disagree, we’ll ask a few quick questions to lock the correct industry.
                 </div>
               </div>
             ) : null}
@@ -717,7 +716,7 @@ export function Step2(props: {
                 tenantId: <span className="font-mono">{tid || "(none)"}</span>
               </div>
               <div className="mt-1">
-                status: <span className="font-mono">{safeTrim(interviewState?.status) || "(none)"}</span>
+                status: <span className="font-mono">{safeTrim(status) || "(none)"}</span>
               </div>
               <div className="mt-1">
                 nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span>
@@ -804,6 +803,8 @@ export function Step2(props: {
                   Continue to confirmation →
                 </button>
               </div>
+
+              <div className="mt-3 text-xs opacity-80">Tip: enable debug with ?debug=1 if you get stuck.</div>
             </div>
           ) : null}
 
