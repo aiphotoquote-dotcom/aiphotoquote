@@ -200,6 +200,7 @@ export default function OnboardingWizard() {
     const newTenantId = safeTrim(j.tenantId);
     if (newTenantId) setTenantInNav(newTenantId);
 
+    // ✅ ALWAYS go to Step 2.
     const next = 2;
 
     await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
@@ -503,11 +504,12 @@ export default function OnboardingWizard() {
               tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               ensureActiveTenant={ensureActiveTenant}
               onBack={() => go(4)}
-              onSaved={() => go(6)}
+              onContinue={() => go(6)}
               onError={(m) => setErr(m)}
-              onOpenAdvancedPolicy={() =>
-                openSetup("/admin/setup/ai-policy?onboarding=1").catch((e: any) => setErr(e?.message ?? String(e)))
-              }
+              onOpenAdvancedPolicy={() => {
+                // keep as sync fn per Step5Pricing typing (it can still *call* async work)
+                openSetup("/admin/setup/ai-policy?onboarding=1").catch((e: any) => setErr(e?.message ?? String(e)));
+              }}
             />
           ) : step === 6 ? (
             <Step5Branding
