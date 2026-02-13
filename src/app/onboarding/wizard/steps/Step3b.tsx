@@ -1,5 +1,4 @@
 // src/app/onboarding/wizard/steps/Step3b.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -107,6 +106,18 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   }
 }
 
+function Spinner({ className }: { className?: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-block h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-gray-900 dark:border-gray-700 dark:border-t-gray-200",
+        className
+      )}
+      aria-hidden="true"
+    />
+  );
+}
+
 export function Step3b(props: {
   tenantId: string | null;
   industryKey: string;
@@ -191,6 +202,9 @@ export function Step3b(props: {
   // null => haven't answered prompt yet
   const [wantsSub, setWantsSub] = useState<"yes" | "no" | null>(null);
 
+  // ✅ "Skipping…" UX while we auto-continue after a "No"
+  const [skipInFlight, setSkipInFlight] = useState(false);
+
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
@@ -269,7 +283,10 @@ export function Step3b(props: {
     if (didAutoSkipRef.current) return;
 
     didAutoSkipRef.current = true;
-    saveAndContinue(null).catch(() => null);
+    setSkipInFlight(true);
+    saveAndContinue(null)
+      .catch(() => null)
+      .finally(() => setSkipInFlight(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, resolvedIndustryKey, wantsSub, nextQ?.id, isLocked]);
 
@@ -337,15 +354,24 @@ export function Step3b(props: {
 
   const showPrompt = wantsSub === null;
 
-  // ✅ If user manually chooses "no", we want the same behavior as intent skip:
-  // immediately submit null and proceed. We don't need a second "NO path" screen.
+  // ✅ If user manually chooses "no", behave like skip:
+  // show a quick "Skipping…" state and auto-continue.
   async function chooseNoAndSkip() {
+    if (working || skipInFlight) return;
+
     setWantsSub("no");
-    // mark intent as skip so any downstream logic that checks it behaves consistently
     intentRef.current = "skip";
     didAutoSkipRef.current = true; // prevent duplicate autoskip effect
-    await saveAndContinue(null);
+
+    setSkipInFlight(true);
+    try {
+      await saveAndContinue(null);
+    } finally {
+      setSkipInFlight(false);
+    }
   }
+
+  const showSkippingCard = wantsSub === "no" && (skipInFlight || working);
 
   return (
     <div>
@@ -379,15 +405,26 @@ export function Step3b(props: {
           <div className="mt-1">
             nextQ.id: <span className="font-mono">{nextQ?.id || "(none)"}</span>
           </div>
-          <div className="mt-2 font-mono whitespace-pre-wrap break-words">
-            {lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}
-          </div>
+          <div className="mt-2 font-mono whitespace-pre-wrap break-words">{lastApi ? JSON.stringify(lastApi, null, 2) : "(no API response yet)"}</div>
         </div>
       ) : null}
 
       {err ? (
         <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
           {err}
+        </div>
+      ) : null}
+
+      {/* ✅ Skipping state (prevents "blank screen" during auto-continue) */}
+      {showSkippingCard ? (
+        <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex items-center gap-3">
+            <Spinner />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Skipping sub-industry refinement…</div>
+              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Taking you to the next step.</div>
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -404,10 +441,11 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
               onClick={() => setWantsSub("yes")}
-              disabled={working || !tid || !resolvedIndustryKey}
+              // ✅ Disable both choice buttons while submitting
+              disabled={working || skipInFlight || !tid || !resolvedIndustryKey}
             >
               Yes — let’s narrow it down
             </button>
@@ -416,12 +454,20 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
               onClick={() => chooseNoAndSkip().catch(() => null)}
-              disabled={working || !tid || !resolvedIndustryKey}
+              // ✅ Disable both choice buttons while submitting
+              disabled={working || skipInFlight || !tid || !resolvedIndustryKey}
             >
-              No — keep it broad for now
+              {skipInFlight ? (
+                <span className="inline-flex items-center gap-2">
+                  <Spinner className="h-4 w-4" />
+                  Skipping…
+                </span>
+              ) : (
+                "No — keep it broad for now"
+              )}
             </button>
           </div>
 
@@ -429,9 +475,9 @@ export function Step3b(props: {
           <div className="mt-4 grid grid-cols-2 gap-3">
             <button
               type="button"
-              className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
               onClick={props.onBack}
-              disabled={working}
+              disabled={working || skipInFlight}
             >
               Back
             </button>
@@ -441,10 +487,10 @@ export function Step3b(props: {
               type="button"
               className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
               onClick={() => chooseNoAndSkip().catch(() => null)}
-              disabled={working || !tid || !resolvedIndustryKey}
+              disabled={working || skipInFlight || !tid || !resolvedIndustryKey}
               title="Skip sub-industry refinement"
             >
-              Continue →
+              {skipInFlight ? "Skipping…" : "Continue →"}
             </button>
           </div>
         </div>
@@ -458,7 +504,7 @@ export function Step3b(props: {
 
             <button
               type="button"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
               onClick={() => start().catch(() => null)}
               disabled={working || !tid || !resolvedIndustryKey || Boolean(nextQ?.id) || isLocked}
             >
@@ -512,7 +558,7 @@ export function Step3b(props: {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                   onClick={props.onBack}
                   disabled={working}
                 >
@@ -544,6 +590,7 @@ export function Step3b(props: {
                     rows={3}
                     placeholder="Type your answer…"
                     className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    disabled={working}
                   />
                 ) : null}
 
@@ -554,7 +601,7 @@ export function Step3b(props: {
                         key={opt}
                         type="button"
                         className={cn(
-                          "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
+                          "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold disabled:opacity-50",
                           choiceAnswer === opt
                             ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
                             : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
@@ -572,7 +619,7 @@ export function Step3b(props: {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
                   onClick={props.onBack}
                   disabled={working}
                 >
