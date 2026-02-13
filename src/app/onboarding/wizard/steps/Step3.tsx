@@ -35,6 +35,7 @@ function pct(n: number | null) {
   return `${Math.max(0, Math.min(100, Math.round(n * 100)))}%`;
 }
 
+/** legacy interview shape (Mode A) */
 type ModeA_Interview = {
   mode: "A";
   status: "collecting" | "locked";
@@ -57,6 +58,27 @@ function setSubIntent(v: "refine" | "skip" | "unknown") {
   } catch {
     // ignore
   }
+}
+
+/** website-analysis shape (new) */
+type WebsiteAnalysisShape = {
+  suggestedIndustryKey?: string;
+  confidenceScore?: number; // 0..1
+  fit?: "good" | "maybe" | "poor";
+  fitReason?: string;
+  businessGuess?: string;
+  detectedServices?: string[];
+  billingSignals?: string[];
+  questions?: string[];
+  meta?: any;
+};
+
+function fitToScore(fit: any): number | null {
+  const s = safeTrim(fit).toLowerCase();
+  if (s === "good") return 0.9;
+  if (s === "maybe") return 0.6;
+  if (s === "poor") return 0.3;
+  return null;
 }
 
 export function Step3(props: {
@@ -88,14 +110,41 @@ export function Step3(props: {
     return x as ModeA_Interview;
   }, [props.aiAnalysis]);
 
-  const proposedKeyRaw = safeTrim(interview?.proposedIndustry?.key);
-  const proposedKey = useMemo(() => normalizeKey(proposedKeyRaw), [proposedKeyRaw]);
+  const webA: WebsiteAnalysisShape | null = useMemo(() => {
+    const x = props.aiAnalysis;
+    if (!x || typeof x !== "object") return null;
+    // we only care about fields we know exist in your analyze-website output
+    return x as WebsiteAnalysisShape;
+  }, [props.aiAnalysis]);
 
-  const proposedLabelRaw = safeTrim(interview?.proposedIndustry?.label);
-  const proposedLabel = proposedLabelRaw;
+  // ✅ primary: Mode A proposedIndustry.key
+  const modeAKeyRaw = safeTrim(interview?.proposedIndustry?.key);
+  const modeAKey = useMemo(() => normalizeKey(modeAKeyRaw), [modeAKeyRaw]);
+  const modeALabelRaw = safeTrim(interview?.proposedIndustry?.label);
 
-  const conf = clamp01Nullable(interview?.confidenceScore);
-  const fit = clamp01Nullable(interview?.fitScore);
+  // ✅ secondary: website analysis suggestedIndustryKey
+  const webKeyRaw = safeTrim(webA?.suggestedIndustryKey);
+  const webKey = useMemo(() => normalizeKey(webKeyRaw), [webKeyRaw]);
+
+  // ✅ tertiary: wizard saved key
+  const wizardKey = useMemo(() => normalizeKey(props.currentIndustryKey), [props.currentIndustryKey]);
+
+  // The key we will display + commit on Yes
+  const proposedKey = modeAKey || webKey || wizardKey;
+
+  // confidence / fit
+  const conf = useMemo(() => {
+    const a = clamp01Nullable(interview?.confidenceScore);
+    if (a !== null) return a;
+    const b = clamp01Nullable(webA?.confidenceScore);
+    return b;
+  }, [interview?.confidenceScore, webA?.confidenceScore]);
+
+  const fit = useMemo(() => {
+    const a = clamp01Nullable(interview?.fitScore);
+    if (a !== null) return a;
+    return fitToScore(webA?.fit);
+  }, [interview?.fitScore, webA?.fit]);
 
   // Map industryKey -> label so we can show canonical labels even if AI label differs.
   const industryLabelMap = useMemo(() => {
@@ -111,23 +160,30 @@ export function Step3(props: {
   const displayIndustryName = useMemo(() => {
     const canonical = proposedKey ? industryLabelMap[proposedKey] : "";
     if (canonical) return canonical;
-    if (proposedLabel && proposedLabel.length <= 42) return proposedLabel;
+
+    // prefer Mode A label if present
+    if (modeALabelRaw && modeALabelRaw.length <= 42) return modeALabelRaw;
+
+    // otherwise show key prettified
     if (proposedKey) return proposedKey.replace(/_/g, " ");
     return "your industry";
-  }, [industryLabelMap, proposedKey, proposedLabel]);
+  }, [industryLabelMap, proposedKey, modeALabelRaw]);
 
   const reasoningLine = useMemo(() => {
-    if (conf !== null && conf >= 0.85) return "High confidence based on your answers and detected signals.";
-    if (conf !== null && conf >= 0.6) return "Based on your answers and detected signals.";
-    return "We matched your inputs against known industry patterns.";
+    if (conf !== null && conf >= 0.85) return "High confidence based on signals found on your site.";
+    if (conf !== null && conf >= 0.6) return "Based on signals found on your site.";
+    return "We matched your website against known industry patterns.";
   }, [conf]);
 
-  const debugReason = safeTrim(interview?.meta?.debug?.reason);
+  const debugReason =
+    safeTrim(interview?.meta?.debug?.reason) ||
+    safeTrim(webA?.fitReason) ||
+    safeTrim(webA?.businessGuess);
 
   const isReady = useMemo(() => {
-    // We show the “circled” confirmation card when we have a proposed industry key or label.
-    return Boolean(proposedKey || proposedLabel);
-  }, [proposedKey, proposedLabel]);
+    // ✅ ready if we have ANY proposed key (Mode A or website analysis or wizard key)
+    return Boolean(proposedKey);
+  }, [proposedKey]);
 
   async function loadIndustries() {
     setErr(null);
@@ -164,17 +220,17 @@ export function Step3(props: {
     setSaving(true);
     setErr(null);
     try {
-      // If AI proposed a key, use it. Otherwise fallback to a saved wizard key if present.
-      const fallback = normalizeKey(props.currentIndustryKey);
-      const keyToUse = proposedKey || fallback;
-      if (!keyToUse) throw new Error("Missing industry. Please run the interview again.");
-      await commitIndustry(keyToUse, "unknown");
+      if (!proposedKey) throw new Error("Missing industry. Please run the interview again.");
+      await commitIndustry(proposedKey, "unknown");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
       setSaving(false);
     }
   }
+
+  const services = Array.isArray(webA?.detectedServices) ? webA!.detectedServices! : [];
+  const billing = Array.isArray(webA?.billingSignals) ? webA!.billingSignals! : [];
 
   return (
     <div>
@@ -189,10 +245,9 @@ export function Step3(props: {
         </div>
       ) : null}
 
-      {/* ✅ Preferred UX: same “circled” confirmation card for BOTH website + no-website paths */}
       {isReady ? (
         <div className="mt-5 rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950 shadow-sm dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-          <div className="text-[11px] font-semibold tracking-wide opacity-80">LOCKED IN</div>
+          <div className="text-[11px] font-semibold tracking-wide opacity-80">RECOMMENDED</div>
 
           <div className="mt-2 text-3xl font-extrabold leading-tight">{displayIndustryName}</div>
 
@@ -220,8 +275,22 @@ export function Step3(props: {
             <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
               <div className="text-xs font-semibold opacity-80">Why we think this</div>
               <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
-                {debugReason || proposedLabel || "No additional details were provided."}
+                {debugReason || "No additional details were provided."}
               </div>
+
+              {services.length ? (
+                <div className="mt-3">
+                  <div className="text-[11px] font-semibold opacity-70">Detected services</div>
+                  <div className="mt-1 text-xs opacity-90">{services.slice(0, 10).join(" • ")}</div>
+                </div>
+              ) : null}
+
+              {billing.length ? (
+                <div className="mt-3">
+                  <div className="text-[11px] font-semibold opacity-70">Billing signals</div>
+                  <div className="mt-1 text-xs opacity-90">{billing.slice(0, 10).join(" • ")}</div>
+                </div>
+              ) : null}
 
               {proposedKey ? (
                 <div className="mt-3 text-[11px] opacity-70">
@@ -261,7 +330,6 @@ export function Step3(props: {
           </button>
         </div>
       ) : (
-        /* Fallback: if we have no AI result somehow, show a tiny helper and push them to interview */
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
           {loading ? (
             <div className="text-sm text-gray-600 dark:text-gray-300">Loading…</div>
