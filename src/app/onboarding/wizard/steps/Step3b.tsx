@@ -46,7 +46,7 @@ type SubInterview = {
   industryKey: string;
   confidenceScore: number;
 
-  // ✅ server may include key now (optional for back-compat)
+  // server may include key now (optional for back-compat)
   proposedSubIndustryKey?: string | null;
   proposedSubIndustryLabel: string | null;
 
@@ -120,9 +120,8 @@ export function Step3b(props: {
   const tid = safeTrim(props.tenantId);
 
   /**
-   * ✅ CRITICAL:
-   * If the wizard ever hands us an empty/placeholder industryKey (or a stale "service"),
-   * fall back to AI-proposed keys so we never start/submit against the wrong industry.
+   * If wizard hands an empty/placeholder industryKey (or stale "service"),
+   * fall back to AI-proposed keys so we never start/submit against wrong industry.
    */
   const resolvedIndustryKey = useMemo(() => {
     const fromProps = normalizeKey(props.industryKey);
@@ -137,7 +136,6 @@ export function Step3b(props: {
     if (!x || typeof x !== "object") return null;
     if ((x as any).mode !== "SUB") return null;
 
-    // Only accept if it matches our resolved industry (prevents cross-industry bleed)
     const ik = normalizeKey((x as any).industryKey);
     if (ik && resolvedIndustryKey && ik !== normalizeKey(resolvedIndustryKey)) return null;
 
@@ -198,18 +196,6 @@ export function Step3b(props: {
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
   const didAutoSkipRef = useRef(false);
 
-  // ✅ New: prevents background auto-skip from firing after user presses Back.
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
-  // ✅ New: once user navigates back, permanently disarm autoskip in this component instance.
-  const didUserNavigateBackRef = useRef(false);
-
   useEffect(() => {
     setErr(null);
     setTextAnswer("");
@@ -227,7 +213,7 @@ export function Step3b(props: {
       setErr(msg);
       props.onError(msg);
     } finally {
-      if (isMountedRef.current) setWorking(false);
+      setWorking(false);
     }
   }
 
@@ -244,9 +230,6 @@ export function Step3b(props: {
     setWorking(true);
     setErr(null);
     try {
-      // ✅ Server decides:
-      // - if defaults exist => returns select question
-      // - else => opens LLM interview
       const out = await postSubInterview({ mode: "SUB", tenantId: tid, industryKey: resolvedIndustryKey, action: "start" });
       setState(out.subIndustryInterview);
       if (debugOn) setLastApi(out);
@@ -255,7 +238,7 @@ export function Step3b(props: {
       setErr(msg);
       props.onError(msg);
     } finally {
-      if (isMountedRef.current) setWorking(false);
+      setWorking(false);
     }
   }
 
@@ -271,10 +254,8 @@ export function Step3b(props: {
     if (intent === "skip") setWantsSub("no");
   }, []);
 
-  // ✅ Auto-skip ONLY when Step3 explicitly set intent === "skip"
-  // and the user has NOT navigated back.
+  // Auto-skip only when intent === skip
   useEffect(() => {
-    if (didUserNavigateBackRef.current) return;
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
     if (!tid || !resolvedIndustryKey) return;
@@ -286,7 +267,7 @@ export function Step3b(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, resolvedIndustryKey, wantsSub, nextQ?.id, isLocked]);
 
-  // Auto-start when wantsSub yes
+  // Auto-start when intent/refine or user chooses yes
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !resolvedIndustryKey) return;
@@ -344,34 +325,25 @@ export function Step3b(props: {
       props.onError(msg);
       lastSubmitRef.current = "";
     } finally {
-      if (isMountedRef.current) setWorking(false);
+      setWorking(false);
     }
   }
 
   const showPrompt = wantsSub === null;
 
-  // ✅ Manual "No" should skip (submit null) and proceed.
-  // BUT it should not mutate intentRef to "skip" (that caused back/forward weirdness).
   async function chooseNoAndSkip() {
-    if (working) return;
+    // No should immediately proceed (this is the answer)
     setWantsSub("no");
-    didAutoSkipRef.current = true; // prevent autoskip effect from double-firing
+    intentRef.current = "unknown";
     await saveAndContinue(null);
-  }
-
-  function handleBackClick() {
-    // Disarm any auto-skip that might still be pending in this instance
-    didUserNavigateBackRef.current = true;
-    didAutoSkipRef.current = true;
-    props.onBack();
   }
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">One more thing (optional)</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel
-        more “you” from day one.
+        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel more “you”
+        from day one.
       </div>
 
       {debugOn ? (
@@ -410,7 +382,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt */}
+      {/* Prompt (NO "Continue" button — user must choose Yes/No) */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -444,12 +416,11 @@ export function Step3b(props: {
             </button>
           </div>
 
-          {/* ✅ No Continue button here. User must pick Yes/No. */}
           <div className="mt-4">
             <button
               type="button"
               className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              onClick={handleBackClick}
+              onClick={props.onBack}
               disabled={working}
             >
               Back
@@ -521,7 +492,7 @@ export function Step3b(props: {
                 <button
                   type="button"
                   className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  onClick={handleBackClick}
+                  onClick={props.onBack}
                   disabled={working}
                 >
                   Back
@@ -581,7 +552,7 @@ export function Step3b(props: {
                 <button
                   type="button"
                   className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  onClick={handleBackClick}
+                  onClick={props.onBack}
                   disabled={working}
                 >
                   Back
@@ -598,7 +569,7 @@ export function Step3b(props: {
               </div>
 
               <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
-                If you’d rather skip this, go Back and choose “keep it broad”.
+                If you’d rather skip this, hit Back and choose “keep it broad”.
               </div>
             </div>
           ) : null}
