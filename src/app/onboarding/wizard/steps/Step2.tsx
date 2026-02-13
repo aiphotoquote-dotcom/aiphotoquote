@@ -152,8 +152,17 @@ export function Step2(props: {
   const aiErr = safeTrim(props.aiAnalysisError);
 
   const isRunning = aiStatus === "running";
-
   const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
+
+  // Debug support on mobile: add ?debug=1
+  const debugOn = useMemo(() => {
+    try {
+      const u = new URL(window.location.href);
+      return u.searchParams.get("debug") === "1";
+    } catch {
+      return false;
+    }
+  }, []);
 
   // suggested key (canonical-ish)
   const suggestedKey =
@@ -163,8 +172,10 @@ export function Step2(props: {
 
   const suggestedKeyNorm = useMemo(() => normalizeKey(suggestedKey), [suggestedKey]);
 
-  // raw long summary often lives here (this is what was blowing up the UI)
+  // raw long summary often lives here (we keep it in details only)
   const rawSummary =
+    safeTrim(pick(props.aiAnalysis, ["industryInterview.meta.debug.reason"])) ||
+    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.description"])) ||
     safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
@@ -194,14 +205,14 @@ export function Step2(props: {
   const didAutoRunRef = useRef(false);
   const autoRunKeyRef = useRef<string>("");
 
-  // show a "starting" state immediately when autorun triggers (prevents “button implies I must press it”)
+  // show a "starting" state immediately when autorun triggers
   const [autoStarting, setAutoStarting] = useState(false);
 
-  // Progress UI for "analysis running"
+  // Progress UI for running/starting
   const runStartRef = useRef<number | null>(null);
   const [runTick, setRunTick] = useState(0);
 
-  // Industry label lookup so we can show “Roofing Contracting” instead of the key or the AI essay
+  // Industry label lookup so we can show “Roofing Contracting” instead of the key
   const [industryLabelMap, setIndustryLabelMap] = useState<Record<string, string>>({});
   const [detailsOpen, setDetailsOpen] = useState(false);
 
@@ -235,13 +246,15 @@ export function Step2(props: {
     return industryLabelMap[suggestedKeyNorm] || "";
   }, [industryLabelMap, suggestedKeyNorm]);
 
-  // Treat this as the “industry name” we show in the proud moment:
-  // Prefer canonical label; fallback to a short version of rawSummary if no map hit.
+  // What we show as the proud moment “industry”
   const displayIndustryName = useMemo(() => {
     if (canonicalIndustryLabel) return canonicalIndustryLabel;
-    // fallback: if AI returned something short like "Roofing Contracting" use it; otherwise fallback to key
+
+    // fallback: if AI returned something short like "Roofing Contracting" use it
     const s = safeTrim(rawSummary);
     if (s && s.length <= 42) return s;
+
+    // last resort: prettify key
     if (suggestedKeyNorm) return suggestedKeyNorm.replace(/_/g, " ");
     return "your industry";
   }, [canonicalIndustryLabel, rawSummary, suggestedKeyNorm]);
@@ -253,25 +266,26 @@ export function Step2(props: {
     return "We matched your website content against known industry patterns.";
   }, [hasWebsite, conf]);
 
+  // ✅ Set/clear start time so progress doesn't jitter during autoStarting
   useEffect(() => {
-    if (isRunning && !runStartRef.current) runStartRef.current = Date.now();
-    if (!isRunning) runStartRef.current = null;
-  }, [isRunning]);
+    const busy = isRunning || autoStarting;
+    if (busy && !runStartRef.current) runStartRef.current = Date.now();
+    if (!busy) runStartRef.current = null;
+  }, [isRunning, autoStarting]);
 
   useEffect(() => {
-    if (!isRunning && !autoStarting) return;
+    if (!(isRunning || autoStarting)) return;
     const t = window.setInterval(() => setRunTick((x) => x + 1), 300);
     return () => window.clearInterval(t);
   }, [isRunning, autoStarting]);
 
   const runProgress = useMemo(() => {
-    // While autoStarting, show gentle ramp until server flips to running
     const start = runStartRef.current ?? Date.now();
     const elapsed = Date.now() - start;
 
+    // "Feels" like progress; caps at 95% until we flip to ready.
     const maxMs = 45_000;
-    const p = Math.min(0.95, Math.max(0.06, elapsed / maxMs));
-    return p;
+    return Math.min(0.95, Math.max(0.06, elapsed / maxMs));
   }, [runTick]);
 
   const runMessage = useMemo(() => {
@@ -336,7 +350,7 @@ export function Step2(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasWebsite, hasAnalysis, isRunning, tid]);
 
-  /* -------------------- Interview mode (unchanged) -------------------- */
+  /* -------------------- Interview mode (unchanged, kept as-is) -------------------- */
 
   const interviewFromProps: IndustryInterviewA | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
@@ -380,14 +394,6 @@ export function Step2(props: {
         .slice(0, 5)
     : [];
 
-  const debugOn = useMemo(() => {
-    try {
-      const u = new URL(window.location.href);
-      return u.searchParams.get("debug") === "1";
-    } catch {
-      return false;
-    }
-  }, []);
   const [lastApi, setLastApi] = useState<any>(null);
 
   async function postInterview(payload: any) {
@@ -541,7 +547,9 @@ export function Step2(props: {
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400">WEBSITE</div>
-                <div className="mt-1 truncate text-sm font-mono text-gray-800 dark:text-gray-200">{website.replace(/^https?:\/\//, "")}</div>
+                <div className="mt-1 truncate text-sm font-mono text-gray-800 dark:text-gray-200">
+                  {website.replace(/^https?:\/\//, "")}
+                </div>
               </div>
 
               <span
@@ -564,20 +572,23 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* Busy state: progress bar + message */}
+            {/* Busy state */}
             {showBusy ? (
               <div className="mt-4">
                 <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-                  <div className="h-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${Math.round(runProgress * 100)}%` }} />
+                  <div
+                    className="h-full bg-emerald-600 transition-[width] duration-300"
+                    style={{ width: `${Math.round(runProgress * 100)}%` }}
+                  />
                 </div>
                 <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
                 <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  This usually takes under a minute. You don’t need to press anything.
+                  You don’t need to press anything — we’ll advance when it’s ready.
                 </div>
               </div>
             ) : null}
 
-            {/* Not yet analyzed: show softer CTA (not scary “must press”) */}
+            {/* Not analyzed yet */}
             {!hasAnalysis && !showBusy ? (
               <div className="mt-4">
                 <button
@@ -621,7 +632,7 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* Analysis ready: clean proud moment */}
+            {/* Analysis ready */}
             {hasAnalysis && !showBusy ? (
               <div className="mt-4">
                 <div className="rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950 shadow-sm dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
@@ -651,12 +662,14 @@ export function Step2(props: {
                   {detailsOpen ? (
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
                       <div className="text-xs font-semibold opacity-80">Why we think this</div>
-                      <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
+
+                      {/* ✅ constrain on mobile; scroll instead of growing forever */}
+                      <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
                         {rawSummary ? rawSummary : "No additional details were provided by the analyzer."}
                       </div>
 
-                      {/* keep key only for debugging, not as the “moment” */}
-                      {suggestedKeyNorm ? (
+                      {/* ✅ internal key only in debug */}
+                      {debugOn && suggestedKeyNorm ? (
                         <div className="mt-3 text-[11px] opacity-70">
                           Internal key: <span className="font-mono">{suggestedKeyNorm}</span>
                         </div>
