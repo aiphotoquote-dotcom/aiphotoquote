@@ -1,6 +1,8 @@
+// src/app/onboarding/wizard/steps/Step3.tsx
+
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { IndustriesResponse, IndustryItem } from "../types";
 import { buildIndustriesUrl } from "../utils";
 
@@ -59,6 +61,12 @@ function isPlaceholder(key: string) {
 /**
  * Step3 -> Step3b intent (no server coupling).
  * Step3b reads and clears this.
+ *
+ * IMPORTANT:
+ * - Step3 should NOT set "skip" (that would skip Step3b).
+ * - We only ever set:
+ *   - "refine" when user explicitly chooses a refinement path (not used in this simplified Step3)
+ *   - "unknown" for normal flow
  */
 function setSubIntent(v: "refine" | "skip" | "unknown") {
   try {
@@ -90,9 +98,6 @@ export function Step3(props: {
   // defaults preview
   const [defaults, setDefaults] = useState<IndustryDefaults | null>(null);
   const [defaultsLoading, setDefaultsLoading] = useState(false);
-
-  // prevent auto-submit loops
-  const autoCommittedRef = useRef(false);
 
   const tid = safeTrim(props.tenantId);
 
@@ -143,7 +148,7 @@ export function Step3(props: {
       const hasSuggested = suggestedKey && list.some((x) => x.key === suggestedKey);
       const hasServer = serverSel && list.some((x) => x.key === serverSel);
 
-      // choose selection (but Step3 may auto-commit below)
+      // Prefer: wizard saved industry -> server -> AI suggestion
       let next =
         (hasWizard ? wizardSel : "") ||
         (hasServer ? serverSel : "") ||
@@ -198,56 +203,28 @@ export function Step3(props: {
     };
   }, [tid, selectedKey]);
 
-  async function commitIndustry(industryKey: string, intent: "refine" | "skip" | "unknown") {
+  async function commitIndustry(industryKey: string) {
     const k = safeTrim(industryKey);
     if (!k) throw new Error("Choose an industry.");
-    setSubIntent(intent);
+
+    // ✅ CRITICAL: never set "skip" from Step3. Step3b must still be shown.
+    setSubIntent("unknown");
+
     await props.onSubmit({ industryKey: k });
   }
 
-  /**
-   * ✅ Key behavior change:
-   * If the tenant already has a real industry (wizardSel) we should not “ask again”.
-   * We auto-commit (skip) and let the wizard advance to Step3b immediately.
-   */
-  useEffect(() => {
-    if (autoCommittedRef.current) return;
-    if (loading) return;
-    if (!tid) return;
-    if (!items.length) return;
-
-    const hasRealSaved = wizardSel && !isPlaceholder(wizardSel) && items.some((x) => x.key === wizardSel);
-    if (!hasRealSaved) return;
-
-    autoCommittedRef.current = true;
-
-    // ensure UI selection reflects saved value (for the brief moment it’s visible)
-    setSelectedKey(wizardSel);
-
-    // auto-advance; Step3b will see intent=skip
-    setSaving(true);
-    setErr(null);
-
-    commitIndustry(wizardSel, "skip")
-      .catch((e: any) => {
-        // If commit fails, unlock the page so user can proceed manually.
-        autoCommittedRef.current = false;
-        setErr(e?.message ?? String(e));
-      })
-      .finally(() => {
-        setSaving(false);
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, tid, items.length, wizardSel]);
+  const hasRealSaved = useMemo(() => {
+    if (loading) return false;
+    if (!wizardSel || isPlaceholder(wizardSel)) return false;
+    return items.some((x) => x.key === wizardSel);
+  }, [loading, wizardSel, items]);
 
   const showManualUI = useMemo(() => {
     // show manual UI when we DON'T have a real saved industry
     if (loading) return false;
-    if (!wizardSel) return true;
-    if (isPlaceholder(wizardSel)) return true;
-    if (!items.some((x) => x.key === wizardSel)) return true;
+    if (!hasRealSaved) return true;
     return false;
-  }, [loading, wizardSel, items]);
+  }, [loading, hasRealSaved]);
 
   return (
     <div>
@@ -256,8 +233,8 @@ export function Step3(props: {
         This locks in your default prompts, customer questions, and photo requests.
       </div>
 
-      {/* Auto-locking state (the “don’t ask again” fix) */}
-      {!showManualUI ? (
+      {/* Saved/locked state: DO NOT auto-advance. User must tap Continue. */}
+      {hasRealSaved && !showManualUI ? (
         <div className="mt-5 overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-50 p-5 text-emerald-950 shadow-sm dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
           <div className="text-[11px] font-semibold tracking-wide opacity-80">LOCKED IN</div>
 
@@ -269,35 +246,56 @@ export function Step3(props: {
             We’ll use this industry to generate your starter defaults. You can change it anytime later in Admin settings.
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <div
-              className={cn(
-                "rounded-full border px-3 py-1 text-xs font-semibold",
-                saving
-                  ? "border-emerald-200 bg-white text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100"
-                  : "border-emerald-200 bg-white text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100"
-              )}
-            >
-              {saving ? "Saving & continuing…" : "Continuing…"}
-            </div>
-
-            <button
-              type="button"
-              className="rounded-full border border-emerald-200 bg-transparent px-3 py-1 text-xs font-semibold hover:bg-white/50 dark:border-emerald-900/40 dark:hover:bg-black/20"
-              onClick={props.onReInterview}
-              disabled={saving}
-              title="Answer a few questions to change the industry suggestion"
-            >
-              Change / improve match
-            </button>
-          </div>
-
           {err ? (
             <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
               {err}
               <div className="mt-2 text-xs opacity-80">You can still select an industry manually below.</div>
             </div>
           ) : null}
+
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              className="rounded-2xl border border-emerald-200 bg-white py-3 text-sm font-semibold text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100"
+              onClick={props.onBack}
+              disabled={saving}
+            >
+              Back
+            </button>
+
+            <button
+              type="button"
+              className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+              disabled={saving || !wizardSel}
+              onClick={async () => {
+                setSaving(true);
+                setErr(null);
+                try {
+                  await commitIndustry(wizardSel);
+                } catch (e: any) {
+                  setErr(e?.message ?? String(e));
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              {saving ? "Saving…" : "Continue →"}
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className="mt-3 w-full rounded-2xl border border-emerald-200 bg-transparent py-3 text-sm font-semibold hover:bg-white/50 dark:border-emerald-900/40 dark:hover:bg-black/20"
+            onClick={() => {
+              // ensure we don't accidentally carry a prior "skip" forward
+              setSubIntent("unknown");
+              props.onReInterview();
+            }}
+            disabled={saving}
+            title="Answer a few questions to change the industry suggestion"
+          >
+            Change / improve match
+          </button>
         </div>
       ) : null}
 
@@ -309,7 +307,10 @@ export function Step3(props: {
             <button
               type="button"
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
-              onClick={props.onReInterview}
+              onClick={() => {
+                setSubIntent("unknown");
+                props.onReInterview();
+              }}
               disabled={saving}
             >
               Improve match
@@ -343,7 +344,9 @@ export function Step3(props: {
                 {selectedKey ? (
                   <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
                     <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">SELECTED</div>
-                    <div className="mt-1 text-lg font-bold text-gray-900 dark:text-gray-100">{selectedLabel || "Selected industry"}</div>
+                    <div className="mt-1 text-lg font-bold text-gray-900 dark:text-gray-100">
+                      {selectedLabel || "Selected industry"}
+                    </div>
                   </div>
                 ) : null}
 
@@ -413,7 +416,7 @@ export function Step3(props: {
                       try {
                         const key = safeTrim(selectedKey);
                         if (!key) throw new Error("Choose an industry.");
-                        await commitIndustry(key, "unknown");
+                        await commitIndustry(key);
                       } catch (e: any) {
                         setErr(e?.message ?? String(e));
                       } finally {
