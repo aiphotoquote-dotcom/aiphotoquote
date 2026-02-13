@@ -36,9 +36,7 @@ async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`
-    );
+    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`);
   }
   return (await res.json()) as T;
 }
@@ -81,9 +79,7 @@ function Card({
         <div
           className={cn(
             "mt-1 h-5 w-5 shrink-0 rounded-full border flex items-center justify-center",
-            selected
-              ? "border-emerald-600 bg-emerald-600"
-              : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
+            selected ? "border-emerald-600 bg-emerald-600" : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
           )}
         >
           {selected ? <div className="h-2 w-2 rounded-full bg-white" /> : null}
@@ -95,9 +91,8 @@ function Card({
 
 /**
  * NOTE:
- * “How do you charge?” does not exist in ai_policy yet (based on the file you pasted).
- * We still collect it here for UX and stash it in sessionStorage so we can wire it later
- * to tenant_settings without doing schema work today.
+ * “How do you charge?” is not wired to DB yet (tenant_settings).
+ * We collect it now for UX and stash in sessionStorage. We'll persist it later.
  */
 type PricingModel =
   | "flat_per_job"
@@ -129,10 +124,10 @@ export function Step5Pricing(props: {
   tenantId: string | null;
   ensureActiveTenant: (tid: string) => Promise<void>;
   onBack: () => void;
-  onContinue: () => void;
+  onSaved: () => void;
   onError: (m: string) => void;
 
-  // Optional: still allow jumping into full policy screen
+  // Optional: allow jumping into full policy screen
   onOpenAdvancedPolicy?: () => void;
 }) {
   const tid = safeTrim(props.tenantId);
@@ -146,7 +141,7 @@ export function Step5Pricing(props: {
   const [pricingEnabled, setPricingEnabled] = useState<boolean>(false);
 
   // keep the rest so we can re-post full policy without wiping settings
-  const [policyRest, setPolicyRest] = useState<PolicyResp extends any ? any : any>(null);
+  const [policyRest, setPolicyRest] = useState<any>(null);
 
   const [pricingModel, setPricingModel] = useState<PricingModel | "">("");
 
@@ -173,17 +168,18 @@ export function Step5Pricing(props: {
       // keep the rest so we can post back without clobbering
       setPolicyRest(data.ai_policy);
 
-      // restore cached “how you charge” (UX only for now)
+      // restore cached “how you charge”
       setPricingModel(readPricingModel());
     } catch (e: any) {
-      setErr(e?.message ?? String(e));
-      props.onError(e?.message ?? String(e));
+      const msg = e?.message ?? String(e);
+      setErr(msg);
+      props.onError(msg);
     } finally {
       setLoading(false);
     }
   }
 
-  async function save() {
+  async function saveAndContinue() {
     setErr(null);
     setSaving(true);
 
@@ -193,12 +189,14 @@ export function Step5Pricing(props: {
 
       if (!canEdit) throw new Error("You can view this step, but only owner/admin can save pricing policy.");
 
+      if (!pricingModel) throw new Error("Please choose how you usually charge before continuing.");
+
       if (!policyRest || typeof policyRest !== "object") {
         throw new Error("Policy not loaded yet. Please refresh and try again.");
       }
 
       // stash pricing model for now (future: persist in tenant_settings)
-      if (pricingModel) writePricingModel(pricingModel as PricingModel);
+      writePricingModel(pricingModel as PricingModel);
 
       const payload = {
         // what Step5 owns
@@ -232,7 +230,7 @@ export function Step5Pricing(props: {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
       setPolicyRest(data.ai_policy);
 
-      props.onContinue();
+      props.onSaved();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -268,6 +266,8 @@ export function Step5Pricing(props: {
     }
   }, [pricingModel]);
 
+  const canSave = Boolean(tid) && !loading && canEdit && Boolean(pricingModel) && !saving;
+
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Pricing setup</div>
@@ -276,25 +276,23 @@ export function Step5Pricing(props: {
       </div>
 
       <div className="mt-5 grid gap-4">
-        {/* Error */}
         {err ? (
           <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
             {err}
           </div>
         ) : null}
 
-        {/* Loading */}
         {loading ? (
           <div className="rounded-3xl border border-gray-200 bg-white p-5 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
             Loading pricing policy…
           </div>
         ) : (
           <>
-            {/* A) How they charge (UX now, persistence later) */}
+            {/* A) How they charge */}
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">How do you usually charge?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                This helps us tailor defaults. (We’ll persist this in tenant settings next.)
+                This helps tailor defaults. (We’ll persist this in tenant settings next.)
               </div>
 
               <div className="mt-4 grid gap-3">
@@ -440,15 +438,16 @@ export function Step5Pricing(props: {
               <button
                 type="button"
                 className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                onClick={() => save().catch(() => null)}
-                disabled={saving || loading || !tid || !canEdit}
+                onClick={() => saveAndContinue().catch(() => null)}
+                disabled={!canSave}
+                title={!pricingModel ? "Choose how you charge to continue" : undefined}
               >
-                {saving ? "Saving…" : "Continue →"}
+                {saving ? "Saving…" : "Save & continue →"}
               </button>
             </div>
 
             <div className="text-xs text-gray-500 dark:text-gray-400">
-              We’ll use this to control what the AI is allowed to show on quotes.
+              You can’t proceed until you choose how you charge (prevents skipping this step).
             </div>
           </>
         )}
