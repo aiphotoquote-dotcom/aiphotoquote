@@ -23,6 +23,36 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function titleFromKey(key: string) {
+  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
+  if (!s) return "Service";
+  return s
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+function looksLikeLabel(s: string) {
+  const t = safeTrim(s);
+  if (!t) return false;
+  // short-ish and not a full paragraph
+  if (t.length > 60) return false;
+  if (t.includes(".") || t.includes("!")) return false;
+  // avoid “This company is…” style sentences
+  const lower = t.toLowerCase();
+  if (lower.startsWith("this ") || lower.startsWith("they ") || lower.startsWith("we ")) return false;
+  return true;
+}
+
+function firstSentence(s: string) {
+  const t = safeTrim(s);
+  if (!t) return "";
+  const idx = t.indexOf(".");
+  if (idx === -1) return t;
+  return t.slice(0, idx + 1).trim();
+}
+
 /* -------------------- Interview (server) shapes -------------------- */
 
 type NextQuestion = {
@@ -140,34 +170,13 @@ function hasMeaningfulAnalysis(aiAnalysis: any): boolean {
   return Boolean(proposedKey || proposedLabel || suggestedKey || suggestedLabel || hasConf);
 }
 
-function compactUrl(raw: string) {
-  const s = safeTrim(raw);
-  if (!s) return "";
-  try {
-    const u = new URL(s);
-    const host = u.host.replace(/^www\./, "");
-    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
-    const shortPath = path.length > 28 ? `${path.slice(0, 28)}…` : path;
-    return `${host}${shortPath}${u.search ? "…" : ""}`;
-  } catch {
-    // fallback
-    return s.length > 42 ? `${s.slice(0, 42)}…` : s;
-  }
-}
-
-function scoreLabel(conf: number | null) {
-  if (conf == null) return "Working…";
-  if (conf >= 0.9) return "Very confident";
-  if (conf >= 0.75) return "Confident";
-  if (conf >= 0.6) return "Decent match";
-  return "Low confidence";
-}
-
-function confColor(conf: number | null) {
-  if (conf == null) return "bg-gray-100 text-gray-800 border-gray-200 dark:bg-black dark:text-gray-200 dark:border-gray-800";
-  if (conf >= 0.85) return "bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-100 dark:border-emerald-900/40";
-  if (conf >= 0.7) return "bg-sky-50 text-sky-900 border-sky-200 dark:bg-sky-950/30 dark:text-sky-100 dark:border-sky-900/40";
-  return "bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/40";
+function confidenceLabel(conf: number | null) {
+  if (conf == null) return "Confidence unavailable";
+  const p = Math.round(conf * 100);
+  if (p >= 90) return `Very confident • ${p}%`;
+  if (p >= 75) return `Confident • ${p}%`;
+  if (p >= 55) return `Somewhat confident • ${p}%`;
+  return `Low confidence • ${p}%`;
 }
 
 export function Step2(props: {
@@ -196,17 +205,17 @@ export function Step2(props: {
 
   const isRunning = aiStatus === "running";
 
+  // ✅ IMPORTANT: do NOT treat a non-empty aiAnalysis object as "done" unless it has real signals.
   const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
-  const suggestedLabel =
+  const rawSuggestedLabel =
     safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
     safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
     safeTrim(pick(props.aiAnalysis, ["business_guess"])) ||
     "";
 
-  // keep key internally (not shown)
-  const suggestedKey =
+  const rawSuggestedKey =
     safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.key"])) ||
     safeTrim(pick(props.aiAnalysis, ["suggestedIndustryKey", "suggested_industry_key"])) ||
     "";
@@ -234,26 +243,33 @@ export function Step2(props: {
   const didAutoRunRef = useRef(false);
   const autoRunKeyRef = useRef<string>("");
 
+  // ✅ NEW: local “starting” state to prevent the “Run analysis now” flash
+  const [localStartPending, setLocalStartPending] = useState(false);
+
+  useEffect(() => {
+    // if server reports running or we already have analysis, stop showing “starting”
+    if (isRunning || hasAnalysis || aiErr) setLocalStartPending(false);
+  }, [isRunning, hasAnalysis, aiErr]);
+
   // Progress UI for "analysis running"
   const runStartRef = useRef<number | null>(null);
   const [runTick, setRunTick] = useState(0);
 
-  // Optional: show a simple “why we think so” panel (collapsed by default)
-  const [showWhy, setShowWhy] = useState(false);
+  const isBusy = isRunning || localStartPending;
 
   useEffect(() => {
-    if (isRunning && !runStartRef.current) runStartRef.current = Date.now();
-    if (!isRunning) runStartRef.current = null;
-  }, [isRunning]);
+    if (isBusy && !runStartRef.current) runStartRef.current = Date.now();
+    if (!isBusy) runStartRef.current = null;
+  }, [isBusy]);
 
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isBusy) return;
     const t = window.setInterval(() => setRunTick((x) => x + 1), 300);
     return () => window.clearInterval(t);
-  }, [isRunning]);
+  }, [isBusy]);
 
   const runProgress = useMemo(() => {
-    if (!isRunning) return 0;
+    if (!isBusy) return 0;
     const start = runStartRef.current ?? Date.now();
     const elapsed = Date.now() - start;
 
@@ -261,26 +277,29 @@ export function Step2(props: {
     const maxMs = 45_000;
     const p = Math.min(0.95, Math.max(0.06, elapsed / maxMs));
     return p;
-  }, [isRunning, runTick]);
+  }, [isBusy, runTick]);
 
   const runMessage = useMemo(() => {
-    if (!isRunning) return "";
+    if (!isBusy) return "";
     const msgs = [
+      "Starting analysis…",
       "Fetching website content…",
       "Extracting services & keywords…",
       "Comparing against industry patterns…",
-      "Choosing the best match…",
-      "Finalizing recommendation…",
+      "Preparing a recommended setup…",
+      "Finalizing results…",
     ];
     const idx = Math.min(msgs.length - 1, Math.floor(runProgress * msgs.length));
     return msgs[idx] ?? "Analyzing…";
-  }, [isRunning, runProgress]);
+  }, [isBusy, runProgress]);
 
+  // ✅ Reset auto-run guard whenever tenantId or website changes
   useEffect(() => {
     const k = `${tid || "(no-tenant)"}|${website || "(no-website)"}`;
     if (autoRunKeyRef.current !== k) {
       autoRunKeyRef.current = k;
       didAutoRunRef.current = false;
+      setLocalStartPending(false);
     }
   }, [tid, website]);
 
@@ -292,33 +311,39 @@ export function Step2(props: {
     if (working) return;
 
     setWorking(true);
+    setLocalStartPending(true); // ✅ prevents idle flash immediately
     try {
       await props.onRun();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       props.onError(msg);
+      setLocalStartPending(false);
     } finally {
       setWorking(false);
     }
   }
 
   useEffect(() => {
+    // If no website, interview immediately.
     if (!hasWebsite) {
       setShowInterview(true);
       return;
     }
 
+    // Website exists -> analysis mode by default.
     setShowInterview(false);
 
+    // If analysis already exists or is currently busy, do nothing.
     if (hasAnalysis) return;
-    if (isRunning) return;
+    if (isBusy) return;
 
+    // ✅ Auto-run analysis once (per tenant+website), only if we have tenantId.
     if (!didAutoRunRef.current && tid) {
       didAutoRunRef.current = true;
       runAnalysisSafely().catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, hasAnalysis, isRunning, tid]);
+  }, [hasWebsite, hasAnalysis, isBusy, tid]);
 
   /* -------------------- Interview state (unchanged, but gated) -------------------- */
 
@@ -364,6 +389,7 @@ export function Step2(props: {
         .slice(0, 5)
     : [];
 
+  // Debug support on mobile: add ?debug=1
   const debugOn = useMemo(() => {
     try {
       const u = new URL(window.location.href);
@@ -402,6 +428,7 @@ export function Step2(props: {
     }
   }
 
+  // Only auto-start interview if we are in interview mode.
   useEffect(() => {
     if (!showInterview) return;
     startIfNeeded().catch(() => null);
@@ -486,13 +513,28 @@ export function Step2(props: {
     }
   }
 
-  const statusPill = useMemo(() => {
-    if (isRunning) return { text: "Analyzing", cls: "bg-slate-50 text-slate-800 border-slate-200 dark:bg-black dark:text-slate-200 dark:border-slate-800" };
-    if (hasAnalysis) return { text: "Analysis ready", cls: "bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-100 dark:border-emerald-900/40" };
-    return { text: "Not analyzed yet", cls: "bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/40" };
-  }, [isRunning, hasAnalysis]);
+  /* -------------------- Pretty output for analysis -------------------- */
 
-  const headline = suggestedLabel ? suggestedLabel : hasAnalysis ? "Industry detected" : "Website analysis";
+  // Industry “proud moment”
+  const prettyIndustryName = useMemo(() => {
+    // If we have a clean label, use it. Otherwise use titleFromKey(key).
+    if (looksLikeLabel(rawSuggestedLabel)) return rawSuggestedLabel;
+    if (rawSuggestedKey) return titleFromKey(rawSuggestedKey);
+    // fallback: try to derive something from the long label
+    const first = firstSentence(rawSuggestedLabel);
+    if (looksLikeLabel(first)) return first;
+    return "Your industry";
+  }, [rawSuggestedLabel, rawSuggestedKey]);
+
+  const rationaleShort = useMemo(() => {
+    // Use the long label as rationale if it's sentence-like
+    const t = safeTrim(rawSuggestedLabel);
+    if (!t) return "";
+    if (looksLikeLabel(t)) return ""; // already used as industry name
+    return firstSentence(t);
+  }, [rawSuggestedLabel]);
+
+  const [showDetails, setShowDetails] = useState(false);
 
   return (
     <div>
@@ -501,26 +543,27 @@ export function Step2(props: {
         <>
           <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Website analysis</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            We’ll analyze your website to predict your industry — then you can confirm or correct it.
+            We’ll analyze your website to recommend an industry setup — then you’ll confirm it to lock in your defaults.
           </div>
 
-          <div className="mt-4 rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-            {/* Top row: website + status */}
+          <div className="mt-4 rounded-3xl border border-gray-200 bg-white p-4 text-sm shadow-sm dark:border-gray-800 dark:bg-gray-950">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Website</div>
-                <div className="mt-1 break-words font-mono text-xs text-gray-800 dark:text-gray-200">
-                  {compactUrl(website)}
-                </div>
+                <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400">WEBSITE</div>
+                <div className="mt-1 break-all font-mono text-xs text-gray-800 dark:text-gray-200">{website}</div>
               </div>
 
               <span
                 className={cn(
-                  "shrink-0 inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold",
-                  statusPill.cls
+                  "shrink-0 inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
+                  isBusy
+                    ? "border-slate-200 bg-slate-50 text-slate-800 dark:border-slate-800 dark:bg-black dark:text-slate-200"
+                    : hasAnalysis
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                    : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
                 )}
               >
-                {statusPill.text}
+                {isBusy ? "Analyzing…" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
               </span>
             </div>
 
@@ -530,203 +573,152 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* RUNNING: progress + messaging */}
-            {isRunning ? (
-              <div className="mt-4 rounded-3xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Analyzing your site</div>
-                  <div className="text-xs font-mono text-gray-600 dark:text-gray-300">{Math.round(runProgress * 100)}%</div>
-                </div>
-
-                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+            {/* Running details: progress + explanation */}
+            {isBusy ? (
+              <div className="mt-4">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
                   <div
                     className="h-full bg-emerald-600 transition-[width] duration-300"
                     style={{ width: `${Math.round(runProgress * 100)}%` }}
                   />
                 </div>
-
                 <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
               </div>
             ) : null}
 
-            {/* NOT READY: CTA */}
-            {!hasAnalysis ? (
-              <div className="mt-4">
-                <div className="rounded-3xl border border-gray-200 bg-white p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">What we look for</div>
-                  <div className="mt-3 grid gap-3">
-                    <div className="flex gap-3">
-                      <div className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-xs font-bold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                        1
-                      </div>
-                      <div className="min-w-0">
-                        <div className="font-semibold">Services & keywords</div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">
-                          We scan page text to understand what you sell and how you describe it.
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-3">
-                      <div className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-xs font-bold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                        2
-                      </div>
-                      <div className="min-w-0">
-                        <div className="font-semibold">Industry signals</div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">
-                          We compare your signals against known patterns to find the best match.
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex gap-3">
-                      <div className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-gray-50 text-xs font-bold text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                        3
-                      </div>
-                      <div className="min-w-0">
-                        <div className="font-semibold">A suggested setup</div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">
-                          We produce an industry suggestion so your defaults feel right from day one.
-                        </div>
-                      </div>
+            {/* Pre-run: show what we look for (compact, not a big box) */}
+            {!hasAnalysis && !isBusy ? (
+              <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">What we look for</div>
+                <div className="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-300">
+                  <div className="flex gap-2">
+                    <span className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-white text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                      1
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-semibold">Services & keywords</div>
+                      <div className="text-sm opacity-80">We scan page text to understand what you sell and how you describe it.</div>
                     </div>
                   </div>
 
-                  <div className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                    You can always correct it in the next step.
+                  <div className="flex gap-2">
+                    <span className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-white text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                      2
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-semibold">Industry signals</div>
+                      <div className="text-sm opacity-80">We compare your signals against known patterns to find the best match.</div>
+                    </div>
                   </div>
+
+                  <div className="flex gap-2">
+                    <span className="mt-0.5 inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200 bg-white text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                      3
+                    </span>
+                    <div className="min-w-0">
+                      <div className="font-semibold">A recommended setup</div>
+                      <div className="text-sm opacity-80">We propose an industry so your defaults feel right from day one.</div>
+                    </div>
+                  </div>
+
+                  <div className="pt-1 text-xs text-gray-500 dark:text-gray-400">You can always correct it in the next step.</div>
                 </div>
+              </div>
+            ) : null}
+
+            {/* Results */}
+            {hasAnalysis ? (
+              <div className="mt-4 rounded-3xl border border-gray-200 bg-gray-50 p-5 text-center dark:border-gray-800 dark:bg-black">
+                <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400">WE RECOMMEND</div>
+
+                <div className="mt-2 text-3xl font-black leading-tight text-gray-900 dark:text-gray-100">{prettyIndustryName}</div>
+
+                <div className="mt-3 inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                  {confidenceLabel(conf)}
+                </div>
+
+                {rationaleShort ? (
+                  <div className="mt-3 text-sm text-gray-700 dark:text-gray-300">{rationaleShort}</div>
+                ) : (
+                  <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">Based on your website content, services, and keywords.</div>
+                )}
 
                 <button
                   type="button"
-                  className="mt-4 w-full rounded-2xl bg-black py-3.5 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                  onClick={() => runAnalysisSafely().catch(() => null)}
-                  disabled={working || isRunning || !tid}
+                  className="mt-4 text-sm font-semibold text-gray-900 underline underline-offset-4 opacity-80 hover:opacity-100 dark:text-gray-100"
+                  onClick={() => setShowDetails((v) => !v)}
                 >
-                  {isRunning ? "Analyzing…" : "Run analysis now"}
+                  {showDetails ? "Hide details" : "Show details"}
                 </button>
 
-                <div className="mt-3 grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    onClick={props.onBack}
-                    disabled={working}
-                  >
-                    Back
-                  </button>
+                {showDetails ? (
+                  <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-3 text-left text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                    {rawSuggestedKey ? (
+                      <div>
+                        <div className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">Industry key</div>
+                        <div className="mt-1 font-mono">{rawSuggestedKey}</div>
+                      </div>
+                    ) : null}
 
-                  <button
-                    type="button"
-                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 opacity-60 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    onClick={() => {
-                      // no-op: user must run analysis or go back
-                    }}
-                    disabled
-                    title="Run analysis to continue"
-                  >
-                    Continue →
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* READY: proud moment + confirm */
-              <div className="mt-4">
-                <div className="rounded-3xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
-                  <div className="text-center">
-                    <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                      Identified industry
-                    </div>
+                    {safeTrim(rawSuggestedLabel) && !looksLikeLabel(rawSuggestedLabel) ? (
+                      <div className={cn("mt-3", !rawSuggestedKey && "mt-0")}>
+                        <div className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">AI summary</div>
+                        <div className="mt-1 whitespace-pre-wrap break-words">{rawSuggestedLabel}</div>
+                      </div>
+                    ) : null}
 
-                    <div className="mt-2 text-2xl font-extrabold leading-tight text-gray-900 dark:text-gray-100">
-                      {headline}
-                    </div>
-
-                    <div className="mt-3 flex items-center justify-center gap-2">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold",
-                          confColor(conf)
-                        )}
-                      >
-                        {scoreLabel(conf)} • {pct(conf)}
-                      </span>
-
-                      {fit !== null ? (
-                        <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                          Fit {pct(fit)}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-                      Based on your website content, services, and keywords.
-                    </div>
-
-                    {/* Optional “why” panel */}
-                    <div className="mt-4">
-                      <button
-                        type="button"
-                        className="text-xs font-semibold text-gray-700 underline underline-offset-4 hover:opacity-80 dark:text-gray-300"
-                        onClick={() => setShowWhy((v) => !v)}
-                      >
-                        {showWhy ? "Hide details" : "Show details"}
-                      </button>
-
-                      {showWhy ? (
-                        <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 text-left text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                          <div className="font-semibold text-gray-900 dark:text-gray-100">What we saw</div>
-                          <ul className="mt-2 list-disc space-y-1 pl-5">
-                            <li>Service terms and descriptions that match this industry</li>
-                            <li>Navigation and page structure common to similar businesses</li>
-                            <li>Keyword patterns consistent with a known industry profile</li>
-                          </ul>
-
-                          {debugOn && suggestedKey ? (
-                            <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-3 font-mono text-[11px] text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                              debug.key: {suggestedKey}
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
+                    <div className="mt-3 text-[11px] text-gray-500 dark:text-gray-400">
+                      Next step: you’ll confirm this industry to lock your default prompts, photo requests, and questions.
                     </div>
                   </div>
-                </div>
+                ) : null}
+              </div>
+            ) : null}
 
-                <div className="mt-4 grid grid-cols-2 gap-3">
+            {/* Actions */}
+            <div className="mt-4 grid gap-2">
+              {!hasAnalysis ? (
+                <button
+                  type="button"
+                  className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  onClick={() => runAnalysisSafely().catch(() => null)}
+                  disabled={working || isBusy || !tid}
+                >
+                  {isBusy ? "Analyzing…" : aiErr ? "Retry analysis" : "Run analysis now"}
+                </button>
+              ) : (
+                <>
+                  <div className="mt-1 grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                      onClick={props.onBack}
+                      disabled={working}
+                    >
+                      Back
+                    </button>
+
+                    <button
+                      type="button"
+                      className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                      onClick={() => handleConfirmYes().catch(() => null)}
+                      disabled={working || !tid}
+                    >
+                      Yes, that’s right →
+                    </button>
+                  </div>
+
                   <button
                     type="button"
-                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    onClick={props.onBack}
-                    disabled={working}
-                  >
-                    Back
-                  </button>
-
-                  <button
-                    type="button"
-                    className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                    onClick={() => handleConfirmYes().catch(() => null)}
+                    className="mt-2 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                    onClick={() => handleConfirmNo().catch(() => null)}
                     disabled={working || !tid}
                   >
-                    Yes, that’s right →
+                    Not quite — improve match
                   </button>
-                </div>
-
-                <button
-                  type="button"
-                  className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-                  onClick={() => handleConfirmNo().catch(() => null)}
-                  disabled={working || !tid}
-                >
-                  Not quite — improve match
-                </button>
-
-                <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-                  If you disagree, we’ll ask a few quick questions to lock the correct industry.
-                </div>
-              </div>
-            )}
+                </>
+              )}
+            </div>
           </div>
         </>
       ) : (
