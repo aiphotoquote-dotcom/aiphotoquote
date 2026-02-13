@@ -7,13 +7,24 @@ import React from "react";
 export function HandoffStep(props: {
   title: string;
   desc: string;
+
   primaryLabel: string;
   onPrimary: () => void;
+
   onBack: () => void;
-  onContinue: () => void;
-  note?: string;
+
+  /**
+   * Continue is intentionally optional and OFF by default.
+   * This prevents users from skipping questions/required setup steps.
+   */
+  onContinue?: () => void;
+  showContinue?: boolean;
   continueLabel?: string;
+
+  note?: string;
 }) {
+  const showContinue = Boolean(props.onContinue) && props.showContinue === true;
+
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">{props.title}</div>
@@ -34,7 +45,7 @@ export function HandoffStep(props: {
           {props.primaryLabel}
         </button>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className={showContinue ? "grid grid-cols-2 gap-3" : "grid grid-cols-1 gap-3"}>
           <button
             type="button"
             className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
@@ -42,13 +53,16 @@ export function HandoffStep(props: {
           >
             Back
           </button>
-          <button
-            type="button"
-            className="rounded-2xl bg-black py-3 text-sm font-semibold text-white dark:bg-white dark:text-black"
-            onClick={props.onContinue}
-          >
-            {props.continueLabel ?? "Continue"}
-          </button>
+
+          {showContinue ? (
+            <button
+              type="button"
+              className="rounded-2xl bg-black py-3 text-sm font-semibold text-white dark:bg-white dark:text-black"
+              onClick={props.onContinue}
+            >
+              {props.continueLabel ?? "Continue"}
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

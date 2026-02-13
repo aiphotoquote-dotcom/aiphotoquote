@@ -27,6 +27,19 @@ type PolicyResp =
     }
   | { ok: false; error: string; message?: string; issues?: any };
 
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+type PricingResp =
+  | { ok: true; tenantId: string; pricingModel: PricingModel | null }
+  | { ok: false; error: string; message?: string; issues?: any };
+
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -36,7 +49,9 @@ async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`);
+    throw new Error(
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`
+    );
   }
   return (await res.json()) as T;
 }
@@ -79,7 +94,9 @@ function Card({
         <div
           className={cn(
             "mt-1 h-5 w-5 shrink-0 rounded-full border flex items-center justify-center",
-            selected ? "border-emerald-600 bg-emerald-600" : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
+            selected
+              ? "border-emerald-600 bg-emerald-600"
+              : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
           )}
         >
           {selected ? <div className="h-2 w-2 rounded-full bg-white" /> : null}
@@ -89,45 +106,14 @@ function Card({
   );
 }
 
-/**
- * NOTE:
- * “How do you charge?” is not wired to DB yet (tenant_settings).
- * We collect it now for UX and stash in sessionStorage. We'll persist it later.
- */
-type PricingModel =
-  | "flat_per_job"
-  | "hourly_plus_materials"
-  | "per_unit"
-  | "packages"
-  | "line_items"
-  | "inspection_only"
-  | "assessment_fee";
-
-function readPricingModel(): PricingModel | "" {
-  try {
-    const v = window.sessionStorage.getItem("apq_onboarding_pricing_model") || "";
-    return (v as any) || "";
-  } catch {
-    return "";
-  }
-}
-
-function writePricingModel(v: PricingModel) {
-  try {
-    window.sessionStorage.setItem("apq_onboarding_pricing_model", v);
-  } catch {
-    // ignore
-  }
-}
-
 export function Step5Pricing(props: {
   tenantId: string | null;
   ensureActiveTenant: (tid: string) => Promise<void>;
   onBack: () => void;
-  onSaved: () => void;
+  onContinue: () => void;
   onError: (m: string) => void;
 
-  // Optional: allow jumping into full policy screen
+  // Optional: still allow jumping into full policy screen
   onOpenAdvancedPolicy?: () => void;
 }) {
   const tid = safeTrim(props.tenantId);
@@ -157,6 +143,7 @@ export function Step5Pricing(props: {
 
       await props.ensureActiveTenant(tid);
 
+      // load AI policy
       const res = await fetch("/api/admin/ai-policy", { cache: "no-store", credentials: "include" });
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to load AI policy");
@@ -164,12 +151,17 @@ export function Step5Pricing(props: {
       setRole(data.role);
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
-
-      // keep the rest so we can post back without clobbering
       setPolicyRest(data.ai_policy);
 
-      // restore cached “how you charge”
-      setPricingModel(readPricingModel());
+      // load pricing model from tenant_settings (durable)
+      const pres = await fetch(`/api/onboarding/pricing?tenantId=${encodeURIComponent(tid)}`, {
+        cache: "no-store",
+        credentials: "include",
+      });
+      const pj = await safeJson<PricingResp>(pres);
+      if (!pj.ok) throw new Error(pj.message || pj.error || "Failed to load pricing model");
+
+      setPricingModel((pj.pricingModel ?? "") as any);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -179,7 +171,25 @@ export function Step5Pricing(props: {
     }
   }
 
-  async function saveAndContinue() {
+  async function savePricingModel() {
+    if (!tid) throw new Error("NO_TENANT: missing tenantId.");
+    await props.ensureActiveTenant(tid);
+
+    const res = await fetch("/api/onboarding/pricing", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        tenantId: tid,
+        pricingModel: pricingModel ? pricingModel : null,
+      }),
+    });
+
+    const j = await safeJson<PricingResp>(res);
+    if (!j.ok) throw new Error(j.message || j.error || "Failed to save pricing model");
+  }
+
+  async function save() {
     setErr(null);
     setSaving(true);
 
@@ -189,14 +199,12 @@ export function Step5Pricing(props: {
 
       if (!canEdit) throw new Error("You can view this step, but only owner/admin can save pricing policy.");
 
-      if (!pricingModel) throw new Error("Please choose how you usually charge before continuing.");
-
       if (!policyRest || typeof policyRest !== "object") {
         throw new Error("Policy not loaded yet. Please refresh and try again.");
       }
 
-      // stash pricing model for now (future: persist in tenant_settings)
-      writePricingModel(pricingModel as PricingModel);
+      // ✅ persist the pricing model first (durable tenant_settings)
+      await savePricingModel();
 
       const payload = {
         // what Step5 owns
@@ -230,7 +238,7 @@ export function Step5Pricing(props: {
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
       setPolicyRest(data.ai_policy);
 
-      props.onSaved();
+      props.onContinue();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -266,8 +274,6 @@ export function Step5Pricing(props: {
     }
   }, [pricingModel]);
 
-  const canSave = Boolean(tid) && !loading && canEdit && Boolean(pricingModel) && !saving;
-
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Pricing setup</div>
@@ -288,11 +294,11 @@ export function Step5Pricing(props: {
           </div>
         ) : (
           <>
-            {/* A) How they charge */}
+            {/* A) How they charge (now durable) */}
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">How do you usually charge?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                This helps tailor defaults. (We’ll persist this in tenant settings next.)
+                We’ll store this in your tenant settings so your defaults and future pricing rules match how you work.
               </div>
 
               <div className="mt-4 grid gap-3">
@@ -438,16 +444,15 @@ export function Step5Pricing(props: {
               <button
                 type="button"
                 className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                onClick={() => saveAndContinue().catch(() => null)}
-                disabled={!canSave}
-                title={!pricingModel ? "Choose how you charge to continue" : undefined}
+                onClick={() => save().catch(() => null)}
+                disabled={saving || loading || !tid || !canEdit}
               >
-                {saving ? "Saving…" : "Save & continue →"}
+                {saving ? "Saving…" : "Continue →"}
               </button>
             </div>
 
             <div className="text-xs text-gray-500 dark:text-gray-400">
-              You can’t proceed until you choose how you charge (prevents skipping this step).
+              We’ll use this to control what the AI is allowed to show on quotes.
             </div>
           </>
         )}

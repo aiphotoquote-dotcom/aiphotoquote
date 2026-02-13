@@ -161,7 +161,11 @@ export const tenantSubIndustries = pgTable(
   },
   (t) => ({
     // ✅ NEW unique key includes industryKey
-    tenantIndustryKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_industry_key_key_uq").on(t.tenantId, t.industryKey, t.key),
+    tenantIndustryKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_industry_key_key_uq").on(
+      t.tenantId,
+      t.industryKey,
+      t.key
+    ),
 
     // ✅ fast reads by tenant+industry
     tenantIndustryIdx: index("tenant_sub_industries_tenant_id_industry_key_idx").on(t.tenantId, t.industryKey),
@@ -227,6 +231,10 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
+
+  // ✅ NEW: how the business charges (used for defaults + future rules)
+  // flat_per_job | hourly_plus_materials | per_unit | packages | line_items | inspection_only | assessment_fee
+  pricingModel: text("pricing_model"),
 
   // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),
