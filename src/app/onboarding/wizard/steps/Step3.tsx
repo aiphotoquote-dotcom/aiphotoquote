@@ -43,7 +43,8 @@ function safeTrim(v: any) {
   return s ? s : "";
 }
 
-function normalizeKey(raw: string) {
+// ✅ accept any so callers can pass optional keys without TS errors
+function normalizeKey(raw: any) {
   const s = safeTrim(raw).toLowerCase();
   if (!s) return "";
   return s
@@ -149,15 +150,9 @@ export function Step3(props: {
   }, [wizardSel, labelMap]);
 
   const showRecommendedUI = useMemo(() => {
-    // Prefer the AI “recommended industry” UI whenever we have a recommendation.
     if (!suggestedKey) return false;
-    // Also require that this key exists in our industries list when possible
-    if (items.length && !items.some((x) => normalizeKey(x.key) === suggestedKey)) {
-      // still show it (AI can be right even if list loads late), but we’ll fall back gracefully
-      return true;
-    }
     return true;
-  }, [suggestedKey, items]);
+  }, [suggestedKey]);
 
   async function loadIndustries() {
     setErr(null);
@@ -172,11 +167,16 @@ export function Step3(props: {
       const list = Array.isArray(j.industries) ? j.industries : [];
       setItems(list);
 
-      // Choose a reasonable default selection for manual fallback UI
       const hasWizard = wizardSel && list.some((x) => normalizeKey(x.key) === wizardSel);
       const hasSuggested = suggestedKey && list.some((x) => normalizeKey(x.key) === suggestedKey);
 
-      const next = (hasSuggested ? suggestedKey : "") || (hasWizard ? wizardSel : "") || normalizeKey(list.find((x) => normalizeKey(x.key) !== "service")?.key) || normalizeKey(list[0]?.key) || "";
+      const next =
+        (hasSuggested ? suggestedKey : "") ||
+        (hasWizard ? wizardSel : "") ||
+        normalizeKey(list.find((x) => normalizeKey(x.key) !== "service")?.key) ||
+        normalizeKey(list[0]?.key) ||
+        "";
+
       setSelectedKey(next);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -282,7 +282,6 @@ export function Step3(props: {
             </div>
           ) : null}
 
-          {/* ✅ No auto-advance. User must explicitly confirm or correct. */}
           <div className="mt-5 grid grid-cols-2 gap-3">
             <button
               type="button"
@@ -301,7 +300,6 @@ export function Step3(props: {
                 setSaving(true);
                 setErr(null);
                 try {
-                  // prefer saved (wizard) industry if present; else use suggested
                   const key = wizardSel || suggestedKey;
                   if (!key) throw new Error("Missing industry selection.");
                   await commitIndustry(key);
@@ -327,7 +325,6 @@ export function Step3(props: {
           </button>
         </div>
       ) : (
-        /* Manual fallback UI (only if we truly have no AI recommendation) */
         <div className="mt-5 overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-4 dark:border-gray-900">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Choose the best match</div>
@@ -359,7 +356,6 @@ export function Step3(props: {
                   ))}
                 </select>
 
-                {/* Starter pack preview */}
                 <div className="mt-2">
                   {defaultsLoading ? (
                     <div className="text-sm text-gray-600 dark:text-gray-300">Loading starter defaults…</div>
