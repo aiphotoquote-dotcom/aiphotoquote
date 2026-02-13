@@ -106,18 +106,6 @@ function readAndClearSubIntent(): "refine" | "skip" | "unknown" {
   }
 }
 
-function Spinner({ className }: { className?: string }) {
-  return (
-    <span
-      className={cn(
-        "inline-block h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-gray-900 dark:border-gray-700 dark:border-t-gray-200",
-        className
-      )}
-      aria-hidden="true"
-    />
-  );
-}
-
 export function Step3b(props: {
   tenantId: string | null;
   industryKey: string;
@@ -202,9 +190,6 @@ export function Step3b(props: {
   // null => haven't answered prompt yet
   const [wantsSub, setWantsSub] = useState<"yes" | "no" | null>(null);
 
-  // ✅ "Skipping…" UX while we auto-continue after a "No"
-  const [skipInFlight, setSkipInFlight] = useState(false);
-
   const [textAnswer, setTextAnswer] = useState("");
   const [choiceAnswer, setChoiceAnswer] = useState<string>("");
 
@@ -212,6 +197,22 @@ export function Step3b(props: {
   const didHydrateIntentRef = useRef(false);
   const intentRef = useRef<"refine" | "skip" | "unknown">("unknown");
   const didAutoSkipRef = useRef(false);
+
+  // ✅ prevent “Back flashes then immediately advances”:
+  // We delay autoskip slightly and cancel it if user navigates away.
+  const leavingRef = useRef(false);
+  const autoSkipTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    leavingRef.current = false;
+    return () => {
+      leavingRef.current = true;
+      if (autoSkipTimerRef.current) {
+        window.clearTimeout(autoSkipTimerRef.current);
+        autoSkipTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     setErr(null);
@@ -221,15 +222,20 @@ export function Step3b(props: {
   }, [nextQ?.id]);
 
   async function saveAndContinue(label: string | null) {
+    if (leavingRef.current) return;
+
     setWorking(true);
     setErr(null);
     try {
+      // If user hit Back while we were about to submit, do nothing.
+      if (leavingRef.current) return;
       await props.onSubmit({ subIndustryLabel: label });
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
       props.onError(msg);
     } finally {
+      if (leavingRef.current) return;
       setWorking(false);
     }
   }
@@ -251,6 +257,7 @@ export function Step3b(props: {
       // - if defaults exist => returns select question
       // - else => opens LLM interview
       const out = await postSubInterview({ mode: "SUB", tenantId: tid, industryKey: resolvedIndustryKey, action: "start" });
+      if (leavingRef.current) return;
       setState(out.subIndustryInterview);
       if (debugOn) setLastApi(out);
     } catch (e: any) {
@@ -258,6 +265,7 @@ export function Step3b(props: {
       setErr(msg);
       props.onError(msg);
     } finally {
+      if (leavingRef.current) return;
       setWorking(false);
     }
   }
@@ -275,18 +283,28 @@ export function Step3b(props: {
   }, []);
 
   // ✅ Auto-skip when intent === skip and wantsSub is "no"
+  // IMPORTANT: delay slightly so a user can hit Back without getting “pulled forward” by the async submit.
   useEffect(() => {
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
     if (!tid || !resolvedIndustryKey) return;
     if (nextQ?.id || isLocked) return;
     if (didAutoSkipRef.current) return;
+    if (leavingRef.current) return;
 
     didAutoSkipRef.current = true;
-    setSkipInFlight(true);
-    saveAndContinue(null)
-      .catch(() => null)
-      .finally(() => setSkipInFlight(false));
+
+    // cancel any prior timer
+    if (autoSkipTimerRef.current) {
+      window.clearTimeout(autoSkipTimerRef.current);
+      autoSkipTimerRef.current = null;
+    }
+
+    autoSkipTimerRef.current = window.setTimeout(() => {
+      autoSkipTimerRef.current = null;
+      if (leavingRef.current) return;
+      saveAndContinue(null).catch(() => null);
+    }, 250);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, resolvedIndustryKey, wantsSub, nextQ?.id, isLocked]);
 
@@ -296,6 +314,7 @@ export function Step3b(props: {
     if (!tid || !resolvedIndustryKey) return;
     if (isLocked) return;
     if (nextQ?.id) return;
+    if (leavingRef.current) return;
     start().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantsSub, tid, resolvedIndustryKey, isLocked, nextQ?.id]);
@@ -333,6 +352,8 @@ export function Step3b(props: {
         answer: ans,
       });
 
+      if (leavingRef.current) return;
+
       if (debugOn) setLastApi(out);
 
       setState(out.subIndustryInterview);
@@ -348,37 +369,44 @@ export function Step3b(props: {
       props.onError(msg);
       lastSubmitRef.current = "";
     } finally {
+      if (leavingRef.current) return;
       setWorking(false);
     }
   }
 
   const showPrompt = wantsSub === null;
 
-  // ✅ If user manually chooses "no", behave like skip:
-  // show a quick "Skipping…" state and auto-continue.
+  // ✅ If user manually chooses "no", we want the same behavior as intent skip:
+  // immediately submit null and proceed. We don't need a second "NO path" screen.
   async function chooseNoAndSkip() {
-    if (working || skipInFlight) return;
-
+    if (leavingRef.current) return;
+    // cancel pending auto-skip (if any)
+    if (autoSkipTimerRef.current) {
+      window.clearTimeout(autoSkipTimerRef.current);
+      autoSkipTimerRef.current = null;
+    }
     setWantsSub("no");
     intentRef.current = "skip";
-    didAutoSkipRef.current = true; // prevent duplicate autoskip effect
-
-    setSkipInFlight(true);
-    try {
-      await saveAndContinue(null);
-    } finally {
-      setSkipInFlight(false);
-    }
+    didAutoSkipRef.current = true; // prevent autoskip effect from re-firing
+    await saveAndContinue(null);
   }
 
-  const showSkippingCard = wantsSub === "no" && (skipInFlight || working);
+  function handleBack() {
+    // cancel any pending skip-submit so it doesn't “pull us forward” after navigation
+    leavingRef.current = true;
+    if (autoSkipTimerRef.current) {
+      window.clearTimeout(autoSkipTimerRef.current);
+      autoSkipTimerRef.current = null;
+    }
+    props.onBack();
+  }
 
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">One more thing (optional)</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel
-        more “you” from day one.
+        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel more
+        “you” from day one.
       </div>
 
       {debugOn ? (
@@ -415,19 +443,6 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* ✅ Skipping state (prevents "blank screen" during auto-continue) */}
-      {showSkippingCard ? (
-        <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-          <div className="flex items-center gap-3">
-            <Spinner />
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Skipping sub-industry refinement…</div>
-              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Taking you to the next step.</div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {/* Prompt */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
@@ -441,11 +456,10 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
               onClick={() => setWantsSub("yes")}
-              // ✅ Disable both choice buttons while submitting
-              disabled={working || skipInFlight || !tid || !resolvedIndustryKey}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
               Yes — let’s narrow it down
             </button>
@@ -454,43 +468,34 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
               onClick={() => chooseNoAndSkip().catch(() => null)}
-              // ✅ Disable both choice buttons while submitting
-              disabled={working || skipInFlight || !tid || !resolvedIndustryKey}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
-              {skipInFlight ? (
-                <span className="inline-flex items-center gap-2">
-                  <Spinner className="h-4 w-4" />
-                  Skipping…
-                </span>
-              ) : (
-                "No — keep it broad for now"
-              )}
+              No — keep it broad for now
             </button>
           </div>
 
-          {/* ✅ Only navigation here. Back ALWAYS calls onBack. */}
+          {/* ✅ Back ALWAYS goes back. Continue skips. */}
           <div className="mt-4 grid grid-cols-2 gap-3">
             <button
               type="button"
-              className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              onClick={props.onBack}
-              disabled={working || skipInFlight}
+              className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              onClick={handleBack}
+              disabled={working}
             >
               Back
             </button>
 
-            {/* Optional affordance: if they didn’t choose, treat as "No" and skip */}
             <button
               type="button"
               className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
               onClick={() => chooseNoAndSkip().catch(() => null)}
-              disabled={working || skipInFlight || !tid || !resolvedIndustryKey}
+              disabled={working || !tid || !resolvedIndustryKey}
               title="Skip sub-industry refinement"
             >
-              {skipInFlight ? "Skipping…" : "Continue →"}
+              Continue →
             </button>
           </div>
         </div>
@@ -504,7 +509,7 @@ export function Step3b(props: {
 
             <button
               type="button"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100"
               onClick={() => start().catch(() => null)}
               disabled={working || !tid || !resolvedIndustryKey || Boolean(nextQ?.id) || isLocked}
             >
@@ -558,8 +563,8 @@ export function Step3b(props: {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  onClick={props.onBack}
+                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  onClick={handleBack}
                   disabled={working}
                 >
                   Back
@@ -590,7 +595,6 @@ export function Step3b(props: {
                     rows={3}
                     placeholder="Type your answer…"
                     className="w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm outline-none focus:border-gray-400 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    disabled={working}
                   />
                 ) : null}
 
@@ -601,7 +605,7 @@ export function Step3b(props: {
                         key={opt}
                         type="button"
                         className={cn(
-                          "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold disabled:opacity-50",
+                          "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
                           choiceAnswer === opt
                             ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
                             : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
@@ -619,8 +623,8 @@ export function Step3b(props: {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                  onClick={props.onBack}
+                  className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                  onClick={handleBack}
                   disabled={working}
                 >
                   Back
