@@ -400,7 +400,9 @@ export default function OnboardingWizard() {
           <div className="min-w-0">
             <div className="text-xs text-gray-600 dark:text-gray-300">AIPhotoQuote Onboarding</div>
             <div className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">Let’s set up your business</div>
-            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">We’ll tailor your quoting experience in just a few steps.</div>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              We’ll tailor your quoting experience in just a few steps.
+            </div>
 
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Mode: <span className="font-mono">{mode}</span> {" • "}
@@ -504,7 +506,7 @@ export default function OnboardingWizard() {
               tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               ensureActiveTenant={ensureActiveTenant}
               onBack={() => go(4)}
-              onContinue={() => go(6)}
+              // ✅ No "continue" escape hatch. Step5Pricing must call its own submit/save to advance.
               onError={(m) => setErr(m)}
               onOpenAdvancedPolicy={() =>
                 openSetup("/admin/setup/ai-policy?onboarding=1").catch((e: any) => setErr(e?.message ?? String(e)))
