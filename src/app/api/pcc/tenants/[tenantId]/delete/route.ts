@@ -81,17 +81,11 @@ async function getActor(req: NextRequest) {
       // ignore
     }
 
-    const ip =
-      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      req.headers.get("x-real-ip") ||
-      null;
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || null;
 
     return { userId, email, ip };
   } catch {
-    const ip =
-      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      req.headers.get("x-real-ip") ||
-      null;
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || null;
 
     return { userId: null, email: null, ip };
   }
@@ -118,13 +112,22 @@ export async function GET(_req: NextRequest, context: { params: Promise<{ tenant
   }
 
   const counts = {
+    tenants: 1,
+
     tenantMembers: await countWhere("tenant_members", "tenant_id", tenantId),
     tenantSettings: await countWhere("tenant_settings", "tenant_id", tenantId),
     tenantSecrets: await countWhere("tenant_secrets", "tenant_id", tenantId),
     tenantPricingRules: await countWhere("tenant_pricing_rules", "tenant_id", tenantId),
     tenantEmailIdentities: await countWhere("tenant_email_identities", "tenant_id", tenantId),
     tenantSubIndustries: await countWhere("tenant_sub_industries", "tenant_id", tenantId),
+
+    // ✅ include onboarding row (exists in prod)
+    tenantOnboarding: await countWhere("tenant_onboarding", "tenant_id", tenantId),
+
     quoteLogs: await countWhere("quote_logs", "tenant_id", tenantId),
+
+    // ✅ include audit rows (you write to this on archive)
+    tenantAuditLog: await countWhere("tenant_audit_log", "tenant_id", tenantId),
   };
 
   return NextResponse.json({
@@ -160,10 +163,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ tenant
   const reason = String(body.data.reason ?? "").trim();
 
   if (confirm !== expected) {
-    return NextResponse.json(
-      { ok: false, error: "CONFIRM_MISMATCH", message: "Confirmation text did not match." },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "CONFIRM_MISMATCH", message: "Confirmation text did not match." }, { status: 400 });
   }
 
   const tenant = await getTenantMeta(tenantId);

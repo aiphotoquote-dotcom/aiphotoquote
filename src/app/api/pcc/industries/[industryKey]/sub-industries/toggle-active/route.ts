@@ -1,3 +1,4 @@
+// src/app/api/pcc/industries/[industryKey]/sub-industries/toggle-active/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -58,7 +59,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ industryKey: s
       updated_at = now()
     where industry_key = ${industryKey}
       and key = ${subKey}
-    returning id::text as "id"
+    returning id::text as "id", key::text as "key"
   `);
 
   const rr = rows(r);
@@ -66,5 +67,5 @@ export async function POST(req: Request, ctx: { params: Promise<{ industryKey: s
     return NextResponse.json({ ok: false, error: "NOT_FOUND", industryKey, key: subKey }, { status: 404 });
   }
 
-  return NextResponse.json({ ok: true, industryKey, key: subKey, isActive });
+  return NextResponse.json({ ok: true, industryKey, key: String(rr[0].key ?? subKey), isActive });
 }

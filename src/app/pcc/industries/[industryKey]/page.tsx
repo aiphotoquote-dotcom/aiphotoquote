@@ -395,6 +395,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       from tenant_sub_industries tsi
       join tenant_settings ts on ts.tenant_id = tsi.tenant_id
       where ts.industry_key = ${key}
+        and tsi.industry_key = ${key}
       group by tsi.key
     ) ov on ov."subKey" = isi.key
     where isi.industry_key = ${key}
@@ -415,14 +416,11 @@ export default async function PccIndustryDetailPage(props: Props) {
     inUseCount: toNum(r.inUseCount, 0),
   }));
 
-  const defaultSubIndustries = showInactive
-    ? defaultSubIndustriesAll
-    : defaultSubIndustriesAll.filter((s) => s.isActive);
-
+  const defaultSubIndustries = showInactive ? defaultSubIndustriesAll : defaultSubIndustriesAll.filter((s) => s.isActive);
   const inactiveCount = defaultSubIndustriesAll.filter((s) => !s.isActive).length;
 
   // -----------------------------
-  // Tenant sub-industry overrides summary (scoped to confirmed tenants)
+  // Tenant sub-industry overrides summary (scoped to confirmed tenants + this industry)
   // -----------------------------
   const overridesR = await db.execute(sql`
     select
@@ -432,6 +430,7 @@ export default async function PccIndustryDetailPage(props: Props) {
     from tenant_sub_industries tsi
     join tenant_settings ts on ts.tenant_id = tsi.tenant_id
     where ts.industry_key = ${key}
+      and tsi.industry_key = ${key}
     group by tsi.key, tsi.label
     order by count(distinct tsi.tenant_id) desc, tsi.label asc
     limit 100
@@ -526,6 +525,9 @@ export default async function PccIndustryDetailPage(props: Props) {
       </div>
 
       {/* Confirmed tenants */}
+      {/* ... UNCHANGED UI BELOW ... */}
+
+      {/* Confirmed tenants */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Confirmed tenants</div>
@@ -616,6 +618,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       </div>
 
       {/* AI suggested tenants */}
+      {/* (unchanged) */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI suggested tenants</div>
@@ -952,8 +955,9 @@ export default async function PccIndustryDetailPage(props: Props) {
         </div>
 
         <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          Scoped to tenants where <span className="font-mono">tenant_settings.industry_key</span> = <span className="font-mono">{key}</span>{" "}
-          (because <span className="font-mono">tenant_sub_industries</span> has no industry column yet).
+          Scoped to tenants where <span className="font-mono">tenant_settings.industry_key</span> ={" "}
+          <span className="font-mono">{key}</span> and <span className="font-mono">tenant_sub_industries.industry_key</span> ={" "}
+          <span className="font-mono">{key}</span>.
         </p>
 
         <div className="mt-3 overflow-x-auto">

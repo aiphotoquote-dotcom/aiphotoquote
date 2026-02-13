@@ -36,7 +36,7 @@ type NextQuestion = {
   options?: string[];
 };
 
-type Candidate = { label: string; score: number };
+type Candidate = { key?: string; label: string; score: number };
 
 type SubInterview = {
   mode: "SUB";
@@ -46,9 +46,11 @@ type SubInterview = {
   industryKey: string;
   confidenceScore: number;
 
+  // server may include key now (optional for back-compat)
+  proposedSubIndustryKey?: string | null;
   proposedSubIndustryLabel: string | null;
-  candidates: Candidate[];
 
+  candidates: Candidate[];
   nextQuestion: NextQuestion | null;
 
   answers: Array<{
@@ -118,9 +120,8 @@ export function Step3b(props: {
   const tid = safeTrim(props.tenantId);
 
   /**
-   * ✅ CRITICAL:
-   * If the wizard ever hands us an empty/placeholder industryKey (or a stale "service"),
-   * fall back to AI-proposed keys so we never start/submit against the wrong industry.
+   * If wizard hands an empty/placeholder industryKey (or stale "service"),
+   * fall back to AI-proposed keys so we never start/submit against wrong industry.
    */
   const resolvedIndustryKey = useMemo(() => {
     const fromProps = normalizeKey(props.industryKey);
@@ -135,7 +136,6 @@ export function Step3b(props: {
     if (!x || typeof x !== "object") return null;
     if ((x as any).mode !== "SUB") return null;
 
-    // Only accept if it matches our resolved industry (prevents cross-industry bleed)
     const ik = normalizeKey((x as any).industryKey);
     if (ik && resolvedIndustryKey && ik !== normalizeKey(resolvedIndustryKey)) return null;
 
@@ -162,7 +162,11 @@ export function Step3b(props: {
 
   const candidates: Candidate[] = Array.isArray(state?.candidates)
     ? state!.candidates
-        .map((c: any) => ({ label: safeTrim(c?.label), score: clamp01(c?.score) }))
+        .map((c: any) => ({
+          key: safeTrim(c?.key) || undefined,
+          label: safeTrim(c?.label),
+          score: clamp01(c?.score),
+        }))
         .filter((c) => c.label)
         .slice(0, 5)
     : [];
@@ -250,7 +254,7 @@ export function Step3b(props: {
     if (intent === "skip") setWantsSub("no");
   }, []);
 
-  // Auto-skip when intent === skip and wantsSub is "no"
+  // Auto-skip only when intent === skip
   useEffect(() => {
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
@@ -263,7 +267,7 @@ export function Step3b(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tid, resolvedIndustryKey, wantsSub, nextQ?.id, isLocked]);
 
-  // Auto-start when wantsSub yes
+  // Auto-start when intent/refine or user chooses yes
   useEffect(() => {
     if (wantsSub !== "yes") return;
     if (!tid || !resolvedIndustryKey) return;
@@ -327,12 +331,19 @@ export function Step3b(props: {
 
   const showPrompt = wantsSub === null;
 
+  async function chooseNoAndSkip() {
+    // No should immediately proceed (this is the answer)
+    setWantsSub("no");
+    intentRef.current = "unknown";
+    await saveAndContinue(null);
+  }
+
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">One more thing (optional)</div>
       <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel
-        more “you” from day one.
+        If you want, we can narrow your setup with a sub-industry — so the default services, photo requests, and questions feel more “you”
+        from day one.
       </div>
 
       {debugOn ? (
@@ -371,7 +382,7 @@ export function Step3b(props: {
         </div>
       ) : null}
 
-      {/* Prompt */}
+      {/* Prompt (NO "Continue" button — user must choose Yes/No) */}
       {showPrompt ? (
         <div className="mt-5 rounded-3xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Would a sub-industry be useful?</div>
@@ -384,12 +395,10 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                wantsSub === "yes"
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
               onClick={() => setWantsSub("yes")}
-              disabled={working}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
               Yes — let’s narrow it down
             </button>
@@ -398,61 +407,25 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                wantsSub === "no"
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
-              onClick={() => setWantsSub("no")}
-              disabled={working}
+              onClick={() => chooseNoAndSkip().catch(() => null)}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
               No — keep it broad for now
             </button>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-3">
+          <div className="mt-4">
             <button
               type="button"
-              className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
               onClick={props.onBack}
               disabled={working}
             >
               Back
             </button>
-
-            <button
-              type="button"
-              className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-              onClick={() => {
-                // default to "no" so the user can continue without interview friction
-                setWantsSub("no");
-              }}
-              disabled={working || !tid || !resolvedIndustryKey}
-            >
-              Continue →
-            </button>
           </div>
-        </div>
-      ) : null}
-
-      {/* NO path */}
-      {wantsSub === "no" && intentRef.current !== "skip" ? (
-        <div className="mt-5 flex gap-3">
-          <button
-            type="button"
-            className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            onClick={props.onBack}
-            disabled={working}
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-            onClick={() => saveAndContinue(null)}
-            disabled={working || !tid || !resolvedIndustryKey}
-          >
-            Continue →
-          </button>
         </div>
       ) : null}
 
@@ -486,7 +459,7 @@ export function Step3b(props: {
                     <div className="mt-2 flex flex-wrap gap-2">
                       {candidates.map((c, i) => (
                         <span
-                          key={i}
+                          key={`${c.key || c.label}:${i}`}
                           className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-1 text-[11px] font-semibold text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
                         >
                           {c.label}
@@ -515,7 +488,7 @@ export function Step3b(props: {
                 Suggested sub-industry: <span className="font-semibold">{proposed || "(none yet)"}</span>
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="mt-4 grid gap-3">
                 <button
                   type="button"
                   className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
@@ -575,7 +548,7 @@ export function Step3b(props: {
                 ) : null}
               </div>
 
-              <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="mt-4 grid gap-3">
                 <button
                   type="button"
                   className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
