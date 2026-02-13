@@ -1,4 +1,5 @@
 // src/app/onboarding/wizard/steps/Step3b.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -259,7 +260,7 @@ export function Step3b(props: {
     if (intent === "skip") setWantsSub("no");
   }, []);
 
-  // Auto-skip when intent === skip and wantsSub is "no"
+  // ✅ Auto-skip when intent === skip and wantsSub is "no"
   useEffect(() => {
     if (intentRef.current !== "skip") return;
     if (wantsSub !== "no") return;
@@ -336,6 +337,16 @@ export function Step3b(props: {
 
   const showPrompt = wantsSub === null;
 
+  // ✅ If user manually chooses "no", we want the same behavior as intent skip:
+  // immediately submit null and proceed. We don't need a second "NO path" screen.
+  async function chooseNoAndSkip() {
+    setWantsSub("no");
+    // mark intent as skip so any downstream logic that checks it behaves consistently
+    intentRef.current = "skip";
+    didAutoSkipRef.current = true; // prevent duplicate autoskip effect
+    await saveAndContinue(null);
+  }
+
   return (
     <div>
       <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">One more thing (optional)</div>
@@ -393,12 +404,10 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                wantsSub === "yes"
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
               onClick={() => setWantsSub("yes")}
-              disabled={working}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
               Yes — let’s narrow it down
             </button>
@@ -407,17 +416,16 @@ export function Step3b(props: {
               type="button"
               className={cn(
                 "w-full rounded-2xl border px-4 py-3 text-left text-sm font-semibold",
-                wantsSub === "no"
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
               )}
-              onClick={() => setWantsSub("no")}
-              disabled={working}
+              onClick={() => chooseNoAndSkip().catch(() => null)}
+              disabled={working || !tid || !resolvedIndustryKey}
             >
               No — keep it broad for now
             </button>
           </div>
 
+          {/* ✅ Only navigation here. Back ALWAYS calls onBack. */}
           <div className="mt-4 grid grid-cols-2 gap-3">
             <button
               type="button"
@@ -428,37 +436,17 @@ export function Step3b(props: {
               Back
             </button>
 
+            {/* Optional affordance: if they didn’t choose, treat as "No" and skip */}
             <button
               type="button"
               className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-              onClick={() => setWantsSub("no")}
+              onClick={() => chooseNoAndSkip().catch(() => null)}
               disabled={working || !tid || !resolvedIndustryKey}
+              title="Skip sub-industry refinement"
             >
               Continue →
             </button>
           </div>
-        </div>
-      ) : null}
-
-      {/* NO path */}
-      {wantsSub === "no" && intentRef.current !== "skip" ? (
-        <div className="mt-5 flex gap-3">
-          <button
-            type="button"
-            className="w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            onClick={props.onBack}
-            disabled={working}
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-            onClick={() => saveAndContinue(null)}
-            disabled={working || !tid || !resolvedIndustryKey}
-          >
-            Continue →
-          </button>
         </div>
       ) : null}
 
