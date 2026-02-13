@@ -48,6 +48,34 @@ function clampStep(n: any) {
   return Math.max(1, Math.min(7, Math.floor(x)));
 }
 
+// normalize "Landscaping" -> "landscaping", "Car Detailing" -> "car_detailing"
+function normalizeIndustryKeyFromLabel(raw: string) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+}
+
+function pick(obj: any, paths: string[]): any {
+  for (const p of paths) {
+    const parts = p.split(".");
+    let cur = obj;
+    let ok = true;
+    for (const k of parts) {
+      if (!cur || typeof cur !== "object" || !(k in cur)) {
+        ok = false;
+        break;
+      }
+      cur = cur[k];
+    }
+    if (ok) return cur;
+  }
+  return null;
+}
+
 export default function OnboardingWizard() {
   const [{ step, mode, tenantId }, setNav] = useState(() => getUrlParams());
 
@@ -254,6 +282,27 @@ export default function OnboardingWizard() {
     await poll;
     await refresh({ tenantId: tid });
     setLastAction(args.answer === "yes" ? "Confirmed analysis." : "Submitted correction.");
+
+    // ✅ IMPORTANT: if user confirmed YES, prime a usable industryKey
+    // so Step3 doesn't fall back to interview just because the analyzer only returned a label.
+    if (args.answer === "yes") {
+      const a = getAiAnalysis(state);
+      const keyFromAi =
+        safeTrim(pick(a, ["industryInterview.proposedIndustry.key"])) ||
+        safeTrim(pick(a, ["suggestedIndustryKey", "suggested_industry_key"])) ||
+        safeTrim(pick(a, ["suggestedIndustry.key"])) ||
+        "";
+
+      const labelFromAi =
+        safeTrim(pick(a, ["industryInterview.proposedIndustry.label"])) ||
+        safeTrim(pick(a, ["suggestedIndustryLabel"])) ||
+        safeTrim(pick(a, ["suggestedIndustry.label"])) ||
+        safeTrim(pick(a, ["businessGuess", "business_guess"])) ||
+        "";
+
+      const derived = keyFromAi || normalizeIndustryKeyFromLabel(labelFromAi);
+      if (derived) setPendingIndustryKey(derived);
+    }
   }
 
   async function persistIndustryOnly(industryKey: string) {
@@ -389,9 +438,18 @@ export default function OnboardingWizard() {
     safeTrim((state as any)?.selectedIndustryKey) ||
     safeTrim((state as any)?.tenantIndustryKey) ||
     safeTrim((normalizedAiAnalysis as any)?.industryInterview?.proposedIndustry?.key) ||
-    safeTrim((normalizedAiAnalysis as any)?.suggestedIndustryKey);
+    safeTrim((normalizedAiAnalysis as any)?.suggestedIndustryKey) ||
+    safeTrim((normalizedAiAnalysis as any)?.suggested_industry_key);
 
-  const effectiveIndustryKey = safeTrim(pendingIndustryKey) || safeTrim(fallbackIndustryKey);
+  // ✅ if AI only gave a label, derive a key so Step3 can proceed
+  const fallbackIndustryLabel =
+    safeTrim((normalizedAiAnalysis as any)?.industryInterview?.proposedIndustry?.label) ||
+    safeTrim((normalizedAiAnalysis as any)?.suggestedIndustryLabel) ||
+    safeTrim((normalizedAiAnalysis as any)?.suggestedIndustry?.label) ||
+    safeTrim((normalizedAiAnalysis as any)?.businessGuess) ||
+    safeTrim((normalizedAiAnalysis as any)?.business_guess);
+
+  const effectiveIndustryKey = safeTrim(pendingIndustryKey) || safeTrim(fallbackIndustryKey) || normalizeIndustryKeyFromLabel(fallbackIndustryLabel);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
@@ -506,10 +564,9 @@ export default function OnboardingWizard() {
               onBack={() => go(4)}
               onContinue={() => go(6)}
               onError={(m) => setErr(m)}
-              onOpenAdvancedPolicy={() => {
-                // keep as sync fn per Step5Pricing typing (it can still *call* async work)
-                openSetup("/admin/setup/ai-policy?onboarding=1").catch((e: any) => setErr(e?.message ?? String(e)));
-              }}
+              onOpenAdvancedPolicy={() =>
+                openSetup("/admin/setup/ai-policy?onboarding=1").catch((e: any) => setErr(e?.message ?? String(e)))
+              }
             />
           ) : step === 6 ? (
             <Step5Branding

@@ -27,19 +27,6 @@ type PolicyResp =
     }
   | { ok: false; error: string; message?: string; issues?: any };
 
-type PricingModel =
-  | "flat_per_job"
-  | "hourly_plus_materials"
-  | "per_unit"
-  | "packages"
-  | "line_items"
-  | "inspection_only"
-  | "assessment_fee";
-
-type PricingResp =
-  | { ok: true; tenantId: string; pricingModel: PricingModel | null }
-  | { ok: false; error: string; message?: string; issues?: any };
-
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -94,9 +81,7 @@ function Card({
         <div
           className={cn(
             "mt-1 h-5 w-5 shrink-0 rounded-full border flex items-center justify-center",
-            selected
-              ? "border-emerald-600 bg-emerald-600"
-              : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
+            selected ? "border-emerald-600 bg-emerald-600" : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
           )}
         >
           {selected ? <div className="h-2 w-2 rounded-full bg-white" /> : null}
@@ -106,6 +91,32 @@ function Card({
   );
 }
 
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+function readPricingModel(): PricingModel | "" {
+  try {
+    const v = window.sessionStorage.getItem("apq_onboarding_pricing_model") || "";
+    return (v as any) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writePricingModel(v: PricingModel) {
+  try {
+    window.sessionStorage.setItem("apq_onboarding_pricing_model", v);
+  } catch {
+    // ignore
+  }
+}
+
 export function Step5Pricing(props: {
   tenantId: string | null;
   ensureActiveTenant: (tid: string) => Promise<void>;
@@ -113,8 +124,7 @@ export function Step5Pricing(props: {
   onContinue: () => void;
   onError: (m: string) => void;
 
-  // Optional: still allow jumping into full policy screen
-  onOpenAdvancedPolicy?: () => void;
+  onOpenAdvancedPolicy?: () => void | Promise<void>;
 }) {
   const tid = safeTrim(props.tenantId);
 
@@ -126,7 +136,6 @@ export function Step5Pricing(props: {
   const [aiMode, setAiMode] = useState<AiMode>("assessment_only");
   const [pricingEnabled, setPricingEnabled] = useState<boolean>(false);
 
-  // keep the rest so we can re-post full policy without wiping settings
   const [policyRest, setPolicyRest] = useState<any>(null);
 
   const [pricingModel, setPricingModel] = useState<PricingModel | "">("");
@@ -143,7 +152,6 @@ export function Step5Pricing(props: {
 
       await props.ensureActiveTenant(tid);
 
-      // load AI policy
       const res = await fetch("/api/admin/ai-policy", { cache: "no-store", credentials: "include" });
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to load AI policy");
@@ -151,17 +159,10 @@ export function Step5Pricing(props: {
       setRole(data.role);
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
+
       setPolicyRest(data.ai_policy);
 
-      // load pricing model from tenant_settings (durable)
-      const pres = await fetch(`/api/onboarding/pricing?tenantId=${encodeURIComponent(tid)}`, {
-        cache: "no-store",
-        credentials: "include",
-      });
-      const pj = await safeJson<PricingResp>(pres);
-      if (!pj.ok) throw new Error(pj.message || pj.error || "Failed to load pricing model");
-
-      setPricingModel((pj.pricingModel ?? "") as any);
+      setPricingModel(readPricingModel());
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
@@ -169,24 +170,6 @@ export function Step5Pricing(props: {
     } finally {
       setLoading(false);
     }
-  }
-
-  async function savePricingModel() {
-    if (!tid) throw new Error("NO_TENANT: missing tenantId.");
-    await props.ensureActiveTenant(tid);
-
-    const res = await fetch("/api/onboarding/pricing", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        tenantId: tid,
-        pricingModel: pricingModel ? pricingModel : null,
-      }),
-    });
-
-    const j = await safeJson<PricingResp>(res);
-    if (!j.ok) throw new Error(j.message || j.error || "Failed to save pricing model");
   }
 
   async function save() {
@@ -198,20 +181,14 @@ export function Step5Pricing(props: {
       await props.ensureActiveTenant(tid);
 
       if (!canEdit) throw new Error("You can view this step, but only owner/admin can save pricing policy.");
+      if (!policyRest || typeof policyRest !== "object") throw new Error("Policy not loaded yet. Please refresh and try again.");
 
-      if (!policyRest || typeof policyRest !== "object") {
-        throw new Error("Policy not loaded yet. Please refresh and try again.");
-      }
-
-      // ✅ persist the pricing model first (durable tenant_settings)
-      await savePricingModel();
+      if (pricingModel) writePricingModel(pricingModel as PricingModel);
 
       const payload = {
-        // what Step5 owns
         ai_mode: aiMode,
         pricing_enabled: pricingEnabled,
 
-        // preserve everything else
         rendering_enabled: !!policyRest.rendering_enabled,
         rendering_style: (policyRest.rendering_style ?? "photoreal") as RenderingStyle,
         rendering_notes: policyRest.rendering_notes ?? "",
@@ -232,7 +209,6 @@ export function Step5Pricing(props: {
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to save AI policy");
 
-      // keep UI in sync (in case backend normalizes)
       setRole(data.role);
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
@@ -294,56 +270,20 @@ export function Step5Pricing(props: {
           </div>
         ) : (
           <>
-            {/* A) How they charge (now durable) */}
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">How do you usually charge?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                We’ll store this in your tenant settings so your defaults and future pricing rules match how you work.
+                This helps us tailor defaults. (We’ll persist this in tenant settings next.)
               </div>
 
               <div className="mt-4 grid gap-3">
-                <Card
-                  title="Flat price per job"
-                  desc="One number for the whole job."
-                  selected={pricingModel === "flat_per_job"}
-                  onClick={() => setPricingModel("flat_per_job")}
-                />
-                <Card
-                  title="Hourly labor + materials"
-                  desc="Labor hours plus material costs/markup."
-                  selected={pricingModel === "hourly_plus_materials"}
-                  onClick={() => setPricingModel("hourly_plus_materials")}
-                />
-                <Card
-                  title="Per-unit pricing"
-                  desc="Sq ft, linear ft, per panel/room/item, etc."
-                  selected={pricingModel === "per_unit"}
-                  onClick={() => setPricingModel("per_unit")}
-                />
-                <Card
-                  title="Packages / tiers"
-                  desc="Basic / Standard / Premium packages."
-                  selected={pricingModel === "packages"}
-                  onClick={() => setPricingModel("packages")}
-                />
-                <Card
-                  title="Line items / menu of services"
-                  desc="Add-ons and service items combine into a total."
-                  selected={pricingModel === "line_items"}
-                  onClick={() => setPricingModel("line_items")}
-                />
-                <Card
-                  title="Quote after inspection only"
-                  desc="No photo estimates — must inspect first."
-                  selected={pricingModel === "inspection_only"}
-                  onClick={() => setPricingModel("inspection_only")}
-                />
-                <Card
-                  title="Assessment / diagnostic fee"
-                  desc="Charge for assessment (optional credit toward job)."
-                  selected={pricingModel === "assessment_fee"}
-                  onClick={() => setPricingModel("assessment_fee")}
-                />
+                <Card title="Flat price per job" desc="One number for the whole job." selected={pricingModel === "flat_per_job"} onClick={() => setPricingModel("flat_per_job")} />
+                <Card title="Hourly labor + materials" desc="Labor hours plus material costs/markup." selected={pricingModel === "hourly_plus_materials"} onClick={() => setPricingModel("hourly_plus_materials")} />
+                <Card title="Per-unit pricing" desc="Sq ft, linear ft, per panel/room/item, etc." selected={pricingModel === "per_unit"} onClick={() => setPricingModel("per_unit")} />
+                <Card title="Packages / tiers" desc="Basic / Standard / Premium packages." selected={pricingModel === "packages"} onClick={() => setPricingModel("packages")} />
+                <Card title="Line items / menu of services" desc="Add-ons and service items combine into a total." selected={pricingModel === "line_items"} onClick={() => setPricingModel("line_items")} />
+                <Card title="Quote after inspection only" desc="No photo estimates — must inspect first." selected={pricingModel === "inspection_only"} onClick={() => setPricingModel("inspection_only")} />
+                <Card title="Assessment / diagnostic fee" desc="Charge for assessment (optional credit toward job)." selected={pricingModel === "assessment_fee"} onClick={() => setPricingModel("assessment_fee")} />
               </div>
 
               {pricingModelLabel ? (
@@ -354,7 +294,6 @@ export function Step5Pricing(props: {
               ) : null}
             </div>
 
-            {/* B) What should AI output */}
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">What should customers receive?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -362,27 +301,9 @@ export function Step5Pricing(props: {
               </div>
 
               <div className="mt-4 grid gap-3">
-                <Card
-                  title="Assessment only"
-                  desc="Scope + questions, but no price numbers."
-                  selected={aiMode === "assessment_only"}
-                  onClick={() => setAiMode("assessment_only")}
-                  disabled={!canEdit}
-                />
-                <Card
-                  title="Assessment + price range"
-                  desc="A low/high range when possible."
-                  selected={aiMode === "range"}
-                  onClick={() => setAiMode("range")}
-                  disabled={!canEdit}
-                />
-                <Card
-                  title="Rough estimate"
-                  desc="Single-number estimate (best for standardized services)."
-                  selected={aiMode === "fixed"}
-                  onClick={() => setAiMode("fixed")}
-                  disabled={!canEdit}
-                />
+                <Card title="Assessment only" desc="Scope + questions, but no price numbers." selected={aiMode === "assessment_only"} onClick={() => setAiMode("assessment_only")} disabled={!canEdit} />
+                <Card title="Assessment + price range" desc="A low/high range when possible." selected={aiMode === "range"} onClick={() => setAiMode("range")} disabled={!canEdit} />
+                <Card title="Rough estimate" desc="Single-number estimate (best for standardized services)." selected={aiMode === "fixed"} onClick={() => setAiMode("fixed")} disabled={!canEdit} />
               </div>
 
               <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
@@ -422,7 +343,7 @@ export function Step5Pricing(props: {
                 <button
                   type="button"
                   className="mt-4 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-                  onClick={props.onOpenAdvancedPolicy}
+                  onClick={() => props.onOpenAdvancedPolicy?.()}
                   disabled={saving}
                 >
                   Advanced: open full AI Policy settings
@@ -430,7 +351,6 @@ export function Step5Pricing(props: {
               ) : null}
             </div>
 
-            {/* Nav */}
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -451,9 +371,7 @@ export function Step5Pricing(props: {
               </button>
             </div>
 
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              We’ll use this to control what the AI is allowed to show on quotes.
-            </div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">We’ll use this to control what the AI is allowed to show on quotes.</div>
           </>
         )}
       </div>
