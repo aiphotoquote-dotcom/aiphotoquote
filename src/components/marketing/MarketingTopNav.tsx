@@ -150,7 +150,7 @@ export default function MarketingTopNav() {
                   Sign in
                 </Link>
                 <Link
-                  href="/sign-up"
+                  href="/onboarding"
                   className={cn(btnBase, btnSignUp)}
                   onClick={() => setMobileOpen(false)}
                 >
