@@ -19,6 +19,16 @@ export default function MarketingTopNav() {
   const linkIdle =
     "text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-200 dark:hover:bg-gray-900 dark:hover:text-white";
 
+  const btnBase =
+    "inline-flex items-center justify-center rounded-xl px-3 py-2 text-sm font-extrabold transition";
+
+  const btnSignIn =
+    "border border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900";
+
+  // “pop” CTA: subtle gradient, stronger shadow, hover lift
+  const btnSignUp =
+    "relative overflow-hidden border border-indigo-200 bg-gradient-to-r from-indigo-600 via-sky-600 to-emerald-600 text-white shadow-md shadow-indigo-500/15 hover:shadow-lg hover:shadow-indigo-500/20 hover:-translate-y-0.5 dark:border-indigo-400/40";
+
   return (
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-black/60">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
@@ -52,7 +62,7 @@ export default function MarketingTopNav() {
 
             <Link
               href="/admin"
-              className="hidden md:inline-flex rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              className="hidden md:inline-flex rounded-xl bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
             >
               Dashboard
             </Link>
@@ -61,11 +71,16 @@ export default function MarketingTopNav() {
           </SignedIn>
 
           <SignedOut>
-            <Link
-              href="/sign-in"
-              className="hidden md:inline-flex rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-            >
+            <Link href="/sign-in" className={cn("hidden md:inline-flex", btnBase, btnSignIn)}>
               Sign in
+            </Link>
+
+            <Link href="/sign-up" className={cn("hidden md:inline-flex", btnBase, btnSignUp)}>
+              {/* subtle sheen */}
+              <span className="pointer-events-none absolute inset-0 opacity-0 transition-opacity hover:opacity-100">
+                <span className="absolute -left-12 top-0 h-full w-10 rotate-12 bg-white/30 blur-sm" />
+              </span>
+              <span className="relative">Sign up</span>
             </Link>
           </SignedOut>
 
@@ -84,13 +99,25 @@ export default function MarketingTopNav() {
       {mobileOpen ? (
         <div className="md:hidden border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
           <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-2">
-            <Link href="/#features" className={cn(linkBase, linkIdle)} onClick={() => setMobileOpen(false)}>
+            <Link
+              href="/#features"
+              className={cn(linkBase, linkIdle)}
+              onClick={() => setMobileOpen(false)}
+            >
               Features
             </Link>
-            <Link href="/#pricing" className={cn(linkBase, linkIdle)} onClick={() => setMobileOpen(false)}>
+            <Link
+              href="/#pricing"
+              className={cn(linkBase, linkIdle)}
+              onClick={() => setMobileOpen(false)}
+            >
               Pricing
             </Link>
-            <Link href="/#how-it-works" className={cn(linkBase, linkIdle)} onClick={() => setMobileOpen(false)}>
+            <Link
+              href="/#how-it-works"
+              className={cn(linkBase, linkIdle)}
+              onClick={() => setMobileOpen(false)}
+            >
               How it works
             </Link>
 
@@ -100,25 +127,36 @@ export default function MarketingTopNav() {
               </div>
               <Link
                 href="/admin"
-                className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                className="rounded-xl bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
                 onClick={() => setMobileOpen(false)}
               >
                 Dashboard
               </Link>
-              <div className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
-                <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">Account</span>
+              <div className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
+                <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">
+                  Account
+                </span>
                 <UserButton afterSignOutUrl="/" />
               </div>
             </SignedIn>
 
             <SignedOut>
-              <Link
-                href="/sign-in"
-                className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-                onClick={() => setMobileOpen(false)}
-              >
-                Sign in
-              </Link>
+              <div className="pt-2 grid grid-cols-2 gap-2">
+                <Link
+                  href="/sign-in"
+                  className={cn(btnBase, btnSignIn)}
+                  onClick={() => setMobileOpen(false)}
+                >
+                  Sign in
+                </Link>
+                <Link
+                  href="/sign-up"
+                  className={cn(btnBase, btnSignUp)}
+                  onClick={() => setMobileOpen(false)}
+                >
+                  <span className="relative">Sign up</span>
+                </Link>
+              </div>
             </SignedOut>
           </div>
         </div>

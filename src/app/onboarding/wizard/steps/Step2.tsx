@@ -129,23 +129,31 @@ function normalizeKey(raw: string) {
     .slice(0, 64);
 }
 
+function isParseFail(err: string) {
+  const e = safeTrim(err).toLowerCase();
+  return (
+    e.includes("parse_fail") ||
+    e.includes("parse fail") ||
+    e.includes("parse") && e.includes("fail") ||
+    e.includes("fetch_fail") ||
+    e.includes("fetch fail") ||
+    e.includes("blocked") ||
+    e.includes("timeout")
+  );
+}
+
 export function Step2(props: {
   tenantId: string | null;
 
   website: string;
   aiAnalysis: any | null | undefined;
 
-  // wizard-provided
   aiAnalysisStatus?: string | null;
   aiAnalysisError?: string | null;
+
   onRun: () => Promise<void>;
   onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
 
-  /**
-   * ✅ NEW (optional):
-   * When the user confirms the suggested industry (website analysis OR interview),
-   * the wizard can persist the industry and advance to the next step (Step 4).
-   */
   onAcceptSuggestedIndustry?: (industryKey: string) => Promise<void>;
 
   onNext: () => void;
@@ -161,7 +169,7 @@ export function Step2(props: {
   const aiErr = safeTrim(props.aiAnalysisError);
 
   const isRunning = aiStatus === "running";
-  const hasAnalysis = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
+  const hasAnalysisRaw = useMemo(() => hasMeaningfulAnalysis(props.aiAnalysis), [props.aiAnalysis]);
 
   // Debug support on mobile: add ?debug=1
   const debugOn = useMemo(() => {
@@ -255,15 +263,12 @@ export function Step2(props: {
     return industryLabelMap[suggestedKeyNorm] || "";
   }, [industryLabelMap, suggestedKeyNorm]);
 
-  // What we show as the proud moment “industry”
   const displayIndustryName = useMemo(() => {
     if (canonicalIndustryLabel) return canonicalIndustryLabel;
 
-    // fallback: if AI returned something short like "Roofing Contracting" use it
     const s = safeTrim(rawSummary);
     if (s && s.length <= 42) return s;
 
-    // last resort: prettify key
     if (suggestedKeyNorm) return suggestedKeyNorm.replace(/_/g, " ");
     return "your industry";
   }, [canonicalIndustryLabel, rawSummary, suggestedKeyNorm]);
@@ -274,6 +279,21 @@ export function Step2(props: {
     if (conf !== null && conf >= 0.6) return "Based on your website content, services, and keywords.";
     return "We matched your website content against known industry patterns.";
   }, [hasWebsite, conf]);
+
+  // ✅ Treat PARSE_FAIL (and similar) as "analysis not usable"
+  const parseFail = hasWebsite && Boolean(aiErr) && isParseFail(aiErr);
+
+  // ✅ Only show the green “recommended industry” card when we have a real key AND no parse failure.
+  const analysisUsable = Boolean(
+    hasWebsite &&
+      !parseFail &&
+      !aiErr &&
+      hasAnalysisRaw &&
+      safeTrim(suggestedKeyNorm) &&
+      (conf === null ? true : conf > 0)
+  );
+
+  const hasAnalysis = analysisUsable;
 
   // ✅ Set/clear start time so progress doesn't jitter during autoStarting
   useEffect(() => {
@@ -291,8 +311,6 @@ export function Step2(props: {
   const runProgress = useMemo(() => {
     const start = runStartRef.current ?? Date.now();
     const elapsed = Date.now() - start;
-
-    // "Feels" like progress; caps at 95% until we flip to ready.
     const maxMs = 45_000;
     return Math.min(0.95, Math.max(0.06, elapsed / maxMs));
   }, [runTick]);
@@ -349,6 +367,9 @@ export function Step2(props: {
 
     setShowInterview(false);
 
+    // If parse failed, don't keep trying automatically.
+    if (parseFail) return;
+
     if (hasAnalysis) return;
     if (isRunning) return;
 
@@ -357,9 +378,9 @@ export function Step2(props: {
       runAnalysisSafely("auto").catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, hasAnalysis, isRunning, tid]);
+  }, [hasWebsite, hasAnalysis, isRunning, tid, parseFail]);
 
-  /* -------------------- Interview mode (unchanged, kept as-is) -------------------- */
+  /* -------------------- Interview mode -------------------- */
 
   const interviewFromProps: IndustryInterviewA | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
@@ -513,19 +534,15 @@ export function Step2(props: {
 
   const showReady = showInterview && isLocked && Boolean(proposedKeyNorm);
 
-  /* -------------------- Confirm handlers (key fix) -------------------- */
-
   async function acceptIndustryAndAdvance(industryKeyNorm: string) {
     const k = safeTrim(industryKeyNorm);
-    if (!k) throw new Error("Missing industry recommendation. Please run the interview again.");
+    if (!k) throw new Error("Missing industry recommendation.");
 
     if (props.onAcceptSuggestedIndustry) {
       await props.onAcceptSuggestedIndustry(k);
-      // Wizard may already navigate; keep onNext as harmless fallback.
       return;
     }
 
-    // Fallback (old behavior): just proceed
     props.onNext();
   }
 
@@ -534,12 +551,12 @@ export function Step2(props: {
     try {
       await props.onConfirm({ answer: "yes" });
 
-      // ✅ If we have a suggested key, persist+advance through the wizard hook.
-      if (suggestedKeyNorm) {
+      // ✅ Only accept/advance if analysis is usable and we have a key.
+      if (analysisUsable && suggestedKeyNorm) {
         await acceptIndustryAndAdvance(suggestedKeyNorm);
       } else {
-        // If no key present, still move forward.
-        props.onNext();
+        // If analysis isn't usable, send them to interview instead of advancing into a broken state.
+        setShowInterview(true);
       }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
@@ -565,7 +582,6 @@ export function Step2(props: {
   async function handleInterviewAccept() {
     setWorking(true);
     try {
-      // ✅ For the no-website path, accept the interview's proposed key.
       await acceptIndustryAndAdvance(proposedKeyNorm);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
@@ -606,15 +622,9 @@ export function Step2(props: {
                     : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
                 )}
               >
-                {showBusy ? "Analyzing…" : hasAnalysis ? "Analysis ready" : "Not analyzed yet"}
+                {showBusy ? "Analyzing…" : hasAnalysis ? "Analysis ready" : "Needs input"}
               </span>
             </div>
-
-            {aiErr ? (
-              <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                {aiErr}
-              </div>
-            ) : null}
 
             {/* Busy state */}
             {showBusy ? (
@@ -626,15 +636,61 @@ export function Step2(props: {
                   />
                 </div>
                 <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{runMessage}</div>
-                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                  You don’t need to press anything — we’ll advance when it’s ready.
-                </div>
+                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">You don’t need to press anything.</div>
               </div>
             ) : null}
 
-            {/* Not analyzed yet */}
-            {!hasAnalysis && !showBusy ? (
+            {/* ✅ Parse fail / fetch fail path */}
+            {parseFail && !showBusy ? (
               <div className="mt-4">
+                <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+                  <div className="font-semibold">We couldn’t read your website.</div>
+                  <div className="mt-1 text-xs opacity-90">
+                    Some sites block automated readers, time out, or require scripts that we can’t run.
+                  </div>
+                  {debugOn ? <div className="mt-2 text-[11px] font-mono opacity-80">Error: {aiErr}</div> : null}
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    onClick={() => runAnalysisSafely("manual").catch(() => null)}
+                    disabled={working || !tid}
+                  >
+                    Try again
+                  </button>
+
+                  <button
+                    type="button"
+                    className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                    onClick={() => setShowInterview(true)}
+                    disabled={working}
+                  >
+                    Run interview →
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  onClick={props.onBack}
+                  disabled={working}
+                >
+                  Back
+                </button>
+              </div>
+            ) : null}
+
+            {/* Not analyzed / needs input (non-parse-fail) */}
+            {!hasAnalysis && !showBusy && !parseFail ? (
+              <div className="mt-4">
+                {aiErr ? (
+                  <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+                    {aiErr}
+                  </div>
+                ) : null}
+
                 <button
                   type="button"
                   className="w-full rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
@@ -644,35 +700,14 @@ export function Step2(props: {
                   Run analysis
                 </button>
 
-                <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-                  <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">What we look for</div>
-                  <ul className="mt-2 grid gap-2 text-sm">
-                    <li className="flex gap-2">
-                      <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-bold dark:border-gray-800 dark:bg-gray-950">
-                        1
-                      </span>
-                      <span>
-                        <span className="font-semibold">Services & keywords</span> — what you sell and how you describe it.
-                      </span>
-                    </li>
-                    <li className="flex gap-2">
-                      <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-bold dark:border-gray-800 dark:bg-gray-950">
-                        2
-                      </span>
-                      <span>
-                        <span className="font-semibold">Industry signals</span> — patterns that match your business type.
-                      </span>
-                    </li>
-                    <li className="flex gap-2">
-                      <span className="mt-[2px] inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-gray-200 bg-white text-[11px] font-bold dark:border-gray-800 dark:bg-gray-950">
-                        3
-                      </span>
-                      <span>
-                        <span className="font-semibold">A recommended setup</span> — so your defaults feel right from day one.
-                      </span>
-                    </li>
-                  </ul>
-                </div>
+                <button
+                  type="button"
+                  className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  onClick={() => setShowInterview(true)}
+                  disabled={working || !tid}
+                >
+                  Can’t access the site? Use interview instead →
+                </button>
               </div>
             ) : null}
 
@@ -881,7 +916,7 @@ export function Step2(props: {
               </div>
 
               {!nextQ ? (
-                <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">{working ? "Thinking…" : "Thinking…"}</div>
+                <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">Thinking…</div>
               ) : (
                 <div className="mt-3">
                   <div className="text-base font-semibold text-gray-900 dark:text-gray-100">{nextQ.question}</div>
