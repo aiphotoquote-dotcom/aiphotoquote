@@ -32,7 +32,7 @@ function getAiAnalysis(state: OnboardingState | null): any | null {
   if (s.aiAnalysisJson && typeof s.aiAnalysisJson === "object") return s.aiAnalysisJson;
 
   if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
-  if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.tenantOnboarding?.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
+  if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
 
   return null;
 }
@@ -126,11 +126,7 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
-      /**
-       * ✅ IMPORTANT NAV FIX:
-       * Allow user back navigation (URL step can be behind server step).
-       * Still prevent "skipping ahead" via URL by clamping forward jumps down to serverStep.
-       */
+      // never allow URL step to drag backwards vs server step
       const p = getUrlParams();
       const urlStepRaw = (p as any)?.step;
       const urlStep = urlStepRaw ? clampStep(urlStepRaw) : null;
@@ -138,9 +134,7 @@ export default function OnboardingWizard() {
       const serverStepRaw = (j as any)?.currentStep;
       const serverStep = clampStep(serverStepRaw || 1);
 
-      // If URL requests a later step than server allows, clamp it down.
-      // If URL requests an earlier step (Back), honor it.
-      const nextStep = urlStep ? Math.min(urlStep, serverStep) : serverStep;
+      const nextStep = urlStep ? Math.max(serverStep, urlStep) : serverStep;
 
       if (nextStep !== step) {
         setUrlParams({ step: nextStep });
@@ -207,7 +201,6 @@ export default function OnboardingWizard() {
     if (newTenantId) setTenantInNav(newTenantId);
 
     // ✅ ALWAYS go to Step 2.
-    // Step2 will decide: website analysis path vs interview path.
     const next = 2;
 
     await refresh({ tenantId: newTenantId || safeTrim(tenantId) });
@@ -265,8 +258,7 @@ export default function OnboardingWizard() {
 
   /**
    * ✅ CRITICAL FIX:
-   * Step3 must persist the chosen industry to the server BEFORE moving to Step3b.
-   * Otherwise a refresh (or any fallback logic) can snap back to "service".
+   * Persist industry before moving on.
    */
   async function persistIndustryOnly(industryKey: string) {
     setErr(null);
@@ -457,7 +449,24 @@ export default function OnboardingWizard() {
               aiAnalysisError={safeTrim((state as any)?.aiAnalysisError)}
               onRun={runWebsiteAnalysis}
               onConfirm={confirmWebsiteAnalysis}
-              onNext={() => go(3)}
+              /**
+               * ✅ Key fix: Step2 now owns "industry confirmation".
+               * When Step2 says "Yes", we persist the industry and jump to Step 4 (sub-industry).
+               */
+              onAcceptSuggestedIndustry={async (industryKey) => {
+                const key = safeTrim(industryKey);
+                if (!key) throw new Error("Missing industry recommendation.");
+
+                await persistIndustryOnly(key);
+
+                setPendingIndustryKey(key);
+                setPendingSubIndustryLabel(null);
+
+                setLastAction("Industry selected — refining focus…");
+                go(4);
+              }}
+              // onNext is now basically a fallback; Step2 should drive through onAcceptSuggestedIndustry.
+              onNext={() => go(4)}
               onBack={() => go(1)}
               onError={(m) => setErr(m)}
             />
@@ -486,7 +495,7 @@ export default function OnboardingWizard() {
               tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
               industryKey={effectiveIndustryKey}
               aiAnalysis={normalizedAiAnalysis}
-              onBack={() => go(3)}
+              onBack={() => go(2)}
               onSkip={async () => {
                 const key = safeTrim(effectiveIndustryKey);
                 if (!key) throw new Error("Missing industry selection.");

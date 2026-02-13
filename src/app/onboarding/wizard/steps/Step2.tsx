@@ -1,3 +1,5 @@
+// src/app/onboarding/wizard/steps/Step2.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -138,6 +140,13 @@ export function Step2(props: {
   aiAnalysisError?: string | null;
   onRun: () => Promise<void>;
   onConfirm: (args: { answer: "yes" | "no"; feedback?: string }) => Promise<void>;
+
+  /**
+   * ✅ NEW (optional):
+   * When the user confirms the suggested industry (website analysis OR interview),
+   * the wizard can persist the industry and advance to the next step (Step 4).
+   */
+  onAcceptSuggestedIndustry?: (industryKey: string) => Promise<void>;
 
   onNext: () => void;
   onBack: () => void;
@@ -376,7 +385,8 @@ export function Step2(props: {
 
   const proposed = interviewState?.proposedIndustry ?? null;
   const hypothesis = safeTrim(proposed?.label) || "";
-  const proposedKey = safeTrim(proposed?.key);
+  const proposedKeyRaw = safeTrim(proposed?.key);
+  const proposedKeyNorm = useMemo(() => normalizeKey(proposedKeyRaw), [proposedKeyRaw]);
 
   const intConf = clamp01Nullable(interviewState?.confidenceScore);
   const intFit = clamp01Nullable(interviewState?.fitScore);
@@ -501,15 +511,36 @@ export function Step2(props: {
     }
   }
 
-  const showReady = showInterview && isLocked && Boolean(proposedKey);
+  const showReady = showInterview && isLocked && Boolean(proposedKeyNorm);
 
-  /* -------------------- Analysis UI actions -------------------- */
+  /* -------------------- Confirm handlers (key fix) -------------------- */
+
+  async function acceptIndustryAndAdvance(industryKeyNorm: string) {
+    const k = safeTrim(industryKeyNorm);
+    if (!k) throw new Error("Missing industry recommendation. Please run the interview again.");
+
+    if (props.onAcceptSuggestedIndustry) {
+      await props.onAcceptSuggestedIndustry(k);
+      // Wizard may already navigate; keep onNext as harmless fallback.
+      return;
+    }
+
+    // Fallback (old behavior): just proceed
+    props.onNext();
+  }
 
   async function handleConfirmYes() {
     setWorking(true);
     try {
       await props.onConfirm({ answer: "yes" });
-      props.onNext();
+
+      // ✅ If we have a suggested key, persist+advance through the wizard hook.
+      if (suggestedKeyNorm) {
+        await acceptIndustryAndAdvance(suggestedKeyNorm);
+      } else {
+        // If no key present, still move forward.
+        props.onNext();
+      }
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       props.onError(msg);
@@ -523,6 +554,19 @@ export function Step2(props: {
     try {
       await props.onConfirm({ answer: "no" });
       setShowInterview(true);
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      props.onError(msg);
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function handleInterviewAccept() {
+    setWorking(true);
+    try {
+      // ✅ For the no-website path, accept the interview's proposed key.
+      await acceptIndustryAndAdvance(proposedKeyNorm);
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       props.onError(msg);
@@ -663,12 +707,10 @@ export function Step2(props: {
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
                       <div className="text-xs font-semibold opacity-80">Why we think this</div>
 
-                      {/* ✅ constrain on mobile; scroll instead of growing forever */}
                       <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
                         {rawSummary ? rawSummary : "No additional details were provided by the analyzer."}
                       </div>
 
-                      {/* ✅ internal key only in debug */}
                       {debugOn && suggestedKeyNorm ? (
                         <div className="mt-3 text-[11px] opacity-70">
                           Internal key: <span className="font-mono">{suggestedKeyNorm}</span>
@@ -715,7 +757,7 @@ export function Step2(props: {
           </div>
         </>
       ) : (
-        /* -------------------- Interview UI (unchanged) -------------------- */
+        /* -------------------- Interview UI -------------------- */
         <>
           <div className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industry interview</div>
           <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
@@ -749,7 +791,7 @@ export function Step2(props: {
                   {hypothesis ? (
                     <>
                       <span className="font-semibold">{hypothesis}</span>
-                      {proposedKey ? <span className="ml-2 font-mono text-xs opacity-70">({proposedKey})</span> : null}
+                      {proposedKeyRaw ? <span className="ml-2 font-mono text-xs opacity-70">({proposedKeyRaw})</span> : null}
                     </>
                   ) : (
                     <span className="text-gray-600 dark:text-gray-300">Building context…</span>
@@ -792,7 +834,7 @@ export function Step2(props: {
               <div className="text-base font-semibold">We’re ready.</div>
               <div className="mt-1">
                 Suggested industry: <span className="font-semibold">{hypothesis}</span>{" "}
-                {proposedKey ? <span className="font-mono text-xs opacity-70">({proposedKey})</span> : null}
+                {proposedKeyRaw ? <span className="font-mono text-xs opacity-70">({proposedKeyRaw})</span> : null}
               </div>
 
               <div className="mt-4 grid grid-cols-2 gap-3">
@@ -810,10 +852,11 @@ export function Step2(props: {
 
                 <button
                   type="button"
-                  className="rounded-2xl bg-black py-3 text-sm font-semibold text-white dark:bg-white dark:text-black"
-                  onClick={props.onNext}
+                  className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                  onClick={() => handleInterviewAccept().catch(() => null)}
+                  disabled={working || !tid || !proposedKeyNorm}
                 >
-                  Continue to confirmation →
+                  Use this & continue →
                 </button>
               </div>
 
