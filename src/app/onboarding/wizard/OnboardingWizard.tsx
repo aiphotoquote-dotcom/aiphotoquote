@@ -32,7 +32,7 @@ function getAiAnalysis(state: OnboardingState | null): any | null {
   if (s.aiAnalysisJson && typeof s.aiAnalysisJson === "object") return s.aiAnalysisJson;
 
   if (s.tenantOnboarding?.aiAnalysis && typeof s.tenantOnboarding.aiAnalysis === "object") return s.tenantOnboarding.aiAnalysis;
-  if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
+  if (s.tenantOnboarding?.ai_analysis && typeof s.tenantOnboarding.tenantOnboarding?.ai_analysis === "object") return s.tenantOnboarding.ai_analysis;
 
   return null;
 }
@@ -126,7 +126,11 @@ export default function OnboardingWizard() {
         setTenantInNav(serverTenantId);
       }
 
-      // never allow URL step to drag backwards vs server step
+      /**
+       * ✅ IMPORTANT NAV FIX:
+       * Allow user back navigation (URL step can be behind server step).
+       * Still prevent "skipping ahead" via URL by clamping forward jumps down to serverStep.
+       */
       const p = getUrlParams();
       const urlStepRaw = (p as any)?.step;
       const urlStep = urlStepRaw ? clampStep(urlStepRaw) : null;
@@ -134,7 +138,9 @@ export default function OnboardingWizard() {
       const serverStepRaw = (j as any)?.currentStep;
       const serverStep = clampStep(serverStepRaw || 1);
 
-      const nextStep = urlStep ? Math.max(serverStep, urlStep) : serverStep;
+      // If URL requests a later step than server allows, clamp it down.
+      // If URL requests an earlier step (Back), honor it.
+      const nextStep = urlStep ? Math.min(urlStep, serverStep) : serverStep;
 
       if (nextStep !== step) {
         setUrlParams({ step: nextStep });
