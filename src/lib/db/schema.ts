@@ -235,6 +235,9 @@ export const tenantSettings = pgTable("tenant_settings", {
   // ✅ NEW: onboarding “how you charge”
   pricingModel: text("pricing_model"),
 
+  // ✅ NEW: model-specific pricing settings (shape depends on pricingModel)
+  pricingConfig: jsonb("pricing_config").$type<any>(),
+
   // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),
   renderingStyle: text("rendering_style"),
