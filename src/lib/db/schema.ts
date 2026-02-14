@@ -235,32 +235,14 @@ export const tenantSettings = pgTable("tenant_settings", {
   // ✅ onboarding “how you charge”
   pricingModel: text("pricing_model"),
 
-  /**
-   * ✅ NEW: pricing model settings (nullable; safe to add)
-   * These are intentionally lightweight “Phase 1” knobs.
-   * Later we can normalize into dedicated tables if needed.
-   */
-
-  // flat_per_job
+  // ✅ NEW: pricing configuration (model-specific tenant defaults)
   flatRateDefault: integer("flat_rate_default"),
-
-  // hourly_plus_materials
   hourlyLaborRate: integer("hourly_labor_rate"),
-  materialMarkupPercent: integer("material_markup_percent"), // store 0-100 as int
-
-  // per_unit
+  materialMarkupPercent: integer("material_markup_percent"),
   perUnitRate: integer("per_unit_rate"),
-  perUnitLabel: text("per_unit_label"), // e.g. "sq ft", "linear ft", "panel", "seat"
-
-  // packages
+  perUnitLabel: text("per_unit_label"),
   packageJson: jsonb("package_json").$type<any>(),
-
-  // line_items
   lineItemsJson: jsonb("line_items_json").$type<any>(),
-
-  // inspection_only has no numeric settings (policy-driven)
-
-  // assessment_fee
   assessmentFeeAmount: integer("assessment_fee_amount"),
   assessmentFeeCreditTowardJob: boolean("assessment_fee_credit_toward_job"),
 
