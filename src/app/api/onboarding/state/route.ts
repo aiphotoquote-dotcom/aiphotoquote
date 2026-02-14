@@ -416,6 +416,7 @@ export async function POST(req: Request) {
         return noCacheJson({ ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a valid pricing model." }, 400);
       }
 
+      // tenant_settings has NO id and NO created_at in your DB. Only updated_at exists.
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, pricing_model, updated_at)
         values (${tid}::uuid, 'service', ${model}, now())
@@ -496,6 +497,7 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
+        // tenant_settings has NO id and NO created_at in your DB. Only updated_at exists.
         await db.execute(sql`
           insert into tenant_settings (tenant_id, industry_key, business_name, updated_at)
           values (${tenantId}::uuid, 'service', ${businessName}, now())
@@ -552,6 +554,7 @@ export async function POST(req: Request) {
 
       const platformFrom = "no-reply@aiphotoquote.com";
 
+      // tenant_settings has NO created_at in your DB. Only updated_at exists.
       await db.execute(sql`
         insert into tenant_settings (
           tenant_id,

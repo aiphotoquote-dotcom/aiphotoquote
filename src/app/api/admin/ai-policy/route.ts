@@ -83,26 +83,39 @@ function normalizePricingModel(v: any): z.infer<typeof PricingModel> | null {
   return parsed.success ? parsed.data : null;
 }
 
+function normalizeAiMode(v: any): z.infer<typeof AiMode> {
+  const s = String(v ?? "").trim();
+  const parsed = AiMode.safeParse(s);
+  return parsed.success ? parsed.data : "assessment_only";
+}
+
+/**
+ * ✅ Server-side truth:
+ * If pricing is disabled, force ai_mode to assessment_only.
+ */
+function enforcePricingRule(ai_mode: z.infer<typeof AiMode>, pricing_enabled: boolean): z.infer<typeof AiMode> {
+  return pricing_enabled ? ai_mode : "assessment_only";
+}
+
 function normalizeRow(row: any) {
-  const ai_mode = (row?.ai_mode ?? "assessment_only").toString();
   const pricing_enabled = !!(row?.pricing_enabled ?? false);
+
+  const ai_mode_raw = normalizeAiMode(row?.ai_mode ?? "assessment_only");
+  const ai_mode = enforcePricingRule(ai_mode_raw, pricing_enabled);
 
   // ✅ onboarding-saved field
   const pricing_model = normalizePricingModel(row?.pricing_model);
 
   const rendering_enabled = !!(row?.rendering_enabled ?? false);
 
-  const rendering_style_raw = (row?.rendering_style ?? "photoreal").toString();
+  const rendering_style_raw = String(row?.rendering_style ?? "photoreal").trim();
   const rendering_style =
     rendering_style_raw === "photoreal" || rendering_style_raw === "clean_oem" || rendering_style_raw === "custom"
       ? rendering_style_raw
       : "photoreal";
 
-  const rendering_notes = (row?.rendering_notes ?? "").toString();
-  const rendering_max_per_day = Number.isFinite(Number(row?.rendering_max_per_day))
-    ? Math.max(0, Number(row?.rendering_max_per_day))
-    : 20;
-
+  const rendering_notes = String(row?.rendering_notes ?? "");
+  const rendering_max_per_day = clampInt(row?.rendering_max_per_day, 20, 0, 1000);
   const rendering_customer_opt_in_required = !!(row?.rendering_customer_opt_in_required ?? true);
 
   // Live Q&A
@@ -151,22 +164,26 @@ export async function POST(req: Request) {
   }
 
   try {
-    const data = parsed.data;
+    const incoming = parsed.data;
+
+    // ✅ enforce rule on write
+    const pricing_enabled = Boolean(incoming.pricing_enabled);
+    const ai_mode = enforcePricingRule(incoming.ai_mode, pricing_enabled);
 
     const upd = await db.execute(sql`
       update tenant_settings
       set
-        ai_mode = ${data.ai_mode},
-        pricing_enabled = ${data.pricing_enabled},
+        ai_mode = ${ai_mode},
+        pricing_enabled = ${pricing_enabled},
 
-        rendering_enabled = ${data.rendering_enabled},
-        rendering_style = ${data.rendering_style},
-        rendering_notes = ${data.rendering_notes},
-        rendering_max_per_day = ${data.rendering_max_per_day},
-        rendering_customer_opt_in_required = ${data.rendering_customer_opt_in_required},
+        rendering_enabled = ${incoming.rendering_enabled},
+        rendering_style = ${incoming.rendering_style},
+        rendering_notes = ${incoming.rendering_notes ?? ""},
+        rendering_max_per_day = ${clampInt(incoming.rendering_max_per_day, 20, 0, 1000)},
+        rendering_customer_opt_in_required = ${incoming.rendering_customer_opt_in_required},
 
-        live_qa_enabled = ${data.live_qa_enabled},
-        live_qa_max_questions = ${data.live_qa_max_questions},
+        live_qa_enabled = ${Boolean(incoming.live_qa_enabled)},
+        live_qa_max_questions = ${clampInt(incoming.live_qa_max_questions, 3, 1, 10)},
 
         updated_at = now()
       where tenant_id = ${gate.tenantId}::uuid
@@ -185,15 +202,20 @@ export async function POST(req: Request) {
            live_qa_enabled, live_qa_max_questions,
            created_at)
         values
-          (gen_random_uuid(), ${gate.tenantId}::uuid, 'auto', ${data.ai_mode}, ${data.pricing_enabled},
-           ${data.rendering_enabled}, ${data.rendering_style}, ${data.rendering_notes}, ${data.rendering_max_per_day}, ${data.rendering_customer_opt_in_required},
-           ${data.live_qa_enabled}, ${data.live_qa_max_questions},
+          (gen_random_uuid(), ${gate.tenantId}::uuid, 'auto', ${ai_mode}, ${pricing_enabled},
+           ${incoming.rendering_enabled}, ${incoming.rendering_style}, ${incoming.rendering_notes ?? ""}, ${clampInt(
+             incoming.rendering_max_per_day,
+             20,
+             0,
+             1000
+           )}, ${incoming.rendering_customer_opt_in_required},
+           ${Boolean(incoming.live_qa_enabled)}, ${clampInt(incoming.live_qa_max_questions, 3, 1, 10)},
            now())
       `);
     }
 
     const row = await getRow(gate.tenantId);
-    const normalized = normalizeRow(row ?? parsed.data);
+    const normalized = normalizeRow(row ?? { ...incoming, ai_mode, pricing_enabled });
 
     return json({
       ok: true,

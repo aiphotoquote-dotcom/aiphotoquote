@@ -168,32 +168,6 @@ function pickIndustrySnapshotFromInput(inputAny: any): string {
   return "";
 }
 
-function pickPricingPolicyFromInput(inputAny: any): PricingPolicySnapshot | null {
-  const pp = inputAny?.pricing_policy_snapshot;
-  if (pp && typeof pp === "object") {
-    const ai_mode = safeTrim(pp.ai_mode) as AiMode;
-    const pricing_enabled = Boolean(pp.pricing_enabled);
-    const pricing_model_raw = safeTrim(pp.pricing_model);
-    const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
-    if (isAiMode(ai_mode)) {
-      return { ai_mode, pricing_enabled, pricing_model };
-    }
-  }
-
-  // back-compat: allow separate fields
-  const ai_mode_raw = safeTrim(inputAny?.ai_mode_snapshot);
-  const pricing_enabled_raw = inputAny?.pricing_enabled_snapshot;
-  const pricing_model_raw = safeTrim(inputAny?.pricing_model_snapshot);
-
-  const ai_mode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : null;
-  if (!ai_mode) return null;
-
-  const pricing_enabled = typeof pricing_enabled_raw === "boolean" ? pricing_enabled_raw : Boolean(pricing_enabled_raw);
-  const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
-
-  return { ai_mode, pricing_enabled, pricing_model };
-}
-
 function isAiMode(v: string): v is AiMode {
   return v === "assessment_only" || v === "range" || v === "fixed";
 }
@@ -207,6 +181,59 @@ function isPricingModel(v: string): v is PricingModel {
     v === "inspection_only" ||
     v === "assessment_fee"
   );
+}
+
+/**
+ * Normalize pricing policy to your rule:
+ * - If pricing_enabled is false => force assessment_only + clear pricing_model.
+ */
+function normalizePricingPolicy(pp: PricingPolicySnapshot): PricingPolicySnapshot {
+  if (!pp.pricing_enabled) {
+    return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+  }
+  // pricing enabled: keep ai_mode (default to range if invalid upstream)
+  const ai_mode: AiMode = isAiMode(pp.ai_mode) ? pp.ai_mode : "range";
+  const pricing_model = pp.pricing_model ?? null;
+  return { ai_mode, pricing_enabled: true, pricing_model };
+}
+
+/**
+ * Hard gate:
+ * - Phase1 must honor resolved.tenant.pricingEnabled
+ * - Phase2 uses frozen snapshot from the quote log (if present)
+ */
+function applyPricingEnabledGate(policy: PricingPolicySnapshot, pricingEnabled: boolean): PricingPolicySnapshot {
+  if (!pricingEnabled) {
+    return normalizePricingPolicy({ ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null });
+  }
+  // enabled: keep existing policy (but normalized)
+  return normalizePricingPolicy(policy);
+}
+
+function pickPricingPolicyFromInput(inputAny: any): PricingPolicySnapshot | null {
+  const pp = inputAny?.pricing_policy_snapshot;
+  if (pp && typeof pp === "object") {
+    const ai_mode_raw = safeTrim(pp.ai_mode);
+    const ai_mode: AiMode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "assessment_only";
+
+    const pricing_enabled = Boolean(pp.pricing_enabled);
+
+    const pricing_model_raw = safeTrim(pp.pricing_model);
+    const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
+
+    return normalizePricingPolicy({ ai_mode, pricing_enabled, pricing_model });
+  }
+
+  // back-compat: allow separate fields
+  const ai_mode_raw = safeTrim(inputAny?.ai_mode_snapshot);
+  const pricing_enabled_raw = inputAny?.pricing_enabled_snapshot;
+  const pricing_model_raw = safeTrim(inputAny?.pricing_model_snapshot);
+
+  const ai_mode: AiMode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "assessment_only";
+  const pricing_enabled = typeof pricing_enabled_raw === "boolean" ? pricing_enabled_raw : Boolean(pricing_enabled_raw);
+  const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
+
+  return normalizePricingPolicy({ ai_mode, pricing_enabled, pricing_model });
 }
 
 function startOfMonthUTC(d: Date) {
@@ -248,6 +275,118 @@ function safeDbTargetFromEnv(): { host: string | null; db: string | null } {
 
 type DebugFn = (stage: string, data?: Record<string, any>) => void;
 
+/* --------------------- image inlining for OpenAI vision --------------------- */
+/**
+ * Why:
+ * OpenAI will fetch image_url itself. Your error shows timeouts fetching Vercel Blob URLs.
+ * Fix:
+ * Fetch bytes server-side and pass as data: URL.
+ *
+ * IMPORTANT:
+ * We still store the original Blob URL in quote_logs.input.images for future concept renders/emails/audits.
+ */
+
+const OPENAI_VISION_MAX_IMAGES = 6; // keep payload sane; we still store all URLs
+const IMAGE_FETCH_TIMEOUT_MS = 12_000;
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8MB cap per image for analysis payload
+
+function guessContentType(url: string): string {
+  const u = url.toLowerCase();
+  if (u.endsWith(".png")) return "image/png";
+  if (u.endsWith(".webp")) return "image/webp";
+  if (u.endsWith(".gif")) return "image/gif";
+  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
+  return "application/octet-stream";
+}
+
+function toBase64(buf: ArrayBuffer): string {
+  return Buffer.from(buf).toString("base64");
+}
+
+async function fetchAsDataUrl(url: string, debug?: DebugFn) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+      // DO NOT send cookies; blob URLs are public
+    });
+
+    if (!res.ok) {
+      throw new Error(`IMAGE_FETCH_FAILED: HTTP ${res.status}`);
+    }
+
+    const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
+    const contentType = ct || guessContentType(url);
+
+    const ab = await res.arrayBuffer();
+    if (ab.byteLength > IMAGE_MAX_BYTES) {
+      throw new Error(`IMAGE_TOO_LARGE: ${ab.byteLength} bytes`);
+    }
+
+    const b64 = toBase64(ab);
+    return `data:${contentType};base64,${b64}`;
+  } catch (e: any) {
+    debug?.("openai.image.inline_failed", { url, message: e?.message ?? String(e) });
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function buildOpenAiVisionContent(args: {
+  images: Array<{ url: string; shotType?: string }>;
+  debug?: DebugFn;
+}) {
+  const { images, debug } = args;
+
+  const picked = (images || []).filter((x) => x?.url).slice(0, OPENAI_VISION_MAX_IMAGES);
+
+  const content: any[] = [];
+  for (const img of picked) {
+    const u = String(img.url);
+    // Try inline first (solves your blob timeout); fall back to remote url if inline fails.
+    try {
+      const dataUrl = await fetchAsDataUrl(u, debug);
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
+    } catch {
+      content.push({ type: "image_url", image_url: { url: u } });
+    }
+  }
+
+  return content;
+}
+
+/* --------------------- output coercion (avoid false fallback) --------------------- */
+function coerceToNumber(v: any): number {
+  const n = typeof v === "string" ? Number(v) : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function coerceStringArray(v: any): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+}
+
+function coerceAiCandidate(candidate: any) {
+  if (!candidate || typeof candidate !== "object") return candidate;
+
+  return {
+    confidence: String(candidate.confidence ?? "").trim() || "low",
+    inspection_required: Boolean(candidate.inspection_required),
+    estimate_low: coerceToNumber(candidate.estimate_low),
+    estimate_high: coerceToNumber(candidate.estimate_high),
+    currency: String(candidate.currency ?? "USD"),
+    summary: String(candidate.summary ?? ""),
+    visible_scope: coerceStringArray(candidate.visible_scope),
+    assumptions: coerceStringArray(candidate.assumptions),
+    questions: coerceStringArray(candidate.questions),
+  };
+}
+
 /**
  * Enforce monthly quote limits (Phase 1 only)
  */
@@ -282,10 +421,7 @@ async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: 
  * Read pricing policy + pricing model from tenant_settings WITHOUT relying on Drizzle schema columns.
  * (Keeps this branch safe even if schema typings lag behind DB.)
  */
-async function loadPricingPolicySnapshot(args: {
-  tenantId: string;
-  debug?: DebugFn;
-}): Promise<PricingPolicySnapshot> {
+async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: DebugFn }): Promise<PricingPolicySnapshot> {
   const { tenantId, debug } = args;
 
   const r = await db.execute(sql`
@@ -300,25 +436,30 @@ async function loadPricingPolicySnapshot(args: {
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
-  const ai_mode_raw = safeTrim(row?.ai_mode) || "assessment_only";
-  const ai_mode: AiMode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "assessment_only";
-
   const pricing_enabled = Boolean(row?.pricing_enabled ?? false);
 
+  // If pricing is disabled, force assessment-only (your rule)
+  const ai_mode_raw = safeTrim(row?.ai_mode) || "assessment_only";
+  const ai_mode: AiMode = pricing_enabled ? (isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "range") : "assessment_only";
+
   const pricing_model_raw = safeTrim(row?.pricing_model);
-  const pricing_model: PricingModel | null = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
+  const pricing_model: PricingModel | null =
+    pricing_enabled && isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
 
-  debug?.("pricingPolicy.loaded", { ai_mode, pricing_enabled, pricing_model });
+  const normalized = normalizePricingPolicy({ ai_mode, pricing_enabled, pricing_model });
 
-  return { ai_mode, pricing_enabled, pricing_model };
+  debug?.("pricingPolicy.loaded", normalized);
+
+  return normalized;
 }
 
 /**
  * Hard guardrail: enforce policy on output *even if the model misbehaves*.
  */
 function enforcePricingPolicyOnOutput(output: any, policy: PricingPolicySnapshot) {
-  const ai_mode = policy.ai_mode;
-  const pricing_enabled = policy.pricing_enabled;
+  const p = normalizePricingPolicy(policy);
+  const ai_mode = p.ai_mode;
+  const pricing_enabled = p.pricing_enabled;
 
   let { low, high } = ensureLowHigh(Number(output?.estimate_low ?? 0), Number(output?.estimate_high ?? 0));
 
@@ -331,8 +472,6 @@ function enforcePricingPolicyOnOutput(output: any, policy: PricingPolicySnapshot
     const mid = clampMoney((low + high) / 2);
     low = mid;
     high = mid;
-  } else {
-    // range is allowed; keep low/high
   }
 
   return { ...output, estimate_low: low, estimate_high: high };
@@ -340,9 +479,11 @@ function enforcePricingPolicyOnOutput(output: any, policy: PricingPolicySnapshot
 
 /**
  * Prompt-level guardrail: inject policy + pricing model guidance ahead of system prompt.
+ * IMPORTANT: Only mention pricing_model hints if pricing_enabled is true.
  */
 function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: PricingPolicySnapshot) {
-  const { ai_mode, pricing_enabled, pricing_model } = policy;
+  const p = normalizePricingPolicy(policy);
+  const { ai_mode, pricing_enabled, pricing_model } = p;
 
   const policyBlock = [
     "### POLICY (must follow exactly)",
@@ -355,12 +496,13 @@ function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: Pricin
       : ai_mode === "fixed"
         ? "- AI mode is FIXED ESTIMATE. Output a single-number estimate by setting estimate_low == estimate_high."
         : "- AI mode is RANGE. Output a low/high range.",
-    pricing_model
-      ? `- Pricing model hint (how the business typically charges): ${pricing_model}. Use this ONLY as a methodology hint.`
-      : "- Pricing model hint: not provided.",
     "- If you are unsure, prefer inspection_required=true and keep estimates conservative.",
     "",
   ].join("\n");
+
+  if (!pricing_enabled) {
+    return [policyBlock, baseSystem].join("\n");
+  }
 
   const modelHint =
     pricing_model === "flat_per_job"
@@ -374,13 +516,12 @@ function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: Pricin
             : pricing_model === "line_items"
               ? "Pricing methodology hint: think add-ons; base service + optional items; range reflects which items apply."
               : pricing_model === "inspection_only"
-                ? "Pricing methodology hint: prefer inspection_required=true; if pricing is enabled, keep low/high conservative and emphasize inspection."
+                ? "Pricing methodology hint: prefer inspection_required=true; keep low/high conservative and emphasize inspection."
                 : pricing_model === "assessment_fee"
-                  ? "Pricing methodology hint: assessment/diagnostic fee model; if pricing enabled, keep estimate conservative and call out assessment if relevant."
+                  ? "Pricing methodology hint: assessment/diagnostic fee model; keep estimate conservative and call out assessment if relevant."
                   : "";
 
   const combined = [policyBlock, modelHint ? `### PRICING MODEL NOTES\n${modelHint}\n` : "", baseSystem].join("\n");
-
   return combined;
 }
 
@@ -526,6 +667,8 @@ function buildAiSnapshot(args: {
   const quoteEstimatorSystem = resolved?.prompts?.quoteEstimatorSystem ?? "";
   const qaQuestionGeneratorSystem = resolved?.prompts?.qaQuestionGeneratorSystem ?? "";
 
+  const policy = normalizePricingPolicy(pricingPolicy);
+
   return {
     version: 2,
     capturedAt: nowIso(),
@@ -549,7 +692,9 @@ function buildAiSnapshot(args: {
       llmKeySource,
     },
     pricing: {
-      policy: pricingPolicy,
+      policy,
+      // Only store model hint when enabled (your rule)
+      modelHint: policy.pricing_enabled ? policy.pricing_model : null,
     },
     pricingRules: resolved.pricing ?? null,
   };
@@ -588,9 +733,7 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(
-    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-  );
+  const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -702,8 +845,9 @@ async function generateQaQuestions(args: {
   service_type: string;
   notes: string;
   maxQuestions: number;
+  debug?: DebugFn;
 }) {
-  const { openai, model, system, images, category, service_type, notes, maxQuestions } = args;
+  const { openai, model, system, images, category, service_type, notes, maxQuestions, debug } = args;
 
   const userText = [
     `Category: ${category}`,
@@ -714,9 +858,8 @@ async function generateQaQuestions(args: {
   ].join("\n");
 
   const content: any[] = [{ type: "text", text: userText }];
-  for (const img of images) {
-    if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-  }
+  const vision = await buildOpenAiVisionContent({ images, debug });
+  content.push(...vision);
 
   const completion = await openai.chat.completions.create({
     model,
@@ -753,13 +896,11 @@ async function generateEstimate(args: {
   service_type: string;
   notes: string;
   normalizedAnswers?: Array<{ question: string; answer: string }>;
+  debug?: DebugFn;
 }) {
-  const { openai, model, system, images, category, service_type, notes, normalizedAnswers } = args;
+  const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
 
-  const qaText =
-    normalizedAnswers?.length
-      ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n")
-      : "";
+  const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
 
   const userText = [
     `Category: ${category}`,
@@ -778,9 +919,8 @@ async function generateEstimate(args: {
     .join("\n");
 
   const content: any[] = [{ type: "text", text: userText }];
-  for (const img of images) {
-    if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-  }
+  const vision = await buildOpenAiVisionContent({ images, debug });
+  content.push(...vision);
 
   const completion = await openai.chat.completions.create({
     model,
@@ -807,16 +947,7 @@ async function generateEstimate(args: {
             assumptions: { type: "array", items: { type: "string" } },
             questions: { type: "array", items: { type: "string" } },
           },
-          required: [
-            "confidence",
-            "inspection_required",
-            "estimate_low",
-            "estimate_high",
-            "summary",
-            "visible_scope",
-            "assumptions",
-            "questions",
-          ],
+          required: ["confidence", "inspection_required", "estimate_low", "estimate_high", "summary", "visible_scope", "assumptions", "questions"],
         },
       },
     } as any,
@@ -831,7 +962,20 @@ async function generateEstimate(args: {
     outputParsed = null;
   }
 
-  const safe = AiOutputSchema.safeParse(outputParsed);
+  // ✅ Salvage common “wrapper” failure mode:
+  // { type:"object", properties:{...actual values...} }
+  const candidate0 =
+    outputParsed &&
+    typeof outputParsed === "object" &&
+    outputParsed.properties &&
+    typeof outputParsed.properties === "object"
+      ? outputParsed.properties
+      : outputParsed;
+
+  // ✅ Coerce types (prevents false fallback when numbers come back as strings, etc.)
+  const candidate = coerceAiCandidate(candidate0);
+
+  const safe = AiOutputSchema.safeParse(candidate);
   if (!safe.success) {
     return {
       confidence: "low",
@@ -839,8 +983,7 @@ async function generateEstimate(args: {
       estimate_low: 0,
       estimate_high: 0,
       currency: "USD",
-      summary:
-        "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
+      summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
       visible_scope: [],
       assumptions: [],
       questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
@@ -927,12 +1070,7 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "MAINTENANCE",
-          message: pc.maintenanceMessage || "Service temporarily unavailable.",
-          ...(debugEnabled ? { debugId } : {}),
-        },
+        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
         { status: 503 }
       );
     }
@@ -1049,13 +1187,23 @@ export async function POST(req: Request) {
       industryKeyForQuote = tenantIndustryKey;
     }
 
+    // Resolve tenant + PCC AI settings (includes pricingEnabled gate)
+    const resolvedBase = await resolveTenantLlm(tenant.id);
+
     // ✅ If we didn't get pricing policy from log (phase1), load it from tenant_settings
     if (!pricingPolicy) {
       pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
     }
 
-    // Resolve tenant + PCC AI settings
-    const resolvedBase = await resolveTenantLlm(tenant.id);
+    // ✅ Apply the hard gate:
+    // - Phase1 (no frozen log): policy must follow resolvedBase.tenant.pricingEnabled
+    // - Phase2 (frozen log): trust the frozen policy
+    const pricingEnabledGate = Boolean((resolvedBase as any)?.tenant?.pricingEnabled);
+    pricingPolicy = isPhase2
+      ? normalizePricingPolicy(pricingPolicy)
+      : applyPricingEnabledGate(normalizePricingPolicy(pricingPolicy), pricingEnabledGate);
+
+    // PCC + industry prompt pack
     const pccCfg = await loadPlatformLlmConfig();
     const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
 
@@ -1075,10 +1223,7 @@ export async function POST(req: Request) {
     };
 
     // ✅ Apply pricing-policy wrapper to estimator system prompt
-    const estimatorSystemWithPolicy = wrapEstimatorSystemWithPricingPolicy(
-      effectivePrompts.quoteEstimatorSystem,
-      pricingPolicy
-    );
+    const estimatorSystemWithPolicy = wrapEstimatorSystemWithPricingPolicy(effectivePrompts.quoteEstimatorSystem, pricingPolicy);
 
     const resolved = {
       ...resolvedBase,
@@ -1103,6 +1248,7 @@ export async function POST(req: Request) {
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
+      pricingEnabledGate,
       pricingPolicy,
     });
 
@@ -1191,12 +1337,7 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            {
-              ok: false,
-              error: "CONTENT_BLOCKED",
-              message: "Your answers include content we can’t process. Please revise.",
-              ...(debugEnabled ? { debugId } : {}),
-            },
+            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
             { status: 400 }
           );
         }
@@ -1225,6 +1366,7 @@ export async function POST(req: Request) {
         service_type,
         notes,
         normalizedAnswers,
+        debug,
       });
 
       const output = enforcePricingPolicyOnOutput(rawOutput, pricingPolicy);
@@ -1308,12 +1450,7 @@ export async function POST(req: Request) {
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "CONTENT_BLOCKED",
-          message: "Your request includes content we can’t process. Please revise and try again.",
-          ...(debugEnabled ? { debugId } : {}),
-        },
+        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
         { status: 400 }
       );
     }
@@ -1322,19 +1459,24 @@ export async function POST(req: Request) {
     aiEnvelope.renderOptIn = renderOptIn;
 
     // ✅ Freeze pricing policy into the quote log input so phase2 uses the same rules.
+    // Phase1 MUST honor resolved.tenant.pricingEnabled.
+    const policyToStore = applyPricingEnabledGate(pricingPolicy, Boolean(resolved.tenant.pricingEnabled));
+
     const inputToStore = {
       tenantSlug,
-      images,
+      images, // canonical URLs stay here for future renders/emails/admin
       render_opt_in: renderOptIn,
       customer,
       industryKeySnapshot: industryKeyForQuote,
       industrySource: "tenant_settings" as const,
       llmKeySource: keySource,
       customer_context: { category, service_type, notes },
-      pricing_policy_snapshot: pricingPolicy,
-      pricing_model_snapshot: pricingPolicy.pricing_model ?? null,
-      ai_mode_snapshot: pricingPolicy.ai_mode,
-      pricing_enabled_snapshot: pricingPolicy.pricing_enabled,
+
+      pricing_policy_snapshot: policyToStore,
+      pricing_model_snapshot: policyToStore.pricing_enabled ? policyToStore.pricing_model ?? null : null,
+      ai_mode_snapshot: policyToStore.ai_mode,
+      pricing_enabled_snapshot: policyToStore.pricing_enabled,
+
       createdAt: nowIso(),
     };
 
@@ -1346,7 +1488,7 @@ export async function POST(req: Request) {
       resolved,
       industryKey: industryKeyForQuote,
       llmKeySource: keySource,
-      pricingPolicy,
+      pricingPolicy: policyToStore,
     });
 
     const inserted = await db
@@ -1376,6 +1518,7 @@ export async function POST(req: Request) {
         service_type,
         notes,
         maxQuestions: resolved.tenant.liveQaMaxQuestions,
+        debug,
       });
 
       const qa = { questions, answers: [], askedAt: nowIso() };
@@ -1388,7 +1531,7 @@ export async function POST(req: Request) {
         resolved,
         industryKey: industryKeyForQuote,
         llmKeySource: keySource,
-        pricingPolicy,
+        pricingPolicy: policyToStore,
       });
 
       await db
@@ -1412,9 +1555,10 @@ export async function POST(req: Request) {
       category,
       service_type,
       notes,
+      debug,
     });
 
-    const output = enforcePricingPolicyOnOutput(rawOutput, pricingPolicy);
+    const output = enforcePricingPolicyOnOutput(rawOutput, policyToStore);
 
     const aiSnapshotEstimated = buildAiSnapshot({
       phase: "phase1_estimated",
@@ -1424,7 +1568,7 @@ export async function POST(req: Request) {
       resolved,
       industryKey: industryKeyForQuote,
       llmKeySource: keySource,
-      pricingPolicy,
+      pricingPolicy: policyToStore,
     });
 
     let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshotEstimated };

@@ -232,8 +232,19 @@ export const tenantSettings = pgTable("tenant_settings", {
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
 
-  // ✅ NEW: onboarding “how you charge”
+  // ✅ Onboarding “how you charge”
   pricingModel: text("pricing_model"),
+
+  // ✅ Pricing model config (hybrid: AI suggests + backend computes)
+  flatRateDefault: integer("flat_rate_default"),
+  hourlyLaborRate: integer("hourly_labor_rate"),
+  materialMarkupPercent: integer("material_markup_percent"),
+  perUnitRate: integer("per_unit_rate"),
+  perUnitLabel: text("per_unit_label"),
+  packageJson: jsonb("package_json").$type<any>(),
+  lineItemsJson: jsonb("line_items_json").$type<any>(),
+  assessmentFeeAmount: integer("assessment_fee_amount"),
+  assessmentFeeCreditTowardJob: boolean("assessment_fee_credit_toward_job"),
 
   // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),

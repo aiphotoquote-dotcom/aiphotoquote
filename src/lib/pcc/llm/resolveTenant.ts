@@ -4,6 +4,52 @@ import { db } from "@/lib/db/client";
 import { tenantSettings, tenantPricingRules } from "@/lib/db/schema";
 import { getPlatformLlm } from "./apply";
 
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function clampMoneyInt(v: unknown, fallback: number | null, min = 0, max = 2_000_000) {
+  if (v === null || v === undefined) return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const m = Math.round(n);
+  return Math.max(min, Math.min(max, m));
+}
+
+function clampPercent(v: unknown, fallback: number | null, min = 0, max = 500) {
+  if (v === null || v === undefined) return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const p = Math.round(n);
+  return Math.max(min, Math.min(max, p));
+}
+
+function safePricingModel(v: unknown): PricingModel | null {
+  const s = safeTrim(v);
+  if (
+    s === "flat_per_job" ||
+    s === "hourly_plus_materials" ||
+    s === "per_unit" ||
+    s === "packages" ||
+    s === "line_items" ||
+    s === "inspection_only" ||
+    s === "assessment_fee"
+  ) {
+    return s;
+  }
+  return null;
+}
+
 /**
  * Tenant + PCC resolver:
  * - PCC provides defaults + allowed guardrails
@@ -27,6 +73,25 @@ export async function resolveTenantLlm(tenantId: string) {
 
       // Optional: model selector stored in DB (if you add it later)
       aiMode: tenantSettings.aiMode,
+
+      // ✅ PRICING gate (numbers allowed)
+      pricingEnabled: tenantSettings.pricingEnabled,
+
+      // ✅ Pricing model + config (hybrid)
+      pricingModel: tenantSettings.pricingModel,
+
+      flatRateDefault: tenantSettings.flatRateDefault,
+      hourlyLaborRate: tenantSettings.hourlyLaborRate,
+      materialMarkupPercent: tenantSettings.materialMarkupPercent,
+
+      perUnitRate: tenantSettings.perUnitRate,
+      perUnitLabel: tenantSettings.perUnitLabel,
+
+      packageJson: tenantSettings.packageJson,
+      lineItemsJson: tenantSettings.lineItemsJson,
+
+      assessmentFeeAmount: tenantSettings.assessmentFeeAmount,
+      assessmentFeeCreditTowardJob: tenantSettings.assessmentFeeCreditTowardJob,
     })
     .from(tenantSettings)
     .where(eq(tenantSettings.tenantId, tenantId))
@@ -34,7 +99,7 @@ export async function resolveTenantLlm(tenantId: string) {
     .then((r) => r[0] ?? null);
 
   // Pricing guardrails (optional — used in prompts later if you want)
-  const pricing = await db
+  const pricingRules = await db
     .select({
       minJob: tenantPricingRules.minJob,
       typicalLow: tenantPricingRules.typicalLow,
@@ -49,10 +114,7 @@ export async function resolveTenantLlm(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // ✅ Model selection rules:
-  // Today: just use PCC defaults.
-  // Later: if tenantSettings.aiMode is a DB dropdown (e.g., "fast", "balanced", "best"),
-  // map it to specific PCC models here. Still NO env vars.
+  // Model selection (PCC defaults for now)
   const estimatorModel = platform.models.estimatorModel;
   const qaModel = platform.models.qaModel;
   const renderModel = platform.models.renderModel;
@@ -69,6 +131,51 @@ export async function resolveTenantLlm(tenantId: string) {
   const liveQaEnabled = tenantQaEnabled;
   const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
 
+  // ✅ Pricing enabled gate
+  const pricingEnabled = settings?.pricingEnabled === true;
+
+  // ✅ Pricing model + config normalization (only when pricingEnabled === true)
+  const pricingModel = pricingEnabled ? safePricingModel(settings?.pricingModel) : null;
+
+  const pricingConfig = pricingEnabled
+    ? {
+        model: pricingModel,
+
+        // flat
+        flatRateDefault: clampMoneyInt(settings?.flatRateDefault, null),
+
+        // hourly + materials
+        hourlyLaborRate: clampMoneyInt(settings?.hourlyLaborRate, null),
+        materialMarkupPercent: clampPercent(settings?.materialMarkupPercent, null),
+
+        // per-unit
+        perUnitRate: clampMoneyInt(settings?.perUnitRate, null),
+        perUnitLabel: safeTrim(settings?.perUnitLabel) || null,
+
+        // packages / line items (structure validated later at use-site)
+        packageJson: (settings?.packageJson ?? null) as any,
+        lineItemsJson: (settings?.lineItemsJson ?? null) as any,
+
+        // assessment fee
+        assessmentFeeAmount: clampMoneyInt(settings?.assessmentFeeAmount, null),
+        assessmentFeeCreditTowardJob: settings?.assessmentFeeCreditTowardJob === true,
+      }
+    : null;
+
+  // ✅ Normalize guardrails too (only when pricingEnabled === true)
+  const normalizedPricingRules =
+    pricingEnabled && pricingRules
+      ? {
+          minJob: clampMoneyInt(pricingRules.minJob, null),
+          typicalLow: clampMoneyInt(pricingRules.typicalLow, null),
+          typicalHigh: clampMoneyInt(pricingRules.typicalHigh, null),
+          maxWithoutInspection: clampMoneyInt(pricingRules.maxWithoutInspection, null),
+          tone: safeTrim(pricingRules.tone) || "value",
+          riskPosture: safeTrim(pricingRules.riskPosture) || "conservative",
+          alwaysEstimateLanguage: pricingRules.alwaysEstimateLanguage !== false,
+        }
+      : null;
+
   return {
     platform,
     models: { estimatorModel, qaModel, renderModel },
@@ -78,13 +185,22 @@ export async function resolveTenantLlm(tenantId: string) {
     tenant: {
       tenantRenderEnabled,
       renderCustomerOptInRequired,
-      tenantStyleKey: (settings?.renderingStyle ?? "").trim() || null,
-      tenantRenderNotes: (settings?.renderingNotes ?? "").trim() || null,
+      tenantStyleKey: safeTrim(settings?.renderingStyle) || null,
+      tenantRenderNotes: safeTrim(settings?.renderingNotes) || null,
       liveQaEnabled,
       liveQaMaxQuestions,
-      aiMode: (settings?.aiMode ?? "").trim() || null,
+      aiMode: safeTrim(settings?.aiMode) || null,
+
+      // ✅ gate for “numbers”
+      pricingEnabled,
     },
 
-    pricing,
+    // ✅ Only expose pricing payload when enabled
+    pricing: pricingEnabled
+      ? {
+          config: pricingConfig,
+          rules: normalizedPricingRules,
+        }
+      : null,
   };
 }
