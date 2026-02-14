@@ -61,7 +61,9 @@ async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`);
+    throw new Error(
+      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`
+    );
   }
   return (await res.json()) as T;
 }
@@ -158,6 +160,8 @@ export function Step5Pricing(props: {
   const [err, setErr] = useState<string | null>(null);
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
+  const priceNumbersAllowed = useMemo(() => pricingEnabled === true, [pricingEnabled]);
+
   async function load() {
     setErr(null);
     setLoading(true);
@@ -173,8 +177,13 @@ export function Step5Pricing(props: {
       if (!data.ok) throw new Error((data as any).message || (data as any).error || "Failed to load AI policy");
 
       setRole(data.role);
-      setAiMode(data.ai_policy.ai_mode);
-      setPricingEnabled(!!data.ai_policy.pricing_enabled);
+
+      // ✅ mirror server truth: if pricing is disabled, force assessment_only
+      const pe = !!data.ai_policy.pricing_enabled;
+      const mode: AiMode = pe ? data.ai_policy.ai_mode : "assessment_only";
+
+      setPricingEnabled(pe);
+      setAiMode(mode);
       setPolicyRest(data.ai_policy);
 
       // 2) Load pricing model from DB (preferred), fallback to sessionStorage
@@ -216,6 +225,20 @@ export function Step5Pricing(props: {
     }
   }
 
+  function togglePricingEnabled() {
+    if (!canEdit) return;
+
+    setPricingEnabled((v) => {
+      const next = !v;
+
+      // ✅ UX mirrors server rule:
+      // turning pricing OFF forces assessment_only immediately.
+      if (!next) setAiMode("assessment_only");
+
+      return next;
+    });
+  }
+
   async function save() {
     setErr(null);
     setSaving(true);
@@ -236,9 +259,12 @@ export function Step5Pricing(props: {
         await persistPricingModelToDb(pricingModel as PricingModel);
       }
 
+      // ✅ enforce server rule in payload too (prevents UI drift)
+      const effectiveAiMode: AiMode = pricingEnabled ? aiMode : "assessment_only";
+
       // Save AI policy (existing behavior)
       const payload = {
-        ai_mode: aiMode,
+        ai_mode: effectiveAiMode,
         pricing_enabled: pricingEnabled,
 
         rendering_enabled: !!policyRest.rendering_enabled,
@@ -262,8 +288,11 @@ export function Step5Pricing(props: {
       if (!data.ok) throw new Error((data as any).message || (data as any).error || "Failed to save AI policy");
 
       setRole(data.role);
-      setAiMode(data.ai_policy.ai_mode);
-      setPricingEnabled(!!data.ai_policy.pricing_enabled);
+
+      // ✅ keep UI aligned with backend normalization
+      const pe = !!data.ai_policy.pricing_enabled;
+      setPricingEnabled(pe);
+      setAiMode(pe ? data.ai_policy.ai_mode : "assessment_only");
       setPolicyRest(data.ai_policy);
 
       props.onContinue();
@@ -387,6 +416,14 @@ export function Step5Pricing(props: {
                 This maps to your AI policy and controls whether numbers are shown.
               </div>
 
+              {!priceNumbersAllowed ? (
+                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                  Pricing is currently <span className="font-semibold">OFF</span>, so AI Mode is forced to{" "}
+                  <span className="font-mono">assessment_only</span> (no numbers). Turn pricing ON to enable range or
+                  fixed estimates.
+                </div>
+              ) : null}
+
               <div className="mt-4 grid gap-3">
                 <Card
                   title="Assessment only"
@@ -400,14 +437,14 @@ export function Step5Pricing(props: {
                   desc="A low/high range when possible."
                   selected={aiMode === "range"}
                   onClick={() => setAiMode("range")}
-                  disabled={!canEdit}
+                  disabled={!canEdit || !priceNumbersAllowed}
                 />
                 <Card
                   title="Rough estimate"
                   desc="Single-number estimate (best for standardized services)."
                   selected={aiMode === "fixed"}
                   onClick={() => setAiMode("fixed")}
-                  disabled={!canEdit}
+                  disabled={!canEdit || !priceNumbersAllowed}
                 />
               </div>
 
@@ -422,7 +459,7 @@ export function Step5Pricing(props: {
 
                   <button
                     type="button"
-                    onClick={() => canEdit && setPricingEnabled((v) => !v)}
+                    onClick={togglePricingEnabled}
                     disabled={!canEdit}
                     className={cn(
                       "rounded-xl border px-3 py-2 text-sm font-semibold",
@@ -476,7 +513,9 @@ export function Step5Pricing(props: {
               </button>
             </div>
 
-            <div className="text-xs text-gray-500 dark:text-gray-400">We’ll use this to control what the AI is allowed to show on quotes.</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              We’ll use this to control what the AI is allowed to show on quotes.
+            </div>
           </>
         )}
       </div>
