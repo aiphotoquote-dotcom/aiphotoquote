@@ -35,7 +35,6 @@ function pct(n: number | null) {
   return `${Math.max(0, Math.min(100, Math.round(n * 100)))}%`;
 }
 
-/** legacy interview shape (Mode A) */
 type ModeA_Interview = {
   mode: "A";
   status: "collecting" | "locked";
@@ -60,24 +59,12 @@ function setSubIntent(v: "refine" | "skip" | "unknown") {
   }
 }
 
-/** website-analysis shape (new) */
-type WebsiteAnalysisShape = {
-  suggestedIndustryKey?: string;
-  confidenceScore?: number; // 0..1
-  fit?: "good" | "maybe" | "poor";
-  fitReason?: string;
-  businessGuess?: string;
-  detectedServices?: string[];
-  billingSignals?: string[];
-  questions?: string[];
-  meta?: any;
-};
-
-function fitToScore(fit: any): number | null {
-  const s = safeTrim(fit).toLowerCase();
-  if (s === "good") return 0.9;
-  if (s === "maybe") return 0.6;
-  if (s === "poor") return 0.3;
+function mapFitToScore(fit: string): number | null {
+  const f = safeTrim(fit).toLowerCase();
+  if (!f) return null;
+  if (f === "good") return 0.85;
+  if (f === "maybe") return 0.6;
+  if (f === "poor") return 0.35;
   return null;
 }
 
@@ -103,6 +90,9 @@ export function Step3(props: {
 
   const [detailsOpen, setDetailsOpen] = useState(false);
 
+  // ----------------------------
+  // Mode A interview (if present)
+  // ----------------------------
   const interview: ModeA_Interview | null = useMemo(() => {
     const x = props.aiAnalysis?.industryInterview;
     if (!x || typeof x !== "object") return null;
@@ -110,43 +100,54 @@ export function Step3(props: {
     return x as ModeA_Interview;
   }, [props.aiAnalysis]);
 
-  const webA: WebsiteAnalysisShape | null = useMemo(() => {
-    const x = props.aiAnalysis;
-    if (!x || typeof x !== "object") return null;
-    // we only care about fields we know exist in your analyze-website output
-    return x as WebsiteAnalysisShape;
+  const interviewProposedKeyRaw = safeTrim(interview?.proposedIndustry?.key);
+  const interviewProposedKey = useMemo(() => normalizeKey(interviewProposedKeyRaw), [interviewProposedKeyRaw]);
+  const interviewProposedLabel = safeTrim(interview?.proposedIndustry?.label);
+
+  const interviewConf = clamp01Nullable(interview?.confidenceScore);
+  const interviewFit = clamp01Nullable(interview?.fitScore);
+  const interviewDebugReason = safeTrim(interview?.meta?.debug?.reason);
+
+  // ----------------------------
+  // Website analysis shape (fallback)
+  // ----------------------------
+  const websiteSuggestedKey = useMemo(() => {
+    // support a few common names just in case
+    const a = props.aiAnalysis ?? {};
+    return (
+      normalizeKey(a?.suggestedIndustryKey) ||
+      normalizeKey(a?.suggested_industry_key) ||
+      normalizeKey(a?.industryKey) ||
+      ""
+    );
   }, [props.aiAnalysis]);
 
-  // ✅ primary: Mode A proposedIndustry.key
-  const modeAKeyRaw = safeTrim(interview?.proposedIndustry?.key);
-  const modeAKey = useMemo(() => normalizeKey(modeAKeyRaw), [modeAKeyRaw]);
-  const modeALabelRaw = safeTrim(interview?.proposedIndustry?.label);
+  const websiteConf = useMemo(() => clamp01Nullable((props.aiAnalysis as any)?.confidenceScore), [props.aiAnalysis]);
+  const websiteFit = useMemo(() => mapFitToScore(safeTrim((props.aiAnalysis as any)?.fit)), [props.aiAnalysis]);
+  const websiteFitReason = useMemo(() => safeTrim((props.aiAnalysis as any)?.fitReason), [props.aiAnalysis]);
 
-  // ✅ secondary: website analysis suggestedIndustryKey
-  const webKeyRaw = safeTrim(webA?.suggestedIndustryKey);
-  const webKey = useMemo(() => normalizeKey(webKeyRaw), [webKeyRaw]);
-
-  // ✅ tertiary: wizard saved key
+  // wizard-provided currentIndustryKey is the most reliable fallback because it may come from tenant_settings
   const wizardKey = useMemo(() => normalizeKey(props.currentIndustryKey), [props.currentIndustryKey]);
 
-  // The key we will display + commit on Yes
-  const proposedKey = modeAKey || webKey || wizardKey;
+  // ----------------------------
+  // Unified “recommended” view
+  // Prefer interview, then wizardKey, then website suggested key.
+  // ----------------------------
+  const recommendedKey = useMemo(() => {
+    return interviewProposedKey || wizardKey || websiteSuggestedKey || "";
+  }, [interviewProposedKey, wizardKey, websiteSuggestedKey]);
 
-  // confidence / fit
   const conf = useMemo(() => {
-    const a = clamp01Nullable(interview?.confidenceScore);
-    if (a !== null) return a;
-    const b = clamp01Nullable(webA?.confidenceScore);
-    return b;
-  }, [interview?.confidenceScore, webA?.confidenceScore]);
+    // prefer interview confidence; otherwise website confidence
+    return interviewConf !== null ? interviewConf : websiteConf;
+  }, [interviewConf, websiteConf]);
 
   const fit = useMemo(() => {
-    const a = clamp01Nullable(interview?.fitScore);
-    if (a !== null) return a;
-    return fitToScore(webA?.fit);
-  }, [interview?.fitScore, webA?.fit]);
+    // prefer interview fitScore; otherwise map website fit
+    return interviewFit !== null ? interviewFit : websiteFit;
+  }, [interviewFit, websiteFit]);
 
-  // Map industryKey -> label so we can show canonical labels even if AI label differs.
+  // Map industryKey -> label so we can show canonical labels
   const industryLabelMap = useMemo(() => {
     const m: Record<string, string> = {};
     for (const it of items) {
@@ -158,32 +159,39 @@ export function Step3(props: {
   }, [items]);
 
   const displayIndustryName = useMemo(() => {
-    const canonical = proposedKey ? industryLabelMap[proposedKey] : "";
+    const canonical = recommendedKey ? industryLabelMap[recommendedKey] : "";
     if (canonical) return canonical;
 
-    // prefer Mode A label if present
-    if (modeALabelRaw && modeALabelRaw.length <= 42) return modeALabelRaw;
+    // interview label if present
+    if (interviewProposedLabel && interviewProposedLabel.length <= 42) return interviewProposedLabel;
 
-    // otherwise show key prettified
-    if (proposedKey) return proposedKey.replace(/_/g, " ");
+    // last fallback: render the key nicely
+    if (recommendedKey) return recommendedKey.replace(/_/g, " ");
     return "your industry";
-  }, [industryLabelMap, proposedKey, modeALabelRaw]);
+  }, [industryLabelMap, recommendedKey, interviewProposedLabel]);
 
   const reasoningLine = useMemo(() => {
-    if (conf !== null && conf >= 0.85) return "High confidence based on signals found on your site.";
-    if (conf !== null && conf >= 0.6) return "Based on signals found on your site.";
-    return "We matched your website against known industry patterns.";
-  }, [conf]);
+    if (interviewConf !== null) {
+      if (interviewConf >= 0.85) return "High confidence based on your answers and detected signals.";
+      if (interviewConf >= 0.6) return "Based on your answers and detected signals.";
+      return "We matched your inputs against known industry patterns.";
+    }
 
-  const debugReason =
-    safeTrim(interview?.meta?.debug?.reason) ||
-    safeTrim(webA?.fitReason) ||
-    safeTrim(webA?.businessGuess);
+    // website analysis phrasing
+    if (websiteConf !== null && websiteConf >= 0.85) return "High confidence based on signals found on your site.";
+    if (websiteConf !== null && websiteConf >= 0.6) return "Based on signals found on your site.";
+    return "We matched your website content against known industry patterns.";
+  }, [interviewConf, websiteConf]);
+
+  const detailsText = useMemo(() => {
+    // prefer interview debug, otherwise website fitReason
+    return interviewDebugReason || websiteFitReason || interviewProposedLabel || "No additional details were provided.";
+  }, [interviewDebugReason, websiteFitReason, interviewProposedLabel]);
 
   const isReady = useMemo(() => {
-    // ✅ ready if we have ANY proposed key (Mode A or website analysis or wizard key)
-    return Boolean(proposedKey);
-  }, [proposedKey]);
+    // ✅ FIX: Ready if we have ANY usable key (interview OR wizard OR website).
+    return Boolean(recommendedKey);
+  }, [recommendedKey]);
 
   async function loadIndustries() {
     setErr(null);
@@ -220,17 +228,15 @@ export function Step3(props: {
     setSaving(true);
     setErr(null);
     try {
-      if (!proposedKey) throw new Error("Missing industry. Please run the interview again.");
-      await commitIndustry(proposedKey, "unknown");
+      const keyToUse = recommendedKey;
+      if (!keyToUse) throw new Error("Missing industry. Please run the interview again.");
+      await commitIndustry(keyToUse, "unknown");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
       setSaving(false);
     }
   }
-
-  const services = Array.isArray(webA?.detectedServices) ? webA!.detectedServices! : [];
-  const billing = Array.isArray(webA?.billingSignals) ? webA!.billingSignals! : [];
 
   return (
     <div>
@@ -275,26 +281,12 @@ export function Step3(props: {
             <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
               <div className="text-xs font-semibold opacity-80">Why we think this</div>
               <div className="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
-                {debugReason || "No additional details were provided."}
+                {detailsText}
               </div>
 
-              {services.length ? (
-                <div className="mt-3">
-                  <div className="text-[11px] font-semibold opacity-70">Detected services</div>
-                  <div className="mt-1 text-xs opacity-90">{services.slice(0, 10).join(" • ")}</div>
-                </div>
-              ) : null}
-
-              {billing.length ? (
-                <div className="mt-3">
-                  <div className="text-[11px] font-semibold opacity-70">Billing signals</div>
-                  <div className="mt-1 text-xs opacity-90">{billing.slice(0, 10).join(" • ")}</div>
-                </div>
-              ) : null}
-
-              {proposedKey ? (
+              {recommendedKey ? (
                 <div className="mt-3 text-[11px] opacity-70">
-                  Internal key: <span className="font-mono">{proposedKey}</span>
+                  Internal key: <span className="font-mono">{recommendedKey}</span>
                 </div>
               ) : null}
             </div>
