@@ -80,6 +80,9 @@ export async function resolveTenantLlm(tenantId: string) {
       // Optional: model selector stored in DB (if you add it later)
       aiMode: tenantSettings.aiMode,
 
+      // ✅ PRICING gate (numbers allowed)
+      pricingEnabled: tenantSettings.pricingEnabled,
+
       // ✅ Pricing model + config (hybrid)
       pricingModel: tenantSettings.pricingModel,
 
@@ -137,6 +140,9 @@ export async function resolveTenantLlm(tenantId: string) {
   const liveQaEnabled = tenantQaEnabled;
   const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
 
+  // ✅ Pricing enabled gate
+  const pricingEnabled = settings?.pricingEnabled === true;
+
   // ✅ Pricing model + config normalization (used by quote engine to compute deterministically)
   const pricingModel = safePricingModel(settings?.pricingModel);
 
@@ -190,6 +196,9 @@ export async function resolveTenantLlm(tenantId: string) {
       liveQaEnabled,
       liveQaMaxQuestions,
       aiMode: safeTrim(settings?.aiMode) || null,
+
+      // ✅ gate for “numbers”
+      pricingEnabled,
     },
 
     // ✅ Hybrid pricing payload (AI suggests, backend computes)
