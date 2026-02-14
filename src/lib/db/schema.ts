@@ -232,10 +232,10 @@ export const tenantSettings = pgTable("tenant_settings", {
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
 
-  // ✅ onboarding “how you charge”
+  // ✅ Onboarding “how you charge”
   pricingModel: text("pricing_model"),
 
-  // ✅ NEW: pricing configuration (model-specific tenant defaults)
+  // ✅ Pricing model config (hybrid: AI suggests + backend computes)
   flatRateDefault: integer("flat_rate_default"),
   hourlyLaborRate: integer("hourly_labor_rate"),
   materialMarkupPercent: integer("material_markup_percent"),
