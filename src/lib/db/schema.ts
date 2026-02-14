@@ -232,11 +232,37 @@ export const tenantSettings = pgTable("tenant_settings", {
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
 
-  // ✅ NEW: onboarding “how you charge”
+  // ✅ onboarding “how you charge”
   pricingModel: text("pricing_model"),
 
-  // ✅ NEW: model-specific pricing settings (shape depends on pricingModel)
-  pricingConfig: jsonb("pricing_config").$type<any>(),
+  /**
+   * ✅ NEW: pricing model settings (nullable; safe to add)
+   * These are intentionally lightweight “Phase 1” knobs.
+   * Later we can normalize into dedicated tables if needed.
+   */
+
+  // flat_per_job
+  flatRateDefault: integer("flat_rate_default"),
+
+  // hourly_plus_materials
+  hourlyLaborRate: integer("hourly_labor_rate"),
+  materialMarkupPercent: integer("material_markup_percent"), // store 0-100 as int
+
+  // per_unit
+  perUnitRate: integer("per_unit_rate"),
+  perUnitLabel: text("per_unit_label"), // e.g. "sq ft", "linear ft", "panel", "seat"
+
+  // packages
+  packageJson: jsonb("package_json").$type<any>(),
+
+  // line_items
+  lineItemsJson: jsonb("line_items_json").$type<any>(),
+
+  // inspection_only has no numeric settings (policy-driven)
+
+  // assessment_fee
+  assessmentFeeAmount: integer("assessment_fee_amount"),
+  assessmentFeeCreditTowardJob: boolean("assessment_fee_credit_toward_job"),
 
   // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),
