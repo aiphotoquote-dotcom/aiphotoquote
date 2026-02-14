@@ -375,24 +375,13 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return noCacheJson(
-        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
-        400
-      );
+      return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." }, 400);
     }
 
     await requireMembership(clerkUserId, tenantId);
     const data = await readTenantOnboarding(tenantId);
 
-    return noCacheJson(
-      {
-        ok: true,
-        isAuthenticated: true,
-        tenantId,
-        ...data,
-      },
-      200
-    );
+    return noCacheJson({ ok: true, isAuthenticated: true, tenantId, ...data }, 200);
   } catch (e: any) {
     const msg = e?.message ?? String(e);
     const status = msg === "UNAUTHENTICATED" ? 401 : msg === "FORBIDDEN_TENANT" ? 403 : 500;
@@ -416,22 +405,17 @@ export async function POST(req: Request) {
 
       const model = safePricingModel(body?.pricing_model);
       if (!model) {
-        return noCacheJson(
-          { ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a valid pricing model." },
-          400
-        );
+        return noCacheJson({ ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a valid pricing model." }, 400);
       }
 
-      // ✅ Safe insert (id/created_at) + update on conflict
       await db.execute(sql`
-        insert into tenant_settings (id, tenant_id, industry_key, pricing_model, created_at, updated_at)
-        values (gen_random_uuid(), ${tid}::uuid, 'auto', ${model}, now(), now())
+        insert into tenant_settings (tenant_id, industry_key, pricing_model, created_at, updated_at)
+        values (${tid}::uuid, 'auto', ${model}, now(), now())
         on conflict (tenant_id) do update
           set pricing_model = excluded.pricing_model,
               updated_at = now()
       `);
 
-      // keep onboarding step at least 5 (pricing page), but don't jump forward
       await db.execute(sql`
         insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
         values (${tid}::uuid, 5, false, now(), now())
@@ -467,12 +451,8 @@ export async function POST(req: Request) {
         ownerEmail = safeTrim(ownerEmail);
       }
 
-      if (ownerName.length < 2) {
-        return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
-      }
-      if (!ownerEmail.includes("@")) {
-        return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
-      }
+      if (ownerName.length < 2) return noCacheJson({ ok: false, error: "OWNER_NAME_REQUIRED" }, 400);
+      if (!ownerEmail.includes("@")) return noCacheJson({ ok: false, error: "OWNER_EMAIL_REQUIRED" }, 400);
 
       let tenantId: string | null = null;
 
@@ -503,10 +483,9 @@ export async function POST(req: Request) {
           on conflict do nothing
         `);
 
-        // ✅ Safe insert (id/created_at)
         await db.execute(sql`
-          insert into tenant_settings (id, tenant_id, industry_key, business_name, created_at, updated_at)
-          values (gen_random_uuid(), ${tenantId}::uuid, 'auto', ${businessName}, now(), now())
+          insert into tenant_settings (tenant_id, industry_key, business_name, created_at, updated_at)
+          values (${tenantId}::uuid, 'auto', ${businessName}, now(), now())
           on conflict (tenant_id) do update
             set business_name = excluded.business_name,
                 updated_at = now()
@@ -518,17 +497,15 @@ export async function POST(req: Request) {
           where id = ${tenantId}::uuid
         `);
 
-        // ✅ Safe insert (id/created_at)
         await db.execute(sql`
-          insert into tenant_settings (id, tenant_id, industry_key, business_name, created_at, updated_at)
-          values (gen_random_uuid(), ${tenantId}::uuid, 'auto', ${businessName}, now(), now())
+          insert into tenant_settings (tenant_id, industry_key, business_name, created_at, updated_at)
+          values (${tenantId}::uuid, 'auto', ${businessName}, now(), now())
           on conflict (tenant_id) do update
             set business_name = excluded.business_name,
                 updated_at = now()
         `);
       }
 
-      // ✅ CRITICAL: ALWAYS go to step 2.
       const nextStep = 2;
 
       await db.execute(sql`
@@ -558,13 +535,10 @@ export async function POST(req: Request) {
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
-
       const platformFrom = "no-reply@aiphotoquote.com";
 
-      // ✅ Safe insert (id/created_at)
       await db.execute(sql`
         insert into tenant_settings (
-          id,
           tenant_id,
           industry_key,
           lead_to_email,
@@ -574,7 +548,6 @@ export async function POST(req: Request) {
           updated_at
         )
         values (
-          gen_random_uuid(),
           ${tid}::uuid,
           'auto',
           ${leadToEmail},
