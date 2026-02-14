@@ -25,7 +25,7 @@ type PolicyResp =
         ai_mode: AiMode;
         pricing_enabled: boolean;
 
-        // ✅ optional: populated if tenant_settings.pricing_model exists
+        // optional: populated if tenant_settings.pricing_model exists
         pricing_model?: PricingModel | null;
 
         rendering_enabled: boolean;
@@ -55,18 +55,22 @@ function Card({
   title,
   desc,
   selected,
+  disabled,
   onClick,
 }: {
   title: string;
   desc: string;
   selected: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={() => !disabled && onClick()}
+      disabled={disabled}
       className={[
-        "w-full text-left rounded-xl border p-4 hover:bg-gray-50",
+        "w-full text-left rounded-xl border p-4",
+        disabled ? "opacity-50 cursor-not-allowed" : "hover:bg-gray-50",
         selected ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-white",
       ].join(" ")}
     >
@@ -130,7 +134,7 @@ export default function AiPolicySetupPage() {
   const [aiMode, setAiMode] = useState<AiMode>("assessment_only");
   const [pricingEnabled, setPricingEnabled] = useState(false);
 
-  // ✅ read-only, sourced from onboarding
+  // read-only, sourced from onboarding
   const [pricingModel, setPricingModel] = useState<PricingModel | null>(null);
 
   const [renderingEnabled, setRenderingEnabled] = useState(false);
@@ -152,6 +156,13 @@ export default function AiPolicySetupPage() {
     else router.push("/onboarding/wizard");
   }
 
+  function enforceUiRules(nextPricingEnabled: boolean, nextAiMode: AiMode) {
+    // ✅ Your rule: only allow range/fixed when pricing is enabled
+    if (!nextPricingEnabled) return { pricingEnabled: false, aiMode: "assessment_only" as AiMode };
+    // pricing enabled: keep requested mode
+    return { pricingEnabled: true, aiMode: nextAiMode };
+  }
+
   async function load() {
     setErr(null);
     setMsg(null);
@@ -167,10 +178,14 @@ export default function AiPolicySetupPage() {
 
       setRole(data.role);
 
-      setAiMode(data.ai_policy.ai_mode);
-      setPricingEnabled(!!data.ai_policy.pricing_enabled);
+      const loadedPricingEnabled = !!data.ai_policy.pricing_enabled;
+      const loadedAiMode = (data.ai_policy.ai_mode ?? "assessment_only") as AiMode;
+      const enforced = enforceUiRules(loadedPricingEnabled, loadedAiMode);
 
-      // ✅ show onboarding pricing model if present
+      setPricingEnabled(enforced.pricingEnabled);
+      setAiMode(enforced.aiMode);
+
+      // show onboarding pricing model if present (but UI will hide details when pricing disabled)
       setPricingModel((data.ai_policy.pricing_model ?? null) as PricingModel | null);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
@@ -196,9 +211,12 @@ export default function AiPolicySetupPage() {
     setSaving(true);
 
     try {
+      const enforced = enforceUiRules(pricingEnabled, aiMode);
+
       const payload = {
-        ai_mode: aiMode,
-        pricing_enabled: pricingEnabled,
+        // ✅ enforce rule on the wire too (so no “stale state” saves)
+        ai_mode: enforced.aiMode,
+        pricing_enabled: enforced.pricingEnabled,
 
         rendering_enabled: renderingEnabled,
         rendering_style: renderingStyle,
@@ -224,10 +242,14 @@ export default function AiPolicySetupPage() {
       setRole(data.role);
 
       // keep UI in sync (in case backend normalizes)
-      setAiMode(data.ai_policy.ai_mode);
-      setPricingEnabled(!!data.ai_policy.pricing_enabled);
+      const savedPricingEnabled = !!data.ai_policy.pricing_enabled;
+      const savedAiMode = (data.ai_policy.ai_mode ?? "assessment_only") as AiMode;
+      const ui = enforceUiRules(savedPricingEnabled, savedAiMode);
 
-      // keep showing pricing model (read-only, but may now be returned)
+      setPricingEnabled(ui.pricingEnabled);
+      setAiMode(ui.aiMode);
+
+      // keep showing pricing model (read-only, but hidden if pricing disabled)
       setPricingModel((data.ai_policy.pricing_model ?? pricingModel ?? null) as PricingModel | null);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
@@ -241,7 +263,6 @@ export default function AiPolicySetupPage() {
       setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
       setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
 
-      // ✅ onboarding flow: bounce right back after save
       if (onboardingMode) {
         goBackToOnboarding();
       }
@@ -252,20 +273,23 @@ export default function AiPolicySetupPage() {
     }
   }
 
+  // ✅ if user toggles pricing off, immediately snap aiMode to assessment_only
+  useEffect(() => {
+    if (!pricingEnabled && aiMode !== "assessment_only") {
+      setAiMode("assessment_only");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pricingEnabled]);
+
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const aiModeLocked = !pricingEnabled; // range/fixed locked out when pricing off
+
   return (
-    <div
-      className={
-        onboardingMode
-          ? "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen"
-          : "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen"
-      }
-    >
-      {/* ✅ In onboarding mode, keep header minimal and unambiguous */}
+    <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">
@@ -322,52 +346,13 @@ export default function AiPolicySetupPage() {
               </div>
             ) : null}
 
-            {/* ✅ Pricing model (from onboarding) */}
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-sm font-semibold text-gray-900">Pricing model (from onboarding)</div>
-                  <div className="mt-1 text-xs text-gray-600">
-                    This comes from the onboarding pricing step. It’s shown here for visibility (read-only).
-                  </div>
-                </div>
-                <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900">
-                  {pricingModelLabel(pricingModel)}
-                </div>
-              </div>
-            </div>
-
-            {/* AI Mode */}
-            <div className="grid gap-3">
-              <div className="text-sm font-semibold text-gray-900">AI Mode</div>
-
-              <Card
-                title="Assessment only (recommended default)"
-                desc="AI describes visible damage, scope, assumptions, and questions. No pricing shown."
-                selected={aiMode === "assessment_only"}
-                onClick={() => canEdit && setAiMode("assessment_only")}
-              />
-              <Card
-                title="Estimate range"
-                desc="AI can return a low/high range."
-                selected={aiMode === "range"}
-                onClick={() => canEdit && setAiMode("range")}
-              />
-              <Card
-                title="Fixed estimate"
-                desc="AI returns a single estimate (best for standardized services)."
-                selected={aiMode === "fixed"}
-                onClick={() => canEdit && setAiMode("fixed")}
-              />
-            </div>
-
             {/* Pricing enabled */}
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <div className="text-sm font-semibold text-gray-900">Pricing Enabled</div>
                   <div className="mt-1 text-xs text-gray-600">
-                    If off, we never show price numbers even if AI mode supports them.
+                    If OFF, the system will never show price numbers, and AI Mode is forced to <span className="font-mono">assessment_only</span>.
                   </div>
                 </div>
 
@@ -385,6 +370,62 @@ export default function AiPolicySetupPage() {
                   {pricingEnabled ? "ON" : "OFF"}
                 </button>
               </div>
+
+              {/* Pricing model (read-only) — only meaningful when pricing is enabled */}
+              <div className="mt-4 flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Pricing model (from onboarding)</div>
+                  <div className="mt-1 text-xs text-gray-600">
+                    {pricingEnabled
+                      ? "Shown for visibility (read-only). Used as a methodology hint when pricing is enabled."
+                      : "Hidden while pricing is disabled (model hints are ignored)."}
+                  </div>
+                </div>
+
+                <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900">
+                  {pricingEnabled ? pricingModelLabel(pricingModel) : "Pricing disabled"}
+                </div>
+              </div>
+            </div>
+
+            {/* AI Mode */}
+            <div className="grid gap-3">
+              <div className="text-sm font-semibold text-gray-900">
+                AI Mode{" "}
+                {!pricingEnabled ? (
+                  <span className="ml-2 inline-flex items-center rounded-md border border-gray-200 bg-gray-50 px-2 py-0.5 text-xs font-semibold text-gray-700">
+                    Locked (pricing off)
+                  </span>
+                ) : null}
+              </div>
+
+              <Card
+                title="Assessment only (recommended default)"
+                desc="AI describes visible damage, scope, assumptions, and questions. No pricing shown."
+                selected={aiMode === "assessment_only"}
+                disabled={!canEdit}
+                onClick={() => canEdit && setAiMode("assessment_only")}
+              />
+              <Card
+                title="Estimate range"
+                desc="AI can return a low/high range (only when Pricing Enabled is ON)."
+                selected={aiMode === "range"}
+                disabled={!canEdit || aiModeLocked}
+                onClick={() => canEdit && !aiModeLocked && setAiMode("range")}
+              />
+              <Card
+                title="Fixed estimate"
+                desc="AI returns a single estimate (only when Pricing Enabled is ON)."
+                selected={aiMode === "fixed"}
+                disabled={!canEdit || aiModeLocked}
+                onClick={() => canEdit && !aiModeLocked && setAiMode("fixed")}
+              />
+
+              {!pricingEnabled ? (
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
+                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price numbers are always suppressed.
+                </div>
+              ) : null}
             </div>
 
             {/* Live Q&A */}
@@ -540,7 +581,6 @@ export default function AiPolicySetupPage() {
               {err && <span className="text-sm text-red-700 whitespace-pre-wrap">{err}</span>}
             </div>
 
-            {/* Only show admin “next links” when NOT onboarding */}
             {!onboardingMode ? (
               <div className="flex gap-2">
                 <a
