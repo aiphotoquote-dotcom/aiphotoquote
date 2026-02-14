@@ -18,12 +18,6 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-function clampInt(v: unknown, fallback: number, min: number, max: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.round(n)));
-}
-
 function clampMoneyInt(v: unknown, fallback: number | null, min = 0, max = 2_000_000) {
   if (v === null || v === undefined) return fallback;
   const n = Number(v);
@@ -120,10 +114,7 @@ export async function resolveTenantLlm(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // ✅ Model selection rules:
-  // Today: just use PCC defaults.
-  // Later: if tenantSettings.aiMode is a DB dropdown (e.g., "fast", "balanced", "best"),
-  // map it to specific PCC models here. Still NO env vars.
+  // Model selection (PCC defaults for now)
   const estimatorModel = platform.models.estimatorModel;
   const qaModel = platform.models.qaModel;
   const renderModel = platform.models.renderModel;
@@ -143,44 +134,47 @@ export async function resolveTenantLlm(tenantId: string) {
   // ✅ Pricing enabled gate
   const pricingEnabled = settings?.pricingEnabled === true;
 
-  // ✅ Pricing model + config normalization (used by quote engine to compute deterministically)
-  const pricingModel = safePricingModel(settings?.pricingModel);
+  // ✅ Pricing model + config normalization (only when pricingEnabled === true)
+  const pricingModel = pricingEnabled ? safePricingModel(settings?.pricingModel) : null;
 
-  const pricingConfig = {
-    model: pricingModel,
-
-    // flat
-    flatRateDefault: clampMoneyInt(settings?.flatRateDefault, null),
-
-    // hourly + materials
-    hourlyLaborRate: clampMoneyInt(settings?.hourlyLaborRate, null),
-    materialMarkupPercent: clampPercent(settings?.materialMarkupPercent, null),
-
-    // per-unit
-    perUnitRate: clampMoneyInt(settings?.perUnitRate, null),
-    perUnitLabel: safeTrim(settings?.perUnitLabel) || null,
-
-    // packages / line items (structure validated later at use-site)
-    packageJson: (settings?.packageJson ?? null) as any,
-    lineItemsJson: (settings?.lineItemsJson ?? null) as any,
-
-    // assessment fee
-    assessmentFeeAmount: clampMoneyInt(settings?.assessmentFeeAmount, null),
-    assessmentFeeCreditTowardJob: settings?.assessmentFeeCreditTowardJob === true,
-  };
-
-  // ✅ Normalize guardrails too (so downstream doesn’t have to)
-  const normalizedPricingRules = pricingRules
+  const pricingConfig = pricingEnabled
     ? {
-        minJob: clampMoneyInt(pricingRules.minJob, null),
-        typicalLow: clampMoneyInt(pricingRules.typicalLow, null),
-        typicalHigh: clampMoneyInt(pricingRules.typicalHigh, null),
-        maxWithoutInspection: clampMoneyInt(pricingRules.maxWithoutInspection, null),
-        tone: safeTrim(pricingRules.tone) || "value",
-        riskPosture: safeTrim(pricingRules.riskPosture) || "conservative",
-        alwaysEstimateLanguage: pricingRules.alwaysEstimateLanguage !== false,
+        model: pricingModel,
+
+        // flat
+        flatRateDefault: clampMoneyInt(settings?.flatRateDefault, null),
+
+        // hourly + materials
+        hourlyLaborRate: clampMoneyInt(settings?.hourlyLaborRate, null),
+        materialMarkupPercent: clampPercent(settings?.materialMarkupPercent, null),
+
+        // per-unit
+        perUnitRate: clampMoneyInt(settings?.perUnitRate, null),
+        perUnitLabel: safeTrim(settings?.perUnitLabel) || null,
+
+        // packages / line items (structure validated later at use-site)
+        packageJson: (settings?.packageJson ?? null) as any,
+        lineItemsJson: (settings?.lineItemsJson ?? null) as any,
+
+        // assessment fee
+        assessmentFeeAmount: clampMoneyInt(settings?.assessmentFeeAmount, null),
+        assessmentFeeCreditTowardJob: settings?.assessmentFeeCreditTowardJob === true,
       }
     : null;
+
+  // ✅ Normalize guardrails too (only when pricingEnabled === true)
+  const normalizedPricingRules =
+    pricingEnabled && pricingRules
+      ? {
+          minJob: clampMoneyInt(pricingRules.minJob, null),
+          typicalLow: clampMoneyInt(pricingRules.typicalLow, null),
+          typicalHigh: clampMoneyInt(pricingRules.typicalHigh, null),
+          maxWithoutInspection: clampMoneyInt(pricingRules.maxWithoutInspection, null),
+          tone: safeTrim(pricingRules.tone) || "value",
+          riskPosture: safeTrim(pricingRules.riskPosture) || "conservative",
+          alwaysEstimateLanguage: pricingRules.alwaysEstimateLanguage !== false,
+        }
+      : null;
 
   return {
     platform,
@@ -201,10 +195,12 @@ export async function resolveTenantLlm(tenantId: string) {
       pricingEnabled,
     },
 
-    // ✅ Hybrid pricing payload (AI suggests, backend computes)
-    pricing: {
-      config: pricingConfig,
-      rules: normalizedPricingRules,
-    },
+    // ✅ Only expose pricing payload when enabled
+    pricing: pricingEnabled
+      ? {
+          config: pricingConfig,
+          rules: normalizedPricingRules,
+        }
+      : null,
   };
 }
