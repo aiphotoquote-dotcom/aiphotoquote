@@ -17,8 +17,8 @@ import { Step1 } from "./steps/Step1";
 import { Step2 } from "./steps/Step2";
 import { Step3 } from "./steps/Step3";
 import { Step3b } from "./steps/Step3b";
+import { Step5Pricing } from "./steps/Step5Pricing";
 import { Step5Branding } from "./steps/Step5Branding";
-import { HandoffStep } from "./steps/HandoffStep";
 import { Step6Plan } from "./steps/Step6Plan";
 
 /* --------------------- small utils --------------------- */
@@ -257,8 +257,7 @@ export default function OnboardingWizard() {
   }
 
   /**
-   * ✅ CRITICAL FIX:
-   * Persist industry before moving on.
+   * ✅ Persist industry before moving on.
    */
   async function persistIndustryOnly(industryKey: string) {
     setErr(null);
@@ -449,10 +448,6 @@ export default function OnboardingWizard() {
               aiAnalysisError={safeTrim((state as any)?.aiAnalysisError)}
               onRun={runWebsiteAnalysis}
               onConfirm={confirmWebsiteAnalysis}
-              /**
-               * ✅ Key fix: Step2 now owns "industry confirmation".
-               * When Step2 says "Yes", we persist the industry and jump to Step 4 (sub-industry).
-               */
               onAcceptSuggestedIndustry={async (industryKey) => {
                 const key = safeTrim(industryKey);
                 if (!key) throw new Error("Missing industry recommendation.");
@@ -465,7 +460,6 @@ export default function OnboardingWizard() {
                 setLastAction("Industry selected — refining focus…");
                 go(4);
               }}
-              // onNext is now basically a fallback; Step2 should drive through onAcceptSuggestedIndustry.
               onNext={() => go(4)}
               onBack={() => go(1)}
               onError={(m) => setErr(m)}
@@ -524,14 +518,15 @@ export default function OnboardingWizard() {
               onError={(m) => setErr(m)}
             />
           ) : step === 5 ? (
-            <HandoffStep
-              title="AI & Pricing Policy"
-              desc="Reuse the full admin setup screen to configure AI mode, Live Q&A, and render policy."
-              primaryLabel="Open AI Policy setup"
-              onPrimary={() => openSetup("/admin/setup/ai-policy").catch((e: any) => setErr(e?.message ?? String(e)))}
+            <Step5Pricing
+              tenantId={safeTrim((state as any)?.tenantId ?? tenantId) || null}
+              ensureActiveTenant={ensureActiveTenant}
               onBack={() => go(4)}
               onContinue={() => go(6)}
-              note="Tip: click Save Policy on that page, then come back here and continue."
+              onError={(m) => setErr(m)}
+              onOpenAdvancedPolicy={() =>
+                openSetup("/admin/setup/ai-policy?onboarding=1").catch((e: any) => setErr(e?.message ?? String(e)))
+              }
             />
           ) : step === 6 ? (
             <Step5Branding

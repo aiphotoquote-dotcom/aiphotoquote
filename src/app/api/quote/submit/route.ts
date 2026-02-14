@@ -80,6 +80,22 @@ const QaQuestionsSchema = z.object({
 
 type BrandLogoVariant = "light" | "dark" | "auto" | string | null;
 
+type AiMode = "assessment_only" | "range" | "fixed";
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+type PricingPolicySnapshot = {
+  ai_mode: AiMode;
+  pricing_enabled: boolean;
+  pricing_model: PricingModel | null;
+};
+
 // ----------------- helpers -----------------
 function normalizePhone(raw: string) {
   const d = String(raw ?? "").replace(/\D/g, "");
@@ -152,6 +168,47 @@ function pickIndustrySnapshotFromInput(inputAny: any): string {
   return "";
 }
 
+function pickPricingPolicyFromInput(inputAny: any): PricingPolicySnapshot | null {
+  const pp = inputAny?.pricing_policy_snapshot;
+  if (pp && typeof pp === "object") {
+    const ai_mode = safeTrim(pp.ai_mode) as AiMode;
+    const pricing_enabled = Boolean(pp.pricing_enabled);
+    const pricing_model_raw = safeTrim(pp.pricing_model);
+    const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
+    if (isAiMode(ai_mode)) {
+      return { ai_mode, pricing_enabled, pricing_model };
+    }
+  }
+
+  // back-compat: allow separate fields
+  const ai_mode_raw = safeTrim(inputAny?.ai_mode_snapshot);
+  const pricing_enabled_raw = inputAny?.pricing_enabled_snapshot;
+  const pricing_model_raw = safeTrim(inputAny?.pricing_model_snapshot);
+
+  const ai_mode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : null;
+  if (!ai_mode) return null;
+
+  const pricing_enabled = typeof pricing_enabled_raw === "boolean" ? pricing_enabled_raw : Boolean(pricing_enabled_raw);
+  const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
+
+  return { ai_mode, pricing_enabled, pricing_model };
+}
+
+function isAiMode(v: string): v is AiMode {
+  return v === "assessment_only" || v === "range" || v === "fixed";
+}
+function isPricingModel(v: string): v is PricingModel {
+  return (
+    v === "flat_per_job" ||
+    v === "hourly_plus_materials" ||
+    v === "per_unit" ||
+    v === "packages" ||
+    v === "line_items" ||
+    v === "inspection_only" ||
+    v === "assessment_fee"
+  );
+}
+
 function startOfMonthUTC(d: Date) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
 }
@@ -219,6 +276,112 @@ async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: 
     err.meta = { used: count, limit: monthlyQuoteLimit };
     throw err;
   }
+}
+
+/**
+ * Read pricing policy + pricing model from tenant_settings WITHOUT relying on Drizzle schema columns.
+ * (Keeps this branch safe even if schema typings lag behind DB.)
+ */
+async function loadPricingPolicySnapshot(args: {
+  tenantId: string;
+  debug?: DebugFn;
+}): Promise<PricingPolicySnapshot> {
+  const { tenantId, debug } = args;
+
+  const r = await db.execute(sql`
+    select
+      ai_mode,
+      pricing_enabled,
+      pricing_model
+    from tenant_settings
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+
+  const ai_mode_raw = safeTrim(row?.ai_mode) || "assessment_only";
+  const ai_mode: AiMode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "assessment_only";
+
+  const pricing_enabled = Boolean(row?.pricing_enabled ?? false);
+
+  const pricing_model_raw = safeTrim(row?.pricing_model);
+  const pricing_model: PricingModel | null = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
+
+  debug?.("pricingPolicy.loaded", { ai_mode, pricing_enabled, pricing_model });
+
+  return { ai_mode, pricing_enabled, pricing_model };
+}
+
+/**
+ * Hard guardrail: enforce policy on output *even if the model misbehaves*.
+ */
+function enforcePricingPolicyOnOutput(output: any, policy: PricingPolicySnapshot) {
+  const ai_mode = policy.ai_mode;
+  const pricing_enabled = policy.pricing_enabled;
+
+  let { low, high } = ensureLowHigh(Number(output?.estimate_low ?? 0), Number(output?.estimate_high ?? 0));
+
+  // If pricing is disabled OR assessment-only => never show numbers.
+  if (!pricing_enabled || ai_mode === "assessment_only") {
+    low = 0;
+    high = 0;
+  } else if (ai_mode === "fixed") {
+    // collapse to a single value
+    const mid = clampMoney((low + high) / 2);
+    low = mid;
+    high = mid;
+  } else {
+    // range is allowed; keep low/high
+  }
+
+  return { ...output, estimate_low: low, estimate_high: high };
+}
+
+/**
+ * Prompt-level guardrail: inject policy + pricing model guidance ahead of system prompt.
+ */
+function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: PricingPolicySnapshot) {
+  const { ai_mode, pricing_enabled, pricing_model } = policy;
+
+  const policyBlock = [
+    "### POLICY (must follow exactly)",
+    "- You are generating a photo-based quote response in a fixed JSON schema.",
+    pricing_enabled
+      ? "- Pricing is ENABLED."
+      : "- Pricing is DISABLED. Do not output any price numbers. Set estimate_low=0 and estimate_high=0.",
+    ai_mode === "assessment_only"
+      ? "- AI mode is ASSESSMENT ONLY. Do not output any price numbers. Set estimate_low=0 and estimate_high=0."
+      : ai_mode === "fixed"
+        ? "- AI mode is FIXED ESTIMATE. Output a single-number estimate by setting estimate_low == estimate_high."
+        : "- AI mode is RANGE. Output a low/high range.",
+    pricing_model
+      ? `- Pricing model hint (how the business typically charges): ${pricing_model}. Use this ONLY as a methodology hint.`
+      : "- Pricing model hint: not provided.",
+    "- If you are unsure, prefer inspection_required=true and keep estimates conservative.",
+    "",
+  ].join("\n");
+
+  const modelHint =
+    pricing_model === "flat_per_job"
+      ? "Pricing methodology hint: think a single job total. Consider labor+materials+overhead bundled."
+      : pricing_model === "hourly_plus_materials"
+        ? "Pricing methodology hint: think hours and material costs/markup; range often reflects uncertainty in time/material."
+        : pricing_model === "per_unit"
+          ? "Pricing methodology hint: estimate per-unit (sq ft/linear ft/per item) and multiply; uncertainty comes from size/count."
+          : pricing_model === "packages"
+            ? "Pricing methodology hint: think Basic/Standard/Premium tiers; map condition/scope to a tier range."
+            : pricing_model === "line_items"
+              ? "Pricing methodology hint: think add-ons; base service + optional items; range reflects which items apply."
+              : pricing_model === "inspection_only"
+                ? "Pricing methodology hint: prefer inspection_required=true; if pricing is enabled, keep low/high conservative and emphasize inspection."
+                : pricing_model === "assessment_fee"
+                  ? "Pricing methodology hint: assessment/diagnostic fee model; if pricing enabled, keep estimate conservative and call out assessment if relevant."
+                  : "";
+
+  const combined = [policyBlock, modelHint ? `### PRICING MODEL NOTES\n${modelHint}\n` : "", baseSystem].join("\n");
+
+  return combined;
 }
 
 /**
@@ -356,14 +519,15 @@ function buildAiSnapshot(args: {
   resolved: any;
   industryKey: string;
   llmKeySource: KeySource;
+  pricingPolicy: PricingPolicySnapshot;
 }) {
-  const { phase, tenantId, tenantSlug, renderOptIn, resolved, industryKey, llmKeySource } = args;
+  const { phase, tenantId, tenantSlug, renderOptIn, resolved, industryKey, llmKeySource, pricingPolicy } = args;
 
   const quoteEstimatorSystem = resolved?.prompts?.quoteEstimatorSystem ?? "";
   const qaQuestionGeneratorSystem = resolved?.prompts?.qaQuestionGeneratorSystem ?? "";
 
   return {
-    version: 1,
+    version: 2,
     capturedAt: nowIso(),
     phase,
     tenant: { tenantId, tenantSlug, industryKey },
@@ -384,7 +548,10 @@ function buildAiSnapshot(args: {
       renderOptIn,
       llmKeySource,
     },
-    pricing: resolved.pricing ?? null,
+    pricing: {
+      policy: pricingPolicy,
+    },
+    pricingRules: resolved.pricing ?? null,
   };
 }
 
@@ -760,7 +927,12 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MAINTENANCE",
+          message: pc.maintenanceMessage || "Service temporarily unavailable.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 503 }
       );
     }
@@ -787,9 +959,13 @@ export async function POST(req: Request) {
 
     // Determine phase
     const isPhase2 = Boolean(parsed.data.quoteLogId && parsed.data.qaAnswers?.length);
-    debug("phase.detected", { isPhase2, quoteLogId: parsed.data.quoteLogId ?? null, qaAnswersLen: parsed.data.qaAnswers?.length ?? 0 });
+    debug("phase.detected", {
+      isPhase2,
+      quoteLogId: parsed.data.quoteLogId ?? null,
+      qaAnswersLen: parsed.data.qaAnswers?.length ?? 0,
+    });
 
-    // Settings
+    // Settings (existing select used elsewhere)
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -838,10 +1014,11 @@ export async function POST(req: Request) {
     const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings.businessName) || null;
 
-    // Pre-load quote log if phase2 (immutable industry + key source)
+    // Pre-load quote log if phase2 (immutable industry + key source + pricing policy)
     let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
     let industryKeyForQuote = tenantIndustryKey;
     let phase2KeySource: KeySource | null = null;
+    let pricingPolicy: PricingPolicySnapshot | null = null;
 
     if (isPhase2) {
       const quoteLogId = parsed.data.quoteLogId!;
@@ -864,9 +1041,17 @@ export async function POST(req: Request) {
       const ks = String(inputAny?.llmKeySource ?? "").trim();
       phase2KeySource = ks === "platform_grace" ? "platform_grace" : ks === "tenant" ? "tenant" : null;
 
-      debug("quoteLog.phase2.snapshot", { industryKeyForQuote, phase2KeySource });
+      // ✅ freeze pricing policy for phase2 from the log
+      pricingPolicy = pickPricingPolicyFromInput(inputAny);
+
+      debug("quoteLog.phase2.snapshot", { industryKeyForQuote, phase2KeySource, hasPricingPolicy: Boolean(pricingPolicy) });
     } else {
       industryKeyForQuote = tenantIndustryKey;
+    }
+
+    // ✅ If we didn't get pricing policy from log (phase1), load it from tenant_settings
+    if (!pricingPolicy) {
+      pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
     }
 
     // Resolve tenant + PCC AI settings
@@ -889,11 +1074,17 @@ export async function POST(req: Request) {
         isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
     };
 
+    // ✅ Apply pricing-policy wrapper to estimator system prompt
+    const estimatorSystemWithPolicy = wrapEstimatorSystemWithPricingPolicy(
+      effectivePrompts.quoteEstimatorSystem,
+      pricingPolicy
+    );
+
     const resolved = {
       ...resolvedBase,
       prompts: {
         ...resolvedBase.prompts,
-        quoteEstimatorSystem: effectivePrompts.quoteEstimatorSystem,
+        quoteEstimatorSystem: estimatorSystemWithPolicy,
         qaQuestionGeneratorSystem: effectivePrompts.qaQuestionGeneratorSystem,
       },
       meta: {
@@ -912,6 +1103,7 @@ export async function POST(req: Request) {
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
+      pricingPolicy,
     });
 
     const denylist = resolved.guardrails.blockedTopics ?? [];
@@ -934,6 +1126,7 @@ export async function POST(req: Request) {
       industryKey: industryKeyForQuote,
       industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
       llmKeySource: keySource,
+      pricingPolicy,
     };
 
     // -------------------------
@@ -998,7 +1191,12 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
+            {
+              ok: false,
+              error: "CONTENT_BLOCKED",
+              message: "Your answers include content we can’t process. Please revise.",
+              ...(debugEnabled ? { debugId } : {}),
+            },
             { status: 400 }
           );
         }
@@ -1015,9 +1213,10 @@ export async function POST(req: Request) {
         resolved,
         industryKey: industryKeyForQuote,
         llmKeySource: (phase2KeySource ?? keySource) as KeySource,
+        pricingPolicy,
       });
 
-      const output = await generateEstimate({
+      const rawOutput = await generateEstimate({
         openai,
         model: resolved.models.estimatorModel,
         system: resolved.prompts.quoteEstimatorSystem,
@@ -1027,6 +1226,8 @@ export async function POST(req: Request) {
         notes,
         normalizedAnswers,
       });
+
+      const output = enforcePricingPolicyOnOutput(rawOutput, pricingPolicy);
 
       let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshot };
 
@@ -1107,7 +1308,12 @@ export async function POST(req: Request) {
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "CONTENT_BLOCKED",
+          message: "Your request includes content we can’t process. Please revise and try again.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
@@ -1115,6 +1321,7 @@ export async function POST(req: Request) {
     const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
     aiEnvelope.renderOptIn = renderOptIn;
 
+    // ✅ Freeze pricing policy into the quote log input so phase2 uses the same rules.
     const inputToStore = {
       tenantSlug,
       images,
@@ -1124,6 +1331,10 @@ export async function POST(req: Request) {
       industrySource: "tenant_settings" as const,
       llmKeySource: keySource,
       customer_context: { category, service_type, notes },
+      pricing_policy_snapshot: pricingPolicy,
+      pricing_model_snapshot: pricingPolicy.pricing_model ?? null,
+      ai_mode_snapshot: pricingPolicy.ai_mode,
+      pricing_enabled_snapshot: pricingPolicy.pricing_enabled,
       createdAt: nowIso(),
     };
 
@@ -1135,6 +1346,7 @@ export async function POST(req: Request) {
       resolved,
       industryKey: industryKeyForQuote,
       llmKeySource: keySource,
+      pricingPolicy,
     });
 
     const inserted = await db
@@ -1176,6 +1388,7 @@ export async function POST(req: Request) {
         resolved,
         industryKey: industryKeyForQuote,
         llmKeySource: keySource,
+        pricingPolicy,
       });
 
       await db
@@ -1191,7 +1404,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
     }
 
-    const output = await generateEstimate({
+    const rawOutput = await generateEstimate({
       openai,
       model: resolved.models.estimatorModel,
       system: resolved.prompts.quoteEstimatorSystem,
@@ -1201,6 +1414,8 @@ export async function POST(req: Request) {
       notes,
     });
 
+    const output = enforcePricingPolicyOnOutput(rawOutput, pricingPolicy);
+
     const aiSnapshotEstimated = buildAiSnapshot({
       phase: "phase1_estimated",
       tenantId: tenant.id,
@@ -1209,6 +1424,7 @@ export async function POST(req: Request) {
       resolved,
       industryKey: industryKeyForQuote,
       llmKeySource: keySource,
+      pricingPolicy,
     });
 
     let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshotEstimated };

@@ -7,6 +7,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 type AiMode = "assessment_only" | "range" | "fixed";
 type RenderingStyle = "photoreal" | "clean_oem" | "custom";
 
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
 type PolicyResp =
   | {
       ok: true;
@@ -15,6 +24,9 @@ type PolicyResp =
       ai_policy: {
         ai_mode: AiMode;
         pricing_enabled: boolean;
+
+        // ✅ optional: populated if tenant_settings.pricing_model exists
+        pricing_model?: PricingModel | null;
 
         rendering_enabled: boolean;
         rendering_style: RenderingStyle;
@@ -82,6 +94,27 @@ function clampInt(v: any, fallback: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+function pricingModelLabel(v: PricingModel | null | undefined) {
+  switch (v) {
+    case "flat_per_job":
+      return "Flat price per job";
+    case "hourly_plus_materials":
+      return "Hourly labor + materials";
+    case "per_unit":
+      return "Per-unit (sq ft / linear ft / per item)";
+    case "packages":
+      return "Packages / tiers";
+    case "line_items":
+      return "Line items / menu of services";
+    case "inspection_only":
+      return "Quote after inspection only";
+    case "assessment_fee":
+      return "Assessment / diagnostic fee";
+    default:
+      return "Not set yet";
+  }
+}
+
 export default function AiPolicySetupPage() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -96,6 +129,9 @@ export default function AiPolicySetupPage() {
 
   const [aiMode, setAiMode] = useState<AiMode>("assessment_only");
   const [pricingEnabled, setPricingEnabled] = useState(false);
+
+  // ✅ read-only, sourced from onboarding
+  const [pricingModel, setPricingModel] = useState<PricingModel | null>(null);
 
   const [renderingEnabled, setRenderingEnabled] = useState(false);
   const [renderingStyle, setRenderingStyle] = useState<RenderingStyle>("photoreal");
@@ -133,6 +169,9 @@ export default function AiPolicySetupPage() {
 
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
+
+      // ✅ show onboarding pricing model if present
+      setPricingModel((data.ai_policy.pricing_model ?? null) as PricingModel | null);
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
@@ -188,6 +227,9 @@ export default function AiPolicySetupPage() {
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
+      // keep showing pricing model (read-only, but may now be returned)
+      setPricingModel((data.ai_policy.pricing_model ?? pricingModel ?? null) as PricingModel | null);
+
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
@@ -216,7 +258,13 @@ export default function AiPolicySetupPage() {
   }, []);
 
   return (
-    <div className={onboardingMode ? "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen" : "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen"}>
+    <div
+      className={
+        onboardingMode
+          ? "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen"
+          : "mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen"
+      }
+    >
       {/* ✅ In onboarding mode, keep header minimal and unambiguous */}
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
@@ -273,6 +321,21 @@ export default function AiPolicySetupPage() {
                 <span className="font-mono">admin</span> can change the policy.
               </div>
             ) : null}
+
+            {/* ✅ Pricing model (from onboarding) */}
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900">Pricing model (from onboarding)</div>
+                  <div className="mt-1 text-xs text-gray-600">
+                    This comes from the onboarding pricing step. It’s shown here for visibility (read-only).
+                  </div>
+                </div>
+                <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900">
+                  {pricingModelLabel(pricingModel)}
+                </div>
+              </div>
+            </div>
 
             {/* AI Mode */}
             <div className="grid gap-3">
@@ -375,9 +438,7 @@ export default function AiPolicySetupPage() {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
-                  <div className="mt-1 text-xs text-gray-600">
-                    Optional “concept render” image of the finished product.
-                  </div>
+                  <div className="mt-1 text-xs text-gray-600">Optional “concept render” image of the finished product.</div>
                 </div>
 
                 <button
@@ -454,7 +515,7 @@ export default function AiPolicySetupPage() {
                           renderingOptInRequired
                             ? "border-green-300 bg-green-50 text-green-800"
                             : "border-gray-300 bg-white text-gray-800",
-                          (!canEdit || !renderingEnabled) ? "opacity-50" : "hover:bg-gray-50",
+                          !canEdit || !renderingEnabled ? "opacity-50" : "hover:bg-gray-50",
                         ].join(" ")}
                       >
                         {renderingOptInRequired ? "ON" : "OFF"}

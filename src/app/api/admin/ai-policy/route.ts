@@ -1,3 +1,5 @@
+// src/app/api/admin/ai-policy/route.ts
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -15,6 +17,17 @@ function json(data: any, status = 200) {
 const AiMode = z.enum(["assessment_only", "range", "fixed"]);
 const RenderingStyle = z.enum(["photoreal", "clean_oem", "custom"]);
 
+// DB stores pricing_model as TEXT (we treat it as optional)
+const PricingModel = z.enum([
+  "flat_per_job",
+  "hourly_plus_materials",
+  "per_unit",
+  "packages",
+  "line_items",
+  "inspection_only",
+  "assessment_fee",
+]);
+
 // NOTE: Live Q&A fields are OPTIONAL to avoid breaking older clients that POST without them.
 const PostBody = z.object({
   ai_mode: AiMode,
@@ -30,6 +43,9 @@ const PostBody = z.object({
   // Live Q&A (tenant-level)
   live_qa_enabled: z.boolean().optional().default(false),
   live_qa_max_questions: z.number().int().min(1).max(10).optional().default(3),
+
+  // IMPORTANT: pricing_model is NOT managed by this endpoint yet (onboarding owns it)
+  // so we do NOT accept it here to avoid accidental overwrites.
 });
 
 async function getRow(tenantId: string) {
@@ -37,6 +53,7 @@ async function getRow(tenantId: string) {
     select
       ai_mode,
       pricing_enabled,
+      pricing_model,
       rendering_enabled,
       rendering_style,
       rendering_notes,
@@ -59,9 +76,19 @@ function clampInt(n: any, fallback: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(v)));
 }
 
+function normalizePricingModel(v: any): z.infer<typeof PricingModel> | null {
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  const parsed = PricingModel.safeParse(s);
+  return parsed.success ? parsed.data : null;
+}
+
 function normalizeRow(row: any) {
   const ai_mode = (row?.ai_mode ?? "assessment_only").toString();
   const pricing_enabled = !!(row?.pricing_enabled ?? false);
+
+  // ✅ onboarding-saved field
+  const pricing_model = normalizePricingModel(row?.pricing_model);
 
   const rendering_enabled = !!(row?.rendering_enabled ?? false);
 
@@ -85,6 +112,8 @@ function normalizeRow(row: any) {
   return {
     ai_mode,
     pricing_enabled,
+    pricing_model, // ✅ now visible to admin UI
+
     rendering_enabled,
     rendering_style,
     rendering_notes,

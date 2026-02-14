@@ -161,7 +161,11 @@ export const tenantSubIndustries = pgTable(
   },
   (t) => ({
     // ✅ NEW unique key includes industryKey
-    tenantIndustryKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_industry_key_key_uq").on(t.tenantId, t.industryKey, t.key),
+    tenantIndustryKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_industry_key_key_uq").on(
+      t.tenantId,
+      t.industryKey,
+      t.key
+    ),
 
     // ✅ fast reads by tenant+industry
     tenantIndustryIdx: index("tenant_sub_industries_tenant_id_industry_key_idx").on(t.tenantId, t.industryKey),
@@ -227,6 +231,9 @@ export const tenantSettings = pgTable("tenant_settings", {
 
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
+
+  // ✅ NEW: onboarding “how you charge”
+  pricingModel: text("pricing_model"),
 
   // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),
@@ -369,14 +376,6 @@ export const industries = pgTable(
 
 /**
  * ✅ Global default sub-industries (industry-wide defaults)
- *
- * Purpose:
- * - Provide a standard “starter list” of sub-industries for an industry key.
- * - Tenants can still override/extend via tenant_sub_industries.
- *
- * NOTE:
- * - We intentionally DO NOT foreign-key industryKey to industries.key because your industries
- *   table may be empty and you still want derived keys to work.
  */
 export const industrySubIndustries = pgTable(
   "industry_sub_industries",
@@ -385,13 +384,11 @@ export const industrySubIndustries = pgTable(
 
     industryKey: text("industry_key").notNull(),
 
-    // canonical sub-industry key under an industry (ex: "marine", "auto", "residential")
     key: text("key").notNull(),
 
     label: text("label").notNull(),
     description: text("description"),
 
-    // ordering hint for UI (lower comes first); optional
     sortOrder: integer("sort_order").notNull().default(1000),
 
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

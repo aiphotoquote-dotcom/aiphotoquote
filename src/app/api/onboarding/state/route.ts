@@ -11,6 +11,15 @@ export const dynamic = "force-dynamic";
 type Mode = "new" | "update" | "existing";
 type PlanTier = "tier0" | "tier1" | "tier2";
 
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
 /* --------------------- helpers --------------------- */
 
 function safeTrim(v: unknown) {
@@ -261,6 +270,22 @@ function applyModeACompat(ai: any | null): any | null {
   return next;
 }
 
+function safePricingModel(v: unknown): PricingModel | null {
+  const s = safeTrim(v);
+  if (
+    s === "flat_per_job" ||
+    s === "hourly_plus_materials" ||
+    s === "per_unit" ||
+    s === "packages" ||
+    s === "line_items" ||
+    s === "inspection_only" ||
+    s === "assessment_fee"
+  ) {
+    return s;
+  }
+  return null;
+}
+
 /* --------------------- db read --------------------- */
 
 async function readTenantOnboarding(tenantId: string) {
@@ -271,7 +296,8 @@ async function readTenantOnboarding(tenantId: string) {
       o.completed,
       o.website,
       o.ai_analysis,
-      ts.plan_tier
+      ts.plan_tier,
+      ts.pricing_model
     from tenants t
     left join tenant_onboarding o on o.tenant_id = t.id
     left join tenant_settings ts on ts.tenant_id = t.id
@@ -295,6 +321,8 @@ async function readTenantOnboarding(tenantId: string) {
   const planTierRaw = safeTrim(row?.plan_tier);
   const planTier = safePlan(planTierRaw);
 
+  const pricingModel = safePricingModel(row?.pricing_model);
+
   return {
     tenantName: row?.tenant_name ?? null,
     currentStep: row?.current_step ?? 1,
@@ -306,6 +334,7 @@ async function readTenantOnboarding(tenantId: string) {
     industryInference,
     industryInterview,
     planTier: planTier ?? null,
+    pricingModel: pricingModel ?? null,
     ...derived,
   };
 }
@@ -333,6 +362,7 @@ export async function GET(req: Request) {
           industryInference: null,
           industryInterview: null,
           planTier: null,
+          pricingModel: null,
           aiAnalysisStatus: "idle",
           aiAnalysisRound: 0,
           aiAnalysisLastAction: "",
@@ -345,10 +375,7 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return noCacheJson(
-        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
-        400
-      );
+      return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." }, 400);
     }
 
     await requireMembership(clerkUserId, tenantId);
@@ -376,10 +403,43 @@ export async function POST(req: Request) {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-    const step = Number(body?.step);
+    const step = body?.step;
+
+    // ---------------- STEP: pricing_model (string step) ----------------
+    if (step === "pricing_model") {
+      const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
+      if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
+      await requireMembership(clerkUserId, tid);
+
+      const model = safePricingModel(body?.pricing_model);
+      if (!model) {
+        return noCacheJson({ ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a valid pricing model." }, 400);
+      }
+
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, industry_key, pricing_model, updated_at)
+        values (${tid}::uuid, 'service', ${model}, now())
+        on conflict (tenant_id) do update
+          set pricing_model = excluded.pricing_model,
+              updated_at = now()
+      `);
+
+      // keep onboarding step at least 5 (pricing page), but don't jump forward
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
+        values (${tid}::uuid, 5, false, now(), now())
+        on conflict (tenant_id) do update
+          set current_step = greatest(tenant_onboarding.current_step, 5),
+              updated_at = now()
+      `);
+
+      return noCacheJson({ ok: true, tenantId: tid, pricingModel: model }, 200);
+    }
+
+    const stepNum = Number(step);
 
     // ---------------- STEP 1 ----------------
-    if (step === 1) {
+    if (stepNum === 1) {
       const businessName = safeTrim(body?.businessName);
       const website = safeTrim(body?.website);
 
@@ -460,7 +520,6 @@ export async function POST(req: Request) {
       }
 
       // ✅ CRITICAL: ALWAYS go to step 2.
-      // Step 2 will choose: website analysis path vs interview path.
       const nextStep = 2;
 
       await db.execute(sql`
@@ -476,7 +535,7 @@ export async function POST(req: Request) {
     }
 
     // ---------------- STEP 5: branding save ----------------
-    if (step === 5) {
+    if (stepNum === 5) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
@@ -486,10 +545,7 @@ export async function POST(req: Request) {
       const brandLogoUrlRaw = safeTrim(body?.brand_logo_url);
 
       if (!leadToEmail.includes("@")) {
-        return noCacheJson(
-          { ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." },
-          400
-        );
+        return noCacheJson({ ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." }, 400);
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
@@ -532,7 +588,7 @@ export async function POST(req: Request) {
     }
 
     // ---------------- STEP 6: plan selection ----------------
-    if (step === 6) {
+    if (stepNum === 6) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
