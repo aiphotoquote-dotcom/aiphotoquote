@@ -275,6 +275,118 @@ function safeDbTargetFromEnv(): { host: string | null; db: string | null } {
 
 type DebugFn = (stage: string, data?: Record<string, any>) => void;
 
+/* --------------------- image inlining for OpenAI vision --------------------- */
+/**
+ * Why:
+ * OpenAI will fetch image_url itself. Your error shows timeouts fetching Vercel Blob URLs.
+ * Fix:
+ * Fetch bytes server-side and pass as data: URL.
+ *
+ * IMPORTANT:
+ * We still store the original Blob URL in quote_logs.input.images for future concept renders/emails/audits.
+ */
+
+const OPENAI_VISION_MAX_IMAGES = 6; // keep payload sane; we still store all URLs
+const IMAGE_FETCH_TIMEOUT_MS = 12_000;
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8MB cap per image for analysis payload
+
+function guessContentType(url: string): string {
+  const u = url.toLowerCase();
+  if (u.endsWith(".png")) return "image/png";
+  if (u.endsWith(".webp")) return "image/webp";
+  if (u.endsWith(".gif")) return "image/gif";
+  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
+  return "application/octet-stream";
+}
+
+function toBase64(buf: ArrayBuffer): string {
+  return Buffer.from(buf).toString("base64");
+}
+
+async function fetchAsDataUrl(url: string, debug?: DebugFn) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+      // DO NOT send cookies; blob URLs are public
+    });
+
+    if (!res.ok) {
+      throw new Error(`IMAGE_FETCH_FAILED: HTTP ${res.status}`);
+    }
+
+    const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
+    const contentType = ct || guessContentType(url);
+
+    const ab = await res.arrayBuffer();
+    if (ab.byteLength > IMAGE_MAX_BYTES) {
+      throw new Error(`IMAGE_TOO_LARGE: ${ab.byteLength} bytes`);
+    }
+
+    const b64 = toBase64(ab);
+    return `data:${contentType};base64,${b64}`;
+  } catch (e: any) {
+    debug?.("openai.image.inline_failed", { url, message: e?.message ?? String(e) });
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function buildOpenAiVisionContent(args: {
+  images: Array<{ url: string; shotType?: string }>;
+  debug?: DebugFn;
+}) {
+  const { images, debug } = args;
+
+  const picked = (images || []).filter((x) => x?.url).slice(0, OPENAI_VISION_MAX_IMAGES);
+
+  const content: any[] = [];
+  for (const img of picked) {
+    const u = String(img.url);
+    // Try inline first (solves your blob timeout); fall back to remote url if inline fails.
+    try {
+      const dataUrl = await fetchAsDataUrl(u, debug);
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
+    } catch {
+      content.push({ type: "image_url", image_url: { url: u } });
+    }
+  }
+
+  return content;
+}
+
+/* --------------------- output coercion (avoid false fallback) --------------------- */
+function coerceToNumber(v: any): number {
+  const n = typeof v === "string" ? Number(v) : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function coerceStringArray(v: any): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+}
+
+function coerceAiCandidate(candidate: any) {
+  if (!candidate || typeof candidate !== "object") return candidate;
+
+  return {
+    confidence: String(candidate.confidence ?? "").trim() || "low",
+    inspection_required: Boolean(candidate.inspection_required),
+    estimate_low: coerceToNumber(candidate.estimate_low),
+    estimate_high: coerceToNumber(candidate.estimate_high),
+    currency: String(candidate.currency ?? "USD"),
+    summary: String(candidate.summary ?? ""),
+    visible_scope: coerceStringArray(candidate.visible_scope),
+    assumptions: coerceStringArray(candidate.assumptions),
+    questions: coerceStringArray(candidate.questions),
+  };
+}
+
 /**
  * Enforce monthly quote limits (Phase 1 only)
  */
@@ -733,8 +845,9 @@ async function generateQaQuestions(args: {
   service_type: string;
   notes: string;
   maxQuestions: number;
+  debug?: DebugFn;
 }) {
-  const { openai, model, system, images, category, service_type, notes, maxQuestions } = args;
+  const { openai, model, system, images, category, service_type, notes, maxQuestions, debug } = args;
 
   const userText = [
     `Category: ${category}`,
@@ -745,9 +858,8 @@ async function generateQaQuestions(args: {
   ].join("\n");
 
   const content: any[] = [{ type: "text", text: userText }];
-  for (const img of images) {
-    if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-  }
+  const vision = await buildOpenAiVisionContent({ images, debug });
+  content.push(...vision);
 
   const completion = await openai.chat.completions.create({
     model,
@@ -784,8 +896,9 @@ async function generateEstimate(args: {
   service_type: string;
   notes: string;
   normalizedAnswers?: Array<{ question: string; answer: string }>;
+  debug?: DebugFn;
 }) {
-  const { openai, model, system, images, category, service_type, notes, normalizedAnswers } = args;
+  const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
 
   const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
 
@@ -806,9 +919,8 @@ async function generateEstimate(args: {
     .join("\n");
 
   const content: any[] = [{ type: "text", text: userText }];
-  for (const img of images) {
-    if (img?.url) content.push({ type: "image_url", image_url: { url: img.url } });
-  }
+  const vision = await buildOpenAiVisionContent({ images, debug });
+  content.push(...vision);
 
   const completion = await openai.chat.completions.create({
     model,
@@ -843,38 +955,41 @@ async function generateEstimate(args: {
 
   const raw = completion.choices?.[0]?.message?.content ?? "{}";
 
-let outputParsed: any = null;
-try {
-  outputParsed = JSON.parse(raw);
-} catch {
-  outputParsed = null;
-}
+  let outputParsed: any = null;
+  try {
+    outputParsed = JSON.parse(raw);
+  } catch {
+    outputParsed = null;
+  }
 
-// ✅ Salvage common “wrapper” failure mode where the model returns
-// { type:"object", properties:{...actual values...} }
-const candidate =
-  outputParsed &&
-  typeof outputParsed === "object" &&
-  outputParsed.properties &&
-  typeof outputParsed.properties === "object"
-    ? outputParsed.properties
-    : outputParsed;
+  // ✅ Salvage common “wrapper” failure mode:
+  // { type:"object", properties:{...actual values...} }
+  const candidate0 =
+    outputParsed &&
+    typeof outputParsed === "object" &&
+    outputParsed.properties &&
+    typeof outputParsed.properties === "object"
+      ? outputParsed.properties
+      : outputParsed;
 
-const safe = AiOutputSchema.safeParse(candidate);
-if (!safe.success) {
-  return {
-    confidence: "low",
-    inspection_required: true,
-    estimate_low: 0,
-    estimate_high: 0,
-    currency: "USD",
-    summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
-    visible_scope: [],
-    assumptions: [],
-    questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
-    _raw: raw,
-  };
-}
+  // ✅ Coerce types (prevents false fallback when numbers come back as strings, etc.)
+  const candidate = coerceAiCandidate(candidate0);
+
+  const safe = AiOutputSchema.safeParse(candidate);
+  if (!safe.success) {
+    return {
+      confidence: "low",
+      inspection_required: true,
+      estimate_low: 0,
+      estimate_high: 0,
+      currency: "USD",
+      summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
+      visible_scope: [],
+      assumptions: [],
+      questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
+      _raw: raw,
+    };
+  }
 
   const v = safe.data;
   const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
@@ -1251,6 +1366,7 @@ export async function POST(req: Request) {
         service_type,
         notes,
         normalizedAnswers,
+        debug,
       });
 
       const output = enforcePricingPolicyOnOutput(rawOutput, pricingPolicy);
@@ -1348,7 +1464,7 @@ export async function POST(req: Request) {
 
     const inputToStore = {
       tenantSlug,
-      images,
+      images, // canonical URLs stay here for future renders/emails/admin
       render_opt_in: renderOptIn,
       customer,
       industryKeySnapshot: industryKeyForQuote,
@@ -1402,6 +1518,7 @@ export async function POST(req: Request) {
         service_type,
         notes,
         maxQuestions: resolved.tenant.liveQaMaxQuestions,
+        debug,
       });
 
       const qa = { questions, answers: [], askedAt: nowIso() };
@@ -1438,6 +1555,7 @@ export async function POST(req: Request) {
       category,
       service_type,
       notes,
+      debug,
     });
 
     const output = enforcePricingPolicyOnOutput(rawOutput, policyToStore);
