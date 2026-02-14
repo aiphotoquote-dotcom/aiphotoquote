@@ -64,6 +64,13 @@
       "when": 1769364968691,
       "tag": "0008_eager_zaran",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1771041630622,
+      "tag": "0009_legal_silver_centurion",
+      "breakpoints": true
     }
   ]
 }
