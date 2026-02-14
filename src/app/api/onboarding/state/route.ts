@@ -11,6 +11,15 @@ export const dynamic = "force-dynamic";
 type Mode = "new" | "update" | "existing";
 type PlanTier = "tier0" | "tier1" | "tier2";
 
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
 /* --------------------- helpers --------------------- */
 
 function safeTrim(v: unknown) {
@@ -253,13 +262,28 @@ function applyModeACompat(ai: any | null): any | null {
   const next: any = { ...(ai as any) };
 
   if (!safeTrim(next.suggestedIndustryKey) && proposedKey) next.suggestedIndustryKey = proposedKey;
-  if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf))
-    next.confidenceScore = conf;
+  if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf)) next.confidenceScore = conf;
   if (next.needsConfirmation === undefined || next.needsConfirmation === null) next.needsConfirmation = true;
 
   if (!safeTrim(next.suggestedIndustryLabel) && proposedLabel) next.suggestedIndustryLabel = proposedLabel;
 
   return next;
+}
+
+function safePricingModel(v: unknown): PricingModel | null {
+  const s = safeTrim(v);
+  if (
+    s === "flat_per_job" ||
+    s === "hourly_plus_materials" ||
+    s === "per_unit" ||
+    s === "packages" ||
+    s === "line_items" ||
+    s === "inspection_only" ||
+    s === "assessment_fee"
+  ) {
+    return s;
+  }
+  return null;
 }
 
 /* --------------------- db read --------------------- */
@@ -272,7 +296,8 @@ async function readTenantOnboarding(tenantId: string) {
       o.completed,
       o.website,
       o.ai_analysis,
-      ts.plan_tier
+      ts.plan_tier,
+      ts.pricing_model
     from tenants t
     left join tenant_onboarding o on o.tenant_id = t.id
     left join tenant_settings ts on ts.tenant_id = t.id
@@ -296,6 +321,8 @@ async function readTenantOnboarding(tenantId: string) {
   const planTierRaw = safeTrim(row?.plan_tier);
   const planTier = safePlan(planTierRaw);
 
+  const pricingModel = safePricingModel(row?.pricing_model);
+
   return {
     tenantName: row?.tenant_name ?? null,
     currentStep: row?.current_step ?? 1,
@@ -307,6 +334,7 @@ async function readTenantOnboarding(tenantId: string) {
     industryInference,
     industryInterview,
     planTier: planTier ?? null,
+    pricingModel: pricingModel ?? null,
     ...derived,
   };
 }
@@ -334,6 +362,7 @@ export async function GET(req: Request) {
           industryInference: null,
           industryInterview: null,
           planTier: null,
+          pricingModel: null,
           aiAnalysisStatus: "idle",
           aiAnalysisRound: 0,
           aiAnalysisLastAction: "",
@@ -374,33 +403,40 @@ export async function POST(req: Request) {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
+    const step = body?.step;
 
-    const stepRaw = body?.step;
-    const stepNum = typeof stepRaw === "number" ? stepRaw : Number(stepRaw);
-
-    // ---------------- STEP: pricing_model (string step; avoids collisions) ----------------
-    if (String(stepRaw ?? "").trim() === "pricing_model") {
+    // ---------------- STEP: pricing_model (string step) ----------------
+    if (step === "pricing_model") {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
-
       await requireMembership(clerkUserId, tid);
 
-      const pricingModel = safeTrim(body?.pricing_model || body?.pricingModel);
-      if (!pricingModel) {
-        return noCacheJson({ ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a pricing model." }, 400);
+      const model = safePricingModel(body?.pricing_model);
+      if (!model) {
+        return noCacheJson({ ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a valid pricing model." }, 400);
       }
 
-      // Minimal, safe write: ONLY this column + updated_at.
       await db.execute(sql`
         insert into tenant_settings (tenant_id, industry_key, pricing_model, updated_at)
-        values (${tid}::uuid, 'service', ${pricingModel}, now())
+        values (${tid}::uuid, 'service', ${model}, now())
         on conflict (tenant_id) do update
           set pricing_model = excluded.pricing_model,
               updated_at = now()
       `);
 
-      return noCacheJson({ ok: true, tenantId: tid, pricingModel }, 200);
+      // keep onboarding step at least 5 (pricing page), but don't jump forward
+      await db.execute(sql`
+        insert into tenant_onboarding (tenant_id, current_step, completed, created_at, updated_at)
+        values (${tid}::uuid, 5, false, now(), now())
+        on conflict (tenant_id) do update
+          set current_step = greatest(tenant_onboarding.current_step, 5),
+              updated_at = now()
+      `);
+
+      return noCacheJson({ ok: true, tenantId: tid, pricingModel: model }, 200);
     }
+
+    const stepNum = Number(step);
 
     // ---------------- STEP 1 ----------------
     if (stepNum === 1) {

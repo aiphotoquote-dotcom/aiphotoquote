@@ -36,18 +36,32 @@ type PricingModel =
   | "inspection_only"
   | "assessment_fee";
 
+type OnboardingStateResp =
+  | { ok: true; pricingModel?: PricingModel | null }
+  | { ok: false; error: string; message?: string };
+
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
+}
+
+function isPricingModel(v: any): v is PricingModel {
+  return (
+    v === "flat_per_job" ||
+    v === "hourly_plus_materials" ||
+    v === "per_unit" ||
+    v === "packages" ||
+    v === "line_items" ||
+    v === "inspection_only" ||
+    v === "assessment_fee"
+  );
 }
 
 async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
     const text = await res.text().catch(() => "");
-    throw new Error(
-      `Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`
-    );
+    throw new Error(`Expected JSON but got "${ct || "unknown"}" (status ${res.status}). First 200 chars: ${text.slice(0, 200)}`);
   }
   return (await res.json()) as T;
 }
@@ -90,9 +104,7 @@ function Card({
         <div
           className={cn(
             "mt-1 h-5 w-5 shrink-0 rounded-full border flex items-center justify-center",
-            selected
-              ? "border-emerald-600 bg-emerald-600"
-              : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
+            selected ? "border-emerald-600 bg-emerald-600" : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
           )}
         >
           {selected ? <div className="h-2 w-2 rounded-full bg-white" /> : null}
@@ -155,19 +167,29 @@ export function Step5Pricing(props: {
 
       await props.ensureActiveTenant(tid);
 
+      // 1) Load AI policy (existing behavior)
       const res = await fetch("/api/admin/ai-policy", { cache: "no-store", credentials: "include" });
       const data = await safeJson<PolicyResp>(res);
-      if (!data.ok) throw new Error(data.message || data.error || "Failed to load AI policy");
+      if (!data.ok) throw new Error((data as any).message || (data as any).error || "Failed to load AI policy");
 
       setRole(data.role);
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
-
-      // keep the rest so we can post back without clobbering
       setPolicyRest(data.ai_policy);
 
-      // restore cached “how you charge”
-      setPricingModel(readPricingModel());
+      // 2) Load pricing model from DB (preferred), fallback to sessionStorage
+      const stateRes = await fetch(`/api/onboarding/state?mode=existing&tenantId=${encodeURIComponent(tid)}`, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "include",
+      });
+      const state = await safeJson<OnboardingStateResp>(stateRes);
+
+      const dbModel = (state as any)?.ok ? (state as any)?.pricingModel : null;
+      const dbPicked = isPricingModel(dbModel) ? (dbModel as PricingModel) : "";
+
+      const localPicked = readPricingModel();
+      setPricingModel(dbPicked || localPicked || "");
     } catch (e: any) {
       setErr(e?.message ?? String(e));
       props.onError(e?.message ?? String(e));
@@ -216,11 +238,9 @@ export function Step5Pricing(props: {
 
       // Save AI policy (existing behavior)
       const payload = {
-        // what Step5 owns
         ai_mode: aiMode,
         pricing_enabled: pricingEnabled,
 
-        // preserve everything else
         rendering_enabled: !!policyRest.rendering_enabled,
         rendering_style: (policyRest.rendering_style ?? "photoreal") as RenderingStyle,
         rendering_notes: policyRest.rendering_notes ?? "",
@@ -239,9 +259,8 @@ export function Step5Pricing(props: {
       });
 
       const data = await safeJson<PolicyResp>(res);
-      if (!data.ok) throw new Error(data.message || data.error || "Failed to save AI policy");
+      if (!data.ok) throw new Error((data as any).message || (data as any).error || "Failed to save AI policy");
 
-      // keep UI in sync (in case backend normalizes)
       setRole(data.role);
       setAiMode(data.ai_policy.ai_mode);
       setPricingEnabled(!!data.ai_policy.pricing_enabled);
@@ -306,7 +325,7 @@ export function Step5Pricing(props: {
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">How do you usually charge?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                This helps tailor defaults. (Now saved to your tenant settings.)
+                This helps tailor defaults. (Saved to your tenant settings.)
               </div>
 
               <div className="mt-4 grid gap-3">
@@ -457,9 +476,7 @@ export function Step5Pricing(props: {
               </button>
             </div>
 
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              We’ll use this to control what the AI is allowed to show on quotes.
-            </div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">We’ll use this to control what the AI is allowed to show on quotes.</div>
           </>
         )}
       </div>
