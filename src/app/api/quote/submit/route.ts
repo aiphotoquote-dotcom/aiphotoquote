@@ -197,6 +197,19 @@ function normalizePricingPolicy(pp: PricingPolicySnapshot): PricingPolicySnapsho
   return { ai_mode, pricing_enabled: true, pricing_model };
 }
 
+/**
+ * Hard gate:
+ * - Phase1 must honor resolved.tenant.pricingEnabled
+ * - Phase2 uses frozen snapshot from the quote log (if present)
+ */
+function applyPricingEnabledGate(policy: PricingPolicySnapshot, pricingEnabled: boolean): PricingPolicySnapshot {
+  if (!pricingEnabled) {
+    return normalizePricingPolicy({ ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null });
+  }
+  // enabled: keep existing policy (but normalized)
+  return normalizePricingPolicy(policy);
+}
+
 function pickPricingPolicyFromInput(inputAny: any): PricingPolicySnapshot | null {
   const pp = inputAny?.pricing_policy_snapshot;
   if (pp && typeof pp === "object") {
@@ -1049,14 +1062,23 @@ export async function POST(req: Request) {
       industryKeyForQuote = tenantIndustryKey;
     }
 
+    // Resolve tenant + PCC AI settings (includes pricingEnabled gate)
+    const resolvedBase = await resolveTenantLlm(tenant.id);
+
     // ✅ If we didn't get pricing policy from log (phase1), load it from tenant_settings
     if (!pricingPolicy) {
       pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
     }
-    pricingPolicy = normalizePricingPolicy(pricingPolicy);
 
-    // Resolve tenant + PCC AI settings
-    const resolvedBase = await resolveTenantLlm(tenant.id);
+    // ✅ Apply the hard gate:
+    // - Phase1 (no frozen log): policy must follow resolvedBase.tenant.pricingEnabled
+    // - Phase2 (frozen log): trust the frozen policy
+    const pricingEnabledGate = Boolean((resolvedBase as any)?.tenant?.pricingEnabled);
+    pricingPolicy = isPhase2
+      ? normalizePricingPolicy(pricingPolicy)
+      : applyPricingEnabledGate(normalizePricingPolicy(pricingPolicy), pricingEnabledGate);
+
+    // PCC + industry prompt pack
     const pccCfg = await loadPlatformLlmConfig();
     const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
 
@@ -1101,6 +1123,7 @@ export async function POST(req: Request) {
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
+      pricingEnabledGate,
       pricingPolicy,
     });
 
@@ -1310,7 +1333,8 @@ export async function POST(req: Request) {
     aiEnvelope.renderOptIn = renderOptIn;
 
     // ✅ Freeze pricing policy into the quote log input so phase2 uses the same rules.
-    const policyToStore = normalizePricingPolicy(pricingPolicy);
+    // Phase1 MUST honor resolved.tenant.pricingEnabled.
+    const policyToStore = applyPricingEnabledGate(pricingPolicy, Boolean(resolved.tenant.pricingEnabled));
 
     const inputToStore = {
       tenantSlug,
