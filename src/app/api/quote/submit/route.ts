@@ -843,28 +843,38 @@ async function generateEstimate(args: {
 
   const raw = completion.choices?.[0]?.message?.content ?? "{}";
 
-  let outputParsed: any = null;
-  try {
-    outputParsed = JSON.parse(raw);
-  } catch {
-    outputParsed = null;
-  }
+let outputParsed: any = null;
+try {
+  outputParsed = JSON.parse(raw);
+} catch {
+  outputParsed = null;
+}
 
-  const safe = AiOutputSchema.safeParse(outputParsed);
-  if (!safe.success) {
-    return {
-      confidence: "low",
-      inspection_required: true,
-      estimate_low: 0,
-      estimate_high: 0,
-      currency: "USD",
-      summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
-      visible_scope: [],
-      assumptions: [],
-      questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
-      _raw: raw,
-    };
-  }
+// ✅ Salvage common “wrapper” failure mode where the model returns
+// { type:"object", properties:{...actual values...} }
+const candidate =
+  outputParsed &&
+  typeof outputParsed === "object" &&
+  outputParsed.properties &&
+  typeof outputParsed.properties === "object"
+    ? outputParsed.properties
+    : outputParsed;
+
+const safe = AiOutputSchema.safeParse(candidate);
+if (!safe.success) {
+  return {
+    confidence: "low",
+    inspection_required: true,
+    estimate_low: 0,
+    estimate_high: 0,
+    currency: "USD",
+    summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
+    visible_scope: [],
+    assumptions: [],
+    questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
+    _raw: raw,
+  };
+}
 
   const v = safe.data;
   const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
