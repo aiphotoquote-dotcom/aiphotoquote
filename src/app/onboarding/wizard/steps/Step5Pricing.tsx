@@ -4,18 +4,37 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 type AiMode = "assessment_only" | "range" | "fixed";
+type RenderingStyle = "photoreal" | "clean_oem" | "custom";
 
 type PolicyResp =
   | {
       ok: true;
       tenantId: string;
       role: "owner" | "admin" | "member";
-      ai_policy: Record<string, any> & {
-        ai_mode?: AiMode;
-        pricing_enabled?: boolean;
+      ai_policy: {
+        ai_mode: AiMode;
+        pricing_enabled: boolean;
+
+        rendering_enabled: boolean;
+        rendering_style: RenderingStyle;
+        rendering_notes: string;
+        rendering_max_per_day: number;
+        rendering_customer_opt_in_required: boolean;
+
+        live_qa_enabled?: boolean;
+        live_qa_max_questions?: number;
       };
     }
   | { ok: false; error: string; message?: string; issues?: any };
+
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
 
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
@@ -71,7 +90,9 @@ function Card({
         <div
           className={cn(
             "mt-1 h-5 w-5 shrink-0 rounded-full border flex items-center justify-center",
-            selected ? "border-emerald-600 bg-emerald-600" : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
+            selected
+              ? "border-emerald-600 bg-emerald-600"
+              : "border-gray-300 bg-white dark:border-gray-700 dark:bg-black"
           )}
         >
           {selected ? <div className="h-2 w-2 rounded-full bg-white" /> : null}
@@ -80,19 +101,6 @@ function Card({
     </button>
   );
 }
-
-/**
- * UX-only for now: store the “how do you charge” selection in sessionStorage.
- * No schema/API changes in this pass.
- */
-type PricingModel =
-  | "flat_per_job"
-  | "hourly_plus_materials"
-  | "per_unit"
-  | "packages"
-  | "line_items"
-  | "inspection_only"
-  | "assessment_fee";
 
 function readPricingModel(): PricingModel | "" {
   try {
@@ -130,8 +138,8 @@ export function Step5Pricing(props: {
   const [aiMode, setAiMode] = useState<AiMode>("assessment_only");
   const [pricingEnabled, setPricingEnabled] = useState<boolean>(false);
 
-  // store the full policy we loaded so we can POST it back safely without clobbering unknown fields
-  const [policyRest, setPolicyRest] = useState<Record<string, any> | null>(null);
+  // keep the rest so we can re-post full policy without wiping settings
+  const [policyRest, setPolicyRest] = useState<any>(null);
 
   const [pricingModel, setPricingModel] = useState<PricingModel | "">("");
 
@@ -152,20 +160,37 @@ export function Step5Pricing(props: {
       if (!data.ok) throw new Error(data.message || data.error || "Failed to load AI policy");
 
       setRole(data.role);
+      setAiMode(data.ai_policy.ai_mode);
+      setPricingEnabled(!!data.ai_policy.pricing_enabled);
 
-      const p = data.ai_policy || {};
-      setPolicyRest(p);
+      // keep the rest so we can post back without clobbering
+      setPolicyRest(data.ai_policy);
 
-      setAiMode((safeTrim(p.ai_mode) as AiMode) || "assessment_only");
-      setPricingEnabled(Boolean(p.pricing_enabled));
-
+      // restore cached “how you charge”
       setPricingModel(readPricingModel());
     } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      setErr(msg);
-      props.onError(msg);
+      setErr(e?.message ?? String(e));
+      props.onError(e?.message ?? String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function persistPricingModelToDb(model: PricingModel) {
+    const res = await fetch("/api/onboarding/state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        step: "pricing_model",
+        tenantId: tid,
+        pricing_model: model,
+      }),
+    });
+
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.ok) {
+      throw new Error(j?.message || j?.error || `Failed to save pricing model (HTTP ${res.status})`);
     }
   }
 
@@ -183,13 +208,27 @@ export function Step5Pricing(props: {
         throw new Error("Policy not loaded yet. Please refresh and try again.");
       }
 
-      if (pricingModel) writePricingModel(pricingModel as PricingModel);
+      // Persist "how you charge"
+      if (pricingModel) {
+        writePricingModel(pricingModel as PricingModel);
+        await persistPricingModelToDb(pricingModel as PricingModel);
+      }
 
-      // safest approach: send back the full policy object we loaded, only overriding the two fields Step5 owns.
+      // Save AI policy (existing behavior)
       const payload = {
-        ...policyRest,
+        // what Step5 owns
         ai_mode: aiMode,
         pricing_enabled: pricingEnabled,
+
+        // preserve everything else
+        rendering_enabled: !!policyRest.rendering_enabled,
+        rendering_style: (policyRest.rendering_style ?? "photoreal") as RenderingStyle,
+        rendering_notes: policyRest.rendering_notes ?? "",
+        rendering_max_per_day: Number(policyRest.rendering_max_per_day ?? 20) || 0,
+        rendering_customer_opt_in_required: !!policyRest.rendering_customer_opt_in_required,
+
+        live_qa_enabled: Boolean(policyRest.live_qa_enabled),
+        live_qa_max_questions: Number(policyRest.live_qa_max_questions ?? 3) || 3,
       };
 
       const res = await fetch("/api/admin/ai-policy", {
@@ -202,10 +241,11 @@ export function Step5Pricing(props: {
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to save AI policy");
 
+      // keep UI in sync (in case backend normalizes)
       setRole(data.role);
-      setPolicyRest(data.ai_policy || {});
-      setAiMode((safeTrim(data.ai_policy?.ai_mode) as AiMode) || aiMode);
-      setPricingEnabled(Boolean(data.ai_policy?.pricing_enabled));
+      setAiMode(data.ai_policy.ai_mode);
+      setPricingEnabled(!!data.ai_policy.pricing_enabled);
+      setPolicyRest(data.ai_policy);
 
       props.onContinue();
     } catch (e: any) {
@@ -263,11 +303,10 @@ export function Step5Pricing(props: {
           </div>
         ) : (
           <>
-            {/* A) UX-only: How they charge */}
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">How do you usually charge?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-                This helps tailor defaults. (Saved locally for now.)
+                This helps tailor defaults. (Now saved to your tenant settings.)
               </div>
 
               <div className="mt-4 grid gap-3">
@@ -323,7 +362,6 @@ export function Step5Pricing(props: {
               ) : null}
             </div>
 
-            {/* B) AI output policy */}
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">What should customers receive?</div>
               <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -399,7 +437,6 @@ export function Step5Pricing(props: {
               ) : null}
             </div>
 
-            {/* Nav */}
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"

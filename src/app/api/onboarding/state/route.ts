@@ -253,7 +253,8 @@ function applyModeACompat(ai: any | null): any | null {
   const next: any = { ...(ai as any) };
 
   if (!safeTrim(next.suggestedIndustryKey) && proposedKey) next.suggestedIndustryKey = proposedKey;
-  if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf)) next.confidenceScore = conf;
+  if ((next.confidenceScore === undefined || next.confidenceScore === null) && Number.isFinite(conf))
+    next.confidenceScore = conf;
   if (next.needsConfirmation === undefined || next.needsConfirmation === null) next.needsConfirmation = true;
 
   if (!safeTrim(next.suggestedIndustryLabel) && proposedLabel) next.suggestedIndustryLabel = proposedLabel;
@@ -345,10 +346,7 @@ export async function GET(req: Request) {
     }
 
     if (!tenantId) {
-      return noCacheJson(
-        { ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." },
-        400
-      );
+      return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED", message: "tenantId is required for this request." }, 400);
     }
 
     await requireMembership(clerkUserId, tenantId);
@@ -376,10 +374,36 @@ export async function POST(req: Request) {
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
-    const step = Number(body?.step);
+
+    const stepRaw = body?.step;
+    const stepNum = typeof stepRaw === "number" ? stepRaw : Number(stepRaw);
+
+    // ---------------- STEP: pricing_model (string step; avoids collisions) ----------------
+    if (String(stepRaw ?? "").trim() === "pricing_model") {
+      const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
+      if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
+
+      await requireMembership(clerkUserId, tid);
+
+      const pricingModel = safeTrim(body?.pricing_model || body?.pricingModel);
+      if (!pricingModel) {
+        return noCacheJson({ ok: false, error: "PRICING_MODEL_REQUIRED", message: "Choose a pricing model." }, 400);
+      }
+
+      // Minimal, safe write: ONLY this column + updated_at.
+      await db.execute(sql`
+        insert into tenant_settings (tenant_id, industry_key, pricing_model, updated_at)
+        values (${tid}::uuid, 'service', ${pricingModel}, now())
+        on conflict (tenant_id) do update
+          set pricing_model = excluded.pricing_model,
+              updated_at = now()
+      `);
+
+      return noCacheJson({ ok: true, tenantId: tid, pricingModel }, 200);
+    }
 
     // ---------------- STEP 1 ----------------
-    if (step === 1) {
+    if (stepNum === 1) {
       const businessName = safeTrim(body?.businessName);
       const website = safeTrim(body?.website);
 
@@ -460,7 +484,6 @@ export async function POST(req: Request) {
       }
 
       // ✅ CRITICAL: ALWAYS go to step 2.
-      // Step 2 will choose: website analysis path vs interview path.
       const nextStep = 2;
 
       await db.execute(sql`
@@ -476,7 +499,7 @@ export async function POST(req: Request) {
     }
 
     // ---------------- STEP 5: branding save ----------------
-    if (step === 5) {
+    if (stepNum === 5) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
@@ -486,10 +509,7 @@ export async function POST(req: Request) {
       const brandLogoUrlRaw = safeTrim(body?.brand_logo_url);
 
       if (!leadToEmail.includes("@")) {
-        return noCacheJson(
-          { ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." },
-          400
-        );
+        return noCacheJson({ ok: false, error: "LEAD_EMAIL_REQUIRED", message: "Enter a valid lead email." }, 400);
       }
 
       const brandLogoUrl = brandLogoUrlRaw ? brandLogoUrlRaw : null;
@@ -532,7 +552,7 @@ export async function POST(req: Request) {
     }
 
     // ---------------- STEP 6: plan selection ----------------
-    if (step === 6) {
+    if (stepNum === 6) {
       const tid = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
       if (!tid) return noCacheJson({ ok: false, error: "TENANT_ID_REQUIRED" }, 400);
 
