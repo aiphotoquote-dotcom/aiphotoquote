@@ -48,7 +48,7 @@ const PostBody = z.object({
   ai_mode: AiMode,
   pricing_enabled: z.boolean(),
 
-  // ✅ new: saved pricing config (pricing_model remains onboarding-owned)
+  // ✅ saved pricing config (pricing_model remains onboarding-owned)
   pricing_config: PricingConfigSchema,
 
   rendering_enabled: z.boolean(),
@@ -159,21 +159,34 @@ async function getOnboardingAnalysis(tenantId: string): Promise<any | null> {
 }
 
 function normalizePricingConfig(row: any) {
+  // ✅ clamp + null-safe normalization (avoid NaN drifting into UI)
+  const flat_rate_default = clampMoneyInt(row?.flat_rate_default, null);
+  const hourly_labor_rate = clampMoneyInt(row?.hourly_labor_rate, null);
+  const material_markup_percent = clampPercentInt(row?.material_markup_percent, null);
+
+  const per_unit_rate = clampMoneyInt(row?.per_unit_rate, null);
+  const per_unit_label = safeTrim(row?.per_unit_label) || null;
+
+  const package_json = row?.package_json ?? null;
+  const line_items_json = row?.line_items_json ?? null;
+
+  const assessment_fee_amount = clampMoneyInt(row?.assessment_fee_amount, null);
+  const assessment_fee_credit_toward_job = Boolean(row?.assessment_fee_credit_toward_job ?? false);
+
   return {
-    flat_rate_default: row?.flat_rate_default === null || row?.flat_rate_default === undefined ? null : Number(row.flat_rate_default),
+    flat_rate_default,
 
-    hourly_labor_rate: row?.hourly_labor_rate === null || row?.hourly_labor_rate === undefined ? null : Number(row.hourly_labor_rate),
-    material_markup_percent:
-      row?.material_markup_percent === null || row?.material_markup_percent === undefined ? null : Number(row.material_markup_percent),
+    hourly_labor_rate,
+    material_markup_percent,
 
-    per_unit_rate: row?.per_unit_rate === null || row?.per_unit_rate === undefined ? null : Number(row.per_unit_rate),
-    per_unit_label: safeTrim(row?.per_unit_label) || null,
+    per_unit_rate,
+    per_unit_label,
 
-    package_json: row?.package_json ?? null,
-    line_items_json: row?.line_items_json ?? null,
+    package_json,
+    line_items_json,
 
-    assessment_fee_amount: row?.assessment_fee_amount === null || row?.assessment_fee_amount === undefined ? null : Number(row.assessment_fee_amount),
-    assessment_fee_credit_toward_job: Boolean(row?.assessment_fee_credit_toward_job ?? false),
+    assessment_fee_amount,
+    assessment_fee_credit_toward_job,
   };
 }
 
@@ -199,6 +212,7 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
   const mentionsMobile = /\bmobile\b|\bon[-\s]?site\b|\btravel\b/.test(hay);
   const mentionsPackage = /\bpackage\b|\btier\b|\bstandard\b|\bpremium\b|\bbasic\b/.test(hay);
 
+  // conservative defaults
   const laborBase = mentionsPremium ? 175 : mentionsMobile ? 140 : 125;
   const markupBase = 30;
 
@@ -206,7 +220,6 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
   const perUnitRate = unitLabel === "sq ft" ? 12 : unitLabel === "linear ft" ? 25 : 15;
 
   const flatDefault = mentionsPremium ? 900 : 500;
-
   const assessmentFee = mentionsDiagnostic ? 99 : 75;
 
   // starter JSON (very lightweight; can be edited later)
@@ -239,23 +252,23 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
     assessment_fee_credit_toward_job: true,
   };
 
-  // Respect pricing model: only the relevant fields matter, but we can return the full object for convenience.
-  // UI will show relevant subset.
+  // Respect pricing model: only the relevant fields matter, but returning the full object helps UI
   if (!pricingModel) return base;
 
-  // If onboarding hints conflict with pricingModel, we still honor pricingModel (no switching here).
+  // We do NOT switch pricingModel here (onboarding-owned).
+  // We also do not hardcode industry; signals above are generic.
   return base;
 }
 
 function normalizeRow(row: any, analysis: any | null) {
-  const pricing_enabled = !!(row?.pricing_enabled ?? false);
+  const pricing_enabled = Boolean(row?.pricing_enabled ?? false);
 
   const ai_mode_raw = normalizeAiMode(row?.ai_mode ?? "assessment_only");
   const ai_mode = enforcePricingRule(ai_mode_raw, pricing_enabled);
 
   const pricing_model = normalizePricingModel(row?.pricing_model);
 
-  const rendering_enabled = !!(row?.rendering_enabled ?? false);
+  const rendering_enabled = Boolean(row?.rendering_enabled ?? false);
 
   const rendering_style_raw = safeTrim(row?.rendering_style ?? "photoreal");
   const rendering_style =
@@ -265,9 +278,9 @@ function normalizeRow(row: any, analysis: any | null) {
 
   const rendering_notes = String(row?.rendering_notes ?? "");
   const rendering_max_per_day = clampInt(row?.rendering_max_per_day, 20, 0, 1000);
-  const rendering_customer_opt_in_required = !!(row?.rendering_customer_opt_in_required ?? true);
+  const rendering_customer_opt_in_required = Boolean(row?.rendering_customer_opt_in_required ?? true);
 
-  const live_qa_enabled = !!(row?.live_qa_enabled ?? false);
+  const live_qa_enabled = Boolean(row?.live_qa_enabled ?? false);
   const live_qa_max_questions = clampInt(row?.live_qa_max_questions, 3, 1, 10);
 
   const pricing_config = normalizePricingConfig(row);
@@ -277,6 +290,9 @@ function normalizeRow(row: any, analysis: any | null) {
     ai_mode,
     pricing_enabled,
     pricing_model,
+
+    // ✅ B: totals are computed server-side from components
+    pricing_computation: "server_components" as const,
 
     pricing_config,
     pricing_suggested,
@@ -298,7 +314,6 @@ export async function GET() {
 
   const row = await getTenantSettingsRow(gate.tenantId);
   if (!row) {
-    // keep your current behavior: fail loudly
     return json({ ok: false, error: "SETTINGS_MISSING", message: "Tenant settings could not be loaded." }, 500);
   }
 
@@ -329,7 +344,7 @@ export async function POST(req: Request) {
     const pricing_enabled = Boolean(incoming.pricing_enabled);
     const ai_mode = enforcePricingRule(incoming.ai_mode, pricing_enabled);
 
-    // normalize pricing_config (even if pricing is disabled, we allow saving config for later)
+    // normalize pricing_config (even if pricing is disabled, allow saving config for later)
     const pc = incoming.pricing_config ?? {};
 
     const flat_rate_default = clampMoneyInt((pc as any).flat_rate_default, null);
@@ -345,7 +360,7 @@ export async function POST(req: Request) {
     const assessment_fee_amount = clampMoneyInt((pc as any).assessment_fee_amount, null);
     const assessment_fee_credit_toward_job = Boolean((pc as any).assessment_fee_credit_toward_job ?? false);
 
-    // IMPORTANT: we do NOT write pricing_model here
+    // IMPORTANT: we do NOT write pricing_model here (onboarding-owned)
     const upd = await db.execute(sql`
       update tenant_settings
       set
@@ -378,16 +393,16 @@ export async function POST(req: Request) {
 
     const updatedRow: any = (upd as any)?.rows?.[0] ?? (Array.isArray(upd) ? (upd as any)[0] : null);
     if (!updatedRow?.tenant_id) {
-      // keep current behavior: fail loudly
-      return json(
-        { ok: false, error: "SETTINGS_MISSING", message: "Tenant settings row missing; cannot update." },
-        500
-      );
+      return json({ ok: false, error: "SETTINGS_MISSING", message: "Tenant settings row missing; cannot update." }, 500);
     }
 
     const row = await getTenantSettingsRow(gate.tenantId);
+    if (!row) {
+      return json({ ok: false, error: "SETTINGS_MISSING", message: "Tenant settings could not be loaded after update." }, 500);
+    }
+
     const analysis = await getOnboardingAnalysis(gate.tenantId);
-    const normalized = normalizeRow(row ?? { ...incoming, ai_mode, pricing_enabled }, analysis);
+    const normalized = normalizeRow(row, analysis);
 
     return json({
       ok: true,
