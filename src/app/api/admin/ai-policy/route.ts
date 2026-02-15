@@ -125,7 +125,7 @@ function normalizeRow(row: any) {
   return {
     ai_mode,
     pricing_enabled,
-    pricing_model,
+    pricing_model, // ✅ now visible to admin UI
 
     rendering_enabled,
     rendering_style,
@@ -143,22 +143,13 @@ export async function GET() {
   if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
 
   const row = await getRow(gate.tenantId);
-  if (!row) {
-    return json(
-      {
-        ok: false,
-        error: "SETTINGS_MISSING",
-        message: "Tenant settings row is missing. Complete onboarding or run provisioning to create tenant_settings.",
-      },
-      500
-    );
-  }
+  const normalized = normalizeRow(row);
 
   return json({
     ok: true,
     tenantId: gate.tenantId,
     role: gate.role,
-    ai_policy: normalizeRow(row),
+    ai_policy: normalized,
   });
 }
 
@@ -202,33 +193,35 @@ export async function POST(req: Request) {
     const updatedRow: any = (upd as any)?.rows?.[0] ?? (Array.isArray(upd) ? (upd as any)[0] : null);
 
     if (!updatedRow?.tenant_id) {
-      return json(
-        {
-          ok: false,
-          error: "SETTINGS_MISSING",
-          message: "Tenant settings row is missing. Complete onboarding or run provisioning to create tenant_settings.",
-        },
-        500
-      );
+      // If tenant_settings row doesn't exist yet, create one.
+      // (industry_key can be refined later during onboarding)
+      await db.execute(sql`
+        insert into tenant_settings
+          (id, tenant_id, industry_key, ai_mode, pricing_enabled,
+           rendering_enabled, rendering_style, rendering_notes, rendering_max_per_day, rendering_customer_opt_in_required,
+           live_qa_enabled, live_qa_max_questions,
+           created_at)
+        values
+          (gen_random_uuid(), ${gate.tenantId}::uuid, 'auto', ${ai_mode}, ${pricing_enabled},
+           ${incoming.rendering_enabled}, ${incoming.rendering_style}, ${incoming.rendering_notes ?? ""}, ${clampInt(
+             incoming.rendering_max_per_day,
+             20,
+             0,
+             1000
+           )}, ${incoming.rendering_customer_opt_in_required},
+           ${Boolean(incoming.live_qa_enabled)}, ${clampInt(incoming.live_qa_max_questions, 3, 1, 10)},
+           now())
+      `);
     }
 
     const row = await getRow(gate.tenantId);
-    if (!row) {
-      return json(
-        {
-          ok: false,
-          error: "SETTINGS_MISSING",
-          message: "Tenant settings row disappeared unexpectedly.",
-        },
-        500
-      );
-    }
+    const normalized = normalizeRow(row ?? { ...incoming, ai_mode, pricing_enabled });
 
     return json({
       ok: true,
       tenantId: gate.tenantId,
       role: gate.role,
-      ai_policy: normalizeRow(row),
+      ai_policy: normalized,
     });
   } catch (e: any) {
     return json(
