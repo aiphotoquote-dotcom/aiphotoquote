@@ -16,6 +16,22 @@ type PricingModel =
   | "inspection_only"
   | "assessment_fee";
 
+type PricingConfig = {
+  flat_rate_default: number | null;
+
+  hourly_labor_rate: number | null;
+  material_markup_percent: number | null;
+
+  per_unit_rate: number | null;
+  per_unit_label: string | null;
+
+  package_json: any | null;
+  line_items_json: any | null;
+
+  assessment_fee_amount: number | null;
+  assessment_fee_credit_toward_job: boolean;
+};
+
 type PolicyResp =
   | {
       ok: true;
@@ -25,8 +41,12 @@ type PolicyResp =
         ai_mode: AiMode;
         pricing_enabled: boolean;
 
-        // optional: populated if tenant_settings.pricing_model exists
+        // onboarding-owned
         pricing_model?: PricingModel | null;
+
+        // ✅ new: persisted config + suggested defaults (not persisted until Save)
+        pricing_config?: PricingConfig | null;
+        pricing_suggested?: PricingConfig | null;
 
         rendering_enabled: boolean;
         rendering_style: RenderingStyle;
@@ -98,6 +118,27 @@ function clampInt(v: any, fallback: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+function clampMoney(v: any, fallback: number | null, min = 0, max = 2_000_000) {
+  if (v === null || v === undefined || v === "") return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const m = Math.round(n);
+  return Math.max(min, Math.min(max, m));
+}
+
+function clampPercent(v: any, fallback: number | null, min = 0, max = 500) {
+  if (v === null || v === undefined || v === "") return fallback;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const p = Math.round(n);
+  return Math.max(min, Math.min(max, p));
+}
+
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
 function pricingModelLabel(v: PricingModel | null | undefined) {
   switch (v) {
     case "flat_per_job":
@@ -119,6 +160,38 @@ function pricingModelLabel(v: PricingModel | null | undefined) {
   }
 }
 
+function tryParseJson(s: string): { ok: true; value: any } | { ok: false; error: string } {
+  const t = safeTrim(s);
+  if (!t) return { ok: true, value: null };
+  try {
+    const v = JSON.parse(t);
+    return { ok: true, value: v };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Invalid JSON" };
+  }
+}
+
+function prettyJson(v: any): string {
+  if (v === null || v === undefined) return "";
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return "";
+  }
+}
+
+const EMPTY_PRICING_CONFIG: PricingConfig = {
+  flat_rate_default: null,
+  hourly_labor_rate: null,
+  material_markup_percent: null,
+  per_unit_rate: null,
+  per_unit_label: null,
+  package_json: null,
+  line_items_json: null,
+  assessment_fee_amount: null,
+  assessment_fee_credit_toward_job: false,
+};
+
 export default function AiPolicySetupPage() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -136,6 +209,17 @@ export default function AiPolicySetupPage() {
 
   // read-only, sourced from onboarding
   const [pricingModel, setPricingModel] = useState<PricingModel | null>(null);
+
+  // ✅ pricing config editable (stored in tenant_settings)
+  const [pricingConfig, setPricingConfig] = useState<PricingConfig>({ ...EMPTY_PRICING_CONFIG });
+
+  // ✅ suggested defaults from server (computed, not saved until user saves)
+  const [pricingSuggested, setPricingSuggested] = useState<PricingConfig | null>(null);
+
+  // JSON editors for packages/line-items
+  const [packageJsonText, setPackageJsonText] = useState("");
+  const [lineItemsJsonText, setLineItemsJsonText] = useState("");
+  const [pricingJsonError, setPricingJsonError] = useState<string | null>(null);
 
   const [renderingEnabled, setRenderingEnabled] = useState(false);
   const [renderingStyle, setRenderingStyle] = useState<RenderingStyle>("photoreal");
@@ -157,15 +241,28 @@ export default function AiPolicySetupPage() {
   }
 
   function enforceUiRules(nextPricingEnabled: boolean, nextAiMode: AiMode) {
-    // ✅ Your rule: only allow range/fixed when pricing is enabled
+    // ✅ rule: only allow range/fixed when pricing is enabled
     if (!nextPricingEnabled) return { pricingEnabled: false, aiMode: "assessment_only" as AiMode };
-    // pricing enabled: keep requested mode
     return { pricingEnabled: true, aiMode: nextAiMode };
+  }
+
+  function applySuggestedDefaults() {
+    if (!pricingSuggested) return;
+    setPricingConfig({ ...pricingSuggested });
+    setPackageJsonText(prettyJson(pricingSuggested.package_json));
+    setLineItemsJsonText(prettyJson(pricingSuggested.line_items_json));
+    setPricingJsonError(null);
+    setMsg("Suggested defaults applied (not saved yet).");
+  }
+
+  function patchPricingConfig(patch: Partial<PricingConfig>) {
+    setPricingConfig((prev) => ({ ...prev, ...patch }));
   }
 
   async function load() {
     setErr(null);
     setMsg(null);
+    setPricingJsonError(null);
     setLoading(true);
 
     try {
@@ -185,8 +282,17 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(enforced.pricingEnabled);
       setAiMode(enforced.aiMode);
 
-      // show onboarding pricing model if present (but UI will hide details when pricing disabled)
       setPricingModel((data.ai_policy.pricing_model ?? null) as PricingModel | null);
+
+      // ✅ pricing config + suggested defaults
+      const cfg = (data.ai_policy.pricing_config ?? null) as PricingConfig | null;
+      const suggested = (data.ai_policy.pricing_suggested ?? null) as PricingConfig | null;
+
+      setPricingConfig({ ...EMPTY_PRICING_CONFIG, ...(cfg ?? {}) });
+      setPricingSuggested(suggested ?? null);
+
+      setPackageJsonText(prettyJson(cfg?.package_json ?? null));
+      setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
@@ -208,15 +314,40 @@ export default function AiPolicySetupPage() {
   async function save() {
     setErr(null);
     setMsg(null);
+    setPricingJsonError(null);
     setSaving(true);
 
     try {
       const enforced = enforceUiRules(pricingEnabled, aiMode);
 
+      // validate JSON inputs before POST
+      const pkgParsed = tryParseJson(packageJsonText);
+      if (!pkgParsed.ok) {
+        setPricingJsonError(`Package JSON error: ${pkgParsed.error}`);
+        throw new Error("Fix Package JSON before saving.");
+      }
+      const liParsed = tryParseJson(lineItemsJsonText);
+      if (!liParsed.ok) {
+        setPricingJsonError(`Line items JSON error: ${liParsed.error}`);
+        throw new Error("Fix Line Items JSON before saving.");
+      }
+
       const payload = {
-        // ✅ enforce rule on the wire too (so no “stale state” saves)
         ai_mode: enforced.aiMode,
         pricing_enabled: enforced.pricingEnabled,
+
+        // ✅ pricing config (saved in tenant_settings)
+        pricing_config: {
+          flat_rate_default: clampMoney(pricingConfig.flat_rate_default, null),
+          hourly_labor_rate: clampMoney(pricingConfig.hourly_labor_rate, null),
+          material_markup_percent: clampPercent(pricingConfig.material_markup_percent, null),
+          per_unit_rate: clampMoney(pricingConfig.per_unit_rate, null),
+          per_unit_label: safeTrim(pricingConfig.per_unit_label) || null,
+          package_json: pkgParsed.value ?? null,
+          line_items_json: liParsed.value ?? null,
+          assessment_fee_amount: clampMoney(pricingConfig.assessment_fee_amount, null),
+          assessment_fee_credit_toward_job: Boolean(pricingConfig.assessment_fee_credit_toward_job),
+        } as PricingConfig,
 
         rendering_enabled: renderingEnabled,
         rendering_style: renderingStyle,
@@ -241,7 +372,6 @@ export default function AiPolicySetupPage() {
       setMsg("Saved.");
       setRole(data.role);
 
-      // keep UI in sync (in case backend normalizes)
       const savedPricingEnabled = !!data.ai_policy.pricing_enabled;
       const savedAiMode = (data.ai_policy.ai_mode ?? "assessment_only") as AiMode;
       const ui = enforceUiRules(savedPricingEnabled, savedAiMode);
@@ -249,8 +379,17 @@ export default function AiPolicySetupPage() {
       setPricingEnabled(ui.pricingEnabled);
       setAiMode(ui.aiMode);
 
-      // keep showing pricing model (read-only, but hidden if pricing disabled)
       setPricingModel((data.ai_policy.pricing_model ?? pricingModel ?? null) as PricingModel | null);
+
+      // sync config back from server
+      const cfg = (data.ai_policy.pricing_config ?? null) as PricingConfig | null;
+      const suggested = (data.ai_policy.pricing_suggested ?? null) as PricingConfig | null;
+
+      setPricingConfig({ ...EMPTY_PRICING_CONFIG, ...(cfg ?? {}) });
+      setPricingSuggested(suggested ?? null);
+
+      setPackageJsonText(prettyJson(cfg?.package_json ?? null));
+      setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
@@ -286,7 +425,9 @@ export default function AiPolicySetupPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const aiModeLocked = !pricingEnabled; // range/fixed locked out when pricing off
+  const aiModeLocked = !pricingEnabled;
+
+  const showPricingConfig = pricingEnabled && !!pricingModel;
 
   return (
     <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
@@ -310,7 +451,10 @@ export default function AiPolicySetupPage() {
         <div className="flex gap-2">
           {onboardingMode ? (
             <button
-              onClick={goBackToOnboarding}
+              onClick={() => {
+                if (returnTo) router.push(returnTo);
+                else router.push("/onboarding/wizard");
+              }}
               className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
             >
               ← Back to onboarding
@@ -352,7 +496,8 @@ export default function AiPolicySetupPage() {
                 <div>
                   <div className="text-sm font-semibold text-gray-900">Pricing Enabled</div>
                   <div className="mt-1 text-xs text-gray-600">
-                    If OFF, the system will never show price numbers, and AI Mode is forced to <span className="font-mono">assessment_only</span>.
+                    If OFF, the system will never show price numbers, and AI Mode is forced to{" "}
+                    <span className="font-mono">assessment_only</span>.
                   </div>
                 </div>
 
@@ -371,13 +516,12 @@ export default function AiPolicySetupPage() {
                 </button>
               </div>
 
-              {/* Pricing model (read-only) — only meaningful when pricing is enabled */}
               <div className="mt-4 flex items-start justify-between gap-4">
                 <div>
                   <div className="text-sm font-semibold text-gray-900">Pricing model (from onboarding)</div>
                   <div className="mt-1 text-xs text-gray-600">
                     {pricingEnabled
-                      ? "Shown for visibility (read-only). Used as a methodology hint when pricing is enabled."
+                      ? "Shown for visibility. This determines which pricing inputs matter."
                       : "Hidden while pricing is disabled (model hints are ignored)."}
                   </div>
                 </div>
@@ -386,7 +530,245 @@ export default function AiPolicySetupPage() {
                   {pricingEnabled ? pricingModelLabel(pricingModel) : "Pricing disabled"}
                 </div>
               </div>
+
+              {pricingEnabled && pricingSuggested ? (
+                <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+                  <div className="text-xs text-blue-900">
+                    Suggested defaults are available (computed from onboarding signals). You can apply them and then fine-tune.
+                  </div>
+                  <button
+                    onClick={applySuggestedDefaults}
+                    disabled={!canEdit}
+                    className="rounded-md bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    Apply suggested defaults
+                  </button>
+                </div>
+              ) : null}
             </div>
+
+            {/* Pricing config */}
+            {showPricingConfig ? (
+              <div className="rounded-xl border border-gray-200 bg-white p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900">Pricing configuration</div>
+                    <div className="mt-1 text-xs text-gray-600">
+                      These inputs feed the pricing engine and become defaults used by prompts / calculations. No industry hardcoding.
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-4">
+                  {pricingModel === "flat_per_job" ? (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                      <div className="text-sm font-semibold text-gray-900">Default job price</div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        Used as a baseline when the AI returns a fixed number or range.
+                      </div>
+                      <div className="mt-3">
+                        <input
+                          type="number"
+                          value={pricingConfig.flat_rate_default ?? ""}
+                          onChange={(e) => patchPricingConfig({ flat_rate_default: clampMoney(e.target.value, null) })}
+                          disabled={!canEdit}
+                          min={0}
+                          max={2000000}
+                          className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                          placeholder="e.g. 500"
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {pricingModel === "hourly_plus_materials" ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="text-sm font-semibold text-gray-900">Hourly labor rate</div>
+                        <div className="mt-3">
+                          <input
+                            type="number"
+                            value={pricingConfig.hourly_labor_rate ?? ""}
+                            onChange={(e) => patchPricingConfig({ hourly_labor_rate: clampMoney(e.target.value, null) })}
+                            disabled={!canEdit}
+                            min={0}
+                            max={2000000}
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                            placeholder="e.g. 125"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="text-sm font-semibold text-gray-900">Material markup %</div>
+                        <div className="mt-3">
+                          <input
+                            type="number"
+                            value={pricingConfig.material_markup_percent ?? ""}
+                            onChange={(e) =>
+                              patchPricingConfig({ material_markup_percent: clampPercent(e.target.value, null) })
+                            }
+                            disabled={!canEdit}
+                            min={0}
+                            max={500}
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                            placeholder="e.g. 30"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {pricingModel === "per_unit" ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="text-sm font-semibold text-gray-900">Per-unit rate</div>
+                        <div className="mt-3">
+                          <input
+                            type="number"
+                            value={pricingConfig.per_unit_rate ?? ""}
+                            onChange={(e) => patchPricingConfig({ per_unit_rate: clampMoney(e.target.value, null) })}
+                            disabled={!canEdit}
+                            min={0}
+                            max={2000000}
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                            placeholder="e.g. 12"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="text-sm font-semibold text-gray-900">Unit label</div>
+                        <div className="mt-1 text-xs text-gray-600">Examples: sq ft, linear ft, item, seat</div>
+                        <div className="mt-3">
+                          <input
+                            type="text"
+                            value={pricingConfig.per_unit_label ?? ""}
+                            onChange={(e) => patchPricingConfig({ per_unit_label: safeTrim(e.target.value) || null })}
+                            disabled={!canEdit}
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                            placeholder="e.g. sq ft"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {pricingModel === "packages" ? (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                      <div className="text-sm font-semibold text-gray-900">Packages JSON</div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        Store your tier structure. This is saved as JSON and can power later UI/logic.
+                      </div>
+
+                      <textarea
+                        value={packageJsonText}
+                        onChange={(e) => setPackageJsonText(e.target.value)}
+                        disabled={!canEdit}
+                        rows={10}
+                        className="mt-3 w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-gray-900 disabled:bg-gray-100"
+                        placeholder={`Example:
+{
+  "tiers": [
+    { "name": "Basic", "price": 500, "includes": ["..."] },
+    { "name": "Standard", "price": 900, "includes": ["..."] },
+    { "name": "Premium", "price": 1400, "includes": ["..."] }
+  ]
+}`}
+                      />
+                    </div>
+                  ) : null}
+
+                  {pricingModel === "line_items" ? (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                      <div className="text-sm font-semibold text-gray-900">Line items JSON</div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        Store menu-style items/add-ons. Saved as JSON; validation happens later at use-site.
+                      </div>
+
+                      <textarea
+                        value={lineItemsJsonText}
+                        onChange={(e) => setLineItemsJsonText(e.target.value)}
+                        disabled={!canEdit}
+                        rows={10}
+                        className="mt-3 w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-gray-900 disabled:bg-gray-100"
+                        placeholder={`Example:
+{
+  "items": [
+    { "key": "base", "label": "Base service", "price": 500 },
+    { "key": "pickup", "label": "Pickup / delivery", "price": 150 }
+  ]
+}`}
+                      />
+                    </div>
+                  ) : null}
+
+                  {pricingModel === "assessment_fee" ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="text-sm font-semibold text-gray-900">Assessment fee amount</div>
+                        <div className="mt-3">
+                          <input
+                            type="number"
+                            value={pricingConfig.assessment_fee_amount ?? ""}
+                            onChange={(e) =>
+                              patchPricingConfig({ assessment_fee_amount: clampMoney(e.target.value, null) })
+                            }
+                            disabled={!canEdit}
+                            min={0}
+                            max={2000000}
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                            placeholder="e.g. 75"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div className="text-sm font-semibold text-gray-900">Credit toward job</div>
+                        <div className="mt-1 text-xs text-gray-600">If ON, you intend to credit the fee when work is approved.</div>
+                        <div className="mt-3 flex items-center justify-between">
+                          <span className="text-sm text-gray-700">Credit fee</span>
+                          <button
+                            onClick={() =>
+                              canEdit &&
+                              patchPricingConfig({
+                                assessment_fee_credit_toward_job: !pricingConfig.assessment_fee_credit_toward_job,
+                              })
+                            }
+                            disabled={!canEdit}
+                            className={[
+                              "rounded-md border px-3 py-2 text-sm font-semibold",
+                              pricingConfig.assessment_fee_credit_toward_job
+                                ? "border-green-300 bg-green-50 text-green-800"
+                                : "border-gray-300 bg-white text-gray-800",
+                              !canEdit ? "opacity-50" : "hover:bg-gray-50",
+                            ].join(" ")}
+                          >
+                            {pricingConfig.assessment_fee_credit_toward_job ? "ON" : "OFF"}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {pricingModel === "inspection_only" ? (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
+                      This model means you do not provide price numbers until inspection. No additional pricing inputs required.
+                    </div>
+                  ) : null}
+
+                  {pricingJsonError ? (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-900 whitespace-pre-wrap">
+                      {pricingJsonError}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : pricingEnabled ? (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
+                Pricing is enabled, but onboarding has not set a pricing model yet. Run onboarding to select one.
+              </div>
+            ) : null}
 
             {/* AI Mode */}
             <div className="grid gap-3">
