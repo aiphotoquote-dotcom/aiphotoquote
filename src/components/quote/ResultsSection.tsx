@@ -35,42 +35,36 @@ export function ResultsSection({
   renderImageUrl: string | null;
   renderError: string | null;
 
-  // new: progress number (0-100) while running
+  // progress number (0-100) while running
   renderProgressPct: number;
 }) {
   if (!hasEstimate) return null;
 
-  function toMoneyNumber(n: any): number | null {
-    // accept numbers or strings like "$5,199"
-    if (n === null || n === undefined || n === "") return null;
-    const num =
-      typeof n === "number"
-        ? n
-        : typeof n === "string"
-          ? Number(n.replace(/[^0-9.\-]/g, ""))
-          : Number(n);
+  function money(n: any) {
+    const num = Number(n);
     if (!Number.isFinite(num) || num <= 0) return null;
-    return num;
-  }
-
-  function formatMoney(num: number | null): string | null {
-    if (num == null) return null;
     return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
-  // Pull common keys (your current result format)
-  const lowNum = toMoneyNumber(result?.estimate_low ?? result?.estimateLow);
-  const highNum = toMoneyNumber(result?.estimate_high ?? result?.estimateHigh);
+  const estLowRaw = result?.estimate_low ?? result?.estimateLow;
+  const estHighRaw = result?.estimate_high ?? result?.estimateHigh;
 
-  // ✅ If low/high are equal, treat as FIXED.
-  const isFixed = lowNum != null && highNum != null && lowNum === highNum;
+  const estLow = money(estLowRaw);
+  const estHigh = money(estHighRaw);
 
-  // ✅ Effective display values
-  const effectiveLow = lowNum;
-  const effectiveHigh = isFixed ? null : highNum;
+  const lowNum = Number(estLowRaw);
+  const highNum = Number(estHighRaw);
 
-  const estLow = formatMoney(effectiveLow);
-  const estHigh = formatMoney(effectiveHigh);
+  const hasLow = estLow != null;
+  const hasHigh = estHigh != null;
+
+  // ✅ fixed-mode visual: treat low==high as a single estimate
+  const isFixed =
+    Number.isFinite(lowNum) &&
+    Number.isFinite(highNum) &&
+    lowNum > 0 &&
+    highNum > 0 &&
+    Math.round(lowNum) === Math.round(highNum);
 
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
@@ -92,17 +86,13 @@ export function ResultsSection({
 
   const pct = Math.max(0, Math.min(100, Number.isFinite(renderProgressPct) ? renderProgressPct : 0));
 
-  const hasAnyEstimate = Boolean(estLow || estHigh);
-
-  // ✅ Copy + amount rendering
-  const estimateLabel = estLow && estHigh ? "ESTIMATE RANGE" : "ESTIMATE";
-  const estimateValue =
-    estLow && estHigh ? `$${estLow} – $${estHigh}` : estLow ? `$${estLow}` : estHigh ? `$${estHigh}` : null;
-
-  const headerBlurb =
-    estimateLabel === "ESTIMATE RANGE"
-      ? "Fast range based on your photos + notes. Final pricing may change after inspection."
-      : "Fast estimate based on your photos + notes. Final pricing may change after inspection.";
+  const estimateLabel = isFixed ? "ESTIMATE" : "ESTIMATE RANGE";
+  const estimateDisplay =
+    isFixed && hasLow
+      ? `$${estLow}`
+      : hasLow && hasHigh
+        ? `$${estLow} – $${estHigh}`
+        : "We need a bit more info";
 
   return (
     <section
@@ -118,23 +108,22 @@ export function ResultsSection({
           >
             Your estimate
           </h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{headerBlurb}</p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            Fast estimate based on your photos + notes. Final pricing may change after inspection.
+          </p>
         </div>
 
         {quoteLogId ? (
           <div className="shrink-0 text-[11px] font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap text-right">
             <div>Ref: {quoteLogId.slice(0, 8)}</div>
 
-            {/* ✅ Make full UUID accessible + copyable without clutter */}
             <details className="mt-1">
               <summary className="cursor-pointer select-none text-[11px] font-medium text-gray-500 dark:text-gray-400">
                 Show full ID
               </summary>
               <div className="mt-2 rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-[10px] text-gray-500 dark:text-gray-400">quoteLogId</div>
-                <div className="mt-1 font-mono text-[11px] text-gray-800 dark:text-gray-200 break-all">
-                  {quoteLogId}
-                </div>
+                <div className="mt-1 font-mono text-[11px] text-gray-800 dark:text-gray-200 break-all">{quoteLogId}</div>
               </div>
             </details>
           </div>
@@ -151,9 +140,7 @@ export function ResultsSection({
 
         <div className="mt-4">
           <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">{estimateLabel}</div>
-          <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">
-            {hasAnyEstimate && estimateValue ? estimateValue : "We need a bit more info"}
-          </div>
+          <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">{estimateDisplay}</div>
 
           <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
             {summary ? summary : "We’ll follow up if we need any clarifications."}
@@ -230,7 +217,6 @@ export function ResultsSection({
             </div>
           </div>
 
-          {/* Progress bar while running */}
           {renderStatus === "running" ? (
             <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
               <div className="h-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${pct}%` }} />

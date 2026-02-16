@@ -282,6 +282,36 @@ function safeDbTargetFromEnv(): { host: string | null; db: string | null } {
 
 type DebugFn = (stage: string, data?: Record<string, any>) => void;
 
+/**
+ * ✅ Enforce estimate shape to match AI mode:
+ * - assessment_only => 0/0
+ * - fixed => high == low
+ * - range => as-is
+ *
+ * Note: we keep both keys for schema/email compatibility.
+ * UI will treat low==high as a single fixed estimate.
+ */
+function applyAiModeToEstimates(
+  policy: PricingPolicySnapshot,
+  estimates: { estimate_low: number; estimate_high: number }
+) {
+  const p = normalizePricingPolicy(policy);
+
+  if (!p.pricing_enabled || p.ai_mode === "assessment_only") {
+    return { estimate_low: 0, estimate_high: 0 };
+  }
+
+  const { low, high } = ensureLowHigh(estimates.estimate_low, estimates.estimate_high);
+
+  if (p.ai_mode === "fixed") {
+    // single-number intent
+    return { estimate_low: low, estimate_high: low };
+  }
+
+  // range
+  return { estimate_low: low, estimate_high: high };
+}
+
 /* --------------------- image inlining for OpenAI vision --------------------- */
 const OPENAI_VISION_MAX_IMAGES = 6;
 const IMAGE_FETCH_TIMEOUT_MS = 12_000;
@@ -1348,11 +1378,17 @@ export async function POST(req: Request) {
         rules: pricingRulesSnap,
       });
 
+      // ✅ enforce mode-based shape
+      const shaped = applyAiModeToEstimates(pricingPolicy, {
+        estimate_low: computed.estimate_low,
+        estimate_high: computed.estimate_high,
+      });
+
       const output = {
         ...rawOutput,
         inspection_required: computed.inspection_required,
-        estimate_low: computed.estimate_low,
-        estimate_high: computed.estimate_high,
+        estimate_low: shaped.estimate_low,
+        estimate_high: shaped.estimate_high,
         pricing_basis: computed.basis,
       };
 
@@ -1558,11 +1594,17 @@ export async function POST(req: Request) {
       rules: pricing_rules_snapshot,
     });
 
+    // ✅ enforce mode-based shape
+    const shaped = applyAiModeToEstimates(policyToStore, {
+      estimate_low: computed.estimate_low,
+      estimate_high: computed.estimate_high,
+    });
+
     const output = {
       ...rawOutput,
       inspection_required: computed.inspection_required,
-      estimate_low: computed.estimate_low,
-      estimate_high: computed.estimate_high,
+      estimate_low: shaped.estimate_low,
+      estimate_high: shaped.estimate_high,
       pricing_basis: computed.basis,
     };
 
