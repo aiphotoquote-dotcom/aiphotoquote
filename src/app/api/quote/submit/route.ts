@@ -2,10 +2,12 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { and, eq, sql } from "drizzle-orm";
+import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
+import { tenants, tenantSecrets, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
+import { decryptSecret } from "@/lib/crypto";
 
 import { sendEmail } from "@/lib/email";
 import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
@@ -13,6 +15,8 @@ import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
 import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
+import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+import { composeEstimatorPrompt, composeQaPrompt } from "@/lib/pcc/llm/composePrompts";
 
 import {
   computeEstimate,
@@ -20,9 +24,6 @@ import {
   type PricingConfigSnapshot,
   type PricingRulesSnapshot,
 } from "@/lib/pricing/computeEstimate";
-
-import { buildLlmContext } from "@/lib/llm/context";
-import type { KeySource } from "@/lib/llm/types";
 
 export const runtime = "nodejs";
 
@@ -68,6 +69,22 @@ const Req = z.object({
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
 });
 
+const AiOutputSchema = z.object({
+  confidence: z.enum(["high", "medium", "low"]),
+  inspection_required: z.boolean(),
+  estimate_low: z.number().nonnegative(),
+  estimate_high: z.number().nonnegative(),
+  currency: z.string().default("USD"),
+  summary: z.string(),
+  visible_scope: z.array(z.string()).default([]),
+  assumptions: z.array(z.string()).default([]),
+  questions: z.array(z.string()).default([]),
+});
+
+const QaQuestionsSchema = z.object({
+  questions: z.array(z.string().min(1)).min(1),
+});
+
 type BrandLogoVariant = "light" | "dark" | "auto" | string | null;
 
 type AiMode = "assessment_only" | "range" | "fixed";
@@ -79,6 +96,8 @@ type PricingModel =
   | "line_items"
   | "inspection_only"
   | "assessment_fee";
+
+type PlanTier = "tier0" | "tier1" | "tier2" | "tier3" | "tier4" | string;
 
 // ----------------- helpers -----------------
 function normalizePhone(raw: string) {
@@ -167,6 +186,20 @@ function isPricingModel(v: string): v is PricingModel {
   );
 }
 
+function isTier0(tier: unknown): boolean {
+  return safeTrim(tier) === "tier0";
+}
+function isTier1or2(tier: unknown): boolean {
+  const t = safeTrim(tier);
+  return t === "tier1" || t === "tier2";
+}
+function hasGraceRemaining(credits: unknown, used: unknown): boolean {
+  const c = Number(credits ?? 0);
+  const u = Number(used ?? 0);
+  if (!Number.isFinite(c) || !Number.isFinite(u)) return false;
+  return c > 0 && u < c;
+}
+
 /**
  * Normalize pricing policy to your rule:
  * - If pricing_enabled is false => force assessment_only + clear pricing_model.
@@ -234,6 +267,13 @@ function startOfNextMonthUTC(d: Date) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0, 0));
 }
 
+type KeySource = "tenant" | "platform_grace";
+
+function platformOpenAiKey(): string | null {
+  const k = process.env.OPENAI_API_KEY?.trim() || "";
+  return k ? k : null;
+}
+
 function isDebugEnabled(req: Request) {
   const h = req.headers.get("x-apq-debug");
   if (h && h.trim() === "1") return true;
@@ -281,6 +321,97 @@ function applyAiModeToEstimates(
   }
 
   return { estimate_low: low, estimate_high: high };
+}
+
+/* --------------------- image inlining for OpenAI vision --------------------- */
+const OPENAI_VISION_MAX_IMAGES = 6;
+const IMAGE_FETCH_TIMEOUT_MS = 12_000;
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+
+function guessContentType(url: string): string {
+  const u = url.toLowerCase();
+  if (u.endsWith(".png")) return "image/png";
+  if (u.endsWith(".webp")) return "image/webp";
+  if (u.endsWith(".gif")) return "image/gif";
+  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
+  return "application/octet-stream";
+}
+
+function toBase64(buf: ArrayBuffer): string {
+  return Buffer.from(buf).toString("base64");
+}
+
+async function fetchAsDataUrl(url: string, debug?: DebugFn) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    if (!res.ok) throw new Error(`IMAGE_FETCH_FAILED: HTTP ${res.status}`);
+
+    const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
+    const contentType = ct || guessContentType(url);
+
+    const ab = await res.arrayBuffer();
+    if (ab.byteLength > IMAGE_MAX_BYTES) throw new Error(`IMAGE_TOO_LARGE: ${ab.byteLength} bytes`);
+
+    const b64 = toBase64(ab);
+    return `data:${contentType};base64,${b64}`;
+  } catch (e: any) {
+    debug?.("openai.image.inline_failed", { url, message: e?.message ?? String(e) });
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function buildOpenAiVisionContent(args: { images: Array<{ url: string; shotType?: string }>; debug?: DebugFn }) {
+  const { images, debug } = args;
+  const picked = (images || []).filter((x) => x?.url).slice(0, OPENAI_VISION_MAX_IMAGES);
+
+  const content: any[] = [];
+  for (const img of picked) {
+    const u = String(img.url);
+    try {
+      const dataUrl = await fetchAsDataUrl(u, debug);
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
+    } catch {
+      content.push({ type: "image_url", image_url: { url: u } });
+    }
+  }
+  return content;
+}
+
+/* --------------------- output coercion --------------------- */
+function coerceToNumber(v: any): number {
+  const n = typeof v === "string" ? Number(v) : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function coerceStringArray(v: any): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+}
+
+function coerceAiCandidate(candidate: any) {
+  if (!candidate || typeof candidate !== "object") return candidate;
+
+  return {
+    confidence: String(candidate.confidence ?? "").trim() || "low",
+    inspection_required: Boolean(candidate.inspection_required),
+    estimate_low: coerceToNumber(candidate.estimate_low),
+    estimate_high: coerceToNumber(candidate.estimate_high),
+    currency: String(candidate.currency ?? "USD"),
+    summary: String(candidate.summary ?? ""),
+    visible_scope: coerceStringArray(candidate.visible_scope),
+    assumptions: coerceStringArray(candidate.assumptions),
+    questions: coerceStringArray(candidate.questions),
+  };
 }
 
 /**
@@ -333,9 +464,7 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
 
   const pricing_enabled = Boolean(row?.pricing_enabled ?? false);
   const ai_mode_raw = safeTrim(row?.ai_mode) || "assessment_only";
-  const ai_mode: AiMode = pricing_enabled
-    ? (isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "range")
-    : "assessment_only";
+  const ai_mode: AiMode = pricing_enabled ? (isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "range") : "assessment_only";
 
   const pricing_model_raw = safeTrim(row?.pricing_model);
   const pricing_model: PricingModel | null =
@@ -345,6 +474,150 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
   debug?.("pricingPolicy.loaded", normalized);
 
   return normalized;
+}
+
+type ResolveKeyPolicyArgs = {
+  planTier: PlanTier | null;
+  activationGraceCredits: number | null;
+  activationGraceUsed: number | null;
+};
+
+function isPlatformKeyAllowedByPlan(args: ResolveKeyPolicyArgs) {
+  const { planTier, activationGraceCredits, activationGraceUsed } = args;
+  if (isTier0(planTier)) return true;
+  if (isTier1or2(planTier) && hasGraceRemaining(activationGraceCredits, activationGraceUsed)) return true;
+  return false;
+}
+
+/**
+ * Resolve OpenAI client (tenant key preferred; platform only for tier0 or tier1/2 grace)
+ */
+async function resolveOpenAiClient(args: {
+  tenantId: string;
+  consumeGrace: boolean;
+  forceKeySource?: KeySource | null;
+  planTier: PlanTier | null;
+  activationGraceCredits: number | null;
+  activationGraceUsed: number | null;
+  debug?: DebugFn;
+}): Promise<{ openai: OpenAI; keySource: KeySource }> {
+  const {
+    tenantId,
+    consumeGrace,
+    forceKeySource,
+    planTier,
+    activationGraceCredits,
+    activationGraceUsed,
+    debug,
+  } = args;
+
+  debug?.("resolveOpenAiClient.start", {
+    tenantId,
+    consumeGrace,
+    forceKeySource: forceKeySource ?? null,
+    planTier: planTier ?? null,
+    activationGraceCredits: activationGraceCredits ?? null,
+    activationGraceUsed: activationGraceUsed ?? null,
+  });
+
+  // Pre-check for tenant secret (cheap)
+  const secretRow = await db
+    .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+    .from(tenantSecrets)
+    .where(eq(tenantSecrets.tenantId, tenantId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  const hasTenantSecret = Boolean(secretRow?.openaiKeyEnc);
+  debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret });
+
+  // If we are forced to tenant (phase2 snapshot), enforce it strictly.
+  if (forceKeySource === "tenant") {
+    if (!secretRow?.openaiKeyEnc) {
+      const e: any = new Error("MISSING_OPENAI_KEY");
+      e.code = "MISSING_OPENAI_KEY";
+      throw e;
+    }
+    const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+    debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
+    return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
+  }
+
+  // If tenant key exists and we're not forced to platform, always use tenant key.
+  if (hasTenantSecret && forceKeySource !== "platform_grace") {
+    const openaiKey = decryptSecret(secretRow!.openaiKeyEnc);
+    debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
+    return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
+  }
+
+  // From here on: tenant key missing OR forced platform.
+  // Phase2 forced platform is allowed (frozen), but must have platform key present.
+  // Phase1 platform must be allowed by plan/grace.
+  const platformAllowed = isPlatformKeyAllowedByPlan({ planTier, activationGraceCredits, activationGraceUsed });
+
+  if (!platformAllowed && forceKeySource !== "platform_grace") {
+    const e: any = new Error("MISSING_OPENAI_KEY");
+    e.code = "MISSING_OPENAI_KEY";
+    throw e;
+  }
+
+  const platformKey = platformOpenAiKey();
+  debug?.("resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
+
+  if (!platformKey) {
+    const e: any = new Error("MISSING_PLATFORM_OPENAI_KEY");
+    e.code = "MISSING_PLATFORM_OPENAI_KEY";
+    throw e;
+  }
+
+  // Phase 2 finalize: do NOT consume; honor phase1 snapshot
+  if (!consumeGrace) {
+    debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
+    return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
+  }
+
+  // Phase1 consume only when using platform
+  const updated = await db
+    .update(tenantSettings)
+    .set({
+      activationGraceUsed: sql`coalesce(${tenantSettings.activationGraceUsed}, 0) + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(tenantSettings.tenantId, tenantId),
+        sql`coalesce(${tenantSettings.activationGraceUsed}, 0) < coalesce(${tenantSettings.activationGraceCredits}, 0)`
+      )
+    )
+    .returning({
+      activation_grace_used: sql`coalesce(${tenantSettings.activationGraceUsed}, 0)`,
+      activation_grace_credits: sql`coalesce(${tenantSettings.activationGraceCredits}, 0)`,
+    });
+
+  const row = updated?.[0] ?? null;
+
+  debug?.("resolveOpenAiClient.grace.updateResult", {
+    updatedRowReturned: Boolean(row),
+    activation_grace_used: row?.activation_grace_used ?? null,
+    activation_grace_credits: row?.activation_grace_credits ?? null,
+  });
+
+  // For tier0: you said they can always use platform key (token-limited elsewhere).
+  // tier0 might not have grace credits configured; allow platform use without consuming.
+  // If update returned nothing, only treat as hard failure for tier1/2 grace tenants.
+  if (!row && !isTier0(planTier)) {
+    const e: any = new Error("TRIAL_EXHAUSTED");
+    e.code = "TRIAL_EXHAUSTED";
+    e.status = 402;
+    e.meta = {
+      used: Number(activationGraceUsed ?? 0),
+      credits: Number(activationGraceCredits ?? 0),
+    };
+    throw e;
+  }
+
+  debug?.("resolveOpenAiClient.platformGrace.consumeOk", { keySource: "platform_grace" });
+  return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
 }
 
 /**
@@ -368,7 +641,7 @@ function buildAiSnapshot(args: {
   const policy = normalizePricingPolicy(pricingPolicy);
 
   return {
-    version: 3,
+    version: 4,
     capturedAt: nowIso(),
     phase,
     tenant: { tenantId, tenantSlug, industryKey },
@@ -394,7 +667,6 @@ function buildAiSnapshot(args: {
       modelHint: policy.pricing_enabled ? policy.pricing_model : null,
     },
     pricingPayload: resolved.pricing ?? null,
-    meta: resolved.meta ?? null,
   };
 }
 
@@ -431,9 +703,7 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(
-    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
-  );
+  const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -535,6 +805,184 @@ async function sendFinalEstimateEmails(args: {
   return emailResult;
 }
 
+// ---------------- AI generation helpers ----------------
+async function generateQaQuestions(args: {
+  openai: OpenAI;
+  model: string;
+  system: string;
+  images: Array<{ url: string; shotType?: string }>;
+  category: string;
+  service_type: string;
+  notes: string;
+  maxQuestions: number;
+  debug?: DebugFn;
+}) {
+  const { openai, model, system, images, category, service_type, notes, maxQuestions, debug } = args;
+
+  const userText = [
+    `Category: ${category}`,
+    `Service type: ${service_type}`,
+    `Customer notes: ${notes || "(none)"}`,
+    "",
+    `Generate up to ${maxQuestions} questions.`,
+  ].join("\n");
+
+  const content: any[] = [{ type: "text", text: userText }];
+  const vision = await buildOpenAiVisionContent({ images, debug });
+  content.push(...vision);
+
+  const completion = await openai.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content },
+    ],
+    temperature: 0.2,
+  });
+
+  const raw = completion.choices?.[0]?.message?.content ?? "{}";
+
+  let parsedQa: any = null;
+  try {
+    parsedQa = JSON.parse(raw);
+  } catch {
+    parsedQa = null;
+  }
+
+  const safeQa = QaQuestionsSchema.safeParse(parsedQa);
+  const questions = safeQa.success
+    ? safeQa.data.questions.slice(0, maxQuestions)
+    : ["Can you describe what you want done (repair vs full replacement) and any material preference?"];
+
+  return questions.map((q) => String(q).trim()).filter(Boolean).slice(0, maxQuestions);
+}
+
+async function generateEstimate(args: {
+  openai: OpenAI;
+  model: string;
+  system: string;
+  images: Array<{ url: string; shotType?: string }>;
+  category: string;
+  service_type: string;
+  notes: string;
+  normalizedAnswers?: Array<{ question: string; answer: string }>;
+  debug?: DebugFn;
+}) {
+  const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
+
+  const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
+
+  const userText = [
+    `Category: ${category}`,
+    `Service type: ${service_type}`,
+    `Customer notes: ${notes || "(none)"}`,
+    normalizedAnswers?.length ? "Follow-up Q&A:" : "",
+    normalizedAnswers?.length ? (qaText || "(none)") : "",
+    "",
+    "Instructions:",
+    "- Use the photos to identify the item, material type, and visible damage/wear.",
+    "- Provide estimate_low and estimate_high (whole dollars).",
+    "- Provide visible_scope as short bullet-style strings.",
+    "- Provide assumptions and questions (3–8 items each is fine).",
+  ]
+    .filter((x) => x !== "")
+    .join("\n");
+
+  const content: any[] = [{ type: "text", text: userText }];
+  const vision = await buildOpenAiVisionContent({ images, debug });
+  content.push(...vision);
+
+  const completion = await openai.chat.completions.create({
+    model,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content },
+    ],
+    temperature: 0.2,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "quote_estimate",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            confidence: { type: "string", enum: ["high", "medium", "low"] },
+            inspection_required: { type: "boolean" },
+            estimate_low: { type: "number" },
+            estimate_high: { type: "number" },
+            currency: { type: "string" },
+            summary: { type: "string" },
+            visible_scope: { type: "array", items: { type: "string" } },
+            assumptions: { type: "array", items: { type: "string" } },
+            questions: { type: "array", items: { type: "string" } },
+          },
+          required: [
+            "confidence",
+            "inspection_required",
+            "estimate_low",
+            "estimate_high",
+            "summary",
+            "visible_scope",
+            "assumptions",
+            "questions",
+          ],
+        },
+      },
+    } as any,
+  });
+
+  const raw = completion.choices?.[0]?.message?.content ?? "{}";
+
+  let outputParsed: any = null;
+  try {
+    outputParsed = JSON.parse(raw);
+  } catch {
+    outputParsed = null;
+  }
+
+  const candidate0 =
+    outputParsed &&
+    typeof outputParsed === "object" &&
+    outputParsed.properties &&
+    typeof outputParsed.properties === "object"
+      ? outputParsed.properties
+      : outputParsed;
+
+  const candidate = coerceAiCandidate(candidate0);
+
+  const safe = AiOutputSchema.safeParse(candidate);
+  if (!safe.success) {
+    return {
+      confidence: "low",
+      inspection_required: true,
+      estimate_low: 0,
+      estimate_high: 0,
+      currency: "USD",
+      summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
+      visible_scope: [],
+      assumptions: [],
+      questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
+      _raw: raw,
+    };
+  }
+
+  const v = safe.data;
+  const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
+
+  return {
+    confidence: v.confidence,
+    inspection_required: Boolean(v.inspection_required),
+    estimate_low: low,
+    estimate_high: high,
+    currency: v.currency || "USD",
+    summary: String(v.summary || "").trim(),
+    visible_scope: Array.isArray(v.visible_scope) ? v.visible_scope : [],
+    assumptions: Array.isArray(v.assumptions) ? v.assumptions : [],
+    questions: Array.isArray(v.questions) ? v.questions : [],
+  };
+}
+
 // ----------------- handler -----------------
 export async function POST(req: Request) {
   const debugEnabled = isDebugEnabled(req);
@@ -564,7 +1012,7 @@ export async function POST(req: Request) {
         }
       })(),
       dbTarget: safeDbTargetFromEnv(),
-      hasOpenAiPlatformKey: Boolean(process.env.OPENAI_API_KEY?.trim()),
+      hasOpenAiPlatformKey: Boolean(platformOpenAiKey()),
     });
 
     const body = await req.json().catch(() => null);
@@ -599,12 +1047,7 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "MAINTENANCE",
-          message: pc.maintenanceMessage || "Service temporarily unavailable.",
-          ...(debugEnabled ? { debugId } : {}),
-        },
+        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
         { status: 503 }
       );
     }
@@ -661,7 +1104,7 @@ export async function POST(req: Request) {
       found: Boolean(settings),
       settingsTenantId: settings?.tenantId ?? null,
       industryKey: settings?.industryKey ?? null,
-      planTier: settings?.planTier ?? null,
+      planTier: (settings as any)?.planTier ?? null,
       activationGraceCredits: settings?.activationGraceCredits ?? null,
       activationGraceUsed: settings?.activationGraceUsed ?? null,
       emailSendMode: (settings as any)?.emailSendMode ?? null,
@@ -731,13 +1174,13 @@ export async function POST(req: Request) {
       industryKeyForQuote = tenantIndustryKey;
     }
 
-    // Resolve tenant settings (toggles + pricing payload)
+    // Resolve tenant + PCC AI settings
     const resolvedBase = await resolveTenantLlm(tenant.id);
 
     // Phase1: load policy from DB if not present
     if (!pricingPolicy) pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
 
-    // Phase1: freeze pricing config/rules from resolved payload
+    // Phase1: freeze pricing config/rules from resolved payload (deterministic engine inputs)
     const resolvedPricingConfig = (resolvedBase as any)?.pricing?.config ?? null;
     const resolvedPricingRules = (resolvedBase as any)?.pricing?.rules ?? null;
 
@@ -748,37 +1191,51 @@ export async function POST(req: Request) {
       ? normalizePricingPolicy(pricingPolicy)
       : applyPricingEnabledGate(normalizePricingPolicy(pricingPolicy), pricingEnabledGate);
 
-    // If phase2 did not have snapshots, fall back
+    // If phase2 did not have snapshots (older logs), fall back to current resolved pricing payload.
     if (!pricingConfigSnap) pricingConfigSnap = resolvedPricingConfig;
     if (!pricingRulesSnap) pricingRulesSnap = resolvedPricingRules;
 
-    // ✅ Strict isolation: build LLM context (includes OpenAI client, composed prompts, models)
-    const llm = await buildLlmContext({
-      tenantId: tenant.id,
+    // ---- PROMPT COMPOSITION LAYER ----
+    const platformLlm = await getPlatformLlm();
+
+    const composedEstimator = composeEstimatorPrompt({
+      platform: platformLlm,
+      tenant: {
+        tenantStyleKey: resolvedBase.tenant.tenantStyleKey,
+        tenantRenderNotes: resolvedBase.tenant.tenantRenderNotes,
+        pricingEnabled: resolvedBase.tenant.pricingEnabled,
+      },
       industryKey: industryKeyForQuote,
       pricingPolicy,
-      isPhase2,
-      forceKeySource: isPhase2 ? phase2KeySource : null,
-      debug,
+    });
+
+    const composedQa = composeQaPrompt({
+      platform: platformLlm,
+      tenant: {
+        tenantStyleKey: resolvedBase.tenant.tenantStyleKey,
+        tenantRenderNotes: resolvedBase.tenant.tenantRenderNotes,
+        pricingEnabled: resolvedBase.tenant.pricingEnabled,
+      },
+      industryKey: industryKeyForQuote,
+      pricingPolicy,
     });
 
     const resolved = {
       ...resolvedBase,
-      models: llm.models,
-      guardrails: llm.guardrails,
-      prompts: llm.prompts,
+      prompts: {
+        ...resolvedBase.prompts,
+        quoteEstimatorSystem: composedEstimator,
+        qaQuestionGeneratorSystem: composedQa,
+      },
       meta: {
         ...(resolvedBase as any)?.meta,
-        compositionVersion: llm.meta.compositionVersion,
-        industryPromptPackApplied: llm.meta.industryPromptPackApplied,
-        industryKeyApplied: llm.meta.industryKeyApplied,
+        compositionVersion: 1,
+        industryKeyApplied: industryKeyForQuote,
       },
     };
 
     debug("pcc.resolved", {
       industryKeyForQuote,
-      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? null,
-      compositionVersion: (resolved as any)?.meta?.compositionVersion ?? null,
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
@@ -786,10 +1243,20 @@ export async function POST(req: Request) {
       pricingPolicy,
       hasPricingConfigSnap: Boolean(pricingConfigSnap),
       hasPricingRulesSnap: Boolean(pricingRulesSnap),
-      llmKeySource: llm.keySource,
     });
 
     const denylist = resolved.guardrails.blockedTopics ?? [];
+
+    // Resolve OpenAI client (plan-aware)
+    const { openai, keySource } = await resolveOpenAiClient({
+      tenantId: tenant.id,
+      consumeGrace: !isPhase2,
+      forceKeySource: isPhase2 ? phase2KeySource : null,
+      planTier: (settings as any)?.planTier ?? null,
+      activationGraceCredits: (settings as any)?.activationGraceCredits ?? null,
+      activationGraceUsed: (settings as any)?.activationGraceUsed ?? null,
+      debug,
+    });
 
     const aiEnvelope = {
       liveQaEnabled: resolved.tenant.liveQaEnabled,
@@ -799,8 +1266,7 @@ export async function POST(req: Request) {
       tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
       industryKey: industryKeyForQuote,
-      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
-      llmKeySource: llm.keySource,
+      llmKeySource: keySource,
       pricingPolicy,
     };
 
@@ -821,10 +1287,7 @@ export async function POST(req: Request) {
       const notes = safeTrim(customer_context.notes) || "";
 
       if (!customer?.name || !customer?.email || !customer?.phone) {
-        return NextResponse.json(
-          { ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) },
-          { status: 400 }
-        );
+        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) }, { status: 400 });
       }
 
       const qaStored: any = existing.qa ?? {};
@@ -885,12 +1348,14 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
-        llmKeySource: (phase2KeySource ?? llm.keySource) as KeySource,
+        llmKeySource: keySource,
         pricingPolicy,
       });
 
-      // ✅ LLM call is isolated
-      const rawOutput = await llm.generateEstimate({
+      const rawOutput = await generateEstimate({
+        openai,
+        model: resolved.models.estimatorModel,
+        system: resolved.prompts.quoteEstimatorSystem,
         images,
         category,
         service_type,
@@ -899,7 +1364,6 @@ export async function POST(req: Request) {
         debug,
       });
 
-      // ✅ SERVER-SIDE PRICING (deterministic)
       const computed = computeEstimate({
         ai: rawOutput,
         imagesCount: Array.isArray(images) ? images.length : 0,
@@ -1021,7 +1485,7 @@ export async function POST(req: Request) {
       customer,
       industryKeySnapshot: industryKeyForQuote,
       industrySource: "tenant_settings" as const,
-      llmKeySource: llm.keySource,
+      llmKeySource: keySource,
       customer_context: { category, service_type, notes },
 
       pricing_policy_snapshot: policyToStore,
@@ -1043,7 +1507,7 @@ export async function POST(req: Request) {
       renderOptIn,
       resolved,
       industryKey: industryKeyForQuote,
-      llmKeySource: llm.keySource,
+      llmKeySource: keySource,
       pricingPolicy: policyToStore,
     });
 
@@ -1065,8 +1529,10 @@ export async function POST(req: Request) {
     }
 
     if (resolved.tenant.liveQaEnabled && resolved.tenant.liveQaMaxQuestions > 0) {
-      // ✅ LLM call is isolated
-      const questions = await llm.generateQaQuestions({
+      const questions = await generateQaQuestions({
+        openai,
+        model: resolved.models.qaModel,
+        system: resolved.prompts.qaQuestionGeneratorSystem,
         images,
         category,
         service_type,
@@ -1084,7 +1550,7 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
-        llmKeySource: llm.keySource,
+        llmKeySource: keySource,
         pricingPolicy: policyToStore,
       });
 
@@ -1101,8 +1567,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
     }
 
-    // ✅ LLM call is isolated
-    const rawOutput = await llm.generateEstimate({
+    const rawOutput = await generateEstimate({
+      openai,
+      model: resolved.models.estimatorModel,
+      system: resolved.prompts.quoteEstimatorSystem,
       images,
       category,
       service_type,
@@ -1110,7 +1578,6 @@ export async function POST(req: Request) {
       debug,
     });
 
-    // ✅ SERVER-SIDE PRICING (deterministic)
     const computed = computeEstimate({
       ai: rawOutput,
       imagesCount: Array.isArray(images) ? images.length : 0,
@@ -1139,7 +1606,7 @@ export async function POST(req: Request) {
       renderOptIn,
       resolved,
       industryKey: industryKeyForQuote,
-      llmKeySource: llm.keySource,
+      llmKeySource: keySource,
       pricingPolicy: policyToStore,
     });
 
