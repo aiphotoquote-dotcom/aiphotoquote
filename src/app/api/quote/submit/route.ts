@@ -2,12 +2,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { and, eq, sql } from "drizzle-orm";
-import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
-import { decryptSecret } from "@/lib/crypto";
+import { tenants, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
 
 import { sendEmail } from "@/lib/email";
 import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
@@ -15,8 +13,6 @@ import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
 import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
-import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { resolvePromptsForIndustry } from "@/lib/pcc/llm/resolvePrompts";
 
 import {
   computeEstimate,
@@ -24,6 +20,9 @@ import {
   type PricingConfigSnapshot,
   type PricingRulesSnapshot,
 } from "@/lib/pricing/computeEstimate";
+
+import { buildLlmContext } from "@/lib/llm/context";
+import type { KeySource } from "@/lib/llm/types";
 
 export const runtime = "nodejs";
 
@@ -67,22 +66,6 @@ const Req = z.object({
   // - [{question, answer}]
   // - ["answer1", "answer2"]
   qaAnswers: z.union([z.array(QaAnswerSchema), z.array(z.string().min(1))]).optional(),
-});
-
-const AiOutputSchema = z.object({
-  confidence: z.enum(["high", "medium", "low"]),
-  inspection_required: z.boolean(),
-  estimate_low: z.number().nonnegative(),
-  estimate_high: z.number().nonnegative(),
-  currency: z.string().default("USD"),
-  summary: z.string(),
-  visible_scope: z.array(z.string()).default([]),
-  assumptions: z.array(z.string()).default([]),
-  questions: z.array(z.string()).default([]),
-});
-
-const QaQuestionsSchema = z.object({
-  questions: z.array(z.string().min(1)).min(1),
 });
 
 type BrandLogoVariant = "light" | "dark" | "auto" | string | null;
@@ -251,13 +234,6 @@ function startOfNextMonthUTC(d: Date) {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, 0, 0, 0, 0));
 }
 
-type KeySource = "tenant" | "platform_grace";
-
-function platformOpenAiKey(): string | null {
-  const k = process.env.OPENAI_API_KEY?.trim() || "";
-  return k ? k : null;
-}
-
 function isDebugEnabled(req: Request) {
   const h = req.headers.get("x-apq-debug");
   if (h && h.trim() === "1") return true;
@@ -287,9 +263,6 @@ type DebugFn = (stage: string, data?: Record<string, any>) => void;
  * - assessment_only => 0/0
  * - fixed => high == low
  * - range => as-is
- *
- * Note: we keep both keys for schema/email compatibility.
- * UI will treat low==high as a single fixed estimate.
  */
 function applyAiModeToEstimates(
   policy: PricingPolicySnapshot,
@@ -304,103 +277,10 @@ function applyAiModeToEstimates(
   const { low, high } = ensureLowHigh(estimates.estimate_low, estimates.estimate_high);
 
   if (p.ai_mode === "fixed") {
-    // single-number intent
     return { estimate_low: low, estimate_high: low };
   }
 
-  // range
   return { estimate_low: low, estimate_high: high };
-}
-
-/* --------------------- image inlining for OpenAI vision --------------------- */
-const OPENAI_VISION_MAX_IMAGES = 6;
-const IMAGE_FETCH_TIMEOUT_MS = 12_000;
-const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
-
-function guessContentType(url: string): string {
-  const u = url.toLowerCase();
-  if (u.endsWith(".png")) return "image/png";
-  if (u.endsWith(".webp")) return "image/webp";
-  if (u.endsWith(".gif")) return "image/gif";
-  if (u.endsWith(".jpg") || u.endsWith(".jpeg")) return "image/jpeg";
-  return "application/octet-stream";
-}
-
-function toBase64(buf: ArrayBuffer): string {
-  return Buffer.from(buf).toString("base64");
-}
-
-async function fetchAsDataUrl(url: string, debug?: DebugFn) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      cache: "no-store",
-      signal: controller.signal,
-    });
-
-    if (!res.ok) throw new Error(`IMAGE_FETCH_FAILED: HTTP ${res.status}`);
-
-    const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
-    const contentType = ct || guessContentType(url);
-
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > IMAGE_MAX_BYTES) throw new Error(`IMAGE_TOO_LARGE: ${ab.byteLength} bytes`);
-
-    const b64 = toBase64(ab);
-    return `data:${contentType};base64,${b64}`;
-  } catch (e: any) {
-    debug?.("openai.image.inline_failed", { url, message: e?.message ?? String(e) });
-    throw e;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function buildOpenAiVisionContent(args: { images: Array<{ url: string; shotType?: string }>; debug?: DebugFn }) {
-  const { images, debug } = args;
-  const picked = (images || []).filter((x) => x?.url).slice(0, OPENAI_VISION_MAX_IMAGES);
-
-  const content: any[] = [];
-  for (const img of picked) {
-    const u = String(img.url);
-    try {
-      const dataUrl = await fetchAsDataUrl(u, debug);
-      content.push({ type: "image_url", image_url: { url: dataUrl } });
-    } catch {
-      content.push({ type: "image_url", image_url: { url: u } });
-    }
-  }
-  return content;
-}
-
-/* --------------------- output coercion --------------------- */
-function coerceToNumber(v: any): number {
-  const n = typeof v === "string" ? Number(v) : Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function coerceStringArray(v: any): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.map((x) => String(x ?? "").trim()).filter(Boolean);
-}
-
-function coerceAiCandidate(candidate: any) {
-  if (!candidate || typeof candidate !== "object") return candidate;
-
-  return {
-    confidence: String(candidate.confidence ?? "").trim() || "low",
-    inspection_required: Boolean(candidate.inspection_required),
-    estimate_low: coerceToNumber(candidate.estimate_low),
-    estimate_high: coerceToNumber(candidate.estimate_high),
-    currency: String(candidate.currency ?? "USD"),
-    summary: String(candidate.summary ?? ""),
-    visible_scope: coerceStringArray(candidate.visible_scope),
-    assumptions: coerceStringArray(candidate.assumptions),
-    questions: coerceStringArray(candidate.questions),
-  };
 }
 
 /**
@@ -453,7 +333,9 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
 
   const pricing_enabled = Boolean(row?.pricing_enabled ?? false);
   const ai_mode_raw = safeTrim(row?.ai_mode) || "assessment_only";
-  const ai_mode: AiMode = pricing_enabled ? (isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "range") : "assessment_only";
+  const ai_mode: AiMode = pricing_enabled
+    ? (isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "range")
+    : "assessment_only";
 
   const pricing_model_raw = safeTrim(row?.pricing_model);
   const pricing_model: PricingModel | null =
@@ -463,167 +345,6 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
   debug?.("pricingPolicy.loaded", normalized);
 
   return normalized;
-}
-
-/**
- * Prompt-level guardrail (still useful as defense-in-depth)
- */
-function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: PricingPolicySnapshot) {
-  const p = normalizePricingPolicy(policy);
-  const { ai_mode, pricing_enabled, pricing_model } = p;
-
-  const policyBlock = [
-    "### POLICY (must follow exactly)",
-    "- You are generating a photo-based quote response in a fixed JSON schema.",
-    pricing_enabled
-      ? "- Pricing is ENABLED."
-      : "- Pricing is DISABLED. Do not output any price numbers. Set estimate_low=0 and estimate_high=0.",
-    ai_mode === "assessment_only"
-      ? "- AI mode is ASSESSMENT ONLY. Do not output any price numbers. Set estimate_low=0 and estimate_high=0."
-      : ai_mode === "fixed"
-        ? "- AI mode is FIXED ESTIMATE. Output a single-number estimate by setting estimate_low == estimate_high."
-        : "- AI mode is RANGE. Output a low/high range.",
-    "- If you are unsure, prefer inspection_required=true and keep estimates conservative.",
-    "",
-  ].join("\n");
-
-  if (!pricing_enabled) return [policyBlock, baseSystem].join("\n");
-
-  const modelHint =
-    pricing_model === "flat_per_job"
-      ? "Pricing methodology hint: think a single job total."
-      : pricing_model === "hourly_plus_materials"
-        ? "Pricing methodology hint: think hours and material costs/markup."
-        : pricing_model === "per_unit"
-          ? "Pricing methodology hint: estimate per-unit and multiply."
-          : pricing_model === "packages"
-            ? "Pricing methodology hint: think Basic/Standard/Premium tiers."
-            : pricing_model === "line_items"
-              ? "Pricing methodology hint: think add-ons; base service + optional items."
-              : pricing_model === "inspection_only"
-                ? "Pricing methodology hint: prefer inspection_required=true."
-                : pricing_model === "assessment_fee"
-                  ? "Pricing methodology hint: assessment/diagnostic fee model."
-                  : "";
-
-  return [policyBlock, modelHint ? `### PRICING MODEL NOTES\n${modelHint}\n` : "", baseSystem].join("\n");
-}
-
-/**
- * Resolve OpenAI client (tenant key OR platform grace)
- */
-async function resolveOpenAiClient(args: {
-  tenantId: string;
-  consumeGrace: boolean;
-  forceKeySource?: KeySource | null;
-  debug?: DebugFn;
-}): Promise<{ openai: OpenAI; keySource: KeySource }> {
-  const { tenantId, consumeGrace, forceKeySource, debug } = args;
-
-  debug?.("resolveOpenAiClient.start", { tenantId, consumeGrace, forceKeySource: forceKeySource ?? null });
-
-  // 1) Tenant key (unless forced platform)
-  if (!forceKeySource || forceKeySource === "tenant") {
-    const secretRow = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret: Boolean(secretRow?.openaiKeyEnc) });
-
-    if (secretRow?.openaiKeyEnc) {
-      const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
-      debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
-      return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
-    }
-
-    if (forceKeySource === "tenant") {
-      const e: any = new Error("MISSING_OPENAI_KEY");
-      e.code = "MISSING_OPENAI_KEY";
-      throw e;
-    }
-  }
-
-  // 2) Platform grace key
-  const platformKey = platformOpenAiKey();
-  debug?.("resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
-
-  if (!platformKey) {
-    const e: any = new Error("MISSING_PLATFORM_OPENAI_KEY");
-    e.code = "MISSING_PLATFORM_OPENAI_KEY";
-    throw e;
-  }
-
-  // Phase 2 finalize: do NOT consume; honor phase1
-  if (!consumeGrace) {
-    debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
-    return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
-  }
-
-  const updated = await db
-    .update(tenantSettings)
-    .set({
-      activationGraceUsed: sql`coalesce(${tenantSettings.activationGraceUsed}, 0) + 1`,
-      updatedAt: sql`now()`,
-    })
-    .where(
-      and(
-        eq(tenantSettings.tenantId, tenantId),
-        sql`coalesce(${tenantSettings.activationGraceUsed}, 0) < coalesce(${tenantSettings.activationGraceCredits}, 0)`
-      )
-    )
-    .returning({
-      activation_grace_used: sql`coalesce(${tenantSettings.activationGraceUsed}, 0)`,
-      activation_grace_credits: sql`coalesce(${tenantSettings.activationGraceCredits}, 0)`,
-    });
-
-  const row = updated?.[0] ?? null;
-
-  debug?.("resolveOpenAiClient.grace.updateResult", {
-    updatedRowReturned: Boolean(row),
-    activation_grace_used: row?.activation_grace_used ?? null,
-    activation_grace_credits: row?.activation_grace_credits ?? null,
-  });
-
-  if (!row) {
-    const cur = await db
-      .select({
-        used: sql`coalesce(${tenantSettings.activationGraceUsed}, 0)`,
-        credits: sql`coalesce(${tenantSettings.activationGraceCredits}, 0)`,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1);
-
-    const curRow = cur?.[0] ?? null;
-
-    debug?.("resolveOpenAiClient.grace.current", {
-      hasRow: Boolean(curRow),
-      used: curRow?.used ?? null,
-      credits: curRow?.credits ?? null,
-    });
-
-    if (!curRow) {
-      const e: any = new Error("SETTINGS_MISSING");
-      e.code = "SETTINGS_MISSING";
-      e.status = 400;
-      throw e;
-    }
-
-    const used = Number(curRow.used ?? 0);
-    const credits = Number(curRow.credits ?? 0);
-
-    const e: any = new Error("TRIAL_EXHAUSTED");
-    e.code = "TRIAL_EXHAUSTED";
-    e.status = 402;
-    e.meta = { used, credits };
-    throw e;
-  }
-
-  debug?.("resolveOpenAiClient.platformGrace.consumeOk", { keySource: "platform_grace" });
-  return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
 }
 
 /**
@@ -673,6 +394,7 @@ function buildAiSnapshot(args: {
       modelHint: policy.pricing_enabled ? policy.pricing_model : null,
     },
     pricingPayload: resolved.pricing ?? null,
+    meta: resolved.meta ?? null,
   };
 }
 
@@ -709,7 +431,9 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
+  const configured = Boolean(
+    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
+  );
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -811,184 +535,6 @@ async function sendFinalEstimateEmails(args: {
   return emailResult;
 }
 
-// ---------------- AI generation helpers ----------------
-async function generateQaQuestions(args: {
-  openai: OpenAI;
-  model: string;
-  system: string;
-  images: Array<{ url: string; shotType?: string }>;
-  category: string;
-  service_type: string;
-  notes: string;
-  maxQuestions: number;
-  debug?: DebugFn;
-}) {
-  const { openai, model, system, images, category, service_type, notes, maxQuestions, debug } = args;
-
-  const userText = [
-    `Category: ${category}`,
-    `Service type: ${service_type}`,
-    `Customer notes: ${notes || "(none)"}`,
-    "",
-    `Generate up to ${maxQuestions} questions.`,
-  ].join("\n");
-
-  const content: any[] = [{ type: "text", text: userText }];
-  const vision = await buildOpenAiVisionContent({ images, debug });
-  content.push(...vision);
-
-  const completion = await openai.chat.completions.create({
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content },
-    ],
-    temperature: 0.2,
-  });
-
-  const raw = completion.choices?.[0]?.message?.content ?? "{}";
-
-  let parsedQa: any = null;
-  try {
-    parsedQa = JSON.parse(raw);
-  } catch {
-    parsedQa = null;
-  }
-
-  const safeQa = QaQuestionsSchema.safeParse(parsedQa);
-  const questions = safeQa.success
-    ? safeQa.data.questions.slice(0, maxQuestions)
-    : ["Can you describe what you want done (repair vs full replacement) and any material preference?"];
-
-  return questions.map((q) => String(q).trim()).filter(Boolean).slice(0, maxQuestions);
-}
-
-async function generateEstimate(args: {
-  openai: OpenAI;
-  model: string;
-  system: string;
-  images: Array<{ url: string; shotType?: string }>;
-  category: string;
-  service_type: string;
-  notes: string;
-  normalizedAnswers?: Array<{ question: string; answer: string }>;
-  debug?: DebugFn;
-}) {
-  const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
-
-  const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
-
-  const userText = [
-    `Category: ${category}`,
-    `Service type: ${service_type}`,
-    `Customer notes: ${notes || "(none)"}`,
-    normalizedAnswers?.length ? "Follow-up Q&A:" : "",
-    normalizedAnswers?.length ? (qaText || "(none)") : "",
-    "",
-    "Instructions:",
-    "- Use the photos to identify the item, material type, and visible damage/wear.",
-    "- Provide estimate_low and estimate_high (whole dollars).",
-    "- Provide visible_scope as short bullet-style strings.",
-    "- Provide assumptions and questions (3–8 items each is fine).",
-  ]
-    .filter((x) => x !== "")
-    .join("\n");
-
-  const content: any[] = [{ type: "text", text: userText }];
-  const vision = await buildOpenAiVisionContent({ images, debug });
-  content.push(...vision);
-
-  const completion = await openai.chat.completions.create({
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content },
-    ],
-    temperature: 0.2,
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "quote_estimate",
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            confidence: { type: "string", enum: ["high", "medium", "low"] },
-            inspection_required: { type: "boolean" },
-            estimate_low: { type: "number" },
-            estimate_high: { type: "number" },
-            currency: { type: "string" },
-            summary: { type: "string" },
-            visible_scope: { type: "array", items: { type: "string" } },
-            assumptions: { type: "array", items: { type: "string" } },
-            questions: { type: "array", items: { type: "string" } },
-          },
-          required: [
-            "confidence",
-            "inspection_required",
-            "estimate_low",
-            "estimate_high",
-            "summary",
-            "visible_scope",
-            "assumptions",
-            "questions",
-          ],
-        },
-      },
-    } as any,
-  });
-
-  const raw = completion.choices?.[0]?.message?.content ?? "{}";
-
-  let outputParsed: any = null;
-  try {
-    outputParsed = JSON.parse(raw);
-  } catch {
-    outputParsed = null;
-  }
-
-  const candidate0 =
-    outputParsed &&
-    typeof outputParsed === "object" &&
-    outputParsed.properties &&
-    typeof outputParsed.properties === "object"
-      ? outputParsed.properties
-      : outputParsed;
-
-  const candidate = coerceAiCandidate(candidate0);
-
-  const safe = AiOutputSchema.safeParse(candidate);
-  if (!safe.success) {
-    return {
-      confidence: "low",
-      inspection_required: true,
-      estimate_low: 0,
-      estimate_high: 0,
-      currency: "USD",
-      summary: "We couldn't generate a structured estimate from the submission. Please add 2–6 clear photos and any details you can.",
-      visible_scope: [],
-      assumptions: [],
-      questions: ["Can you add a wide shot and 1–2 close-ups of the problem area?"],
-      _raw: raw,
-    };
-  }
-
-  const v = safe.data;
-  const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
-
-  return {
-    confidence: v.confidence,
-    inspection_required: Boolean(v.inspection_required),
-    estimate_low: low,
-    estimate_high: high,
-    currency: v.currency || "USD",
-    summary: String(v.summary || "").trim(),
-    visible_scope: Array.isArray(v.visible_scope) ? v.visible_scope : [],
-    assumptions: Array.isArray(v.assumptions) ? v.assumptions : [],
-    questions: Array.isArray(v.questions) ? v.questions : [],
-  };
-}
-
 // ----------------- handler -----------------
 export async function POST(req: Request) {
   const debugEnabled = isDebugEnabled(req);
@@ -1018,7 +564,7 @@ export async function POST(req: Request) {
         }
       })(),
       dbTarget: safeDbTargetFromEnv(),
-      hasOpenAiPlatformKey: Boolean(platformOpenAiKey()),
+      hasOpenAiPlatformKey: Boolean(process.env.OPENAI_API_KEY?.trim()),
     });
 
     const body = await req.json().catch(() => null);
@@ -1053,7 +599,12 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MAINTENANCE",
+          message: pc.maintenanceMessage || "Service temporarily unavailable.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 503 }
       );
     }
@@ -1180,13 +731,13 @@ export async function POST(req: Request) {
       industryKeyForQuote = tenantIndustryKey;
     }
 
-    // Resolve tenant + PCC AI settings
+    // Resolve tenant settings (toggles + pricing payload)
     const resolvedBase = await resolveTenantLlm(tenant.id);
 
     // Phase1: load policy from DB if not present
     if (!pricingPolicy) pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
 
-    // Phase1: freeze pricing config/rules from resolved payload (deterministic engine inputs)
+    // Phase1: freeze pricing config/rules from resolved payload
     const resolvedPricingConfig = (resolvedBase as any)?.pricing?.config ?? null;
     const resolvedPricingRules = (resolvedBase as any)?.pricing?.rules ?? null;
 
@@ -1197,52 +748,37 @@ export async function POST(req: Request) {
       ? normalizePricingPolicy(pricingPolicy)
       : applyPricingEnabledGate(normalizePricingPolicy(pricingPolicy), pricingEnabledGate);
 
-    // If phase2 did not have snapshots (older logs), fall back to current resolved pricing payload.
+    // If phase2 did not have snapshots, fall back
     if (!pricingConfigSnap) pricingConfigSnap = resolvedPricingConfig;
     if (!pricingRulesSnap) pricingRulesSnap = resolvedPricingRules;
 
-    // PCC + industry prompt pack
-    const pccCfg = await loadPlatformLlmConfig();
-    const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
-
-    const baseEstimator = String(pccCfg?.prompts?.quoteEstimatorSystem ?? "");
-    const baseQa = String(pccCfg?.prompts?.qaQuestionGeneratorSystem ?? "");
-    const resolvedEstimator = String(resolvedBase?.prompts?.quoteEstimatorSystem ?? "");
-    const resolvedQa = String(resolvedBase?.prompts?.qaQuestionGeneratorSystem ?? "");
-
-    const isUsingBaseEstimator = resolvedEstimator.trim() === baseEstimator.trim();
-    const isUsingBaseQa = resolvedQa.trim() === baseQa.trim();
-
-    const effectivePrompts = {
-      quoteEstimatorSystem:
-        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem ? industryResolved.quoteEstimatorSystem : resolvedEstimator,
-      qaQuestionGeneratorSystem:
-        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
-    };
-
-    // Apply pricing-policy wrapper (defense-in-depth)
-    const estimatorSystemWithPolicy = wrapEstimatorSystemWithPricingPolicy(effectivePrompts.quoteEstimatorSystem, pricingPolicy);
+    // ✅ Strict isolation: build LLM context (includes OpenAI client, composed prompts, models)
+    const llm = await buildLlmContext({
+      tenantId: tenant.id,
+      industryKey: industryKeyForQuote,
+      pricingPolicy,
+      isPhase2,
+      forceKeySource: isPhase2 ? phase2KeySource : null,
+      debug,
+    });
 
     const resolved = {
       ...resolvedBase,
-      prompts: {
-        ...resolvedBase.prompts,
-        quoteEstimatorSystem: estimatorSystemWithPolicy,
-        qaQuestionGeneratorSystem: effectivePrompts.qaQuestionGeneratorSystem,
-      },
+      models: llm.models,
+      guardrails: llm.guardrails,
+      prompts: llm.prompts,
       meta: {
         ...(resolvedBase as any)?.meta,
-        industryPromptPackApplied: {
-          industryKey: industryKeyForQuote,
-          estimatorApplied: Boolean(isUsingBaseEstimator && industryResolved.quoteEstimatorSystem),
-          qaApplied: Boolean(isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem),
-        },
+        compositionVersion: llm.meta.compositionVersion,
+        industryPromptPackApplied: llm.meta.industryPromptPackApplied,
+        industryKeyApplied: llm.meta.industryKeyApplied,
       },
     };
 
     debug("pcc.resolved", {
       industryKeyForQuote,
       industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? null,
+      compositionVersion: (resolved as any)?.meta?.compositionVersion ?? null,
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
@@ -1250,17 +786,10 @@ export async function POST(req: Request) {
       pricingPolicy,
       hasPricingConfigSnap: Boolean(pricingConfigSnap),
       hasPricingRulesSnap: Boolean(pricingRulesSnap),
+      llmKeySource: llm.keySource,
     });
 
     const denylist = resolved.guardrails.blockedTopics ?? [];
-
-    // Resolve OpenAI client (plan-aware)
-    const { openai, keySource } = await resolveOpenAiClient({
-      tenantId: tenant.id,
-      consumeGrace: !isPhase2,
-      forceKeySource: isPhase2 ? phase2KeySource : null,
-      debug,
-    });
 
     const aiEnvelope = {
       liveQaEnabled: resolved.tenant.liveQaEnabled,
@@ -1271,7 +800,7 @@ export async function POST(req: Request) {
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
       industryKey: industryKeyForQuote,
       industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
-      llmKeySource: keySource,
+      llmKeySource: llm.keySource,
       pricingPolicy,
     };
 
@@ -1292,7 +821,10 @@ export async function POST(req: Request) {
       const notes = safeTrim(customer_context.notes) || "";
 
       if (!customer?.name || !customer?.email || !customer?.phone) {
-        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) },
+          { status: 400 }
+        );
       }
 
       const qaStored: any = existing.qa ?? {};
@@ -1353,14 +885,12 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
-        llmKeySource: (phase2KeySource ?? keySource) as KeySource,
+        llmKeySource: (phase2KeySource ?? llm.keySource) as KeySource,
         pricingPolicy,
       });
 
-      const rawOutput = await generateEstimate({
-        openai,
-        model: resolved.models.estimatorModel,
-        system: resolved.prompts.quoteEstimatorSystem,
+      // ✅ LLM call is isolated
+      const rawOutput = await llm.generateEstimate({
         images,
         category,
         service_type,
@@ -1378,7 +908,6 @@ export async function POST(req: Request) {
         rules: pricingRulesSnap,
       });
 
-      // ✅ enforce mode-based shape
       const shaped = applyAiModeToEstimates(pricingPolicy, {
         estimate_low: computed.estimate_low,
         estimate_high: computed.estimate_high,
@@ -1492,7 +1021,7 @@ export async function POST(req: Request) {
       customer,
       industryKeySnapshot: industryKeyForQuote,
       industrySource: "tenant_settings" as const,
-      llmKeySource: keySource,
+      llmKeySource: llm.keySource,
       customer_context: { category, service_type, notes },
 
       pricing_policy_snapshot: policyToStore,
@@ -1514,7 +1043,7 @@ export async function POST(req: Request) {
       renderOptIn,
       resolved,
       industryKey: industryKeyForQuote,
-      llmKeySource: keySource,
+      llmKeySource: llm.keySource,
       pricingPolicy: policyToStore,
     });
 
@@ -1536,10 +1065,8 @@ export async function POST(req: Request) {
     }
 
     if (resolved.tenant.liveQaEnabled && resolved.tenant.liveQaMaxQuestions > 0) {
-      const questions = await generateQaQuestions({
-        openai,
-        model: resolved.models.qaModel,
-        system: resolved.prompts.qaQuestionGeneratorSystem,
+      // ✅ LLM call is isolated
+      const questions = await llm.generateQaQuestions({
         images,
         category,
         service_type,
@@ -1557,7 +1084,7 @@ export async function POST(req: Request) {
         renderOptIn,
         resolved,
         industryKey: industryKeyForQuote,
-        llmKeySource: keySource,
+        llmKeySource: llm.keySource,
         pricingPolicy: policyToStore,
       });
 
@@ -1574,10 +1101,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
     }
 
-    const rawOutput = await generateEstimate({
-      openai,
-      model: resolved.models.estimatorModel,
-      system: resolved.prompts.quoteEstimatorSystem,
+    // ✅ LLM call is isolated
+    const rawOutput = await llm.generateEstimate({
       images,
       category,
       service_type,
@@ -1594,7 +1119,6 @@ export async function POST(req: Request) {
       rules: pricing_rules_snapshot,
     });
 
-    // ✅ enforce mode-based shape
     const shaped = applyAiModeToEstimates(policyToStore, {
       estimate_low: computed.estimate_low,
       estimate_high: computed.estimate_high,
@@ -1615,7 +1139,7 @@ export async function POST(req: Request) {
       renderOptIn,
       resolved,
       industryKey: industryKeyForQuote,
-      llmKeySource: keySource,
+      llmKeySource: llm.keySource,
       pricingPolicy: policyToStore,
     });
 
