@@ -40,14 +40,38 @@ export function ResultsSection({
 }) {
   if (!hasEstimate) return null;
 
-  function money(n: any) {
-    const num = Number(n);
+  function toMoneyNumber(n: any): number | null {
+    // accept numbers or strings like "$5,199"
+    if (n === null || n === undefined || n === "") return null;
+    const num =
+      typeof n === "number"
+        ? n
+        : typeof n === "string"
+          ? Number(n.replace(/[^0-9.\-]/g, ""))
+          : Number(n);
     if (!Number.isFinite(num) || num <= 0) return null;
+    return num;
+  }
+
+  function formatMoney(num: number | null): string | null {
+    if (num == null) return null;
     return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
-  const estLow = money(result?.estimate_low ?? result?.estimateLow);
-  const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
+  // Pull common keys (your current result format)
+  const lowNum = toMoneyNumber(result?.estimate_low ?? result?.estimateLow);
+  const highNum = toMoneyNumber(result?.estimate_high ?? result?.estimateHigh);
+
+  // ✅ If low/high are equal, treat as FIXED.
+  const isFixed = lowNum != null && highNum != null && lowNum === highNum;
+
+  // ✅ Effective display values
+  const effectiveLow = lowNum;
+  const effectiveHigh = isFixed ? null : highNum;
+
+  const estLow = formatMoney(effectiveLow);
+  const estHigh = formatMoney(effectiveHigh);
+
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
   const confidence = String(result?.confidence ?? "").toLowerCase();
@@ -68,6 +92,18 @@ export function ResultsSection({
 
   const pct = Math.max(0, Math.min(100, Number.isFinite(renderProgressPct) ? renderProgressPct : 0));
 
+  const hasAnyEstimate = Boolean(estLow || estHigh);
+
+  // ✅ Copy + amount rendering
+  const estimateLabel = estLow && estHigh ? "ESTIMATE RANGE" : "ESTIMATE";
+  const estimateValue =
+    estLow && estHigh ? `$${estLow} – $${estHigh}` : estLow ? `$${estLow}` : estHigh ? `$${estHigh}` : null;
+
+  const headerBlurb =
+    estimateLabel === "ESTIMATE RANGE"
+      ? "Fast range based on your photos + notes. Final pricing may change after inspection."
+      : "Fast estimate based on your photos + notes. Final pricing may change after inspection.";
+
   return (
     <section
       ref={sectionRef as any}
@@ -82,9 +118,7 @@ export function ResultsSection({
           >
             Your estimate
           </h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Fast range based on your photos + notes. Final pricing may change after inspection.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{headerBlurb}</p>
         </div>
 
         {quoteLogId ? (
@@ -116,9 +150,9 @@ export function ResultsSection({
         </div>
 
         <div className="mt-4">
-          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">ESTIMATE RANGE</div>
+          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">{estimateLabel}</div>
           <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">
-            {estLow && estHigh ? `$${estLow} – $${estHigh}` : "We need a bit more info"}
+            {hasAnyEstimate && estimateValue ? estimateValue : "We need a bit more info"}
           </div>
 
           <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
