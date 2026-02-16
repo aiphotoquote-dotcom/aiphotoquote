@@ -301,6 +301,48 @@ function pricingBadgeFromSnapshot(aiSnapshot: any) {
   return null;
 }
 
+/**
+ * ✅ Display dollars ONLY when pricing is enabled AND mode is not assessment_only.
+ * - fixed OR low==high => "$X"
+ * - range => "$X – $Y"
+ * - pricing off / assessment_only => "AI assessment"
+ */
+function estimateDisplayFromSnapshot(args: {
+  aiSnapshot: any;
+  estLow: number | null;
+  estHigh: number | null;
+}) {
+  const { aiSnapshot, estLow, estHigh } = args;
+
+  if (estLow == null && estHigh == null) {
+    return <span className="text-gray-500 dark:text-gray-400">No estimate yet</span>;
+  }
+
+  const pol = aiSnapshot?.pricing?.policy ?? null;
+  const enabled = pol?.pricing_enabled;
+  const mode = String(pol?.ai_mode ?? "").trim();
+
+  // If explicitly off, or assessment_only: never show dollars (even if numbers exist)
+  if (enabled === false || mode === "assessment_only") {
+    return <span className="text-gray-500 dark:text-gray-400">AI assessment</span>;
+  }
+
+  // If explicitly fixed OR low==high: show single number (prevents "$X – $X")
+  const low = estLow;
+  const high = estHigh;
+
+  if (mode === "fixed" || (low != null && high != null && low === high)) {
+    return <>{money(low ?? high)}</>;
+  }
+
+  // Range fallback (handles missing mode/legacy)
+  return (
+    <>
+      {money(low)} – {money(high)}
+    </>
+  );
+}
+
 export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
@@ -678,13 +720,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                       {/* Presentable AI preview */}
                       <div className="mt-3 grid gap-2">
                         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                          {estLow == null && estHigh == null ? (
-                            <span className="text-gray-500 dark:text-gray-400">No estimate yet</span>
-                          ) : (
-                            <>
-                              {money(estLow)} – {money(estHigh)}
-                            </>
-                          )}
+                          {estimateDisplayFromSnapshot({ aiSnapshot: ai.aiSnapshot, estLow, estHigh })}
                         </div>
 
                         {ai.summary ? (
