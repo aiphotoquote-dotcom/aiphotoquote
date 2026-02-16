@@ -182,6 +182,9 @@ function safeParseMaybeJson(v: any) {
   return { raw: v };
 }
 
+/**
+ * Presentable AI bits (legacy tolerant)
+ */
 function normalizeAiOutput(outputRaw: any) {
   const root = safeParseMaybeJson(outputRaw) ?? null;
   const assessment = root?.assessment && typeof root.assessment === "object" ? root.assessment : null;
@@ -209,6 +212,9 @@ function normalizeAiOutput(outputRaw: any) {
           : null,
     estimateLow,
     estimateHigh,
+
+    // ✅ also return snapshot if present
+    aiSnapshot: root?.ai_snapshot && typeof root.ai_snapshot === "object" ? root.ai_snapshot : null,
   };
 }
 
@@ -271,6 +277,71 @@ type PageProps = {
 };
 
 type ViewMode = "all" | "unread" | "new" | "in_progress" | "custom";
+
+/**
+ * ✅ Pricing badge should come from the stored ai_snapshot policy,
+ * not inferred from estimate numbers (assessment-only can still be “enabled”).
+ */
+function pricingBadgeFromSnapshot(aiSnapshot: any) {
+  const pol = aiSnapshot?.pricing?.policy ?? null;
+  const enabled = pol?.pricing_enabled;
+  const mode = String(pol?.ai_mode ?? "").trim();
+
+  if (enabled === false) return chip("Pricing: Off", "gray");
+
+  // enabled could be true, or missing (older data)
+  if (enabled === true) {
+    if (mode === "assessment_only") return chip("Pricing: Assessment only", "gray");
+    if (mode === "fixed") return chip("Pricing: Fixed", "blue");
+    if (mode === "range") return chip("Pricing: Range", "blue");
+    return chip("Pricing: On", "blue");
+  }
+
+  // unknown (older rows)
+  return null;
+}
+
+/**
+ * ✅ Display dollars ONLY when pricing is enabled AND mode is not assessment_only.
+ * - fixed OR low==high => "$X"
+ * - range => "$X – $Y"
+ * - pricing off / assessment_only => "AI assessment"
+ */
+function estimateDisplayFromSnapshot(args: {
+  aiSnapshot: any;
+  estLow: number | null;
+  estHigh: number | null;
+}) {
+  const { aiSnapshot, estLow, estHigh } = args;
+
+  if (estLow == null && estHigh == null) {
+    return <span className="text-gray-500 dark:text-gray-400">No estimate yet</span>;
+  }
+
+  const pol = aiSnapshot?.pricing?.policy ?? null;
+  const enabled = pol?.pricing_enabled;
+  const mode = String(pol?.ai_mode ?? "").trim();
+
+  // If explicitly off, or assessment_only: never show dollars (even if numbers exist)
+  if (enabled === false || mode === "assessment_only") {
+    return <span className="text-gray-500 dark:text-gray-400">AI assessment</span>;
+  }
+
+  // If explicitly fixed OR low==high: show single number (prevents "$X – $X")
+  const low = estLow;
+  const high = estHigh;
+
+  if (mode === "fixed" || (low != null && high != null && low === high)) {
+    return <>{money(low ?? high)}</>;
+  }
+
+  // Range fallback (handles missing mode/legacy)
+  return (
+    <>
+      {money(low)} – {money(high)}
+    </>
+  );
+}
 
 export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const { userId } = await auth();
@@ -494,8 +565,8 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
           <h1 className="text-2xl font-semibold">Quotes</h1>
 
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page {safePage}{" "}
-            / {totalPages}
+            {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page {safePage} /{" "}
+            {totalPages}
           </p>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -603,6 +674,9 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
               const cancelHref = `/admin/quotes` + qs({ ...filterParams, page: safePage, pageSize }) + `#${anchor}`;
 
+              // ✅ Pricing badge from snapshot (truth)
+              const pricingBadge = pricingBadgeFromSnapshot(ai.aiSnapshot);
+
               return (
                 <li key={r.id} id={anchor} className={cn("p-5 scroll-mt-24", unread ? "bg-yellow-50/60 dark:bg-yellow-950/10" : "")}>
                   <div className="flex flex-wrap items-start justify-between gap-4">
@@ -628,6 +702,9 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         {/* AI badges */}
                         {ai.confidence ? chip(`Confidence: ${String(ai.confidence)}`, confTone as any) : null}
                         {ai.inspectionRequired != null ? chip(ai.inspectionRequired ? "Inspection" : "No inspection", inspTone as any) : null}
+
+                        {/* ✅ Pricing badge from ai_snapshot */}
+                        {pricingBadge}
                       </div>
 
                       <div className="mt-1 flex flex-wrap gap-2 text-sm text-gray-600 dark:text-gray-300">
@@ -643,13 +720,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                       {/* Presentable AI preview */}
                       <div className="mt-3 grid gap-2">
                         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                          {estLow == null && estHigh == null ? (
-                            <span className="text-gray-500 dark:text-gray-400">No estimate yet</span>
-                          ) : (
-                            <>
-                              {money(estLow)} – {money(estHigh)}
-                            </>
-                          )}
+                          {estimateDisplayFromSnapshot({ aiSnapshot: ai.aiSnapshot, estLow, estHigh })}
                         </div>
 
                         {ai.summary ? (

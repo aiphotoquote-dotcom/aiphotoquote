@@ -15,6 +15,28 @@ function money(n: unknown) {
   return `$${Math.round(v).toLocaleString()}`;
 }
 
+/**
+ * ✅ Avoid "$X – $X" in email.
+ * - if both numbers exist and equal => "$X"
+ * - if both exist and differ => "$X – $Y"
+ * - otherwise => ""
+ */
+function formatEstimate(low: unknown, high: unknown) {
+  const lo = Number(low);
+  const hi = Number(high);
+
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return "";
+
+  const loTxt = money(lo);
+  const hiTxt = money(hi);
+
+  if (!loTxt || !hiTxt) return "";
+
+  if (Math.round(lo) === Math.round(hi)) return loTxt;
+
+  return `${loTxt} – ${hiTxt}`;
+}
+
 function badge(text: string, bg: string, fg: string) {
   return `<span style="display:inline-block;padding:6px 10px;border-radius:999px;background:${bg};color:${fg};font-size:12px;font-weight:900;letter-spacing:.2px;">${esc(
     text
@@ -115,8 +137,8 @@ function renderTopBrand(args: {
     variant === "dark"
       ? { bg: "#0b0b0b", border: "#111827" }
       : variant === "light"
-      ? { bg: "#ffffff", border: "#e5e7eb" }
-      : null;
+        ? { bg: "#ffffff", border: "#e5e7eb" }
+        : null;
 
   if (!chip) {
     return `<img src="${esc(brandLogoUrl)}" alt="${esc(businessName)}"
@@ -205,15 +227,15 @@ export function renderLeadNewEmailHTML(args: {
     conf === "high"
       ? badge("High confidence", "#ecfdf5", "#065f46")
       : conf === "medium"
-      ? badge("Medium confidence", "#eff6ff", "#1d4ed8")
-      : conf === "low"
-      ? badge("Low confidence", "#fff7ed", "#9a3412")
-      : badge("AI assessment", "#f3f4f6", "#111827");
+        ? badge("Medium confidence", "#eff6ff", "#1d4ed8")
+        : conf === "low"
+          ? badge("Low confidence", "#fff7ed", "#9a3412")
+          : badge("AI assessment", "#f3f4f6", "#111827");
 
   const inspect = inspectionRequired === true;
 
-  const hasRange = typeof estimateLow === "number" && typeof estimateHigh === "number";
-  const rangeText = hasRange ? `${money(estimateLow)} – ${money(estimateHigh)}` : "";
+  // ✅ fixed/range formatting
+  const rangeText = formatEstimate(estimateLow, estimateHigh);
 
   const safeSummary = String(summary ?? "").trim();
   const safeNotes = String(notes ?? "").trim();

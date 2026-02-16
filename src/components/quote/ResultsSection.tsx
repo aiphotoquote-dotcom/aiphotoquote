@@ -6,6 +6,57 @@ import { toneBadge } from "./ui";
 
 type RenderStatus = "idle" | "running" | "rendered" | "failed";
 
+type AiMode = "assessment_only" | "range" | "fixed";
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+export type PricingPolicySnapshot = {
+  ai_mode: AiMode;
+  pricing_enabled: boolean;
+  pricing_model: PricingModel | null;
+};
+
+function normalizePricingPolicy(raw: any): PricingPolicySnapshot {
+  const pricing_enabled = Boolean(raw?.pricing_enabled);
+
+  const aiRaw = String(raw?.ai_mode ?? "").trim().toLowerCase();
+  const ai_mode: AiMode =
+    pricing_enabled && (aiRaw === "range" || aiRaw === "fixed" || aiRaw === "assessment_only")
+      ? (aiRaw as AiMode)
+      : pricing_enabled
+        ? "range"
+        : "assessment_only";
+
+  const pmRaw = String(raw?.pricing_model ?? "").trim();
+  const pricing_model: PricingModel | null =
+    pricing_enabled &&
+    (pmRaw === "flat_per_job" ||
+      pmRaw === "hourly_plus_materials" ||
+      pmRaw === "per_unit" ||
+      pmRaw === "packages" ||
+      pmRaw === "line_items" ||
+      pmRaw === "inspection_only" ||
+      pmRaw === "assessment_fee")
+      ? (pmRaw as PricingModel)
+      : null;
+
+  if (!pricing_enabled) return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+  return { ai_mode, pricing_enabled: true, pricing_model };
+}
+
+function coerceMode(policy: PricingPolicySnapshot): AiMode {
+  if (!policy.pricing_enabled) return "assessment_only";
+  if (policy.ai_mode === "fixed") return "fixed";
+  if (policy.ai_mode === "range") return "range";
+  return "assessment_only";
+}
+
 export function ResultsSection({
   sectionRef,
   headingRef,
@@ -19,6 +70,7 @@ export function ResultsSection({
   renderImageUrl,
   renderError,
   renderProgressPct,
+  pricingPolicy,
 }: {
   sectionRef: React.RefObject<HTMLElement | null>;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
@@ -35,10 +87,16 @@ export function ResultsSection({
   renderImageUrl: string | null;
   renderError: string | null;
 
-  // new: progress number (0-100) while running
+  // progress number (0-100) while running
   renderProgressPct: number;
+
+  // ✅ NEW: pricing policy used to render labels (assessment vs range vs fixed)
+  pricingPolicy: PricingPolicySnapshot;
 }) {
   if (!hasEstimate) return null;
+
+  const policy = normalizePricingPolicy(pricingPolicy);
+  const pricingMode = coerceMode(policy);
 
   function money(n: any) {
     const num = Number(n);
@@ -48,6 +106,7 @@ export function ResultsSection({
 
   const estLow = money(result?.estimate_low ?? result?.estimateLow);
   const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
+
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
   const confidence = String(result?.confidence ?? "").toLowerCase();
@@ -68,6 +127,30 @@ export function ResultsSection({
 
   const pct = Math.max(0, Math.min(100, Number.isFinite(renderProgressPct) ? renderProgressPct : 0));
 
+  // ✅ Pre-submit + results consistency
+  const headerSubcopy =
+    pricingMode === "assessment_only"
+      ? "Quick assessment based on your photos + notes. We’ll follow up with next steps if needed."
+      : pricingMode === "fixed"
+        ? "Fast estimate based on your photos + notes. Final pricing may change after inspection."
+        : "Fast range based on your photos + notes. Final pricing may change after inspection.";
+
+  const headlineLabel =
+    pricingMode === "assessment_only" ? "ASSESSMENT" : pricingMode === "fixed" ? "ESTIMATE" : "ESTIMATE RANGE";
+
+  let primaryLine: string | null = null;
+  if (pricingMode === "fixed") {
+    const one = estLow || estHigh;
+    primaryLine = one ? `$${one}` : null;
+  } else if (pricingMode === "range") {
+    primaryLine = estLow && estHigh ? `$${estLow} – $${estHigh}` : null;
+  } else {
+    primaryLine = null;
+  }
+
+  const primaryFallback =
+    pricingMode === "assessment_only" ? "We’ll follow up shortly" : "We need a bit more info";
+
   return (
     <section
       ref={sectionRef as any}
@@ -80,11 +163,9 @@ export function ResultsSection({
             tabIndex={-1}
             className="text-lg font-semibold text-gray-900 dark:text-gray-100 outline-none"
           >
-            Your estimate
+            Your {pricingMode === "assessment_only" ? "assessment" : "estimate"}
           </h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Fast range based on your photos + notes. Final pricing may change after inspection.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{headerSubcopy}</p>
         </div>
 
         {quoteLogId ? (
@@ -112,13 +193,21 @@ export function ResultsSection({
         <div className="flex flex-wrap items-center gap-2">
           {toneBadge(confidence ? `Confidence: ${confidence}` : "Confidence: unknown", confidenceTone as any)}
           {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
+          {toneBadge(
+            pricingMode === "assessment_only"
+              ? "Assessment only"
+              : pricingMode === "fixed"
+                ? "Fixed estimate"
+                : "Range estimate",
+            pricingMode === "assessment_only" ? "gray" : pricingMode === "fixed" ? "blue" : "blue"
+          )}
           {showRenderBlock ? toneBadge("Rendering requested", "blue") : null}
         </div>
 
         <div className="mt-4">
-          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">ESTIMATE RANGE</div>
+          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">{headlineLabel}</div>
           <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">
-            {estLow && estHigh ? `$${estLow} – $${estHigh}` : "We need a bit more info"}
+            {primaryLine ? primaryLine : primaryFallback}
           </div>
 
           <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">

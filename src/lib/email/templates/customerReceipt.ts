@@ -11,7 +11,7 @@ function esc(s: unknown) {
 
 function money(n: unknown) {
   const v = Number(n);
-  if (!Number.isFinite(v)) return "";
+  if (!Number.isFinite(v) || v <= 0) return "";
   return `$${Math.round(v).toLocaleString()}`;
 }
 
@@ -78,7 +78,11 @@ function normalizeVariant(v: unknown): BrandLogoVariant {
  *
  * NOTE: We only have one logo URL today; variant is a rendering hint only.
  */
-function renderTopLogo(args: { brandLogoUrl?: string | null; businessName: string; brandLogoVariant?: BrandLogoVariant | null }) {
+function renderTopLogo(args: {
+  brandLogoUrl?: string | null;
+  businessName: string;
+  brandLogoVariant?: BrandLogoVariant | null;
+}) {
   const { brandLogoUrl, businessName } = args;
   const variant = normalizeVariant(args.brandLogoVariant);
 
@@ -100,6 +104,52 @@ function renderTopLogo(args: { brandLogoUrl?: string | null; businessName: strin
 
   // auto / light
   return img;
+}
+
+type QuoteDisplayMode = "assessment_only" | "fixed" | "range";
+
+function computeQuoteDisplay(estimateLow?: number | null, estimateHigh?: number | null) {
+  const lowN = Number(estimateLow ?? 0);
+  const highN = Number(estimateHigh ?? 0);
+
+  const lowOk = Number.isFinite(lowN) && lowN > 0;
+  const highOk = Number.isFinite(highN) && highN > 0;
+
+  let mode: QuoteDisplayMode = "assessment_only";
+  if (lowOk || highOk) {
+    if (lowOk && highOk && Math.round(lowN) === Math.round(highN)) mode = "fixed";
+    else if (lowOk && highOk) mode = "range";
+    else mode = "fixed";
+  }
+
+  const lowStr = lowOk ? money(lowN) : "";
+  const highStr = highOk ? money(highN) : "";
+
+  let display = "";
+  if (mode === "fixed") {
+    display = lowStr || highStr || "";
+  } else if (mode === "range") {
+    display = lowStr && highStr ? `${lowStr} – ${highStr}` : lowStr || highStr || "";
+  } else {
+    display = "";
+  }
+
+  const title =
+    mode === "assessment_only" ? "Assessment" : mode === "fixed" ? "Estimate" : "Estimate range";
+
+  const introLine =
+    mode === "assessment_only"
+      ? "Hi {{name}}, we received your photos. We’ll follow up with next steps if needed."
+      : mode === "fixed"
+        ? "Hi {{name}}, here’s your preliminary estimate based on your photos."
+        : "Hi {{name}}, here’s your preliminary estimate range based on your photos.";
+
+  const preheader =
+    mode === "assessment_only"
+      ? "We received your photos — assessment is ready."
+      : `We received your photos — your estimate is ready.`;
+
+  return { mode, display, title, introLine, preheader };
 }
 
 export function renderCustomerReceiptEmailHTML(args: {
@@ -167,15 +217,16 @@ export function renderCustomerReceiptEmailHTML(args: {
     planHow,
   } = args;
 
-  const preheader = "We received your photos — your estimate range is ready.";
-
   const topLogo = renderTopLogo({
     brandLogoUrl,
     businessName,
     brandLogoVariant,
   });
 
-  const rangeText = `${money(estimateLow)} – ${money(estimateHigh)}`;
+  const quoteDisplay = computeQuoteDisplay(estimateLow ?? null, estimateHigh ?? null);
+
+  const preheader = quoteDisplay.preheader;
+
   const safeSummary = String(summary ?? "").trim();
 
   const conf = String(confidence ?? "").toLowerCase().trim();
@@ -183,10 +234,10 @@ export function renderCustomerReceiptEmailHTML(args: {
     conf === "high"
       ? badge("High confidence", "#ecfdf5", "#065f46")
       : conf === "medium"
-      ? badge("Medium confidence", "#eff6ff", "#1d4ed8")
-      : conf === "low"
-      ? badge("Low confidence", "#fff7ed", "#9a3412")
-      : "";
+        ? badge("Medium confidence", "#eff6ff", "#1d4ed8")
+        : conf === "low"
+          ? badge("Low confidence", "#fff7ed", "#9a3412")
+          : "";
 
   const inspect = inspectionRequired === true;
 
@@ -249,9 +300,7 @@ export function renderCustomerReceiptEmailHTML(args: {
     .slice(0, 6)
     .map((s) => {
       const items = listItems(s.items || [], 10);
-      const note = s.note
-        ? `<div style="margin-top:8px;color:#6b7280;font-size:12px;">${esc(s.note)}</div>`
-        : "";
+      const note = s.note ? `<div style="margin-top:8px;color:#6b7280;font-size:12px;">${esc(s.note)}</div>` : "";
       const body = `${items || ""}${note || ""}` || `<div style="color:#6b7280;">(No details)</div>`;
       return sectionCard({ title: s.title, body, subtle: s.subtle });
     })
@@ -293,6 +342,28 @@ export function renderCustomerReceiptEmailHTML(args: {
     </div>
   `;
 
+  const introLine = quoteDisplay.introLine.replace("{{name}}", esc(customerName));
+
+  const estimateTitle = quoteDisplay.title;
+
+  const estimateBody =
+    quoteDisplay.mode === "assessment_only"
+      ? `
+          <div style="font-size:14px;line-height:1.55;color:#111;">
+            We’ve reviewed your photos and notes. If we need any clarifications, we’ll reach out shortly.
+          </div>
+          ${inspectCallout}
+        `
+      : `
+          <div style="font-size:20px;font-weight:900;color:#111;margin-top:-2px;">
+            ${esc(quoteDisplay.display || "")}
+          </div>
+          <div style="margin-top:8px;font-size:12px;color:#6b7280;">
+            Final pricing can change after inspection and confirming materials/scope.
+          </div>
+          ${inspectCallout}
+        `;
+
   return `<!doctype html>
 <html>
   <head>
@@ -331,10 +402,10 @@ export function renderCustomerReceiptEmailHTML(args: {
             <tr>
               <td style="padding:18px 20px 0;">
                 <div style="font-size:22px;font-weight:900;letter-spacing:-.2px;margin:0 0 6px;">
-                  Your estimate is ready ✅
+                  Your ${quoteDisplay.mode === "assessment_only" ? "assessment" : "estimate"} is ready ✅
                 </div>
                 <div style="font-size:14px;line-height:1.5;color:#374151;">
-                  Hi ${esc(customerName)}, here’s your preliminary estimate range based on your photos.
+                  ${introLine}
                 </div>
                 <div style="margin-top:10px;">
                   ${confBadge}
@@ -346,16 +417,8 @@ export function renderCustomerReceiptEmailHTML(args: {
             <tr>
               <td style="padding:16px 20px 0;">
                 ${sectionCard({
-                  title: "Estimate range",
-                  body: `
-                    <div style="font-size:20px;font-weight:900;color:#111;margin-top:-2px;">
-                      ${esc(rangeText)}
-                    </div>
-                    <div style="margin-top:8px;font-size:12px;color:#6b7280;">
-                      Final pricing can change after inspection and confirming materials/scope.
-                    </div>
-                    ${inspectCallout}
-                  `,
+                  title: estimateTitle,
+                  body: estimateBody,
                 })}
               </td>
             </tr>
@@ -399,7 +462,7 @@ export function renderCustomerReceiptEmailHTML(args: {
               scopeHtml
                 ? `<tr><td style="padding:16px 20px 0;">
                      ${sectionCard({
-                       title: "What this estimate includes",
+                       title: "What this includes",
                        body: scopeHtml,
                        subtle: true,
                      })}
@@ -464,7 +527,11 @@ export function renderCustomerReceiptEmailHTML(args: {
               <td style="padding:18px 20px;background:#0b0b0b;">
                 <div style="color:#e5e7eb;font-size:12px;line-height:1.5;">
                   <div style="font-weight:900;color:#fff;margin-bottom:6px;">${esc(businessName)}</div>
-                  This email includes an estimate range only. Final scope and pricing may change after inspection.
+                  ${
+                    quoteDisplay.mode === "assessment_only"
+                      ? "This email includes an AI assessment only. We may follow up to confirm scope and materials."
+                      : "This email includes an estimate. Final scope and pricing may change after inspection."
+                  }
                 </div>
                 <div style="margin-top:10px;color:#9ca3af;font-size:11px;">
                   Powered by AI Photo Quote

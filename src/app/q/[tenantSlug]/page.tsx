@@ -18,6 +18,52 @@ function normalizeTenantSlug(v: any): string {
   return String(v ?? "").trim();
 }
 
+type AiMode = "assessment_only" | "range" | "fixed";
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+type PricingPolicySnapshot = {
+  ai_mode: AiMode;
+  pricing_enabled: boolean;
+  pricing_model: PricingModel | null;
+};
+
+function normalizePricingPolicy(raw: Partial<PricingPolicySnapshot> | null | undefined): PricingPolicySnapshot {
+  const pricing_enabled = Boolean(raw?.pricing_enabled);
+
+  const aiRaw = String(raw?.ai_mode ?? "").trim() as AiMode;
+  const ai_mode: AiMode =
+    pricing_enabled && (aiRaw === "range" || aiRaw === "fixed" || aiRaw === "assessment_only")
+      ? aiRaw
+      : pricing_enabled
+        ? "range"
+        : "assessment_only";
+
+  const pmRaw = String(raw?.pricing_model ?? "").trim() as PricingModel;
+  const pricing_model: PricingModel | null =
+    pricing_enabled &&
+    (pmRaw === "flat_per_job" ||
+      pmRaw === "hourly_plus_materials" ||
+      pmRaw === "per_unit" ||
+      pmRaw === "packages" ||
+      pmRaw === "line_items" ||
+      pmRaw === "inspection_only" ||
+      pmRaw === "assessment_fee")
+      ? pmRaw
+      : null;
+
+  if (!pricing_enabled) return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+
+  // defense-in-depth: if ai_mode is assessment_only while pricing is enabled, allow it (user choice)
+  return { ai_mode, pricing_enabled: true, pricing_model };
+}
+
 export default async function Page(props: PageProps) {
   const p = await props.params;
   const tenantSlug = normalizeTenantSlug(p?.tenantSlug);
@@ -35,6 +81,9 @@ export default async function Page(props: PageProps) {
 
   let brand_logo_url: string | null = null;
   let business_name: string | null = null;
+
+  // ✅ pricing policy hint (pre-submit UI)
+  let pricingPolicyHint: PricingPolicySnapshot = { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
 
   // Display defaults
   let displayTenantName = "Get a Photo Quote";
@@ -67,7 +116,10 @@ export default async function Page(props: PageProps) {
           "rendering_enabled",
           "rendering_customer_opt_in_required",
           "brand_logo_url",
-          "business_name"
+          "business_name",
+          "ai_mode",
+          "pricing_enabled",
+          "pricing_model"
         from "tenant_settings"
         where "tenant_id" = ${tenantId}::uuid
         limit 1
@@ -80,20 +132,19 @@ export default async function Page(props: PageProps) {
         rendering_customer_opt_in_required: boolean | null;
         brand_logo_url: string | null;
         business_name: string | null;
+
+        ai_mode: string | null;
+        pricing_enabled: boolean | null;
+        pricing_model: string | null;
       }>(settingsRes);
 
       industry_key = settings?.industry_key ?? null;
 
-      ai_rendering_enabled =
-        typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
-
-      rendering_enabled =
-        typeof settings?.rendering_enabled === "boolean" ? settings.rendering_enabled : null;
+      ai_rendering_enabled = typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
+      rendering_enabled = typeof settings?.rendering_enabled === "boolean" ? settings.rendering_enabled : null;
 
       rendering_customer_opt_in_required =
-        typeof settings?.rendering_customer_opt_in_required === "boolean"
-          ? settings.rendering_customer_opt_in_required
-          : null;
+        typeof settings?.rendering_customer_opt_in_required === "boolean" ? settings.rendering_customer_opt_in_required : null;
 
       brand_logo_url = settings?.brand_logo_url ?? null;
       business_name = settings?.business_name ?? null;
@@ -101,19 +152,46 @@ export default async function Page(props: PageProps) {
       if (industry_key) displayIndustry = industry_key;
 
       // ✅ Effective: canonical wins, otherwise legacy wins
-      aiRenderingEnabled =
-        ai_rendering_enabled === true ? true : rendering_enabled === true ? true : false;
+      aiRenderingEnabled = ai_rendering_enabled === true ? true : rendering_enabled === true ? true : false;
 
       // If tenantSettings has a business name, prefer it for display
       if (business_name && business_name.trim()) {
         displayTenantName = business_name.trim();
       }
+
+      // ✅ pricing hint (pre-submit)
+      pricingPolicyHint = normalizePricingPolicy({
+        ai_mode: (settings?.ai_mode ?? undefined) as any,
+        pricing_enabled: Boolean(settings?.pricing_enabled),
+        pricing_model: (settings?.pricing_model ?? undefined) as any,
+      });
     }
   } catch {
     // If anything fails, we still render the form; QuoteForm will show errors if submit fails
   }
 
   const logoUrl = (brand_logo_url ?? "").trim() || null;
+
+  const heroCopy =
+    pricingPolicyHint.pricing_enabled && pricingPolicyHint.ai_mode === "fixed"
+      ? "Get a fast estimate by uploading a few clear photos. No phone calls required."
+      : pricingPolicyHint.pricing_enabled && pricingPolicyHint.ai_mode === "range"
+        ? "Get a fast estimate range by uploading a few clear photos. No phone calls required."
+        : "Get a fast assessment by uploading a few clear photos. No phone calls required.";
+
+  const bulletPricingCopy =
+    pricingPolicyHint.pricing_enabled && pricingPolicyHint.ai_mode === "fixed"
+      ? "No obligation. This is an estimate — final pricing depends on inspection and scope."
+      : pricingPolicyHint.pricing_enabled && pricingPolicyHint.ai_mode === "range"
+        ? "No obligation. This is an estimate range — final pricing depends on inspection and scope."
+        : "No obligation. This is an assessment — we’ll follow up with any questions and next steps.";
+
+  const formSubCopy =
+    pricingPolicyHint.pricing_enabled && pricingPolicyHint.ai_mode === "fixed"
+      ? "Upload photos and add a quick note. We’ll return an estimate."
+      : pricingPolicyHint.pricing_enabled && pricingPolicyHint.ai_mode === "range"
+        ? "Upload photos and add a quick note. We’ll return an estimate range."
+        : "Upload photos and add a quick note. We’ll return an assessment and next steps.";
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -138,30 +216,27 @@ export default async function Page(props: PageProps) {
 
             <h1 className="mt-4 text-4xl font-semibold tracking-tight">{displayTenantName}</h1>
 
-            <p className="mt-3 text-base text-gray-700 dark:text-gray-200">
-              Get a fast estimate range by uploading a few clear photos. No phone calls required.
-            </p>
+            <p className="mt-3 text-base text-gray-700 dark:text-gray-200">{heroCopy}</p>
 
             <div className="mt-6 space-y-3 text-sm text-gray-800 dark:text-gray-200">
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">No obligation.</span> This is an estimate range — final
-                  pricing depends on inspection and scope.
+                  <span className="font-semibold">No obligation.</span> {bulletPricingCopy}
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include
-                  close-ups + a full view.
+                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include close-ups + a
+                  full view.
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  Tailored for <span className="font-semibold">{displayIndustry}</span> quotes. We’ll follow
-                  up if anything needs clarification.
+                  Tailored for <span className="font-semibold">{displayIndustry}</span> quotes. We’ll follow up if
+                  anything needs clarification.
                 </p>
               </div>
             </div>
@@ -172,9 +247,7 @@ export default async function Page(props: PageProps) {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-2xl font-semibold">Get a Photo Quote</h2>
-                  <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                    Upload photos and add a quick note. We’ll return an estimate range.
-                  </p>
+                  <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">{formSubCopy}</p>
                 </div>
 
                 <div className="hidden md:flex flex-col items-end text-xs text-gray-600 dark:text-gray-300">
@@ -186,8 +259,12 @@ export default async function Page(props: PageProps) {
               </div>
 
               <div className="mt-6">
-                {/* NOTE: opt-in-required is read above and will be wired next */}
-                <QuoteForm tenantSlug={tenantSlug} aiRenderingEnabled={aiRenderingEnabled} />
+                <QuoteForm
+                  tenantSlug={tenantSlug}
+                  aiRenderingEnabled={aiRenderingEnabled}
+                  aiRenderingOptInRequired={Boolean(rendering_customer_opt_in_required)}
+                  pricingPolicyHint={pricingPolicyHint}
+                />
               </div>
             </div>
           </div>

@@ -30,6 +30,50 @@ function defaultShotTypeForIndex(idx: number): ShotType {
   return "extra";
 }
 
+type AiMode = "assessment_only" | "range" | "fixed";
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+export type PricingPolicySnapshot = {
+  ai_mode: AiMode;
+  pricing_enabled: boolean;
+  pricing_model: PricingModel | null;
+};
+
+function normalizePricingPolicy(raw: any): PricingPolicySnapshot {
+  const pricing_enabled = Boolean(raw?.pricing_enabled);
+
+  const aiRaw = String(raw?.ai_mode ?? "").trim().toLowerCase();
+  const ai_mode: AiMode =
+    pricing_enabled && (aiRaw === "range" || aiRaw === "fixed" || aiRaw === "assessment_only")
+      ? (aiRaw as AiMode)
+      : pricing_enabled
+        ? "range"
+        : "assessment_only";
+
+  const pmRaw = String(raw?.pricing_model ?? "").trim();
+  const pm: PricingModel | null =
+    pricing_enabled &&
+    (pmRaw === "flat_per_job" ||
+      pmRaw === "hourly_plus_materials" ||
+      pmRaw === "per_unit" ||
+      pmRaw === "packages" ||
+      pmRaw === "line_items" ||
+      pmRaw === "inspection_only" ||
+      pmRaw === "assessment_fee")
+      ? (pmRaw as PricingModel)
+      : null;
+
+  if (!pricing_enabled) return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+  return { ai_mode, pricing_enabled: true, pricing_model: pm };
+}
+
 type ServerAi = {
   liveQaEnabled?: boolean;
   liveQaMaxQuestions?: number;
@@ -39,16 +83,21 @@ type ServerAi = {
   // server may echo back final opt-in state
   renderOptIn?: boolean;
 
-  // ✅ NEW: server policy for whether opt-in is required
+  // ✅ server policy for whether opt-in is required
   renderOptInRequired?: boolean;
 
   tenantStyleKey?: string;
   tenantRenderNotes?: string;
+
+  // ✅ pricing policy (authoritative after first response)
+  pricingPolicy?: PricingPolicySnapshot;
 };
 
 function extractServerAi(json: any): ServerAi | null {
   const ai = json?.ai;
   if (!ai || typeof ai !== "object") return null;
+
+  const pricingPolicyRaw = ai?.pricingPolicy && typeof ai.pricingPolicy === "object" ? ai.pricingPolicy : null;
 
   return {
     liveQaEnabled: typeof ai.liveQaEnabled === "boolean" ? ai.liveQaEnabled : undefined,
@@ -63,22 +112,26 @@ function extractServerAi(json: any): ServerAi | null {
       typeof ai.renderOptInRequired === "boolean"
         ? ai.renderOptInRequired
         : typeof ai.render_opt_in_required === "boolean"
-        ? ai.render_opt_in_required
-        : undefined,
+          ? ai.render_opt_in_required
+          : undefined,
 
     tenantStyleKey: typeof ai.tenantStyleKey === "string" ? ai.tenantStyleKey : undefined,
     tenantRenderNotes: typeof ai.tenantRenderNotes === "string" ? ai.tenantRenderNotes : undefined,
+
+    pricingPolicy: pricingPolicyRaw ? normalizePricingPolicy(pricingPolicyRaw) : undefined,
   };
 }
 
 export default function QuoteForm({
   tenantSlug,
   aiRenderingEnabled = false, // legacy/initial hint (server becomes authoritative after submit)
-  aiRenderingOptInRequired = false, // ✅ initial hint (server becomes authoritative after submit)
+  aiRenderingOptInRequired = false, // initial hint (server becomes authoritative after submit)
+  pricingPolicyHint, // ✅ NEW: pre-submit pricing policy hint from server-rendered page
 }: {
   tenantSlug: string;
   aiRenderingEnabled?: boolean;
   aiRenderingOptInRequired?: boolean;
+  pricingPolicyHint?: PricingPolicySnapshot;
 }) {
   const MIN_PHOTOS = 1;
   const MAX_PHOTOS = 12;
@@ -152,6 +205,17 @@ export default function QuoteForm({
   const workingStep = useMemo(() => computeWorkingStep(phase), [phase]);
 
   /**
+   * ✅ Effective pricing policy:
+   * - before first response: use pricingPolicyHint
+   * - after first response: serverAi.pricingPolicy is authoritative
+   */
+  const effectivePricingPolicy: PricingPolicySnapshot = useMemo(() => {
+    if (serverAi?.pricingPolicy) return serverAi.pricingPolicy;
+    if (pricingPolicyHint) return normalizePricingPolicy(pricingPolicyHint);
+    return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+  }, [serverAi, pricingPolicyHint]);
+
+  /**
    * ✅ Effective rendering enabled:
    * - before first response: use prop
    * - after first response: serverAi.tenantRenderEnabled is authoritative
@@ -171,10 +235,7 @@ export default function QuoteForm({
     return aiRenderingOptInRequired;
   }, [serverAi, aiRenderingOptInRequired]);
 
-  const showRendering = useMemo(
-    () => effectiveAiRenderingEnabled && renderOptIn,
-    [effectiveAiRenderingEnabled, renderOptIn]
-  );
+  const showRendering = useMemo(() => effectiveAiRenderingEnabled && renderOptIn, [effectiveAiRenderingEnabled, renderOptIn]);
 
   // --- Rendering (moved to hook) ---
   const { renderStatus, renderImageUrl, renderError, renderProgressPct, resetRenderState } = useRenderPreview({
@@ -224,7 +285,7 @@ export default function QuoteForm({
     if (mode === "qa") {
       return {
         title: "Answer questions",
-        subtitle: "One more step — answer these and we’ll finalize your estimate.",
+        subtitle: "One more step — answer these and we’ll finalize your response.",
         rightLabel: "Next",
         primaryLabel: "Jump to questions",
         onPrimary: () => focusAndScroll(qaSectionRef.current, { block: "start" }),
@@ -234,7 +295,7 @@ export default function QuoteForm({
     if (mode === "results") {
       if (showRendering && renderStatus === "running") {
         return {
-          title: "Estimate ready",
+          title: "Ready",
           subtitle: "Rendering your visual preview now…",
           rightLabel: "Rendering",
           primaryLabel: "Jump to preview",
@@ -243,10 +304,10 @@ export default function QuoteForm({
       }
 
       return {
-        title: "Estimate ready",
-        subtitle: showRendering ? `Rendering: ${renderingLabel}` : "Review your estimate details below.",
+        title: "Ready",
+        subtitle: showRendering ? `Rendering: ${renderingLabel}` : "Review the details below.",
         rightLabel: "Done",
-        primaryLabel: "View estimate",
+        primaryLabel: "View result",
         onPrimary: () => focusAndScroll(resultsRef.current, { block: "start" }),
       };
     }
@@ -272,9 +333,17 @@ export default function QuoteForm({
       };
     }
 
+    // pricing-aware “ready” copy (pre-submit)
+    const pricingLine =
+      !effectivePricingPolicy.pricing_enabled || effectivePricingPolicy.ai_mode === "assessment_only"
+        ? "We’ll return an assessment and next steps."
+        : effectivePricingPolicy.ai_mode === "fixed"
+          ? "We’ll return an estimate."
+          : "We’ll return an estimate range.";
+
     return {
       title: "Ready to submit",
-      subtitle: "You’re ready — submit and we’ll inspect your photos.",
+      subtitle: pricingLine,
       rightLabel: "Ready",
       primaryLabel: "Jump to submit",
       onPrimary: () => focusAndScroll(infoSectionRef.current, { block: "start" }),
@@ -293,6 +362,7 @@ export default function QuoteForm({
     photosOk,
     contactOk,
     MIN_PHOTOS,
+    effectivePricingPolicy,
   ]);
 
   // Overall progress for the top bar (never disappears)
@@ -793,6 +863,7 @@ export default function QuoteForm({
           renderImageUrl={renderImageUrl}
           renderError={renderError}
           renderProgressPct={renderProgressPct}
+          pricingPolicy={effectivePricingPolicy}
         />
       ) : null}
 

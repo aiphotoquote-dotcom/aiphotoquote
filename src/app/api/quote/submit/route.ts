@@ -18,6 +18,13 @@ import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { resolvePromptsForIndustry } from "@/lib/pcc/llm/resolvePrompts";
 
+import {
+  computeEstimate,
+  type PricingPolicySnapshot,
+  type PricingConfigSnapshot,
+  type PricingRulesSnapshot,
+} from "@/lib/pricing/computeEstimate";
+
 export const runtime = "nodejs";
 
 // ----------------- schemas -----------------
@@ -89,12 +96,6 @@ type PricingModel =
   | "line_items"
   | "inspection_only"
   | "assessment_fee";
-
-type PricingPolicySnapshot = {
-  ai_mode: AiMode;
-  pricing_enabled: boolean;
-  pricing_model: PricingModel | null;
-};
 
 // ----------------- helpers -----------------
 function normalizePhone(raw: string) {
@@ -191,9 +192,8 @@ function normalizePricingPolicy(pp: PricingPolicySnapshot): PricingPolicySnapsho
   if (!pp.pricing_enabled) {
     return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
   }
-  // pricing enabled: keep ai_mode (default to range if invalid upstream)
-  const ai_mode: AiMode = isAiMode(pp.ai_mode) ? pp.ai_mode : "range";
-  const pricing_model = pp.pricing_model ?? null;
+  const ai_mode: AiMode = isAiMode(pp.ai_mode as any) ? (pp.ai_mode as AiMode) : "range";
+  const pricing_model = (pp.pricing_model as any) ?? null;
   return { ai_mode, pricing_enabled: true, pricing_model };
 }
 
@@ -206,7 +206,6 @@ function applyPricingEnabledGate(policy: PricingPolicySnapshot, pricingEnabled: 
   if (!pricingEnabled) {
     return normalizePricingPolicy({ ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null });
   }
-  // enabled: keep existing policy (but normalized)
   return normalizePricingPolicy(policy);
 }
 
@@ -215,16 +214,13 @@ function pickPricingPolicyFromInput(inputAny: any): PricingPolicySnapshot | null
   if (pp && typeof pp === "object") {
     const ai_mode_raw = safeTrim(pp.ai_mode);
     const ai_mode: AiMode = isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "assessment_only";
-
     const pricing_enabled = Boolean(pp.pricing_enabled);
-
     const pricing_model_raw = safeTrim(pp.pricing_model);
     const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
-
     return normalizePricingPolicy({ ai_mode, pricing_enabled, pricing_model });
   }
 
-  // back-compat: allow separate fields
+  // back-compat
   const ai_mode_raw = safeTrim(inputAny?.ai_mode_snapshot);
   const pricing_enabled_raw = inputAny?.pricing_enabled_snapshot;
   const pricing_model_raw = safeTrim(inputAny?.pricing_model_snapshot);
@@ -234,6 +230,18 @@ function pickPricingPolicyFromInput(inputAny: any): PricingPolicySnapshot | null
   const pricing_model = isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
 
   return normalizePricingPolicy({ ai_mode, pricing_enabled, pricing_model });
+}
+
+function pickPricingConfigFromInput(inputAny: any): PricingConfigSnapshot | null {
+  const pc = inputAny?.pricing_config_snapshot;
+  if (pc && typeof pc === "object") return pc as PricingConfigSnapshot;
+  return null;
+}
+
+function pickPricingRulesFromInput(inputAny: any): PricingRulesSnapshot | null {
+  const pr = inputAny?.pricing_rules_snapshot;
+  if (pr && typeof pr === "object") return pr as PricingRulesSnapshot;
+  return null;
 }
 
 function startOfMonthUTC(d: Date) {
@@ -246,7 +254,6 @@ function startOfNextMonthUTC(d: Date) {
 type KeySource = "tenant" | "platform_grace";
 
 function platformOpenAiKey(): string | null {
-  // per your note: Vercel uses OPENAI_API_KEY
   const k = process.env.OPENAI_API_KEY?.trim() || "";
   return k ? k : null;
 }
@@ -275,20 +282,40 @@ function safeDbTargetFromEnv(): { host: string | null; db: string | null } {
 
 type DebugFn = (stage: string, data?: Record<string, any>) => void;
 
-/* --------------------- image inlining for OpenAI vision --------------------- */
 /**
- * Why:
- * OpenAI will fetch image_url itself. Your error shows timeouts fetching Vercel Blob URLs.
- * Fix:
- * Fetch bytes server-side and pass as data: URL.
+ * ✅ Enforce estimate shape to match AI mode:
+ * - assessment_only => 0/0
+ * - fixed => high == low
+ * - range => as-is
  *
- * IMPORTANT:
- * We still store the original Blob URL in quote_logs.input.images for future concept renders/emails/audits.
+ * Note: we keep both keys for schema/email compatibility.
+ * UI will treat low==high as a single fixed estimate.
  */
+function applyAiModeToEstimates(
+  policy: PricingPolicySnapshot,
+  estimates: { estimate_low: number; estimate_high: number }
+) {
+  const p = normalizePricingPolicy(policy);
 
-const OPENAI_VISION_MAX_IMAGES = 6; // keep payload sane; we still store all URLs
+  if (!p.pricing_enabled || p.ai_mode === "assessment_only") {
+    return { estimate_low: 0, estimate_high: 0 };
+  }
+
+  const { low, high } = ensureLowHigh(estimates.estimate_low, estimates.estimate_high);
+
+  if (p.ai_mode === "fixed") {
+    // single-number intent
+    return { estimate_low: low, estimate_high: low };
+  }
+
+  // range
+  return { estimate_low: low, estimate_high: high };
+}
+
+/* --------------------- image inlining for OpenAI vision --------------------- */
+const OPENAI_VISION_MAX_IMAGES = 6;
 const IMAGE_FETCH_TIMEOUT_MS = 12_000;
-const IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8MB cap per image for analysis payload
+const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 function guessContentType(url: string): string {
   const u = url.toLowerCase();
@@ -312,20 +339,15 @@ async function fetchAsDataUrl(url: string, debug?: DebugFn) {
       method: "GET",
       cache: "no-store",
       signal: controller.signal,
-      // DO NOT send cookies; blob URLs are public
     });
 
-    if (!res.ok) {
-      throw new Error(`IMAGE_FETCH_FAILED: HTTP ${res.status}`);
-    }
+    if (!res.ok) throw new Error(`IMAGE_FETCH_FAILED: HTTP ${res.status}`);
 
     const ct = (res.headers.get("content-type") || "").split(";")[0].trim();
     const contentType = ct || guessContentType(url);
 
     const ab = await res.arrayBuffer();
-    if (ab.byteLength > IMAGE_MAX_BYTES) {
-      throw new Error(`IMAGE_TOO_LARGE: ${ab.byteLength} bytes`);
-    }
+    if (ab.byteLength > IMAGE_MAX_BYTES) throw new Error(`IMAGE_TOO_LARGE: ${ab.byteLength} bytes`);
 
     const b64 = toBase64(ab);
     return `data:${contentType};base64,${b64}`;
@@ -337,18 +359,13 @@ async function fetchAsDataUrl(url: string, debug?: DebugFn) {
   }
 }
 
-async function buildOpenAiVisionContent(args: {
-  images: Array<{ url: string; shotType?: string }>;
-  debug?: DebugFn;
-}) {
+async function buildOpenAiVisionContent(args: { images: Array<{ url: string; shotType?: string }>; debug?: DebugFn }) {
   const { images, debug } = args;
-
   const picked = (images || []).filter((x) => x?.url).slice(0, OPENAI_VISION_MAX_IMAGES);
 
   const content: any[] = [];
   for (const img of picked) {
     const u = String(img.url);
-    // Try inline first (solves your blob timeout); fall back to remote url if inline fails.
     try {
       const dataUrl = await fetchAsDataUrl(u, debug);
       content.push({ type: "image_url", image_url: { url: dataUrl } });
@@ -356,11 +373,10 @@ async function buildOpenAiVisionContent(args: {
       content.push({ type: "image_url", image_url: { url: u } });
     }
   }
-
   return content;
 }
 
-/* --------------------- output coercion (avoid false fallback) --------------------- */
+/* --------------------- output coercion --------------------- */
 function coerceToNumber(v: any): number {
   const n = typeof v === "string" ? Number(v) : Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -419,7 +435,6 @@ async function enforceMonthlyLimit(args: { tenantId: string; monthlyQuoteLimit: 
 
 /**
  * Read pricing policy + pricing model from tenant_settings WITHOUT relying on Drizzle schema columns.
- * (Keeps this branch safe even if schema typings lag behind DB.)
  */
 async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: DebugFn }): Promise<PricingPolicySnapshot> {
   const { tenantId, debug } = args;
@@ -437,8 +452,6 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 
   const pricing_enabled = Boolean(row?.pricing_enabled ?? false);
-
-  // If pricing is disabled, force assessment-only (your rule)
   const ai_mode_raw = safeTrim(row?.ai_mode) || "assessment_only";
   const ai_mode: AiMode = pricing_enabled ? (isAiMode(ai_mode_raw) ? (ai_mode_raw as AiMode) : "range") : "assessment_only";
 
@@ -447,39 +460,13 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
     pricing_enabled && isPricingModel(pricing_model_raw) ? (pricing_model_raw as PricingModel) : null;
 
   const normalized = normalizePricingPolicy({ ai_mode, pricing_enabled, pricing_model });
-
   debug?.("pricingPolicy.loaded", normalized);
 
   return normalized;
 }
 
 /**
- * Hard guardrail: enforce policy on output *even if the model misbehaves*.
- */
-function enforcePricingPolicyOnOutput(output: any, policy: PricingPolicySnapshot) {
-  const p = normalizePricingPolicy(policy);
-  const ai_mode = p.ai_mode;
-  const pricing_enabled = p.pricing_enabled;
-
-  let { low, high } = ensureLowHigh(Number(output?.estimate_low ?? 0), Number(output?.estimate_high ?? 0));
-
-  // If pricing is disabled OR assessment-only => never show numbers.
-  if (!pricing_enabled || ai_mode === "assessment_only") {
-    low = 0;
-    high = 0;
-  } else if (ai_mode === "fixed") {
-    // collapse to a single value
-    const mid = clampMoney((low + high) / 2);
-    low = mid;
-    high = mid;
-  }
-
-  return { ...output, estimate_low: low, estimate_high: high };
-}
-
-/**
- * Prompt-level guardrail: inject policy + pricing model guidance ahead of system prompt.
- * IMPORTANT: Only mention pricing_model hints if pricing_enabled is true.
+ * Prompt-level guardrail (still useful as defense-in-depth)
  */
 function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: PricingPolicySnapshot) {
   const p = normalizePricingPolicy(policy);
@@ -500,39 +487,30 @@ function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: Pricin
     "",
   ].join("\n");
 
-  if (!pricing_enabled) {
-    return [policyBlock, baseSystem].join("\n");
-  }
+  if (!pricing_enabled) return [policyBlock, baseSystem].join("\n");
 
   const modelHint =
     pricing_model === "flat_per_job"
-      ? "Pricing methodology hint: think a single job total. Consider labor+materials+overhead bundled."
+      ? "Pricing methodology hint: think a single job total."
       : pricing_model === "hourly_plus_materials"
-        ? "Pricing methodology hint: think hours and material costs/markup; range often reflects uncertainty in time/material."
+        ? "Pricing methodology hint: think hours and material costs/markup."
         : pricing_model === "per_unit"
-          ? "Pricing methodology hint: estimate per-unit (sq ft/linear ft/per item) and multiply; uncertainty comes from size/count."
+          ? "Pricing methodology hint: estimate per-unit and multiply."
           : pricing_model === "packages"
-            ? "Pricing methodology hint: think Basic/Standard/Premium tiers; map condition/scope to a tier range."
+            ? "Pricing methodology hint: think Basic/Standard/Premium tiers."
             : pricing_model === "line_items"
-              ? "Pricing methodology hint: think add-ons; base service + optional items; range reflects which items apply."
+              ? "Pricing methodology hint: think add-ons; base service + optional items."
               : pricing_model === "inspection_only"
-                ? "Pricing methodology hint: prefer inspection_required=true; keep low/high conservative and emphasize inspection."
+                ? "Pricing methodology hint: prefer inspection_required=true."
                 : pricing_model === "assessment_fee"
-                  ? "Pricing methodology hint: assessment/diagnostic fee model; keep estimate conservative and call out assessment if relevant."
+                  ? "Pricing methodology hint: assessment/diagnostic fee model."
                   : "";
 
-  const combined = [policyBlock, modelHint ? `### PRICING MODEL NOTES\n${modelHint}\n` : "", baseSystem].join("\n");
-  return combined;
+  return [policyBlock, modelHint ? `### PRICING MODEL NOTES\n${modelHint}\n` : "", baseSystem].join("\n");
 }
 
 /**
- * Resolve OpenAI client using:
- * - tenant secret if present
- * - else platform key if grace credits available (optionally consumes one)
- *
- * IMPORTANT:
- * - Phase 1: consumeGrace=true (atomic increment)
- * - Phase 2: consumeGrace=false (use prior llmKeySource from quote log)
+ * Resolve OpenAI client (tenant key OR platform grace)
  */
 async function resolveOpenAiClient(args: {
   tenantId: string;
@@ -544,7 +522,7 @@ async function resolveOpenAiClient(args: {
 
   debug?.("resolveOpenAiClient.start", { tenantId, consumeGrace, forceKeySource: forceKeySource ?? null });
 
-  // 1) Tenant key if exists (unless explicitly forced to platform)
+  // 1) Tenant key (unless forced platform)
   if (!forceKeySource || forceKeySource === "tenant") {
     const secretRow = await db
       .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
@@ -578,13 +556,12 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
-  // Phase 2 finalize: do NOT consume; honor phase1’s decision
+  // Phase 2 finalize: do NOT consume; honor phase1
   if (!consumeGrace) {
     debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // ✅ FIX B: Use Drizzle update/select (consistent result shape; avoids db.execute RETURNING row parsing issues)
   const updated = await db
     .update(tenantSettings)
     .set({
@@ -670,7 +647,7 @@ function buildAiSnapshot(args: {
   const policy = normalizePricingPolicy(pricingPolicy);
 
   return {
-    version: 2,
+    version: 3,
     capturedAt: nowIso(),
     phase,
     tenant: { tenantId, tenantSlug, industryKey },
@@ -693,10 +670,9 @@ function buildAiSnapshot(args: {
     },
     pricing: {
       policy,
-      // Only store model hint when enabled (your rule)
       modelHint: policy.pricing_enabled ? policy.pricing_model : null,
     },
-    pricingRules: resolved.pricing ?? null,
+    pricingPayload: resolved.pricing ?? null,
   };
 }
 
@@ -947,7 +923,16 @@ async function generateEstimate(args: {
             assumptions: { type: "array", items: { type: "string" } },
             questions: { type: "array", items: { type: "string" } },
           },
-          required: ["confidence", "inspection_required", "estimate_low", "estimate_high", "summary", "visible_scope", "assumptions", "questions"],
+          required: [
+            "confidence",
+            "inspection_required",
+            "estimate_low",
+            "estimate_high",
+            "summary",
+            "visible_scope",
+            "assumptions",
+            "questions",
+          ],
         },
       },
     } as any,
@@ -962,8 +947,6 @@ async function generateEstimate(args: {
     outputParsed = null;
   }
 
-  // ✅ Salvage common “wrapper” failure mode:
-  // { type:"object", properties:{...actual values...} }
   const candidate0 =
     outputParsed &&
     typeof outputParsed === "object" &&
@@ -972,7 +955,6 @@ async function generateEstimate(args: {
       ? outputParsed.properties
       : outputParsed;
 
-  // ✅ Coerce types (prevents false fallback when numbers come back as strings, etc.)
   const candidate = coerceAiCandidate(candidate0);
 
   const safe = AiOutputSchema.safeParse(candidate);
@@ -993,6 +975,7 @@ async function generateEstimate(args: {
 
   const v = safe.data;
   const { low, high } = ensureLowHigh(v.estimate_low, v.estimate_high);
+
   return {
     confidence: v.confidence,
     inspection_required: Boolean(v.inspection_required),
@@ -1103,7 +1086,7 @@ export async function POST(req: Request) {
       qaAnswersLen: parsed.data.qaAnswers?.length ?? 0,
     });
 
-    // Settings (existing select used elsewhere)
+    // Settings
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -1152,11 +1135,14 @@ export async function POST(req: Request) {
     const brandLogoVariant: BrandLogoVariant = normalizeBrandLogoVariant((settings as any)?.brandLogoVariant);
     const businessNameFromSettings = safeTrim(settings.businessName) || null;
 
-    // Pre-load quote log if phase2 (immutable industry + key source + pricing policy)
+    // Pre-load quote log if phase2 (immutable industry + key source + pricing snapshots)
     let phase2Existing: { id: string; input: any; qa: any; output: any } | null = null;
     let industryKeyForQuote = tenantIndustryKey;
     let phase2KeySource: KeySource | null = null;
+
     let pricingPolicy: PricingPolicySnapshot | null = null;
+    let pricingConfigSnap: PricingConfigSnapshot | null = null;
+    let pricingRulesSnap: PricingRulesSnapshot | null = null;
 
     if (isPhase2) {
       const quoteLogId = parsed.data.quoteLogId!;
@@ -1179,29 +1165,41 @@ export async function POST(req: Request) {
       const ks = String(inputAny?.llmKeySource ?? "").trim();
       phase2KeySource = ks === "platform_grace" ? "platform_grace" : ks === "tenant" ? "tenant" : null;
 
-      // ✅ freeze pricing policy for phase2 from the log
       pricingPolicy = pickPricingPolicyFromInput(inputAny);
+      pricingConfigSnap = pickPricingConfigFromInput(inputAny);
+      pricingRulesSnap = pickPricingRulesFromInput(inputAny);
 
-      debug("quoteLog.phase2.snapshot", { industryKeyForQuote, phase2KeySource, hasPricingPolicy: Boolean(pricingPolicy) });
+      debug("quoteLog.phase2.snapshot", {
+        industryKeyForQuote,
+        phase2KeySource,
+        hasPricingPolicy: Boolean(pricingPolicy),
+        hasPricingConfig: Boolean(pricingConfigSnap),
+        hasPricingRules: Boolean(pricingRulesSnap),
+      });
     } else {
       industryKeyForQuote = tenantIndustryKey;
     }
 
-    // Resolve tenant + PCC AI settings (includes pricingEnabled gate)
+    // Resolve tenant + PCC AI settings
     const resolvedBase = await resolveTenantLlm(tenant.id);
 
-    // ✅ If we didn't get pricing policy from log (phase1), load it from tenant_settings
-    if (!pricingPolicy) {
-      pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
-    }
+    // Phase1: load policy from DB if not present
+    if (!pricingPolicy) pricingPolicy = await loadPricingPolicySnapshot({ tenantId: tenant.id, debug });
 
-    // ✅ Apply the hard gate:
-    // - Phase1 (no frozen log): policy must follow resolvedBase.tenant.pricingEnabled
-    // - Phase2 (frozen log): trust the frozen policy
+    // Phase1: freeze pricing config/rules from resolved payload (deterministic engine inputs)
+    const resolvedPricingConfig = (resolvedBase as any)?.pricing?.config ?? null;
+    const resolvedPricingRules = (resolvedBase as any)?.pricing?.rules ?? null;
+
+    // Apply hard gate in phase1
     const pricingEnabledGate = Boolean((resolvedBase as any)?.tenant?.pricingEnabled);
+
     pricingPolicy = isPhase2
       ? normalizePricingPolicy(pricingPolicy)
       : applyPricingEnabledGate(normalizePricingPolicy(pricingPolicy), pricingEnabledGate);
+
+    // If phase2 did not have snapshots (older logs), fall back to current resolved pricing payload.
+    if (!pricingConfigSnap) pricingConfigSnap = resolvedPricingConfig;
+    if (!pricingRulesSnap) pricingRulesSnap = resolvedPricingRules;
 
     // PCC + industry prompt pack
     const pccCfg = await loadPlatformLlmConfig();
@@ -1222,7 +1220,7 @@ export async function POST(req: Request) {
         isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
     };
 
-    // ✅ Apply pricing-policy wrapper to estimator system prompt
+    // Apply pricing-policy wrapper (defense-in-depth)
     const estimatorSystemWithPolicy = wrapEstimatorSystemWithPricingPolicy(effectivePrompts.quoteEstimatorSystem, pricingPolicy);
 
     const resolved = {
@@ -1250,6 +1248,8 @@ export async function POST(req: Request) {
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
       pricingEnabledGate,
       pricingPolicy,
+      hasPricingConfigSnap: Boolean(pricingConfigSnap),
+      hasPricingRulesSnap: Boolean(pricingRulesSnap),
     });
 
     const denylist = resolved.guardrails.blockedTopics ?? [];
@@ -1369,7 +1369,28 @@ export async function POST(req: Request) {
         debug,
       });
 
-      const output = enforcePricingPolicyOnOutput(rawOutput, pricingPolicy);
+      // ✅ SERVER-SIDE PRICING (deterministic)
+      const computed = computeEstimate({
+        ai: rawOutput,
+        imagesCount: Array.isArray(images) ? images.length : 0,
+        policy: pricingPolicy,
+        config: pricingConfigSnap,
+        rules: pricingRulesSnap,
+      });
+
+      // ✅ enforce mode-based shape
+      const shaped = applyAiModeToEstimates(pricingPolicy, {
+        estimate_low: computed.estimate_low,
+        estimate_high: computed.estimate_high,
+      });
+
+      const output = {
+        ...rawOutput,
+        inspection_required: computed.inspection_required,
+        estimate_low: shaped.estimate_low,
+        estimate_high: shaped.estimate_high,
+        pricing_basis: computed.basis,
+      };
 
       let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshot };
 
@@ -1458,13 +1479,15 @@ export async function POST(req: Request) {
     const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
     aiEnvelope.renderOptIn = renderOptIn;
 
-    // ✅ Freeze pricing policy into the quote log input so phase2 uses the same rules.
-    // Phase1 MUST honor resolved.tenant.pricingEnabled.
+    // ✅ Freeze pricing policy + pricing inputs into the quote log so phase2 is immutable
     const policyToStore = applyPricingEnabledGate(pricingPolicy, Boolean(resolved.tenant.pricingEnabled));
+
+    const pricing_config_snapshot: PricingConfigSnapshot | null = (resolved as any)?.pricing?.config ?? null;
+    const pricing_rules_snapshot: PricingRulesSnapshot | null = (resolved as any)?.pricing?.rules ?? null;
 
     const inputToStore = {
       tenantSlug,
-      images, // canonical URLs stay here for future renders/emails/admin
+      images,
       render_opt_in: renderOptIn,
       customer,
       industryKeySnapshot: industryKeyForQuote,
@@ -1473,6 +1496,10 @@ export async function POST(req: Request) {
       customer_context: { category, service_type, notes },
 
       pricing_policy_snapshot: policyToStore,
+      pricing_config_snapshot,
+      pricing_rules_snapshot,
+
+      // back-compat fields (keep)
       pricing_model_snapshot: policyToStore.pricing_enabled ? policyToStore.pricing_model ?? null : null,
       ai_mode_snapshot: policyToStore.ai_mode,
       pricing_enabled_snapshot: policyToStore.pricing_enabled,
@@ -1558,7 +1585,28 @@ export async function POST(req: Request) {
       debug,
     });
 
-    const output = enforcePricingPolicyOnOutput(rawOutput, policyToStore);
+    // ✅ SERVER-SIDE PRICING (deterministic)
+    const computed = computeEstimate({
+      ai: rawOutput,
+      imagesCount: Array.isArray(images) ? images.length : 0,
+      policy: policyToStore,
+      config: pricing_config_snapshot,
+      rules: pricing_rules_snapshot,
+    });
+
+    // ✅ enforce mode-based shape
+    const shaped = applyAiModeToEstimates(policyToStore, {
+      estimate_low: computed.estimate_low,
+      estimate_high: computed.estimate_high,
+    });
+
+    const output = {
+      ...rawOutput,
+      inspection_required: computed.inspection_required,
+      estimate_low: shaped.estimate_low,
+      estimate_high: shaped.estimate_high,
+      pricing_basis: computed.basis,
+    };
 
     const aiSnapshotEstimated = buildAiSnapshot({
       phase: "phase1_estimated",
