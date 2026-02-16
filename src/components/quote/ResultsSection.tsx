@@ -6,16 +6,55 @@ import { toneBadge } from "./ui";
 
 type RenderStatus = "idle" | "running" | "rendered" | "failed";
 
-type PricingPolicySnapshot = {
-  ai_mode?: "assessment_only" | "range" | "fixed" | string;
-  pricing_enabled?: boolean;
-  pricing_model?: string | null;
+type AiMode = "assessment_only" | "range" | "fixed";
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+export type PricingPolicySnapshot = {
+  ai_mode: AiMode;
+  pricing_enabled: boolean;
+  pricing_model: PricingModel | null;
 };
 
-function normalizeAiMode(v: any): "assessment_only" | "range" | "fixed" {
-  const s = String(v ?? "").trim().toLowerCase();
-  if (s === "assessment_only" || s === "range" || s === "fixed") return s;
-  return "range";
+function normalizePricingPolicy(raw: any): PricingPolicySnapshot {
+  const pricing_enabled = Boolean(raw?.pricing_enabled);
+
+  const aiRaw = String(raw?.ai_mode ?? "").trim().toLowerCase();
+  const ai_mode: AiMode =
+    pricing_enabled && (aiRaw === "range" || aiRaw === "fixed" || aiRaw === "assessment_only")
+      ? (aiRaw as AiMode)
+      : pricing_enabled
+        ? "range"
+        : "assessment_only";
+
+  const pmRaw = String(raw?.pricing_model ?? "").trim();
+  const pricing_model: PricingModel | null =
+    pricing_enabled &&
+    (pmRaw === "flat_per_job" ||
+      pmRaw === "hourly_plus_materials" ||
+      pmRaw === "per_unit" ||
+      pmRaw === "packages" ||
+      pmRaw === "line_items" ||
+      pmRaw === "inspection_only" ||
+      pmRaw === "assessment_fee")
+      ? (pmRaw as PricingModel)
+      : null;
+
+  if (!pricing_enabled) return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+  return { ai_mode, pricing_enabled: true, pricing_model };
+}
+
+function coerceMode(policy: PricingPolicySnapshot): AiMode {
+  if (!policy.pricing_enabled) return "assessment_only";
+  if (policy.ai_mode === "fixed") return "fixed";
+  if (policy.ai_mode === "range") return "range";
+  return "assessment_only";
 }
 
 export function ResultsSection({
@@ -51,10 +90,13 @@ export function ResultsSection({
   // progress number (0-100) while running
   renderProgressPct: number;
 
-  // ✅ server-driven pricing behavior
-  pricingPolicy?: PricingPolicySnapshot | null;
+  // ✅ NEW: pricing policy used to render labels (assessment vs range vs fixed)
+  pricingPolicy: PricingPolicySnapshot;
 }) {
   if (!hasEstimate) return null;
+
+  const policy = normalizePricingPolicy(pricingPolicy);
+  const pricingMode = coerceMode(policy);
 
   function money(n: any) {
     const num = Number(n);
@@ -62,11 +104,8 @@ export function ResultsSection({
     return num.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
-  const estLowRaw = result?.estimate_low ?? result?.estimateLow;
-  const estHighRaw = result?.estimate_high ?? result?.estimateHigh;
-
-  const estLow = money(estLowRaw);
-  const estHigh = money(estHighRaw);
+  const estLow = money(result?.estimate_low ?? result?.estimateLow);
+  const estHigh = money(result?.estimate_high ?? result?.estimateHigh);
 
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
@@ -85,34 +124,32 @@ export function ResultsSection({
     confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
 
   const showRenderBlock = aiRenderingEnabled && renderOptIn;
+
   const pct = Math.max(0, Math.min(100, Number.isFinite(renderProgressPct) ? renderProgressPct : 0));
 
-  // ---- Pricing mode resolution (server policy wins) ----
-  const pricingEnabled = Boolean(pricingPolicy?.pricing_enabled);
-  const aiMode =
-    !pricingEnabled ? "assessment_only" : normalizeAiMode(pricingPolicy?.ai_mode ?? "range");
-
-  const isAssessment = aiMode === "assessment_only";
-  const isFixed = aiMode === "fixed";
-  const isRange = aiMode === "range";
-
-  // Big card labels + value rendering
-  const headlineLabel = isAssessment ? "ASSESSMENT" : isFixed ? "ESTIMATE" : "ESTIMATE RANGE";
-
-  let headlineValue = "We need a bit more info";
-  if (isAssessment) {
-    headlineValue = "No pricing shown";
-  } else if (estLow && estHigh) {
-    if (isFixed && estLow === estHigh) headlineValue = `$${estLow}`;
-    else headlineValue = `$${estLow} – $${estHigh}`;
-  }
-
-  const subline =
-    isAssessment
-      ? "Assessment based on your photos + notes. We’ll follow up if inspection is needed."
-      : isFixed
+  // ✅ Pre-submit + results consistency
+  const headerSubcopy =
+    pricingMode === "assessment_only"
+      ? "Quick assessment based on your photos + notes. We’ll follow up with next steps if needed."
+      : pricingMode === "fixed"
         ? "Fast estimate based on your photos + notes. Final pricing may change after inspection."
         : "Fast range based on your photos + notes. Final pricing may change after inspection.";
+
+  const headlineLabel =
+    pricingMode === "assessment_only" ? "ASSESSMENT" : pricingMode === "fixed" ? "ESTIMATE" : "ESTIMATE RANGE";
+
+  let primaryLine: string | null = null;
+  if (pricingMode === "fixed") {
+    const one = estLow || estHigh;
+    primaryLine = one ? `$${one}` : null;
+  } else if (pricingMode === "range") {
+    primaryLine = estLow && estHigh ? `$${estLow} – $${estHigh}` : null;
+  } else {
+    primaryLine = null;
+  }
+
+  const primaryFallback =
+    pricingMode === "assessment_only" ? "We’ll follow up shortly" : "We need a bit more info";
 
   return (
     <section
@@ -126,15 +163,16 @@ export function ResultsSection({
             tabIndex={-1}
             className="text-lg font-semibold text-gray-900 dark:text-gray-100 outline-none"
           >
-            Your {isAssessment ? "assessment" : "estimate"}
+            Your {pricingMode === "assessment_only" ? "assessment" : "estimate"}
           </h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{subline}</p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{headerSubcopy}</p>
         </div>
 
         {quoteLogId ? (
           <div className="shrink-0 text-[11px] font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap text-right">
             <div>Ref: {quoteLogId.slice(0, 8)}</div>
 
+            {/* ✅ Make full UUID accessible + copyable without clutter */}
             <details className="mt-1">
               <summary className="cursor-pointer select-none text-[11px] font-medium text-gray-500 dark:text-gray-400">
                 Show full ID
@@ -155,20 +193,25 @@ export function ResultsSection({
         <div className="flex flex-wrap items-center gap-2">
           {toneBadge(confidence ? `Confidence: ${confidence}` : "Confidence: unknown", confidenceTone as any)}
           {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
+          {toneBadge(
+            pricingMode === "assessment_only"
+              ? "Assessment only"
+              : pricingMode === "fixed"
+                ? "Fixed estimate"
+                : "Range estimate",
+            pricingMode === "assessment_only" ? "gray" : pricingMode === "fixed" ? "blue" : "blue"
+          )}
           {showRenderBlock ? toneBadge("Rendering requested", "blue") : null}
-          {isFixed ? toneBadge("Fixed estimate", "blue") : isRange ? toneBadge("Range estimate", "blue") : toneBadge("Assessment only", "gray")}
         </div>
 
         <div className="mt-4">
-          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">
-            {headlineLabel}
-          </div>
+          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">{headlineLabel}</div>
           <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">
-            {headlineValue}
+            {primaryLine ? primaryLine : primaryFallback}
           </div>
 
           <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-            {summary ? summary : isAssessment ? "We’ll follow up if we need any clarifications." : "We’ll follow up if we need any clarifications."}
+            {summary ? summary : "We’ll follow up if we need any clarifications."}
           </div>
         </div>
       </div>
@@ -242,6 +285,7 @@ export function ResultsSection({
             </div>
           </div>
 
+          {/* Progress bar while running */}
           {renderStatus === "running" ? (
             <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
               <div className="h-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${pct}%` }} />
