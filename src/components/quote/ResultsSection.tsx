@@ -6,6 +6,18 @@ import { toneBadge } from "./ui";
 
 type RenderStatus = "idle" | "running" | "rendered" | "failed";
 
+type PricingPolicySnapshot = {
+  ai_mode?: "assessment_only" | "range" | "fixed" | string;
+  pricing_enabled?: boolean;
+  pricing_model?: string | null;
+};
+
+function normalizeAiMode(v: any): "assessment_only" | "range" | "fixed" {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "assessment_only" || s === "range" || s === "fixed") return s;
+  return "range";
+}
+
 export function ResultsSection({
   sectionRef,
   headingRef,
@@ -19,6 +31,7 @@ export function ResultsSection({
   renderImageUrl,
   renderError,
   renderProgressPct,
+  pricingPolicy,
 }: {
   sectionRef: React.RefObject<HTMLElement | null>;
   headingRef: React.RefObject<HTMLHeadingElement | null>;
@@ -37,6 +50,9 @@ export function ResultsSection({
 
   // progress number (0-100) while running
   renderProgressPct: number;
+
+  // ✅ server-driven pricing behavior
+  pricingPolicy?: PricingPolicySnapshot | null;
 }) {
   if (!hasEstimate) return null;
 
@@ -51,20 +67,6 @@ export function ResultsSection({
 
   const estLow = money(estLowRaw);
   const estHigh = money(estHighRaw);
-
-  const lowNum = Number(estLowRaw);
-  const highNum = Number(estHighRaw);
-
-  const hasLow = estLow != null;
-  const hasHigh = estHigh != null;
-
-  // ✅ fixed-mode visual: treat low==high as a single estimate
-  const isFixed =
-    Number.isFinite(lowNum) &&
-    Number.isFinite(highNum) &&
-    lowNum > 0 &&
-    highNum > 0 &&
-    Math.round(lowNum) === Math.round(highNum);
 
   const summary = String(result?.summary ?? "").trim();
   const inspection = Boolean(result?.inspection_required ?? result?.inspectionRequired);
@@ -83,16 +85,34 @@ export function ResultsSection({
     confidence === "high" ? "green" : confidence === "medium" ? "yellow" : confidence === "low" ? "red" : "gray";
 
   const showRenderBlock = aiRenderingEnabled && renderOptIn;
-
   const pct = Math.max(0, Math.min(100, Number.isFinite(renderProgressPct) ? renderProgressPct : 0));
 
-  const estimateLabel = isFixed ? "ESTIMATE" : "ESTIMATE RANGE";
-  const estimateDisplay =
-    isFixed && hasLow
-      ? `$${estLow}`
-      : hasLow && hasHigh
-        ? `$${estLow} – $${estHigh}`
-        : "We need a bit more info";
+  // ---- Pricing mode resolution (server policy wins) ----
+  const pricingEnabled = Boolean(pricingPolicy?.pricing_enabled);
+  const aiMode =
+    !pricingEnabled ? "assessment_only" : normalizeAiMode(pricingPolicy?.ai_mode ?? "range");
+
+  const isAssessment = aiMode === "assessment_only";
+  const isFixed = aiMode === "fixed";
+  const isRange = aiMode === "range";
+
+  // Big card labels + value rendering
+  const headlineLabel = isAssessment ? "ASSESSMENT" : isFixed ? "ESTIMATE" : "ESTIMATE RANGE";
+
+  let headlineValue = "We need a bit more info";
+  if (isAssessment) {
+    headlineValue = "No pricing shown";
+  } else if (estLow && estHigh) {
+    if (isFixed && estLow === estHigh) headlineValue = `$${estLow}`;
+    else headlineValue = `$${estLow} – $${estHigh}`;
+  }
+
+  const subline =
+    isAssessment
+      ? "Assessment based on your photos + notes. We’ll follow up if inspection is needed."
+      : isFixed
+        ? "Fast estimate based on your photos + notes. Final pricing may change after inspection."
+        : "Fast range based on your photos + notes. Final pricing may change after inspection.";
 
   return (
     <section
@@ -106,11 +126,9 @@ export function ResultsSection({
             tabIndex={-1}
             className="text-lg font-semibold text-gray-900 dark:text-gray-100 outline-none"
           >
-            Your estimate
+            Your {isAssessment ? "assessment" : "estimate"}
           </h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Fast estimate based on your photos + notes. Final pricing may change after inspection.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">{subline}</p>
         </div>
 
         {quoteLogId ? (
@@ -123,7 +141,9 @@ export function ResultsSection({
               </summary>
               <div className="mt-2 rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-[10px] text-gray-500 dark:text-gray-400">quoteLogId</div>
-                <div className="mt-1 font-mono text-[11px] text-gray-800 dark:text-gray-200 break-all">{quoteLogId}</div>
+                <div className="mt-1 font-mono text-[11px] text-gray-800 dark:text-gray-200 break-all">
+                  {quoteLogId}
+                </div>
               </div>
             </details>
           </div>
@@ -136,14 +156,19 @@ export function ResultsSection({
           {toneBadge(confidence ? `Confidence: ${confidence}` : "Confidence: unknown", confidenceTone as any)}
           {inspection ? toneBadge("Inspection recommended", "yellow") : toneBadge("No inspection required", "green")}
           {showRenderBlock ? toneBadge("Rendering requested", "blue") : null}
+          {isFixed ? toneBadge("Fixed estimate", "blue") : isRange ? toneBadge("Range estimate", "blue") : toneBadge("Assessment only", "gray")}
         </div>
 
         <div className="mt-4">
-          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">{estimateLabel}</div>
-          <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">{estimateDisplay}</div>
+          <div className="text-[11px] font-semibold tracking-wide text-gray-600 dark:text-gray-300">
+            {headlineLabel}
+          </div>
+          <div className="mt-1 text-3xl font-semibold text-gray-900 dark:text-gray-100">
+            {headlineValue}
+          </div>
 
           <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-            {summary ? summary : "We’ll follow up if we need any clarifications."}
+            {summary ? summary : isAssessment ? "We’ll follow up if we need any clarifications." : "We’ll follow up if we need any clarifications."}
           </div>
         </div>
       </div>
