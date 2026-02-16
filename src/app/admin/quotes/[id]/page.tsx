@@ -224,6 +224,86 @@ function fmtNum(v: any) {
   return String(Math.round(n));
 }
 
+/* -------------------- pricing policy helpers (admin view) -------------------- */
+type AiMode = "assessment_only" | "range" | "fixed";
+type PricingModel =
+  | "flat_per_job"
+  | "hourly_plus_materials"
+  | "per_unit"
+  | "packages"
+  | "line_items"
+  | "inspection_only"
+  | "assessment_fee";
+
+type PricingPolicySnapshot = {
+  ai_mode: AiMode;
+  pricing_enabled: boolean;
+  pricing_model: PricingModel | null;
+};
+
+function normalizePricingPolicy(raw: any): PricingPolicySnapshot {
+  const pricing_enabled = Boolean(raw?.pricing_enabled);
+
+  const aiRaw = String(raw?.ai_mode ?? "").trim().toLowerCase();
+  const ai_mode: AiMode =
+    pricing_enabled && (aiRaw === "range" || aiRaw === "fixed" || aiRaw === "assessment_only")
+      ? (aiRaw as AiMode)
+      : pricing_enabled
+        ? "range"
+        : "assessment_only";
+
+  const pmRaw = String(raw?.pricing_model ?? "").trim();
+  const pricing_model: PricingModel | null =
+    pricing_enabled &&
+    (pmRaw === "flat_per_job" ||
+      pmRaw === "hourly_plus_materials" ||
+      pmRaw === "per_unit" ||
+      pmRaw === "packages" ||
+      pmRaw === "line_items" ||
+      pmRaw === "inspection_only" ||
+      pmRaw === "assessment_fee")
+      ? (pmRaw as PricingModel)
+      : null;
+
+  if (!pricing_enabled) return { ai_mode: "assessment_only", pricing_enabled: false, pricing_model: null };
+  return { ai_mode, pricing_enabled: true, pricing_model };
+}
+
+function coerceMode(policy: PricingPolicySnapshot): AiMode {
+  if (!policy.pricing_enabled) return "assessment_only";
+  if (policy.ai_mode === "fixed") return "fixed";
+  if (policy.ai_mode === "range") return "range";
+  return "assessment_only";
+}
+
+function formatEstimateForPolicy(args: {
+  estLow: number | null;
+  estHigh: number | null;
+  policy: PricingPolicySnapshot;
+}): { text: string | null; tone: "green" | "gray"; label: string } {
+  const mode = coerceMode(args.policy);
+
+  if (mode === "assessment_only") {
+    return { text: null, tone: "gray", label: "Assessment only" };
+  }
+
+  const low = args.estLow;
+  const high = args.estHigh;
+
+  if (mode === "fixed") {
+    const one = low != null ? low : high != null ? high : null;
+    return { text: one != null ? formatUSD(one) : null, tone: "green", label: "Fixed estimate" };
+  }
+
+  // range
+  if (low != null && high != null) {
+    return { text: `${formatUSD(low)} – ${formatUSD(high)}`, tone: "green", label: "Range estimate" };
+  }
+  if (low != null) return { text: formatUSD(low), tone: "green", label: "Range estimate" };
+  if (high != null) return { text: formatUSD(high), tone: "green", label: "Range estimate" };
+  return { text: null, tone: "green", label: "Range estimate" };
+}
+
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
   searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
@@ -373,7 +453,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const stageLabel =
     stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  // ---- NEW: normalize AI output (supports old and new shapes) ----
+  // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
 
   // "aiAssessment" is the bucket we render from; with the deterministic engine we store fields at top level.
@@ -385,8 +465,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     null;
 
   // Prefer new deterministic fields first
-  const estLow = safeMoney(aiAssessment?.estimate_low ?? aiAssessment?.estimateLow ?? aiAssessment?.estimate?.low ?? aiAssessment?.estimate?.estimate_low);
-  const estHigh = safeMoney(aiAssessment?.estimate_high ?? aiAssessment?.estimateHigh ?? aiAssessment?.estimate?.high ?? aiAssessment?.estimate?.estimate_high);
+  const estLow = safeMoney(
+    aiAssessment?.estimate_low ??
+      aiAssessment?.estimateLow ??
+      aiAssessment?.estimate?.low ??
+      aiAssessment?.estimate?.estimate_low
+  );
+  const estHigh = safeMoney(
+    aiAssessment?.estimate_high ??
+      aiAssessment?.estimateHigh ??
+      aiAssessment?.estimate?.high ??
+      aiAssessment?.estimate?.estimate_high
+  );
 
   const confidence = aiAssessment?.confidence ?? null;
 
@@ -429,6 +519,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     null;
 
   const llmKeySource = safeTrim(inputAny?.llmKeySource) || null;
+
+  const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
+  const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
   async function setStage(formData: FormData) {
     "use server";
@@ -612,7 +705,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm font-semibold">AI assessment</div>
               <div className="flex flex-wrap items-center gap-2">
-                {estLow != null && estHigh != null ? chip(`${formatUSD(estLow)} – ${formatUSD(estHigh)}`, "green") : null}
+                {/* ✅ policy-aware: fixed vs range vs assessment */}
+                {estimateDisplay.text ? chip(estimateDisplay.text, estimateDisplay.tone) : null}
+                {chip(estimateDisplay.label, estimateDisplay.label === "Assessment only" ? "gray" : "blue")}
                 {confidence ? chip(`Confidence: ${String(confidence)}`, "gray") : null}
                 {inspectionRequired === true ? chip("Inspection required", "yellow") : null}
               </div>
