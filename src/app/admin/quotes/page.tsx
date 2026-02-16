@@ -182,6 +182,9 @@ function safeParseMaybeJson(v: any) {
   return { raw: v };
 }
 
+/**
+ * Presentable AI bits (legacy tolerant)
+ */
 function normalizeAiOutput(outputRaw: any) {
   const root = safeParseMaybeJson(outputRaw) ?? null;
   const assessment = root?.assessment && typeof root.assessment === "object" ? root.assessment : null;
@@ -209,6 +212,9 @@ function normalizeAiOutput(outputRaw: any) {
           : null,
     estimateLow,
     estimateHigh,
+
+    // ✅ also return snapshot if present
+    aiSnapshot: root?.ai_snapshot && typeof root.ai_snapshot === "object" ? root.ai_snapshot : null,
   };
 }
 
@@ -266,129 +272,34 @@ function filterPill(opts: { href: string; label: string; active: boolean }) {
   );
 }
 
-/* ------------------------- pricing display helpers ------------------------- */
-type PricingPolicyLite = {
-  pricing_enabled: boolean;
-  ai_mode: "assessment_only" | "range" | "fixed";
-  pricing_model: string | null;
-};
-
-function safeTrim(v: any) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
-function normalizePricingPolicyLite(v: any): PricingPolicyLite | null {
-  if (!v || typeof v !== "object") return null;
-
-  const pricing_enabled = Boolean((v as any).pricing_enabled);
-  const ai_mode_raw = safeTrim((v as any).ai_mode) || "assessment_only";
-  const ai_mode =
-    ai_mode_raw === "assessment_only" || ai_mode_raw === "range" || ai_mode_raw === "fixed"
-      ? (ai_mode_raw as PricingPolicyLite["ai_mode"])
-      : "assessment_only";
-
-  const pricing_model = safeTrim((v as any).pricing_model) || null;
-
-  // enforce your rule locally too: disabled => assessment_only + null model
-  if (!pricing_enabled) return { pricing_enabled: false, ai_mode: "assessment_only", pricing_model: null };
-
-  return { pricing_enabled: true, ai_mode, pricing_model };
-}
-
-function humanizePricingModel(m: string | null) {
-  const s = safeTrim(m);
-  if (!s) return null;
-
-  // keep it “engineer readable” but not ugly
-  const map: Record<string, string> = {
-    flat_per_job: "Flat",
-    hourly_plus_materials: "Hourly + Materials",
-    per_unit: "Per-unit",
-    packages: "Packages",
-    line_items: "Line items",
-    inspection_only: "Inspection only",
-    assessment_fee: "Assessment fee",
-  };
-
-  return map[s] ?? s.replace(/_/g, " ");
-}
-
-function humanizeAiMode(mode: PricingPolicyLite["ai_mode"]) {
-  if (mode === "assessment_only") return "Assessment";
-  if (mode === "fixed") return "Fixed";
-  return "Range";
-}
-
-function extractPricingPolicyFromRow(args: { input: any; output: any }): PricingPolicyLite | null {
-  const { input, output } = args;
-
-  // 0) deterministic basis if you add it later
-  const basis = output?.pricing_basis && typeof output.pricing_basis === "object" ? output.pricing_basis : null;
-  const basisNorm = normalizePricingPolicyLite(basis);
-  if (basisNorm) return basisNorm;
-
-  // 1) snapshot in quote log input (phase1 freeze)
-  const snap = input?.pricing_policy_snapshot && typeof input.pricing_policy_snapshot === "object" ? input.pricing_policy_snapshot : null;
-  const snapNorm = normalizePricingPolicyLite(snap);
-  if (snapNorm) return snapNorm;
-
-  // 2) legacy separate fields (still in input)
-  const legacy = {
-    pricing_enabled: input?.pricing_enabled_snapshot,
-    ai_mode: input?.ai_mode_snapshot,
-    pricing_model: input?.pricing_model_snapshot,
-  };
-  const legacyNorm = normalizePricingPolicyLite(legacy);
-  if (legacyNorm) return legacyNorm;
-
-  // 3) ai_snapshot in output (newer path)
-  const policy = output?.ai_snapshot?.pricing?.policy ?? null;
-  const policyNorm = normalizePricingPolicyLite(policy);
-  if (policyNorm) return policyNorm;
-
-  return null;
-}
-
-function estimateDisplay(args: {
-  policy: PricingPolicyLite | null;
-  estLow: number | null;
-  estHigh: number | null;
-}) {
-  const { policy, estLow, estHigh } = args;
-
-  // No policy? fall back to showing whatever we have.
-  if (!policy) {
-    if (estLow == null && estHigh == null) return { kind: "none" as const, text: "No estimate yet" };
-    return { kind: "money" as const, text: `${money(estLow)} – ${money(estHigh)}` };
-  }
-
-  if (!policy.pricing_enabled || policy.ai_mode === "assessment_only") {
-    return { kind: "policy" as const, text: "Assessment only" };
-  }
-
-  if (policy.ai_mode === "fixed") {
-    // if we have a clean single number, show it as a single value
-    if (estLow != null && estHigh != null) {
-      const a = Math.round(estLow);
-      const b = Math.round(estHigh);
-      if (Number.isFinite(a) && Number.isFinite(b) && a === b) return { kind: "money" as const, text: `${money(a)}` };
-    }
-    // otherwise show range fallback
-    if (estLow == null && estHigh == null) return { kind: "none" as const, text: "Estimate pending" };
-    return { kind: "money" as const, text: `${money(estLow)} – ${money(estHigh)}` };
-  }
-
-  // range mode
-  if (estLow == null && estHigh == null) return { kind: "none" as const, text: "Estimate pending" };
-  return { kind: "money" as const, text: `${money(estLow)} – ${money(estHigh)}` };
-}
-
 type PageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
 };
 
 type ViewMode = "all" | "unread" | "new" | "in_progress" | "custom";
+
+/**
+ * ✅ Pricing badge should come from the stored ai_snapshot policy,
+ * not inferred from estimate numbers (assessment-only can still be “enabled”).
+ */
+function pricingBadgeFromSnapshot(aiSnapshot: any) {
+  const pol = aiSnapshot?.pricing?.policy ?? null;
+  const enabled = pol?.pricing_enabled;
+  const mode = String(pol?.ai_mode ?? "").trim();
+
+  if (enabled === false) return chip("Pricing: Off", "gray");
+
+  // enabled could be true, or missing (older data)
+  if (enabled === true) {
+    if (mode === "assessment_only") return chip("Pricing: Assessment only", "gray");
+    if (mode === "fixed") return chip("Pricing: Fixed", "blue");
+    if (mode === "range") return chip("Pricing: Range", "blue");
+    return chip("Pricing: On", "blue");
+  }
+
+  // unknown (older rows)
+  return null;
+}
 
 export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const { userId } = await auth();
@@ -612,8 +523,8 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
           <h1 className="text-2xl font-semibold">Quotes</h1>
 
           <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-            {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page {safePage}{" "}
-            / {totalPages}
+            {totalCount} total{hasFilters ? " (filtered)" : ""} · {unreadCountOnPage} unread on this page · Page {safePage} /{" "}
+            {totalPages}
           </p>
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -701,10 +612,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
               const st = normalizeStage(r.stage);
               const unread = !r.isRead;
 
-              const outputObj = safeParseMaybeJson((r as any).output);
-              const ai = normalizeAiOutput(outputObj);
-              const policy = extractPricingPolicyFromRow({ input: r.input, output: outputObj });
-
+              const ai = normalizeAiOutput((r as any).output);
               const estLow = asNumber(ai.estimateLow);
               const estHigh = asNumber(ai.estimateHigh);
 
@@ -724,21 +632,8 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
               const cancelHref = `/admin/quotes` + qs({ ...filterParams, page: safePage, pageSize }) + `#${anchor}`;
 
-              const estDisp = estimateDisplay({ policy, estLow, estHigh });
-
-              const pricingBadge = (() => {
-                if (!policy) return null;
-
-                if (!policy.pricing_enabled) return chip("Pricing: Off", "gray");
-
-                const modeLabel = humanizeAiMode(policy.ai_mode);
-                const modelLabel = humanizePricingModel(policy.pricing_model);
-
-                // subtle but informative
-                const label = modelLabel ? `Pricing: ${modeLabel} · ${modelLabel}` : `Pricing: ${modeLabel}`;
-                const tone = policy.ai_mode === "assessment_only" ? "gray" : "blue";
-                return chip(label, tone as any);
-              })();
+              // ✅ Pricing badge from snapshot (truth)
+              const pricingBadge = pricingBadgeFromSnapshot(ai.aiSnapshot);
 
               return (
                 <li key={r.id} id={anchor} className={cn("p-5 scroll-mt-24", unread ? "bg-yellow-50/60 dark:bg-yellow-950/10" : "")}>
@@ -765,6 +660,8 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         {/* AI badges */}
                         {ai.confidence ? chip(`Confidence: ${String(ai.confidence)}`, confTone as any) : null}
                         {ai.inspectionRequired != null ? chip(ai.inspectionRequired ? "Inspection" : "No inspection", inspTone as any) : null}
+
+                        {/* ✅ Pricing badge from ai_snapshot */}
                         {pricingBadge}
                       </div>
 
@@ -781,12 +678,12 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                       {/* Presentable AI preview */}
                       <div className="mt-3 grid gap-2">
                         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                          {estDisp.kind === "none" ? (
-                            <span className="text-gray-500 dark:text-gray-400">{estDisp.text}</span>
-                          ) : estDisp.kind === "policy" ? (
-                            <span className="text-gray-700 dark:text-gray-200">{estDisp.text}</span>
+                          {estLow == null && estHigh == null ? (
+                            <span className="text-gray-500 dark:text-gray-400">No estimate yet</span>
                           ) : (
-                            <>{estDisp.text}</>
+                            <>
+                              {money(estLow)} – {money(estHigh)}
+                            </>
                           )}
                         </div>
 
