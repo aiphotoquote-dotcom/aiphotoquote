@@ -18,6 +18,14 @@ function normalizeTenantSlug(v: any): string {
   return String(v ?? "").trim();
 }
 
+type AiMode = "assessment_only" | "range" | "fixed";
+
+function normalizeAiMode(v: any): AiMode {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "fixed" || s === "range" || s === "assessment_only") return s as AiMode;
+  return "assessment_only";
+}
+
 export default async function Page(props: PageProps) {
   const p = await props.params;
   const tenantSlug = normalizeTenantSlug(p?.tenantSlug);
@@ -29,9 +37,13 @@ export default async function Page(props: PageProps) {
   let industry_key: string | null = null;
 
   // ✅ Pull BOTH canonical + legacy so we don’t “accidentally disable” rendering
-  let ai_rendering_enabled: boolean | null = null; // canonical
+  let ai_rendering_enabled: boolean | null = null; // canonical (legacy naming you already have in DB)
   let rendering_enabled: boolean | null = null; // legacy
   let rendering_customer_opt_in_required: boolean | null = null; // used later (UI)
+
+  // ✅ Pricing + AI mode (for correct customer-facing language)
+  let pricing_enabled: boolean | null = null;
+  let ai_mode: AiMode = "assessment_only";
 
   let brand_logo_url: string | null = null;
   let business_name: string | null = null;
@@ -63,9 +75,14 @@ export default async function Page(props: PageProps) {
       const settingsRes = await db.execute(sql`
         select
           "industry_key",
+
+          "pricing_enabled",
+          "ai_mode",
+
           "ai_rendering_enabled",
           "rendering_enabled",
           "rendering_customer_opt_in_required",
+
           "brand_logo_url",
           "business_name"
         from "tenant_settings"
@@ -75,14 +92,22 @@ export default async function Page(props: PageProps) {
 
       const settings = firstRow<{
         industry_key: string | null;
+
+        pricing_enabled: boolean | null;
+        ai_mode: string | null;
+
         ai_rendering_enabled: boolean | null;
         rendering_enabled: boolean | null;
         rendering_customer_opt_in_required: boolean | null;
+
         brand_logo_url: string | null;
         business_name: string | null;
       }>(settingsRes);
 
       industry_key = settings?.industry_key ?? null;
+
+      pricing_enabled = typeof settings?.pricing_enabled === "boolean" ? settings.pricing_enabled : null;
+      ai_mode = normalizeAiMode(settings?.ai_mode);
 
       ai_rendering_enabled =
         typeof settings?.ai_rendering_enabled === "boolean" ? settings.ai_rendering_enabled : null;
@@ -100,7 +125,7 @@ export default async function Page(props: PageProps) {
 
       if (industry_key) displayIndustry = industry_key;
 
-      // ✅ Effective: canonical wins, otherwise legacy wins
+      // ✅ Effective rendering: canonical wins, otherwise legacy wins
       aiRenderingEnabled =
         ai_rendering_enabled === true ? true : rendering_enabled === true ? true : false;
 
@@ -114,6 +139,36 @@ export default async function Page(props: PageProps) {
   }
 
   const logoUrl = (brand_logo_url ?? "").trim() || null;
+
+  // -------------------------
+  // Customer-facing language selection
+  // -------------------------
+  const pricingOn = pricing_enabled === true;
+  const effectiveAiMode: AiMode = pricingOn ? ai_mode : "assessment_only";
+
+  const headlineNoun =
+    effectiveAiMode === "assessment_only" ? "assessment" : effectiveAiMode === "fixed" ? "estimate" : "estimate range";
+
+  const heroSentence =
+    effectiveAiMode === "assessment_only"
+      ? "Get a fast assessment by uploading a few clear photos. No phone calls required."
+      : effectiveAiMode === "fixed"
+        ? "Get a fast estimate by uploading a few clear photos. No phone calls required."
+        : "Get a fast estimate range by uploading a few clear photos. No phone calls required.";
+
+  const cardSubtitle =
+    effectiveAiMode === "assessment_only"
+      ? "Upload photos and add a quick note. We’ll return an assessment."
+      : effectiveAiMode === "fixed"
+        ? "Upload photos and add a quick note. We’ll return an estimate."
+        : "Upload photos and add a quick note. We’ll return an estimate range.";
+
+  const bulletNoObligation =
+    effectiveAiMode === "assessment_only"
+      ? "No obligation. This is an assessment — final pricing depends on inspection and scope."
+      : effectiveAiMode === "fixed"
+        ? "No obligation. This is an estimate — final pricing depends on inspection and scope."
+        : "No obligation. This is an estimate range — final pricing depends on inspection and scope.";
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
@@ -138,30 +193,26 @@ export default async function Page(props: PageProps) {
 
             <h1 className="mt-4 text-4xl font-semibold tracking-tight">{displayTenantName}</h1>
 
-            <p className="mt-3 text-base text-gray-700 dark:text-gray-200">
-              Get a fast estimate range by uploading a few clear photos. No phone calls required.
-            </p>
+            <p className="mt-3 text-base text-gray-700 dark:text-gray-200">{heroSentence}</p>
 
             <div className="mt-6 space-y-3 text-sm text-gray-800 dark:text-gray-200">
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">No obligation.</span> This is an estimate range — final
-                  pricing depends on inspection and scope.
+                  <span className="font-semibold">No obligation.</span> {bulletNoObligation}
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include
-                  close-ups + a full view.
+                  <span className="font-semibold">Best results:</span> 2–6 photos, good lighting, include close-ups + a full view.
                 </p>
               </div>
               <div className="flex gap-3">
                 <div className="mt-1 h-2 w-2 rounded-full bg-black dark:bg-white" />
                 <p>
-                  Tailored for <span className="font-semibold">{displayIndustry}</span> quotes. We’ll follow
-                  up if anything needs clarification.
+                  Tailored for <span className="font-semibold">{displayIndustry}</span> {headlineNoun}s. We’ll follow up if anything needs
+                  clarification.
                 </p>
               </div>
             </div>
@@ -172,9 +223,7 @@ export default async function Page(props: PageProps) {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-2xl font-semibold">Get a Photo Quote</h2>
-                  <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-                    Upload photos and add a quick note. We’ll return an estimate range.
-                  </p>
+                  <p className="mt-2 text-sm text-gray-700 dark:text-gray-200">{cardSubtitle}</p>
                 </div>
 
                 <div className="hidden md:flex flex-col items-end text-xs text-gray-600 dark:text-gray-300">
