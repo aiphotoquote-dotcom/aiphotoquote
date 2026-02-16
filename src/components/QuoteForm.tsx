@@ -63,12 +63,144 @@ function extractServerAi(json: any): ServerAi | null {
       typeof ai.renderOptInRequired === "boolean"
         ? ai.renderOptInRequired
         : typeof ai.render_opt_in_required === "boolean"
-        ? ai.render_opt_in_required
-        : undefined,
+          ? ai.render_opt_in_required
+          : undefined,
 
     tenantStyleKey: typeof ai.tenantStyleKey === "string" ? ai.tenantStyleKey : undefined,
     tenantRenderNotes: typeof ai.tenantRenderNotes === "string" ? ai.tenantRenderNotes : undefined,
   };
+}
+
+function asFiniteNumber(v: any): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v.replace(/[^0-9.\-]/g, "")) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * ✅ UI normalize:
+ * If estimate low/high are present and equal (e.g. $5199–$5199), treat as FIXED by nulling high.
+ * This is intentionally conservative and only changes the UI object we store in state.
+ */
+function normalizeResultForUi(raw: any): any {
+  if (!raw || typeof raw !== "object") return raw;
+
+  // shallow clone root first
+  const root = Array.isArray(raw) ? [...raw] : { ...raw };
+
+  // helper to "fixify" an estimate object
+  const fixEstimateObj = (obj: any): any => {
+    if (!obj || typeof obj !== "object") return obj;
+
+    const est = { ...obj };
+    const low = asFiniteNumber(est.low);
+    const high = asFiniteNumber(est.high);
+
+    // Only if both present and equal -> fixed
+    if (low != null && high != null && low === high) {
+      est.high = null;
+      // optional hint for any future UI logic (harmless if unused)
+      (est as any).__ui_mode = "fixed";
+      (est as any).__ui_value = low;
+    }
+
+    return est;
+  };
+
+  // Try common paths WITHOUT guessing component internals
+  // - result.estimate
+  // - result.output.estimate
+  // - result.assessment.estimate
+  // - result.output.assessment.estimate
+  // - result.output.output.estimate (some wrappers)
+  const patchPath = (path: string[]) => {
+    let cur: any = root;
+    for (let i = 0; i < path.length - 1; i++) {
+      const k = path[i];
+      if (!cur || typeof cur !== "object") return;
+      cur = cur[k];
+    }
+    const last = path[path.length - 1];
+    if (!cur || typeof cur !== "object") return;
+    if (!cur[last] || typeof cur[last] !== "object") return;
+
+    // clone chain minimally
+    // rebuild the chain from root along the path so we don't mutate original references
+    const rebuild = (obj: any, idx: number): any => {
+      if (idx === path.length - 1) {
+        // obj is parent of estimate
+        return { ...obj, [last]: fixEstimateObj(obj[last]) };
+      }
+      const key = path[idx];
+      if (!obj || typeof obj !== "object") return obj;
+
+      const child = obj[key];
+      const nextChild = rebuild(child, idx + 1);
+
+      // only clone if changed
+      if (nextChild === child) return obj;
+      return { ...obj, [key]: nextChild };
+    };
+
+    // apply rebuild back onto root
+    const nextRoot = rebuild(root, 0);
+    // In normal objects, rebuild returns a cloned root when modifications occur
+    // Update root reference
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    (root as any) = nextRoot;
+  };
+
+  // NOTE: because root is declared as const above, patchPath rebuild uses local root shadowing.
+  // We'll do explicit patching with a simpler approach below that does not rely on reassigning const.
+
+  const cloneAndPatch = (obj: any, path: string[]): any => {
+    // returns new root if patched, else original
+    const walk = (node: any, depth: number): any => {
+      if (!node || typeof node !== "object") return node;
+
+      if (depth === path.length - 1) {
+        const key = path[depth];
+        if (!node[key] || typeof node[key] !== "object") return node;
+        const patched = fixEstimateObj(node[key]);
+        if (patched === node[key]) return node;
+        return { ...node, [key]: patched };
+      }
+
+      const key = path[depth];
+      const child = node[key];
+      const nextChild = walk(child, depth + 1);
+      if (nextChild === child) return node;
+      return { ...node, [key]: nextChild };
+    };
+
+    const out = walk(obj, 0);
+    return out;
+  };
+
+  // Try multiple known nestings
+  const paths: string[][] = [
+    ["estimate"],
+    ["output", "estimate"],
+    ["assessment", "estimate"],
+    ["output", "assessment", "estimate"],
+    ["output", "output", "estimate"],
+    ["output", "output", "assessment", "estimate"],
+  ];
+
+  let next = root;
+  for (const p of paths) {
+    next = cloneAndPatch(next, p);
+  }
+
+  // Also handle snake_case variants if present
+  const snakePaths: string[][] = [
+    ["output", "estimate_range"], // if someone stores that way
+    ["assessment", "estimate_range"],
+  ];
+  for (const p of snakePaths) {
+    next = cloneAndPatch(next, p);
+  }
+
+  return next;
 }
 
 export default function QuoteForm({
@@ -601,18 +733,20 @@ export default function QuoteForm({
       const qsFromQaObj: string[] = Array.isArray(json?.qa?.questions) ? json.qa.questions : [];
       const qsMerged = (qsFromTop.length ? qsFromTop : qsFromQaObj).map((x: any) => String(x)).filter(Boolean);
 
+      const outForUi = normalizeResultForUi(json?.output ?? json);
+
       if (needsQaFlag && qsMerged.length) {
         setNeedsQa(true);
         setQaQuestions(qsMerged);
         setQaAnswers(qsMerged.map(() => ""));
-        setResult(json?.output ?? json);
+        setResult(outForUi);
         return;
       }
 
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
-      setResult(json?.output ?? json);
+      setResult(outForUi);
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
     } finally {
@@ -681,7 +815,9 @@ export default function QuoteForm({
       setNeedsQa(false);
       setQaQuestions([]);
       setQaAnswers([]);
-      setResult(json?.output ?? json);
+
+      const outForUi = normalizeResultForUi(json?.output ?? json);
+      setResult(outForUi);
     } catch (e: any) {
       setError(e?.message ?? "Something went wrong.");
     } finally {
