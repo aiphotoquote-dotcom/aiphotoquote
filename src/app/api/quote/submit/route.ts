@@ -304,10 +304,7 @@ type DebugFn = (stage: string, data?: Record<string, any>) => void;
  * - fixed => high == low
  * - range => as-is
  */
-function applyAiModeToEstimates(
-  policy: PricingPolicySnapshot,
-  estimates: { estimate_low: number; estimate_high: number }
-) {
+function applyAiModeToEstimates(policy: PricingPolicySnapshot, estimates: { estimate_low: number; estimate_high: number }) {
   const p = normalizePricingPolicy(policy);
 
   if (!p.pricing_enabled || p.ai_mode === "assessment_only") {
@@ -490,7 +487,12 @@ function isPlatformKeyAllowedByPlan(args: ResolveKeyPolicyArgs) {
 }
 
 /**
- * Resolve OpenAI client (tenant key preferred; platform only for tier0 or tier1/2 grace)
+ * Resolve OpenAI client:
+ * - Prefer TENANT KEY whenever it exists (all paid tiers, tier0 too)
+ * - Use PLATFORM KEY only when:
+ *   - tier0 (always allowed; token-limited elsewhere)
+ *   - tier1/tier2 AND grace remaining (consumeGrace on phase1 only)
+ * - Phase2 must honor the frozen key source from the quote log when present
  */
 async function resolveOpenAiClient(args: {
   tenantId: string;
@@ -501,15 +503,7 @@ async function resolveOpenAiClient(args: {
   activationGraceUsed: number | null;
   debug?: DebugFn;
 }): Promise<{ openai: OpenAI; keySource: KeySource }> {
-  const {
-    tenantId,
-    consumeGrace,
-    forceKeySource,
-    planTier,
-    activationGraceCredits,
-    activationGraceUsed,
-    debug,
-  } = args;
+  const { tenantId, consumeGrace, forceKeySource, planTier, activationGraceCredits, activationGraceUsed, debug } = args;
 
   debug?.("resolveOpenAiClient.start", {
     tenantId,
@@ -520,7 +514,7 @@ async function resolveOpenAiClient(args: {
     activationGraceUsed: activationGraceUsed ?? null,
   });
 
-  // Pre-check for tenant secret (cheap)
+  // 1) Look for tenant key (cheap + deterministic)
   const secretRow = await db
     .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
     .from(tenantSecrets)
@@ -531,7 +525,7 @@ async function resolveOpenAiClient(args: {
   const hasTenantSecret = Boolean(secretRow?.openaiKeyEnc);
   debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret });
 
-  // If we are forced to tenant (phase2 snapshot), enforce it strictly.
+  // 2) If forced to tenant (phase2 snapshot), enforce strictly.
   if (forceKeySource === "tenant") {
     if (!secretRow?.openaiKeyEnc) {
       const e: any = new Error("MISSING_OPENAI_KEY");
@@ -543,19 +537,18 @@ async function resolveOpenAiClient(args: {
     return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
   }
 
-  // If tenant key exists and we're not forced to platform, always use tenant key.
+  // 3) If we have a tenant key and we're not forced to platform, always use it.
   if (hasTenantSecret && forceKeySource !== "platform_grace") {
     const openaiKey = decryptSecret(secretRow!.openaiKeyEnc);
     debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
     return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
   }
 
-  // From here on: tenant key missing OR forced platform.
-  // Phase2 forced platform is allowed (frozen), but must have platform key present.
-  // Phase1 platform must be allowed by plan/grace.
-  const platformAllowed = isPlatformKeyAllowedByPlan({ planTier, activationGraceCredits, activationGraceUsed });
+  // 4) From here on: either tenant key missing OR forced to platform.
+  const platformAllowedByPlan = isPlatformKeyAllowedByPlan({ planTier, activationGraceCredits, activationGraceUsed });
 
-  if (!platformAllowed && forceKeySource !== "platform_grace") {
+  // If NOT forced platform and platform not allowed, the only valid outcome is "missing tenant key"
+  if (forceKeySource !== "platform_grace" && !platformAllowedByPlan) {
     const e: any = new Error("MISSING_OPENAI_KEY");
     e.code = "MISSING_OPENAI_KEY";
     throw e;
@@ -570,13 +563,19 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
-  // Phase 2 finalize: do NOT consume; honor phase1 snapshot
+  // Phase2 finalize: never consume (honor the frozen phase1 decision)
   if (!consumeGrace) {
     debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // Phase1 consume only when using platform
+  // Tier0: always allowed to use platform key, and we do NOT consume grace counters.
+  if (isTier0(planTier)) {
+    debug?.("resolveOpenAiClient.platformGrace.tier0", { keySource: "platform_grace" });
+    return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
+  }
+
+  // Tier1/2: consume grace when using platform key on phase1.
   const updated = await db
     .update(tenantSettings)
     .set({
@@ -602,10 +601,7 @@ async function resolveOpenAiClient(args: {
     activation_grace_credits: row?.activation_grace_credits ?? null,
   });
 
-  // For tier0: you said they can always use platform key (token-limited elsewhere).
-  // tier0 might not have grace credits configured; allow platform use without consuming.
-  // If update returned nothing, only treat as hard failure for tier1/2 grace tenants.
-  if (!row && !isTier0(planTier)) {
+  if (!row) {
     const e: any = new Error("TRIAL_EXHAUSTED");
     e.code = "TRIAL_EXHAUSTED";
     e.status = 402;
@@ -703,7 +699,9 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
+  const configured = Boolean(
+    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
+  );
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -870,6 +868,7 @@ async function generateEstimate(args: {
 }) {
   const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
 
+  // ✅ YES: we include the Q&A in the final estimator prompt (when present)
   const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
 
   const userText = [
@@ -917,16 +916,7 @@ async function generateEstimate(args: {
             assumptions: { type: "array", items: { type: "string" } },
             questions: { type: "array", items: { type: "string" } },
           },
-          required: [
-            "confidence",
-            "inspection_required",
-            "estimate_low",
-            "estimate_high",
-            "summary",
-            "visible_scope",
-            "assumptions",
-            "questions",
-          ],
+          required: ["confidence", "inspection_required", "estimate_low", "estimate_high", "summary", "visible_scope", "assumptions", "questions"],
         },
       },
     } as any,
@@ -1047,7 +1037,12 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MAINTENANCE",
+          message: pc.maintenanceMessage || "Service temporarily unavailable.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 503 }
       );
     }
@@ -1078,9 +1073,10 @@ export async function POST(req: Request) {
       isPhase2,
       quoteLogId: parsed.data.quoteLogId ?? null,
       qaAnswersLen: parsed.data.qaAnswers?.length ?? 0,
+      renderOptInFromReq: typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : null,
     });
 
-    // Settings
+    // Settings (also used for key policy)
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -1169,6 +1165,7 @@ export async function POST(req: Request) {
         hasPricingPolicy: Boolean(pricingPolicy),
         hasPricingConfig: Boolean(pricingConfigSnap),
         hasPricingRules: Boolean(pricingRulesSnap),
+        renderOptInFromLog: Boolean(inputAny?.render_opt_in),
       });
     } else {
       industryKeyForQuote = tenantIndustryKey;
@@ -1239,6 +1236,7 @@ export async function POST(req: Request) {
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
+      renderCustomerOptInRequired: Boolean(resolved?.tenant?.renderCustomerOptInRequired),
       pricingEnabledGate,
       pricingPolicy,
       hasPricingConfigSnap: Boolean(pricingConfigSnap),
@@ -1287,7 +1285,10 @@ export async function POST(req: Request) {
       const notes = safeTrim(customer_context.notes) || "";
 
       if (!customer?.name || !customer?.email || !customer?.phone) {
-        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) },
+          { status: 400 }
+        );
       }
 
       const qaStored: any = existing.qa ?? {};
@@ -1332,20 +1333,52 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
+            {
+              ok: false,
+              error: "CONTENT_BLOCKED",
+              message: "Your answers include content we can’t process. Please revise.",
+              ...(debugEnabled ? { debugId } : {}),
+            },
             { status: 400 }
           );
         }
       }
 
-      const renderOptIn = Boolean(inputAny?.render_opt_in);
-      aiEnvelope.renderOptIn = renderOptIn;
+      // ✅ FIX: Phase2 must honor render_opt_in if provided on finalize,
+      // otherwise fall back to the stored snapshot from phase1.
+      const renderOptInFromReq =
+        typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : undefined;
+      const renderOptInFromLog = Boolean(inputAny?.render_opt_in);
+
+      const renderOptInEffective = resolved.tenant.tenantRenderEnabled
+        ? Boolean(renderOptInFromReq ?? renderOptInFromLog)
+        : false;
+
+      aiEnvelope.renderOptIn = renderOptInEffective;
+
+      debug("render.phase2", {
+        tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+        renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+        renderOptInFromReq: renderOptInFromReq ?? null,
+        renderOptInFromLog,
+        renderOptInEffective,
+      });
+
+      // If phase2 request provided render_opt_in, persist it so the log reflects reality.
+      // Also keep quote_logs.renderOptIn column in sync.
+      if (typeof renderOptInFromReq === "boolean") {
+        const updatedInput = { ...(inputAny ?? {}), render_opt_in: renderOptInEffective };
+        await db
+          .update(quoteLogs)
+          .set({ input: updatedInput as any, renderOptIn: renderOptInEffective })
+          .where(eq(quoteLogs.id, quoteLogId));
+      }
 
       const aiSnapshot = buildAiSnapshot({
         phase: "phase2_finalized",
         tenantId: tenant.id,
         tenantSlug,
-        renderOptIn,
+        renderOptIn: renderOptInEffective,
         resolved,
         industryKey: industryKeyForQuote,
         llmKeySource: keySource,
@@ -1360,7 +1393,7 @@ export async function POST(req: Request) {
         category,
         service_type,
         notes,
-        normalizedAnswers,
+        normalizedAnswers, // ✅ YES: used by estimator
         debug,
       });
 
@@ -1383,6 +1416,12 @@ export async function POST(req: Request) {
         estimate_low: shaped.estimate_low,
         estimate_high: shaped.estimate_high,
         pricing_basis: computed.basis,
+
+        // ✅ make QA available to downstream consumers (rendering/job/UI)
+        qa_context: {
+          questions: storedQuestions,
+          answers: normalizedAnswers,
+        },
       };
 
       let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshot };
@@ -1406,7 +1445,7 @@ export async function POST(req: Request) {
           brandLogoUrl,
           brandLogoVariant,
           businessNameFromSettings,
-          renderOptIn,
+          renderOptIn: renderOptInEffective,
         });
 
         outputToStore = { ...(outputToStore ?? {}), email: emailResult };
@@ -1420,7 +1459,13 @@ export async function POST(req: Request) {
         outputToStore = { ...(outputToStore ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
       }
 
-      return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
+      return NextResponse.json({
+        ok: true,
+        quoteLogId,
+        output: outputToStore,
+        ai: { ...aiEnvelope, qaAnswersUsed: normalizedAnswers.length > 0 },
+        ...(debugEnabled ? { debugId } : {}),
+      });
     }
 
     // -------------------------
@@ -1457,7 +1502,6 @@ export async function POST(req: Request) {
     }
 
     const customer_context = parsed.data.customer_context ?? {};
-
     const category = industryKeyForQuote || "service";
     const service_type = safeTrim(customer_context.service_type) || "upholstery";
     const notes = safeTrim(customer_context.notes) || "";
@@ -1564,7 +1608,15 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
+      return NextResponse.json({
+        ok: true,
+        quoteLogId,
+        needsQa: true,
+        questions,
+        qa,
+        ai: aiEnvelope,
+        ...(debugEnabled ? { debugId } : {}),
+      });
     }
 
     const rawOutput = await generateEstimate({
@@ -1665,7 +1717,13 @@ export async function POST(req: Request) {
 
     if (code === "PLAN_LIMIT_REACHED") {
       return NextResponse.json(
-        { ok: false, error: "PLAN_LIMIT_REACHED", message: "Monthly quote limit reached for your plan.", meta: e?.meta ?? undefined, ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "PLAN_LIMIT_REACHED",
+          message: "Monthly quote limit reached for your plan.",
+          meta: e?.meta ?? undefined,
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 402 }
       );
     }
@@ -1697,7 +1755,13 @@ export async function POST(req: Request) {
 
     if (code === "MISSING_OPENAI_KEY") {
       return NextResponse.json(
-        { ok: false, error: "MISSING_OPENAI_KEY", message: "No OpenAI key is configured for this tenant. Add a tenant key in AI Setup.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MISSING_OPENAI_KEY",
+          message:
+            "No OpenAI key is configured for this tenant (or platform grace is not available for this plan). Add a tenant key in AI Setup.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
