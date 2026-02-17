@@ -51,7 +51,12 @@ const PostBody = z.object({
   // saved pricing config (pricing_model remains onboarding-owned)
   pricing_config: PricingConfigSchema,
 
-  // ✅ IMPORTANT: matches DB column ai_rendering_enabled
+  /**
+   * IMPORTANT: This is the UI’s single toggle.
+   * Server will sync BOTH columns:
+   * - ai_rendering_enabled (new / preferred)
+   * - rendering_enabled (legacy / back-compat)
+   */
   rendering_enabled: z.boolean(),
   rendering_style: RenderingStyle,
   rendering_notes: z.string().max(2000),
@@ -123,8 +128,10 @@ async function getTenantSettingsRow(tenantId: string) {
       assessment_fee_amount,
       assessment_fee_credit_toward_job,
 
-      -- ✅ IMPORTANT: column is ai_rendering_enabled
+      -- ✅ read BOTH columns (new + legacy)
       ai_rendering_enabled,
+      rendering_enabled,
+
       rendering_style,
       rendering_notes,
       rendering_max_per_day,
@@ -186,7 +193,6 @@ function normalizePricingConfig(row: any) {
 
 /**
  * Suggestions remain generic; do NOT hardcode industry-specific language here.
- * (You can keep this as-is, but I’m leaving it unchanged besides removing any vertical assumptions.)
  */
 function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof PricingModel> | null; analysis: any | null }) {
   const { analysis } = args;
@@ -250,8 +256,8 @@ function normalizeRow(row: any, analysis: any | null) {
 
   const pricing_model = normalizePricingModel(row?.pricing_model);
 
-  // ✅ IMPORTANT: read the correct column
-  const rendering_enabled = Boolean(row?.ai_rendering_enabled ?? false);
+  // ✅ effective render enabled = (new OR legacy)
+  const rendering_enabled = Boolean(row?.ai_rendering_enabled ?? false) || Boolean(row?.rendering_enabled ?? false);
 
   const rendering_style_raw = safeTrim(row?.rendering_style ?? "photoreal");
   const rendering_style =
@@ -341,7 +347,9 @@ export async function POST(req: Request) {
     const assessment_fee_amount = clampMoneyInt((pc as any).assessment_fee_amount, null);
     const assessment_fee_credit_toward_job = Boolean((pc as any).assessment_fee_credit_toward_job ?? false);
 
-    // ✅ IMPORTANT: write ai_rendering_enabled
+    const renderingEnabled = Boolean(incoming.rendering_enabled);
+
+    // ✅ IMPORTANT: write BOTH columns so they never drift again
     const upd = await db.execute(sql`
       update tenant_settings
       set
@@ -358,7 +366,9 @@ export async function POST(req: Request) {
         assessment_fee_amount = ${assessment_fee_amount},
         assessment_fee_credit_toward_job = ${assessment_fee_credit_toward_job},
 
-        ai_rendering_enabled = ${incoming.rendering_enabled},
+        ai_rendering_enabled = ${renderingEnabled},
+        rendering_enabled = ${renderingEnabled},
+
         rendering_style = ${incoming.rendering_style},
         rendering_notes = ${incoming.rendering_notes ?? ""},
         rendering_max_per_day = ${clampInt(incoming.rendering_max_per_day, 20, 0, 1000)},
