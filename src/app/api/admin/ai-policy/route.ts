@@ -48,10 +48,10 @@ const PostBody = z.object({
   ai_mode: AiMode,
   pricing_enabled: z.boolean(),
 
-  // ✅ saved pricing config (pricing_model remains onboarding-owned)
+  // saved pricing config (pricing_model remains onboarding-owned)
   pricing_config: PricingConfigSchema,
 
-  // UI contract (keep this name)
+  // ✅ IMPORTANT: matches DB column ai_rendering_enabled
   rendering_enabled: z.boolean(),
   rendering_style: RenderingStyle,
   rendering_notes: z.string().max(2000),
@@ -102,17 +102,11 @@ function normalizeAiMode(v: any): z.infer<typeof AiMode> {
   return parsed.success ? parsed.data : "assessment_only";
 }
 
-/**
- * Server-side truth:
- * If pricing is disabled, force ai_mode to assessment_only.
- */
 function enforcePricingRule(ai_mode: z.infer<typeof AiMode>, pricing_enabled: boolean): z.infer<typeof AiMode> {
   return pricing_enabled ? ai_mode : "assessment_only";
 }
 
 async function getTenantSettingsRow(tenantId: string) {
-  // IMPORTANT:
-  // DB column is ai_rendering_enabled (NOT rendering_enabled)
   const r = await db.execute(sql`
     select
       ai_mode,
@@ -129,6 +123,7 @@ async function getTenantSettingsRow(tenantId: string) {
       assessment_fee_amount,
       assessment_fee_credit_toward_job,
 
+      -- ✅ IMPORTANT: column is ai_rendering_enabled
       ai_rendering_enabled,
       rendering_style,
       rendering_notes,
@@ -178,29 +173,29 @@ function normalizePricingConfig(row: any) {
 
   return {
     flat_rate_default,
-
     hourly_labor_rate,
     material_markup_percent,
-
     per_unit_rate,
     per_unit_label,
-
     package_json,
     line_items_json,
-
     assessment_fee_amount,
     assessment_fee_credit_toward_job,
   };
 }
 
+/**
+ * Suggestions remain generic; do NOT hardcode industry-specific language here.
+ * (You can keep this as-is, but I’m leaving it unchanged besides removing any vertical assumptions.)
+ */
 function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof PricingModel> | null; analysis: any | null }) {
-  const { pricingModel, analysis } = args;
+  const { analysis } = args;
 
   const signalsArr: string[] = Array.isArray(analysis?.billingSignals) ? analysis.billingSignals.map((x: any) => String(x)) : [];
   const servicesArr: string[] = Array.isArray(analysis?.detectedServices) ? analysis.detectedServices.map((x: any) => String(x)) : [];
-
   const hay = `${signalsArr.join(" ")} ${servicesArr.join(" ")}`.toLowerCase();
 
+  const mentionsHourly = /\bhour\b|\bper hour\b|\bhourly\b/.test(hay);
   const mentionsSqFt = /\bsq\s?ft\b|\bsquare\s?foot\b/.test(hay);
   const mentionsLinear = /\blinear\s?ft\b|\bper\s?foot\b/.test(hay);
   const mentionsDiagnostic = /\bdiagnostic\b|\bassessment\b|\binspection\b/.test(hay);
@@ -234,9 +229,9 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
     ],
   };
 
-  const base = {
+  return {
     flat_rate_default: flatDefault,
-    hourly_labor_rate: laborBase,
+    hourly_labor_rate: mentionsHourly ? laborBase : laborBase,
     material_markup_percent: markupBase,
     per_unit_rate: perUnitRate,
     per_unit_label: unitLabel,
@@ -245,9 +240,6 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
     assessment_fee_amount: assessmentFee,
     assessment_fee_credit_toward_job: true,
   };
-
-  if (!pricingModel) return base;
-  return base;
 }
 
 function normalizeRow(row: any, analysis: any | null) {
@@ -258,7 +250,7 @@ function normalizeRow(row: any, analysis: any | null) {
 
   const pricing_model = normalizePricingModel(row?.pricing_model);
 
-  // IMPORTANT: db column is ai_rendering_enabled
+  // ✅ IMPORTANT: read the correct column
   const rendering_enabled = Boolean(row?.ai_rendering_enabled ?? false);
 
   const rendering_style_raw = safeTrim(row?.rendering_style ?? "photoreal");
@@ -349,9 +341,7 @@ export async function POST(req: Request) {
     const assessment_fee_amount = clampMoneyInt((pc as any).assessment_fee_amount, null);
     const assessment_fee_credit_toward_job = Boolean((pc as any).assessment_fee_credit_toward_job ?? false);
 
-    // IMPORTANT:
-    // - pricing_model is onboarding-owned (do not write here)
-    // - rendering enabled column is ai_rendering_enabled
+    // ✅ IMPORTANT: write ai_rendering_enabled
     const upd = await db.execute(sql`
       update tenant_settings
       set
@@ -368,11 +358,11 @@ export async function POST(req: Request) {
         assessment_fee_amount = ${assessment_fee_amount},
         assessment_fee_credit_toward_job = ${assessment_fee_credit_toward_job},
 
-        ai_rendering_enabled = ${Boolean(incoming.rendering_enabled)},
+        ai_rendering_enabled = ${incoming.rendering_enabled},
         rendering_style = ${incoming.rendering_style},
         rendering_notes = ${incoming.rendering_notes ?? ""},
         rendering_max_per_day = ${clampInt(incoming.rendering_max_per_day, 20, 0, 1000)},
-        rendering_customer_opt_in_required = ${Boolean(incoming.rendering_customer_opt_in_required)},
+        rendering_customer_opt_in_required = ${incoming.rendering_customer_opt_in_required},
 
         live_qa_enabled = ${Boolean(incoming.live_qa_enabled)},
         live_qa_max_questions = ${clampInt(incoming.live_qa_max_questions, 3, 1, 10)},

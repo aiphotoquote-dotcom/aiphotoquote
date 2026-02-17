@@ -3,208 +3,201 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
-import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
+import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
 import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
-import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function json(data: any, status = 200) {
+  return NextResponse.json(data, { status });
+}
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+/**
+ * Minimal runtime guard for platform cfg shape expected by buildEffectiveLlmConfig.
+ */
+function normalizePlatformCfg(platformAny: any) {
+  const cfg = platformAny?.cfg ?? platformAny;
+
+  const ok =
+    cfg &&
+    typeof cfg === "object" &&
+    typeof cfg.version === "number" &&
+    typeof cfg.updatedAt === "string" &&
+    cfg.models &&
+    typeof cfg.models === "object" &&
+    typeof cfg.models.estimatorModel === "string" &&
+    typeof cfg.models.qaModel === "string" &&
+    cfg.prompts &&
+    typeof cfg.prompts === "object" &&
+    typeof cfg.prompts.quoteEstimatorSystem === "string" &&
+    typeof cfg.prompts.qaQuestionGeneratorSystem === "string" &&
+    cfg.guardrails &&
+    typeof cfg.guardrails === "object" &&
+    Array.isArray(cfg.guardrails.blockedTopics) &&
+    typeof cfg.guardrails.maxQaQuestions === "number";
+
+  if (!ok) {
+    const e: any = new Error("PLATFORM_LLM_CONFIG_INVALID");
+    e.code = "PLATFORM_LLM_CONFIG_INVALID";
+    throw e;
+  }
+
+  return cfg as any;
+}
 
 const GetQuery = z.object({
   tenantId: z.string().uuid(),
-  industryKey: z.string().optional(),
+  industryKey: z.string().optional().nullable(),
 });
 
 const PostBody = z.object({
   tenantId: z.string().uuid(),
-  industryKey: z.string().nullable().optional(),
-  overrides: z.any(),
+  industryKey: z.string().optional().nullable(),
+  overrides: z
+    .object({
+      updatedAt: z.string().optional().nullable(),
+      models: z
+        .object({
+          estimatorModel: z.string().optional(),
+          qaModel: z.string().optional(),
+          renderModel: z.string().optional(),
+        })
+        .optional(),
+      prompts: z
+        .object({
+          extraSystemPreamble: z.string().optional(),
+          quoteEstimatorSystem: z.string().optional(),
+          qaQuestionGeneratorSystem: z.string().optional(),
+        })
+        .optional(),
+      maxQaQuestions: z.number().int().min(1).max(10).optional(),
+    })
+    .optional()
+    .nullable(),
 });
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s;
-}
-
-function numClamp(v: unknown, min: number, max: number, fallback: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-/**
- * We don't have a dedicated DB column for maxQaQuestions.
- * Persist it in a reserved namespace inside models JSON:
- *   models._apq.maxQaQuestions
- */
-function readMaxQaQuestionsFromRow(row: { models?: any } | null | undefined): number | null {
-  const raw = row?.models?.["_apq"]?.maxQaQuestions;
-  if (raw == null) return null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.max(1, Math.min(10, Math.floor(n))) : null;
-}
-
-function writeMaxQaQuestionsIntoModels(models: any, maxQaQuestions: number | null) {
-  const base = models && typeof models === "object" && !Array.isArray(models) ? models : {};
-  const apq = base["_apq"] && typeof base["_apq"] === "object" && !Array.isArray(base["_apq"]) ? base["_apq"] : {};
-  const nextApq =
-    maxQaQuestions == null
-      ? apq
-      : {
-          ...apq,
-          maxQaQuestions: Math.max(1, Math.min(10, Math.floor(maxQaQuestions))),
-        };
-
-  // If we aren't setting it, just return original models
-  if (maxQaQuestions == null) return base;
-
-  return {
-    ...base,
-    _apq: nextApq,
-  };
-}
-
 export async function GET(req: Request) {
-  try {
-    await requireTenantRole(["owner", "admin"]);
+  const gate = await requireTenantRole(["owner", "admin", "member"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
 
-    const url = new URL(req.url);
-    const parsed = GetQuery.safeParse({
-      tenantId: url.searchParams.get("tenantId") || "",
-      industryKey: url.searchParams.get("industryKey") || undefined,
-    });
-
-    if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "BAD_REQUEST", message: "Invalid query params", issues: parsed.error.issues },
-        { status: 400 }
-      );
-    }
-
-    const { tenantId, industryKey } = parsed.data;
-
-    const platform = await loadPlatformLlmConfig();
-    const industry = getIndustryDefaults(industryKey ?? null);
-
-    const tenantRow = await getTenantLlmOverrides(tenantId);
-
-    const tenant: (TenantLlmOverrides & { maxQaQuestions?: number }) | null = tenantRow
-      ? (() => {
-          const normalized = normalizeTenantOverrides({
-            models: tenantRow.models ?? {},
-            prompts: tenantRow.prompts ?? {},
-            updatedAt: tenantRow.updatedAt ?? undefined,
-          }) as any;
-
-          const storedMax = readMaxQaQuestionsFromRow(tenantRow);
-          if (storedMax != null) normalized.maxQaQuestions = storedMax;
-
-          return normalized as any;
-        })()
-      : null;
-
-    const effective = buildEffectiveLlmConfig({
-      platform,
-      industry,
-      tenant: tenant ?? null,
-    }).effective;
-
-    const effectiveBase = buildEffectiveLlmConfig({
-      platform,
-      industry,
-      tenant: null,
-    }).effective;
-
-    return NextResponse.json({
-      ok: true,
-      platform,
-      industry,
-      tenant,
-      effective,
-      effectiveBase,
-      permissions: { canEdit: true },
-    });
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    const status = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status });
+  const url = new URL(req.url);
+  const parsedQ = GetQuery.safeParse({
+    tenantId: url.searchParams.get("tenantId"),
+    industryKey: url.searchParams.get("industryKey"),
+  });
+  if (!parsedQ.success) {
+    return json({ ok: false, error: "BAD_REQUEST", message: "Invalid query", issues: parsedQ.error.issues }, 400);
   }
+
+  // Must match active tenant context
+  if (parsedQ.data.tenantId !== gate.tenantId) {
+    return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
+  }
+
+  const platformAny: any = await getPlatformLlm();
+  const platformCfg = normalizePlatformCfg(platformAny);
+
+  // ✅ industry pack placeholder (DB-backed soon). No hardcoding.
+  const industryKey = safeTrim(parsedQ.data.industryKey) || null;
+  const industry: any = {};
+
+  const row = await getTenantLlmOverrides(gate.tenantId);
+  const tenant: TenantLlmOverrides | null = row
+    ? normalizeTenantOverrides({
+        models: row.models ?? {},
+        prompts: row.prompts ?? {},
+        updatedAt: row.updatedAt ?? undefined,
+        maxQaQuestions: row.maxQaQuestions ?? undefined,
+      } as any)
+    : null;
+
+  const effectiveBaseBundle = buildEffectiveLlmConfig({
+    platform: platformCfg,
+    industry,
+    tenant: null,
+  });
+
+  const effectiveBundle = buildEffectiveLlmConfig({
+    platform: platformCfg,
+    industry,
+    tenant,
+  });
+
+  const canEdit = gate.role === "owner" || gate.role === "admin";
+
+  return json({
+    ok: true,
+    platform: platformCfg,
+    industry,
+    tenant,
+    effectiveBase: effectiveBaseBundle.effective,
+    effective: effectiveBundle.effective,
+    permissions: {
+      role: gate.role,
+      canEdit,
+    },
+  });
 }
 
 export async function POST(req: Request) {
-  try {
-    await requireTenantRole(["owner", "admin"]);
+  const gate = await requireTenantRole(["owner", "admin"]);
+  if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
 
-    const body = await req.json().catch(() => null);
-    const parsed = PostBody.safeParse(body);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues },
-        { status: 400 }
-      );
-    }
-
-    const { tenantId, industryKey, overrides } = parsed.data;
-
-    // Normalize known overrides (models/prompts)
-    const normalized = normalizeTenantOverrides(overrides ?? {}) as any;
-
-    // Pull maxQaQuestions (if present) and clamp. If missing, don't overwrite stored value.
-    const incomingMaxQaQuestionsRaw = (overrides as any)?.maxQaQuestions;
-    const incomingHasMaxQaQuestions = incomingMaxQaQuestionsRaw != null && safeTrim(incomingMaxQaQuestionsRaw) !== "";
-    const incomingMaxQaQuestions = incomingHasMaxQaQuestions
-      ? numClamp(incomingMaxQaQuestionsRaw, 1, 10, 3)
-      : null;
-
-    // Read current row so we can preserve existing _apq namespace if needed.
-    const existingRow = await getTenantLlmOverrides(tenantId);
-    const existingModels = existingRow?.models ?? {};
-
-    const modelsToStore = incomingHasMaxQaQuestions
-      ? writeMaxQaQuestionsIntoModels({ ...(existingModels as any), ...(normalized.models ?? {}) }, incomingMaxQaQuestions)
-      : { ...(existingModels as any), ...(normalized.models ?? {}) };
-
-    await upsertTenantLlmOverrides({
-      tenantId,
-      models: modelsToStore,
-      prompts: normalized.prompts ?? {},
-    });
-
-    const platform = await loadPlatformLlmConfig();
-    const industry = getIndustryDefaults((industryKey ?? null) as any);
-
-    const tenantRow = await getTenantLlmOverrides(tenantId);
-    const tenant: (TenantLlmOverrides & { maxQaQuestions?: number }) | null = tenantRow
-      ? (() => {
-          const t = normalizeTenantOverrides({
-            models: tenantRow.models ?? {},
-            prompts: tenantRow.prompts ?? {},
-            updatedAt: tenantRow.updatedAt ?? undefined,
-          }) as any;
-
-          const storedMax = readMaxQaQuestionsFromRow(tenantRow);
-          if (storedMax != null) t.maxQaQuestions = storedMax;
-
-          return t as any;
-        })()
-      : null;
-
-    const effective = buildEffectiveLlmConfig({
-      platform,
-      industry,
-      tenant: tenant ?? null,
-    }).effective;
-
-    const effectiveBase = buildEffectiveLlmConfig({
-      platform,
-      industry,
-      tenant: null,
-    }).effective;
-
-    return NextResponse.json({ ok: true, tenant, effective, effectiveBase });
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    const status = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status });
+  const body = await req.json().catch(() => null);
+  const parsed = PostBody.safeParse(body);
+  if (!parsed.success) {
+    return json({ ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues }, 400);
   }
+
+  if (parsed.data.tenantId !== gate.tenantId) {
+    return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
+  }
+
+  const overrides = parsed.data.overrides ?? null;
+
+  // Persist tenant overrides (or clear if null/empty)
+  const saved = await upsertTenantLlmOverrides(gate.tenantId, overrides);
+
+  // Recompute effective after save
+  const platformAny: any = await getPlatformLlm();
+  const platformCfg = normalizePlatformCfg(platformAny);
+
+  const industryKey = safeTrim(parsed.data.industryKey) || null;
+  const industry: any = {};
+
+  const tenant: TenantLlmOverrides | null = saved
+    ? normalizeTenantOverrides({
+        models: saved.models ?? {},
+        prompts: saved.prompts ?? {},
+        updatedAt: saved.updatedAt ?? undefined,
+        maxQaQuestions: (saved as any).maxQaQuestions ?? undefined,
+      } as any)
+    : null;
+
+  const effectiveBaseBundle = buildEffectiveLlmConfig({
+    platform: platformCfg,
+    industry,
+    tenant: null,
+  });
+
+  const effectiveBundle = buildEffectiveLlmConfig({
+    platform: platformCfg,
+    industry,
+    tenant,
+  });
+
+  return json({
+    ok: true,
+    tenant,
+    effectiveBase: effectiveBaseBundle.effective,
+    effective: effectiveBundle.effective,
+  });
 }

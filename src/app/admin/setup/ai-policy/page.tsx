@@ -32,31 +32,29 @@ type PricingConfig = {
   assessment_fee_credit_toward_job: boolean;
 };
 
-type AiPolicyShape = {
-  ai_mode: AiMode;
-  pricing_enabled: boolean;
-
-  pricing_model?: PricingModel | null;
-
-  pricing_config?: PricingConfig | null;
-  pricing_suggested?: PricingConfig | null;
-
-  rendering_enabled: boolean;
-  rendering_style: RenderingStyle;
-  rendering_notes: string;
-  rendering_max_per_day: number;
-  rendering_customer_opt_in_required: boolean;
-
-  live_qa_enabled?: boolean;
-  live_qa_max_questions?: number;
-};
-
 type PolicyResp =
   | {
       ok: true;
       tenantId: string;
       role: "owner" | "admin" | "member";
-      ai_policy: AiPolicyShape;
+      ai_policy: {
+        ai_mode: AiMode;
+        pricing_enabled: boolean;
+
+        pricing_model?: PricingModel | null;
+
+        pricing_config?: PricingConfig | null;
+        pricing_suggested?: PricingConfig | null;
+
+        rendering_enabled: boolean;
+        rendering_style: RenderingStyle;
+        rendering_notes: string;
+        rendering_max_per_day: number;
+        rendering_customer_opt_in_required: boolean;
+
+        live_qa_enabled?: boolean;
+        live_qa_max_questions?: number;
+      };
     }
   | { ok: false; error: string; message?: string; issues?: any };
 
@@ -206,87 +204,6 @@ const PRICING_MODEL_OPTIONS: Array<{ value: PricingModel; label: string; desc: s
   { value: "assessment_fee", label: "Assessment fee", desc: "Charge an inspection/diagnostic fee; optionally credit it toward the job." },
 ];
 
-function applyPolicyToState(args: {
-  role: "owner" | "admin" | "member";
-  policy: AiPolicyShape;
-  setRole: (r: any) => void;
-
-  setPricingEnabled: (v: boolean) => void;
-  setAiMode: (v: AiMode) => void;
-  setPricingModel: (v: PricingModel | null) => void;
-  serverPricingModelRef: React.MutableRefObject<PricingModel | null>;
-  setPricingConfig: (v: PricingConfig) => void;
-  setPricingSuggested: (v: PricingConfig | null) => void;
-  setPackageJsonText: (v: string) => void;
-  setLineItemsJsonText: (v: string) => void;
-
-  setRenderingEnabled: (v: boolean) => void;
-  setRenderingStyle: (v: RenderingStyle) => void;
-  setRenderingNotes: (v: string) => void;
-  setRenderingMaxPerDay: (v: number) => void;
-  setRenderingOptInRequired: (v: boolean) => void;
-
-  setLiveQaEnabled: (v: boolean) => void;
-  setLiveQaMaxQuestions: (v: number) => void;
-}) {
-  const {
-    role,
-    policy,
-    setRole,
-    setPricingEnabled,
-    setAiMode,
-    setPricingModel,
-    serverPricingModelRef,
-    setPricingConfig,
-    setPricingSuggested,
-    setPackageJsonText,
-    setLineItemsJsonText,
-    setRenderingEnabled,
-    setRenderingStyle,
-    setRenderingNotes,
-    setRenderingMaxPerDay,
-    setRenderingOptInRequired,
-    setLiveQaEnabled,
-    setLiveQaMaxQuestions,
-  } = args;
-
-  function enforceUiRules(nextPricingEnabled: boolean, nextAiMode: AiMode) {
-    if (!nextPricingEnabled) return { pricingEnabled: false, aiMode: "assessment_only" as AiMode };
-    return { pricingEnabled: true, aiMode: nextAiMode };
-  }
-
-  setRole(role);
-
-  const loadedPricingEnabled = !!policy.pricing_enabled;
-  const loadedAiMode = (policy.ai_mode ?? "assessment_only") as AiMode;
-  const enforced = enforceUiRules(loadedPricingEnabled, loadedAiMode);
-
-  setPricingEnabled(enforced.pricingEnabled);
-  setAiMode(enforced.aiMode);
-
-  const pm = (policy.pricing_model ?? null) as PricingModel | null;
-  setPricingModel(pm);
-  serverPricingModelRef.current = pm;
-
-  const cfg = (policy.pricing_config ?? null) as PricingConfig | null;
-  const suggested = (policy.pricing_suggested ?? null) as PricingConfig | null;
-
-  setPricingConfig({ ...EMPTY_PRICING_CONFIG, ...(cfg ?? {}) });
-  setPricingSuggested(suggested ?? null);
-
-  setPackageJsonText(prettyJson(cfg?.package_json ?? null));
-  setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
-
-  setRenderingEnabled(!!policy.rendering_enabled);
-  setRenderingStyle((policy.rendering_style ?? "photoreal") as RenderingStyle);
-  setRenderingNotes(policy.rendering_notes ?? "");
-  setRenderingMaxPerDay(Number.isFinite(policy.rendering_max_per_day) ? policy.rendering_max_per_day : 20);
-  setRenderingOptInRequired(!!policy.rendering_customer_opt_in_required);
-
-  setLiveQaEnabled(Boolean(policy.live_qa_enabled));
-  setLiveQaMaxQuestions(clampInt(policy.live_qa_max_questions, 3, 1, 10));
-}
-
 export default function AiPolicySetupPage() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -309,6 +226,9 @@ export default function AiPolicySetupPage() {
   // keep track of what server last confirmed
   const serverPricingModelRef = useRef<PricingModel | null>(null);
 
+  // ✅ NEW: keep track of what server last confirmed for render enabled
+  const serverRenderingEnabledRef = useRef<boolean | null>(null);
+
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>({ ...EMPTY_PRICING_CONFIG });
   const [pricingSuggested, setPricingSuggested] = useState<PricingConfig | null>(null);
 
@@ -327,13 +247,6 @@ export default function AiPolicySetupPage() {
 
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-
-  // POST vs GET mismatch detector (your current issue)
-  const [persistMismatch, setPersistMismatch] = useState<{
-    field: string;
-    postValue: any;
-    getValue: any;
-  } | null>(null);
 
   const canEdit = useMemo(() => role === "owner" || role === "admin", [role]);
 
@@ -374,13 +287,10 @@ export default function AiPolicySetupPage() {
     }
   }
 
-  async function load(opts?: { silent?: boolean }) {
-    if (!opts?.silent) {
-      setErr(null);
-      setMsg(null);
-      setPricingJsonError(null);
-      setPersistMismatch(null);
-    }
+  async function load() {
+    setErr(null);
+    setMsg(null);
+    setPricingJsonError(null);
     setLoading(true);
 
     try {
@@ -390,33 +300,42 @@ export default function AiPolicySetupPage() {
       const data = await safeJson<PolicyResp>(res);
       if (!data.ok) throw new Error(data.message || data.error || "Failed to load AI policy");
 
-      applyPolicyToState({
-        role: data.role,
-        policy: data.ai_policy,
-        setRole,
+      setRole(data.role);
 
-        setPricingEnabled,
-        setAiMode,
-        setPricingModel,
-        serverPricingModelRef,
-        setPricingConfig,
-        setPricingSuggested,
-        setPackageJsonText,
-        setLineItemsJsonText,
+      const loadedPricingEnabled = !!data.ai_policy.pricing_enabled;
+      const loadedAiMode = (data.ai_policy.ai_mode ?? "assessment_only") as AiMode;
+      const enforced = enforceUiRules(loadedPricingEnabled, loadedAiMode);
 
-        setRenderingEnabled,
-        setRenderingStyle,
-        setRenderingNotes,
-        setRenderingMaxPerDay,
-        setRenderingOptInRequired,
+      setPricingEnabled(enforced.pricingEnabled);
+      setAiMode(enforced.aiMode);
 
-        setLiveQaEnabled,
-        setLiveQaMaxQuestions,
-      });
+      const pm = (data.ai_policy.pricing_model ?? null) as PricingModel | null;
+      setPricingModel(pm);
+      serverPricingModelRef.current = pm;
 
-      if (!opts?.silent) setMsg("Loaded.");
+      const cfg = (data.ai_policy.pricing_config ?? null) as PricingConfig | null;
+      const suggested = (data.ai_policy.pricing_suggested ?? null) as PricingConfig | null;
+
+      setPricingConfig({ ...EMPTY_PRICING_CONFIG, ...(cfg ?? {}) });
+      setPricingSuggested(suggested ?? null);
+
+      setPackageJsonText(prettyJson(cfg?.package_json ?? null));
+      setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
+
+      setRenderingEnabled(!!data.ai_policy.rendering_enabled);
+      serverRenderingEnabledRef.current = !!data.ai_policy.rendering_enabled;
+
+      setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
+      setRenderingNotes(data.ai_policy.rendering_notes ?? "");
+      setRenderingMaxPerDay(
+        Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
+      );
+      setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
+
+      setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
+      setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
     } catch (e: any) {
-      if (!opts?.silent) setErr(e?.message ?? String(e));
+      setErr(e?.message ?? String(e));
     } finally {
       setLoading(false);
     }
@@ -457,7 +376,6 @@ export default function AiPolicySetupPage() {
     setErr(null);
     setMsg(null);
     setPricingJsonError(null);
-    setPersistMismatch(null);
     setSaving(true);
 
     try {
@@ -495,17 +413,16 @@ export default function AiPolicySetupPage() {
           assessment_fee_credit_toward_job: Boolean(pricingConfig.assessment_fee_credit_toward_job),
         } as PricingConfig,
 
-        rendering_enabled: Boolean(renderingEnabled),
+        rendering_enabled: renderingEnabled,
         rendering_style: renderingStyle,
         rendering_notes: renderingNotes,
         rendering_max_per_day: Math.max(0, Math.min(1000, Number(renderingMaxPerDay) || 0)),
-        rendering_customer_opt_in_required: Boolean(renderingOptInRequired),
+        rendering_customer_opt_in_required: renderingOptInRequired,
 
         live_qa_enabled: Boolean(liveQaEnabled),
         live_qa_max_questions: Math.max(1, Math.min(10, Number(liveQaMaxQuestions) || 3)),
       };
 
-      // POST
       const res = await fetch("/api/admin/ai-policy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -513,52 +430,45 @@ export default function AiPolicySetupPage() {
         credentials: "include",
       });
 
-      const postData = await safeJson<PolicyResp>(res);
-      if (!postData.ok) throw new Error(postData.message || postData.error || "Failed to save AI policy");
-
-      // IMPORTANT: Immediately re-load from GET so UI reflects DB truth.
-      // This catches cases where POST handler returns optimistic values but does not persist correctly.
-      const getRes = await fetch("/api/admin/ai-policy", { cache: "no-store", credentials: "include" });
-      const getData = await safeJson<PolicyResp>(getRes);
-      if (!getData.ok) throw new Error(getData.message || getData.error || "Saved but failed to re-load policy");
-
-      // Detect mismatch specifically on the rendering enabled field (your reported symptom)
-      const postRender = Boolean(postData.ai_policy.rendering_enabled);
-      const getRender = Boolean(getData.ai_policy.rendering_enabled);
-      if (postRender !== getRender) {
-        setPersistMismatch({
-          field: "rendering_enabled",
-          postValue: postRender,
-          getValue: getRender,
-        });
-      }
-
-      // Apply GET (DB-backed) as source of truth
-      applyPolicyToState({
-        role: getData.role,
-        policy: getData.ai_policy,
-        setRole,
-
-        setPricingEnabled,
-        setAiMode,
-        setPricingModel,
-        serverPricingModelRef,
-        setPricingConfig,
-        setPricingSuggested,
-        setPackageJsonText,
-        setLineItemsJsonText,
-
-        setRenderingEnabled,
-        setRenderingStyle,
-        setRenderingNotes,
-        setRenderingMaxPerDay,
-        setRenderingOptInRequired,
-
-        setLiveQaEnabled,
-        setLiveQaMaxQuestions,
-      });
+      const data = await safeJson<PolicyResp>(res);
+      if (!data.ok) throw new Error(data.message || data.error || "Failed to save AI policy");
 
       setMsg("Saved.");
+      setRole(data.role);
+
+      const savedPricingEnabled = !!data.ai_policy.pricing_enabled;
+      const savedAiMode = (data.ai_policy.ai_mode ?? "assessment_only") as AiMode;
+      const ui = enforceUiRules(savedPricingEnabled, savedAiMode);
+
+      setPricingEnabled(ui.pricingEnabled);
+      setAiMode(ui.aiMode);
+
+      // pricing_model comes from the db; keep in sync if present
+      const pm = (data.ai_policy.pricing_model ?? pricingModel ?? null) as PricingModel | null;
+      setPricingModel(pm);
+      serverPricingModelRef.current = pm;
+
+      const cfg = (data.ai_policy.pricing_config ?? null) as PricingConfig | null;
+      const suggested = (data.ai_policy.pricing_suggested ?? null) as PricingConfig | null;
+
+      setPricingConfig({ ...EMPTY_PRICING_CONFIG, ...(cfg ?? {}) });
+      setPricingSuggested(suggested ?? null);
+
+      setPackageJsonText(prettyJson(cfg?.package_json ?? null));
+      setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
+
+      setRenderingEnabled(!!data.ai_policy.rendering_enabled);
+      serverRenderingEnabledRef.current = !!data.ai_policy.rendering_enabled;
+
+      setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
+      setRenderingNotes(data.ai_policy.rendering_notes ?? "");
+      setRenderingMaxPerDay(
+        Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
+      );
+      setRenderingOptInRequired(!!data.ai_policy.rendering_customer_opt_in_required);
+
+      setLiveQaEnabled(Boolean(data.ai_policy.live_qa_enabled));
+      setLiveQaMaxQuestions(clampInt(data.ai_policy.live_qa_max_questions, 3, 1, 10));
 
       if (onboardingMode) {
         goBackToOnboarding();
@@ -589,6 +499,9 @@ export default function AiPolicySetupPage() {
   const showPricingConfig = !!pricingModel;
 
   const pricingModelDirty = (pricingModel ?? null) !== (serverPricingModelRef.current ?? null);
+
+  const renderingEnabledDirty =
+    serverRenderingEnabledRef.current !== null && renderingEnabled !== Boolean(serverRenderingEnabledRef.current);
 
   return (
     <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
@@ -629,7 +542,7 @@ export default function AiPolicySetupPage() {
                 ← Setup Home
               </a>
               <button
-                onClick={() => load()}
+                onClick={load}
                 className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-100"
               >
                 Refresh
@@ -648,21 +561,6 @@ export default function AiPolicySetupPage() {
               <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
                 You can view this page, but only <span className="font-mono">owner</span> or{" "}
                 <span className="font-mono">admin</span> can change the policy.
-              </div>
-            ) : null}
-
-            {persistMismatch ? (
-              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
-                <div className="font-semibold">Policy save mismatch detected</div>
-                <div className="mt-1 text-xs opacity-90">
-                  The POST response did not match the DB-backed GET response. This usually means the API handler is not persisting
-                  the field correctly.
-                </div>
-                <div className="mt-3 text-xs font-mono whitespace-pre-wrap">
-                  field: {persistMismatch.field}
-                  {"\n"}post: {String(persistMismatch.postValue)}
-                  {"\n"}get:  {String(persistMismatch.getValue)}
-                </div>
               </div>
             ) : null}
 
@@ -782,7 +680,8 @@ export default function AiPolicySetupPage() {
                   <div>
                     <div className="text-sm font-semibold text-gray-900">Pricing configuration</div>
                     <div className="mt-1 text-xs text-gray-600">
-                      These inputs feed the pricing engine and become defaults used by prompts / calculations. (No industry hardcoding.)
+                      These inputs feed the pricing engine and become defaults used by prompts / calculations.
+                      (No industry hardcoding.)
                     </div>
                   </div>
                 </div>
@@ -987,7 +886,8 @@ export default function AiPolicySetupPage() {
 
                   {pricingModel === "inspection_only" ? (
                     <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
-                      This model means you do not provide price numbers until inspection. No additional pricing inputs required.
+                      This model means you do not provide price numbers until inspection. No additional pricing inputs
+                      required.
                     </div>
                   ) : null}
 
@@ -1039,7 +939,8 @@ export default function AiPolicySetupPage() {
 
               {!pricingEnabled ? (
                 <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
-                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price numbers are always suppressed.
+                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price
+                  numbers are always suppressed.
                 </div>
               ) : null}
             </div>
@@ -1094,6 +995,21 @@ export default function AiPolicySetupPage() {
                 <div>
                   <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
                   <div className="mt-1 text-xs text-gray-600">Optional “concept render” image of the finished product.</div>
+
+                  {/* ✅ NEW: server-confirmation line */}
+                  {serverRenderingEnabledRef.current !== null ? (
+                    <div className="mt-2 text-xs text-gray-500">
+                      Server confirmed:{" "}
+                      <span className="font-mono">
+                        {serverRenderingEnabledRef.current ? "enabled" : "disabled"}
+                      </span>
+                      {renderingEnabledDirty ? (
+                        <span className="ml-2 rounded-md border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs font-semibold text-yellow-900">
+                          Unsaved
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
 
                 <button
@@ -1165,9 +1081,7 @@ export default function AiPolicySetupPage() {
                         disabled={!canEdit || !renderingEnabled}
                         className={[
                           "rounded-md border px-3 py-2 text-sm font-semibold",
-                          renderingOptInRequired
-                            ? "border-green-300 bg-green-50 text-green-800"
-                            : "border-gray-300 bg-white text-gray-800",
+                          renderingOptInRequired ? "border-green-300 bg-green-50 text-green-800" : "border-gray-300 bg-white text-gray-800",
                           !canEdit || !renderingEnabled ? "opacity-50" : "hover:bg-gray-50",
                         ].join(" ")}
                       >
