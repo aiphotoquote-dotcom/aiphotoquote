@@ -51,6 +51,7 @@ const PostBody = z.object({
   // ✅ saved pricing config (pricing_model remains onboarding-owned)
   pricing_config: PricingConfigSchema,
 
+  // UI contract (keep this name)
   rendering_enabled: z.boolean(),
   rendering_style: RenderingStyle,
   rendering_notes: z.string().max(2000),
@@ -110,6 +111,8 @@ function enforcePricingRule(ai_mode: z.infer<typeof AiMode>, pricing_enabled: bo
 }
 
 async function getTenantSettingsRow(tenantId: string) {
+  // IMPORTANT:
+  // DB column is ai_rendering_enabled (NOT rendering_enabled)
   const r = await db.execute(sql`
     select
       ai_mode,
@@ -126,11 +129,12 @@ async function getTenantSettingsRow(tenantId: string) {
       assessment_fee_amount,
       assessment_fee_credit_toward_job,
 
-      rendering_enabled,
+      ai_rendering_enabled,
       rendering_style,
       rendering_notes,
       rendering_max_per_day,
       rendering_customer_opt_in_required,
+
       live_qa_enabled,
       live_qa_max_questions
     from tenant_settings
@@ -159,7 +163,6 @@ async function getOnboardingAnalysis(tenantId: string): Promise<any | null> {
 }
 
 function normalizePricingConfig(row: any) {
-  // ✅ clamp + null-safe normalization (avoid NaN drifting into UI)
   const flat_rate_default = clampMoneyInt(row?.flat_rate_default, null);
   const hourly_labor_rate = clampMoneyInt(row?.hourly_labor_rate, null);
   const material_markup_percent = clampPercentInt(row?.material_markup_percent, null);
@@ -190,12 +193,6 @@ function normalizePricingConfig(row: any) {
   };
 }
 
-/**
- * ✅ “Intelligent” suggestions without industry/sub-industry hardcoding:
- * - Use onboarding billingSignals + detectedServices keywords (generic)
- * - Always respect pricing_model (onboarding-owned)
- * - Provide conservative defaults when signals are weak
- */
 function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof PricingModel> | null; analysis: any | null }) {
   const { pricingModel, analysis } = args;
 
@@ -204,7 +201,6 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
 
   const hay = `${signalsArr.join(" ")} ${servicesArr.join(" ")}`.toLowerCase();
 
-  const mentionsHourly = /\bhour\b|\bper hour\b|\bhourly\b/.test(hay);
   const mentionsSqFt = /\bsq\s?ft\b|\bsquare\s?foot\b/.test(hay);
   const mentionsLinear = /\blinear\s?ft\b|\bper\s?foot\b/.test(hay);
   const mentionsDiagnostic = /\bdiagnostic\b|\bassessment\b|\binspection\b/.test(hay);
@@ -212,7 +208,6 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
   const mentionsMobile = /\bmobile\b|\bon[-\s]?site\b|\btravel\b/.test(hay);
   const mentionsPackage = /\bpackage\b|\btier\b|\bstandard\b|\bpremium\b|\bbasic\b/.test(hay);
 
-  // conservative defaults
   const laborBase = mentionsPremium ? 175 : mentionsMobile ? 140 : 125;
   const markupBase = 30;
 
@@ -222,7 +217,6 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
   const flatDefault = mentionsPremium ? 900 : 500;
   const assessmentFee = mentionsDiagnostic ? 99 : 75;
 
-  // starter JSON (very lightweight; can be edited later)
   const packageJson = mentionsPackage
     ? {
         tiers: [
@@ -252,11 +246,7 @@ function buildSuggestedPricingConfig(args: { pricingModel: z.infer<typeof Pricin
     assessment_fee_credit_toward_job: true,
   };
 
-  // Respect pricing model: only the relevant fields matter, but returning the full object helps UI
   if (!pricingModel) return base;
-
-  // We do NOT switch pricingModel here (onboarding-owned).
-  // We also do not hardcode industry; signals above are generic.
   return base;
 }
 
@@ -268,7 +258,8 @@ function normalizeRow(row: any, analysis: any | null) {
 
   const pricing_model = normalizePricingModel(row?.pricing_model);
 
-  const rendering_enabled = Boolean(row?.rendering_enabled ?? false);
+  // IMPORTANT: db column is ai_rendering_enabled
+  const rendering_enabled = Boolean(row?.ai_rendering_enabled ?? false);
 
   const rendering_style_raw = safeTrim(row?.rendering_style ?? "photoreal");
   const rendering_style =
@@ -291,7 +282,6 @@ function normalizeRow(row: any, analysis: any | null) {
     pricing_enabled,
     pricing_model,
 
-    // ✅ B: totals are computed server-side from components
     pricing_computation: "server_components" as const,
 
     pricing_config,
@@ -344,7 +334,6 @@ export async function POST(req: Request) {
     const pricing_enabled = Boolean(incoming.pricing_enabled);
     const ai_mode = enforcePricingRule(incoming.ai_mode, pricing_enabled);
 
-    // normalize pricing_config (even if pricing is disabled, allow saving config for later)
     const pc = incoming.pricing_config ?? {};
 
     const flat_rate_default = clampMoneyInt((pc as any).flat_rate_default, null);
@@ -360,7 +349,9 @@ export async function POST(req: Request) {
     const assessment_fee_amount = clampMoneyInt((pc as any).assessment_fee_amount, null);
     const assessment_fee_credit_toward_job = Boolean((pc as any).assessment_fee_credit_toward_job ?? false);
 
-    // IMPORTANT: we do NOT write pricing_model here (onboarding-owned)
+    // IMPORTANT:
+    // - pricing_model is onboarding-owned (do not write here)
+    // - rendering enabled column is ai_rendering_enabled
     const upd = await db.execute(sql`
       update tenant_settings
       set
@@ -377,11 +368,11 @@ export async function POST(req: Request) {
         assessment_fee_amount = ${assessment_fee_amount},
         assessment_fee_credit_toward_job = ${assessment_fee_credit_toward_job},
 
-        rendering_enabled = ${incoming.rendering_enabled},
+        ai_rendering_enabled = ${Boolean(incoming.rendering_enabled)},
         rendering_style = ${incoming.rendering_style},
         rendering_notes = ${incoming.rendering_notes ?? ""},
         rendering_max_per_day = ${clampInt(incoming.rendering_max_per_day, 20, 0, 1000)},
-        rendering_customer_opt_in_required = ${incoming.rendering_customer_opt_in_required},
+        rendering_customer_opt_in_required = ${Boolean(incoming.rendering_customer_opt_in_required)},
 
         live_qa_enabled = ${Boolean(incoming.live_qa_enabled)},
         live_qa_max_questions = ${clampInt(incoming.live_qa_max_questions, 3, 1, 10)},
