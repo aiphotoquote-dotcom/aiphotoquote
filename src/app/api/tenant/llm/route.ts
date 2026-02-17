@@ -109,8 +109,7 @@ export async function GET(req: Request) {
     const platformAny: any = await getPlatformLlm();
     const platformCfg = normalizePlatformCfg(platformAny);
 
-    // ✅ industry defaults are currently resolved from an industry key (no hardcoding in this route)
-    // If you later move industry packs to DB, this is the only place that should change.
+    // Industry layer (stubbed to {} until DB-backed packs land)
     const industryKey = safeTrim(parsed.data.industryKey) || null;
     const industry = getIndustryDefaults(industryKey);
 
@@ -197,8 +196,10 @@ export async function POST(req: Request) {
       maxQaQuestions: incoming.maxQaQuestions ?? undefined,
     } as any);
 
-    // Persist overrides (tenantStore owns schema details; allow extra fields via `as any`)
-    await upsertTenantLlmOverrides(gate.tenantId, {
+    // ✅ FIX: upsertTenantLlmOverrides expects ONE argument (object form).
+    // Tenant store owns its schema; we pass tenantId + payload as a single object.
+    await upsertTenantLlmOverrides({
+      tenantId: gate.tenantId,
       models: normalized.models ?? {},
       prompts: normalized.prompts ?? {},
       updatedAt: normalized.updatedAt ?? undefined,
