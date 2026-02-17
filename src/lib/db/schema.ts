@@ -437,3 +437,31 @@ export const tenantOnboarding = pgTable(
     stepIdx: index("tenant_onboarding_step_idx").on(t.currentStep),
   })
 );
+
+/**
+ * ✅ Industry LLM packs (DB-backed, no hardcoded industries)
+ * Layering: Platform base + Industry pack + Tenant pack
+ */
+export const industryLlmPacks = pgTable(
+  "industry_llm_packs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    // joins by industries.key
+    industryKey: text("industry_key").notNull(),
+
+    /**
+     * Stored as Partial<PlatformLlmConfig> (models/prompts only).
+     * Guardrails remain platform-locked.
+     */
+    pack: jsonb("pack").$type<any>().notNull(),
+
+    // optional metadata
+    version: integer("version").notNull().default(1),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    industryKeyUq: uniqueIndex("industry_llm_packs_industry_key_uq").on(t.industryKey),
+    industryKeyIdx: index("industry_llm_packs_industry_key_idx").on(t.industryKey),
+  })
+);
