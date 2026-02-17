@@ -14,7 +14,7 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
-import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
+import { resolveTenantLlm, computeRenderOptIn } from "@/lib/pcc/llm/resolveTenant";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
 import { composeEstimatorPrompt, composeQaPrompt } from "@/lib/pcc/llm/composePrompts";
 
@@ -129,16 +129,22 @@ function normalizeBrandLogoVariant(v: unknown): BrandLogoVariant {
   return s;
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Prefer the *actual* request host over VERCEL_URL.
+ * VERCEL_URL can be a deployment URL that is protected (401), which breaks render kicks.
+ */
 function getBaseUrl(req: Request) {
   const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
   if (envBase) return envBase.replace(/\/+$/, "");
 
-  const vercel = process.env.VERCEL_URL?.trim();
-  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
-
+  // Prefer host headers (public domain) before VERCEL_URL
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  const vercel = process.env.VERCEL_URL?.trim();
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   return "";
 }
@@ -869,7 +875,9 @@ async function generateEstimate(args: {
   const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
 
   // ✅ YES: we include the Q&A in the final estimator prompt (when present)
-  const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
+  const qaText = normalizedAnswers?.length
+    ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n")
+    : "";
 
   const userText = [
     `Category: ${category}`,
@@ -1101,8 +1109,8 @@ export async function POST(req: Request) {
       settingsTenantId: settings?.tenantId ?? null,
       industryKey: settings?.industryKey ?? null,
       planTier: (settings as any)?.planTier ?? null,
-      activationGraceCredits: settings?.activationGraceCredits ?? null,
-      activationGraceUsed: settings?.activationGraceUsed ?? null,
+      activationGraceCredits: (settings as any)?.activationGraceCredits ?? null,
+      activationGraceUsed: (settings as any)?.activationGraceUsed ?? null,
       emailSendMode: (settings as any)?.emailSendMode ?? null,
       hasResendFromEmail: Boolean(settings?.resendFromEmail),
     });
@@ -1165,7 +1173,7 @@ export async function POST(req: Request) {
         hasPricingPolicy: Boolean(pricingPolicy),
         hasPricingConfig: Boolean(pricingConfigSnap),
         hasPricingRules: Boolean(pricingRulesSnap),
-        renderOptInFromLog: Boolean(inputAny?.render_opt_in),
+        renderOptInFromLog: typeof inputAny?.render_opt_in === "boolean" ? inputAny.render_opt_in : null,
       });
     } else {
       industryKeyForQuote = tenantIndustryKey;
@@ -1344,22 +1352,27 @@ export async function POST(req: Request) {
         }
       }
 
-      // ✅ FIX: Phase2 must honor render_opt_in if provided on finalize,
-      // otherwise fall back to the stored snapshot from phase1.
+      // ✅ Phase2 render decision:
+      // - Prefer explicit request value when provided
+      // - Else fall back to stored snapshot (phase1)
+      // - Apply computeRenderOptIn so "opt-in not required" tenants default to TRUE
       const renderOptInFromReq =
         typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : undefined;
-      const renderOptInFromLog = Boolean(inputAny?.render_opt_in);
+      const renderOptInFromLog =
+        typeof inputAny?.render_opt_in === "boolean" ? (inputAny.render_opt_in as boolean) : null;
 
-      const renderOptInEffective = resolved.tenant.tenantRenderEnabled
-        ? Boolean(renderOptInFromReq ?? renderOptInFromLog)
-        : false;
+      const renderOptInEffective = computeRenderOptIn({
+        tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+        renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+        customerOptIn: typeof renderOptInFromReq === "boolean" ? renderOptInFromReq : renderOptInFromLog,
+      });
 
       aiEnvelope.renderOptIn = renderOptInEffective;
 
       debug("render.phase2", {
         tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
         renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
-        renderOptInFromReq: renderOptInFromReq ?? null,
+        renderOptInFromReq: typeof renderOptInFromReq === "boolean" ? renderOptInFromReq : null,
         renderOptInFromLog,
         renderOptInEffective,
       });
@@ -1476,7 +1489,12 @@ export async function POST(req: Request) {
     const incoming = parsed.data.customer ?? parsed.data.contact;
     if (!incoming) {
       return NextResponse.json(
-        { ok: false, error: "MISSING_CUSTOMER", message: "Customer info is required (name, phone, email).", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MISSING_CUSTOMER",
+          message: "Customer info is required (name, phone, email).",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
@@ -1508,13 +1526,34 @@ export async function POST(req: Request) {
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "CONTENT_BLOCKED",
+          message: "Your request includes content we can’t process. Please revise and try again.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
 
-    const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
+    // ✅ Phase1 render decision:
+    // - If rendering disabled -> false
+    // - If opt-in required -> honor checkbox (default false if missing)
+    // - If opt-in NOT required -> default true
+    const renderOptIn = computeRenderOptIn({
+      tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+      renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+      customerOptIn: typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : null,
+    });
+
     aiEnvelope.renderOptIn = renderOptIn;
+
+    debug("render.phase1", {
+      tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+      renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+      renderOptInFromReq: typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : null,
+      renderOptIn,
+    });
 
     // ✅ Freeze pricing policy + pricing inputs into the quote log so phase2 is immutable
     const policyToStore = applyPricingEnabledGate(pricingPolicy, Boolean(resolved.tenant.pricingEnabled));
@@ -1768,7 +1807,12 @@ export async function POST(req: Request) {
 
     if (code === "SETTINGS_MISSING") {
       return NextResponse.json(
-        { ok: false, error: "SETTINGS_MISSING", message: "Tenant settings could not be loaded. See debugId in logs.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "SETTINGS_MISSING",
+          message: "Tenant settings could not be loaded. See debugId in logs.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 500 }
       );
     }

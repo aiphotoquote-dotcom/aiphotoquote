@@ -2,7 +2,11 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { tenantSettings, tenantPricingRules } from "@/lib/db/schema";
+
 import { getPlatformLlm } from "./apply";
+import { getIndustryDefaults, buildEffectiveLlmConfig } from "./effective";
+import { getTenantLlmOverrides } from "./tenantStore";
+import { normalizeTenantOverrides, type TenantLlmOverrides } from "./tenantTypes";
 
 type PricingModel =
   | "flat_per_job"
@@ -51,16 +55,41 @@ function safePricingModel(v: unknown): PricingModel | null {
 }
 
 /**
+ * ✅ Single source of truth for render opt-in logic.
+ *
+ * Rules:
+ * - If tenant rendering is disabled -> renderOptIn is always false.
+ * - If rendering is enabled:
+ *   - If customer opt-in is required -> renderOptIn equals user choice.
+ *   - If opt-in is NOT required -> renderOptIn is true by default (auto render).
+ */
+export function computeRenderOptIn(args: {
+  tenantRenderEnabled: boolean;
+  renderCustomerOptInRequired: boolean;
+  customerOptIn?: boolean | null;
+}) {
+  if (!args.tenantRenderEnabled) return false;
+  if (args.renderCustomerOptInRequired) return Boolean(args.customerOptIn);
+  return true;
+}
+
+/**
  * Tenant + PCC resolver:
- * - PCC provides defaults + allowed guardrails
- * - Tenant can override via settings (drop-down selection stored in DB)
- * - NO env vars for tenant model selection
+ * - Platform provides defaults + guardrails + industry packs
+ * - Industry defaults apply based on tenant_settings.industry_key (or caller-provided industryKey elsewhere)
+ * - Tenant can override via tenant_llm_overrides (managed by Admin LLM Settings page)
+ * - No env vars for tenant model selection
  */
 export async function resolveTenantLlm(tenantId: string) {
+  // Platform config (base)
   const platform = await getPlatformLlm();
 
+  // Tenant settings (toggles + pricing + render prefs + industry key)
   const settings = await db
     .select({
+      // industry
+      industryKey: tenantSettings.industryKey,
+
       // AI toggles + render prefs
       aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
       renderingStyle: tenantSettings.renderingStyle,
@@ -71,7 +100,7 @@ export async function resolveTenantLlm(tenantId: string) {
       liveQaEnabled: tenantSettings.liveQaEnabled,
       liveQaMaxQuestions: tenantSettings.liveQaMaxQuestions,
 
-      // Optional: model selector stored in DB (if you add it later)
+      // Optional: ai mode
       aiMode: tenantSettings.aiMode,
 
       // ✅ PRICING gate (numbers allowed)
@@ -98,7 +127,7 @@ export async function resolveTenantLlm(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // Pricing guardrails (optional — used in prompts later if you want)
+  // Pricing guardrails (optional — used in computeEstimate + prompt composition)
   const pricingRules = await db
     .select({
       minJob: tenantPricingRules.minJob,
@@ -114,11 +143,30 @@ export async function resolveTenantLlm(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // Model selection (PCC defaults for now)
-  const estimatorModel = platform.models.estimatorModel;
-  const qaModel = platform.models.qaModel;
-  const renderModel = platform.models.renderModel;
+  // Industry defaults derived from tenant settings
+  const industryKey = safeTrim(settings?.industryKey) || null;
+  const industry = getIndustryDefaults(industryKey);
 
+  // Tenant overrides from tenant_llm_overrides (saved by Admin LLM Settings page)
+  const tenantRow = await getTenantLlmOverrides(tenantId);
+  const tenantOverrides: TenantLlmOverrides | null = tenantRow
+    ? normalizeTenantOverrides({
+        models: tenantRow.models ?? {},
+        prompts: tenantRow.prompts ?? {},
+        updatedAt: tenantRow.updatedAt ?? undefined,
+      })
+    : null;
+
+  // ✅ Effective LLM config (platform + industry + tenant overrides)
+  const effectiveBundle = buildEffectiveLlmConfig({
+    platform,
+    industry,
+    tenant: tenantOverrides,
+  });
+
+  const effective = effectiveBundle.effective;
+
+  // Render policy
   const tenantRenderEnabled = settings?.aiRenderingEnabled === true;
   const renderCustomerOptInRequired = settings?.renderingCustomerOptInRequired === true;
 
@@ -126,7 +174,7 @@ export async function resolveTenantLlm(tenantId: string) {
   const tenantQaEnabled = settings?.liveQaEnabled === true;
   const tenantQaMaxRaw = Number(settings?.liveQaMaxQuestions ?? 3);
   const tenantQaMax = Number.isFinite(tenantQaMaxRaw) ? Math.max(1, Math.min(10, Math.floor(tenantQaMaxRaw))) : 3;
-  const platformQaMax = platform.guardrails.maxQaQuestions;
+  const platformQaMax = effective.guardrails.maxQaQuestions;
 
   const liveQaEnabled = tenantQaEnabled;
   const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
@@ -177,18 +225,29 @@ export async function resolveTenantLlm(tenantId: string) {
       : null;
 
   return {
-    platform,
-    models: { estimatorModel, qaModel, renderModel },
-    prompts: platform.prompts,
-    guardrails: platform.guardrails,
+    platform, // keep for debugging / transparency
+
+    // ✅ Effective models/prompts/guardrails are what the quoting pipeline should use
+    models: {
+      estimatorModel: effective.models.estimatorModel,
+      qaModel: effective.models.qaModel,
+      renderModel: effective.models.renderModel,
+    },
+    prompts: effective.prompts,
+    guardrails: effective.guardrails,
 
     tenant: {
+      // Render policy + style
       tenantRenderEnabled,
       renderCustomerOptInRequired,
       tenantStyleKey: safeTrim(settings?.renderingStyle) || null,
       tenantRenderNotes: safeTrim(settings?.renderingNotes) || null,
+
+      // QA policy
       liveQaEnabled,
       liveQaMaxQuestions,
+
+      // other
       aiMode: safeTrim(settings?.aiMode) || null,
 
       // ✅ gate for “numbers”
@@ -202,5 +261,12 @@ export async function resolveTenantLlm(tenantId: string) {
           rules: normalizedPricingRules,
         }
       : null,
+
+    // Optional: meta/debug (safe to ignore by callers)
+    meta: {
+      industryKeyApplied: industryKey,
+      tenantOverridesUpdatedAt: tenantOverrides?.updatedAt ?? null,
+      effectiveComposition: effectiveBundle?.meta ?? null,
+    },
   };
 }

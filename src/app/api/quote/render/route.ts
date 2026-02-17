@@ -60,6 +60,10 @@ async function getTenantBySlug(tenantSlug: string) {
   return rows[0] ?? null;
 }
 
+function pickJsonRow(r: any) {
+  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+}
+
 // If there is already a queued/running job, return it instead of inserting a new one
 async function findExistingQueuedJob(quoteLogId: string): Promise<{ id: string; status: string } | null> {
   const r = await db.execute(sql`
@@ -71,7 +75,7 @@ async function findExistingQueuedJob(quoteLogId: string): Promise<{ id: string; 
     limit 1
   `);
 
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const row: any = pickJsonRow(r);
   if (!row) return null;
   return { id: String(row.id), status: String(row.status) };
 }
@@ -90,6 +94,97 @@ async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; pr
     )
   `);
   return jobId;
+}
+
+type NormalizedQa = Array<{ question: string; answer: string }>;
+
+function normalizeQaAnswers(qaAny: any): NormalizedQa {
+  const answers = qaAny?.answers;
+  if (!Array.isArray(answers)) return [];
+  return answers
+    .map((x: any) => ({
+      question: safeTrim(x?.question),
+      answer: safeTrim(x?.answer),
+    }))
+    .filter((x) => x.question && x.answer);
+}
+
+function buildRenderPrompt(args: {
+  tenantSlug: string;
+  quoteLogId: string;
+  inputAny: any;
+  qaAny: any;
+  outputAny: any;
+}) {
+  const { tenantSlug, quoteLogId, inputAny, qaAny, outputAny } = args;
+
+  const ctx = inputAny?.customer_context ?? {};
+  const category = safeTrim(ctx?.category) || safeTrim(inputAny?.industryKeySnapshot) || "service";
+  const serviceType = safeTrim(ctx?.service_type) || "service";
+  const notes = safeTrim(ctx?.notes);
+
+  const summary = safeTrim(outputAny?.summary);
+  const visibleScope = Array.isArray(outputAny?.visible_scope) ? outputAny.visible_scope.map(safeTrim).filter(Boolean) : [];
+
+  const qaPairs = normalizeQaAnswers(qaAny);
+  const qaText = qaPairs.length
+    ? qaPairs.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n")
+    : "";
+
+  const styleKey =
+    safeTrim(outputAny?.ai_snapshot?.tenantSettings?.tenantStyleKey) ||
+    safeTrim(outputAny?.ai_snapshot?.tenantSettings?.tenantStyle) ||
+    safeTrim(inputAny?.tenantStyleKey) ||
+    "photoreal";
+
+  const renderNotes =
+    safeTrim(outputAny?.ai_snapshot?.tenantSettings?.tenantRenderNotes) ||
+    safeTrim(inputAny?.tenantRenderNotes) ||
+    "";
+
+  const lines: string[] = [];
+
+  lines.push(
+    `You are generating a customer-facing visual concept render for an AI Photo Quote.`,
+    `Tenant: ${tenantSlug}`,
+    `Quote: ${quoteLogId}`,
+    ``,
+    `Goal: Create a realistic "after" concept image that matches the requested work and constraints.`,
+    `Do NOT invent project details that are not stated below. If something is unclear, keep it generic rather than hallucinating.`,
+    `No text overlays, no labels, no watermarks.`,
+    ``
+  );
+
+  lines.push(`Service context:`);
+  lines.push(`- Category: ${category}`);
+  lines.push(`- Service type: ${serviceType}`);
+  if (notes) lines.push(`- Customer notes: ${notes}`);
+  if (summary) lines.push(`- Estimate summary: ${summary}`);
+
+  if (visibleScope.length) {
+    lines.push(``);
+    lines.push(`Visible scope to reflect in the render:`);
+    for (const s of visibleScope.slice(0, 12)) lines.push(`- ${s}`);
+  }
+
+  if (qaText) {
+    lines.push(``);
+    lines.push(`Follow-up Q&A (must be honored):`);
+    lines.push(qaText);
+  }
+
+  lines.push(``);
+  lines.push(`Rendering style: ${styleKey}`);
+  if (renderNotes) {
+    lines.push(`Tenant render notes: ${renderNotes}`);
+  }
+
+  lines.push(``);
+  lines.push(
+    `Output: a single high-quality image matching the requested concept. Keep it plausible and consistent with typical materials and construction for this category.`
+  );
+
+  return lines.join("\n");
 }
 
 /**
@@ -117,7 +212,6 @@ async function tryKickCronNow(req: Request) {
       signal: controller.signal,
     });
 
-    // Read a tiny bit for debugging (don’t throw if it fails)
     let bodySnippet: string | null = null;
     try {
       const txt = await r.text();
@@ -174,6 +268,9 @@ export async function POST(req: Request) {
         renderOptIn: quoteLogs.renderOptIn,
         renderStatus: quoteLogs.renderStatus,
         renderImageUrl: quoteLogs.renderImageUrl,
+        input: quoteLogs.input,
+        qa: quoteLogs.qa,
+        output: quoteLogs.output,
       })
       .from(quoteLogs)
       .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)))
@@ -184,10 +281,41 @@ export async function POST(req: Request) {
       return json({ ok: false, error: "QUOTE_NOT_FOUND", message: "Quote not found for this tenant." }, 404, debugId);
     }
 
+    const inputAny: any = (q as any).input ?? {};
+    const qaAny: any = (q as any).qa ?? {};
+    const outputAny: any = (q as any).output ?? {};
+
+    /**
+     * ✅ Opt-in source of truth:
+     * - quote_logs.render_opt_in is the fast column used by UI
+     * - BUT older/newer flows may have stored the actual customer opt-in in input.render_opt_in
+     *   (especially if the phase1 logic gated the column)
+     *
+     * We treat either as "opted in".
+     */
+    const optInFromColumn = Boolean(q.renderOptIn);
+    const optInFromInput = Boolean(inputAny?.render_opt_in);
+    const optedIn = optInFromColumn || optInFromInput;
+
+    // Self-heal: if input says opted-in but column is false, update column.
+    if (optInFromInput && !optInFromColumn) {
+      await db
+        .update(quoteLogs)
+        .set({ renderOptIn: true })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+    }
+
     // If not opted-in, do not enqueue
-    if (!q.renderOptIn) {
+    if (!optedIn) {
       return json(
-        { ok: true, quoteLogId, status: "not_requested", jobId: null, imageUrl: q.renderImageUrl ?? null },
+        {
+          ok: true,
+          quoteLogId,
+          status: "not_requested",
+          jobId: null,
+          imageUrl: q.renderImageUrl ?? null,
+          optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+        },
         200,
         debugId
       );
@@ -195,7 +323,18 @@ export async function POST(req: Request) {
 
     // If an image URL exists, treat as rendered and never enqueue/stomp.
     if (q.renderImageUrl) {
-      return json({ ok: true, quoteLogId, status: "rendered", jobId: null, imageUrl: q.renderImageUrl }, 200, debugId);
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          status: "rendered",
+          jobId: null,
+          imageUrl: q.renderImageUrl,
+          optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+        },
+        200,
+        debugId
+      );
     }
 
     // 3) Idempotency: if queued/running exists, return it
@@ -218,6 +357,7 @@ export async function POST(req: Request) {
           status: existing.status === "running" ? "running" : "queued",
           jobId: existing.id,
           skipped: true,
+          optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
           kick,
         },
         200,
@@ -225,8 +365,15 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4) Enqueue job
-    const prompt = "queued_by_api_quote_render";
+    // 4) Enqueue job with a REAL prompt (includes summary/scope/Q&A)
+    const prompt = buildRenderPrompt({
+      tenantSlug,
+      quoteLogId,
+      inputAny,
+      qaAny,
+      outputAny,
+    });
+
     const jobId = await enqueueRenderJob({ tenantId: tenant.id, quoteLogId, prompt });
 
     // 5) Reflect queued status on quote log for UI/admin visibility
@@ -237,7 +384,18 @@ export async function POST(req: Request) {
 
     const kick = await tryKickCronNow(req);
 
-    return json({ ok: true, quoteLogId, status: "queued", jobId, kick }, 200, debugId);
+    return json(
+      {
+        ok: true,
+        quoteLogId,
+        status: "queued",
+        jobId,
+        optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+        kick,
+      },
+      200,
+      debugId
+    );
   } catch (e) {
     return json({ ok: false, error: "REQUEST_FAILED", message: safeErr(e) }, 500, debugId);
   }
