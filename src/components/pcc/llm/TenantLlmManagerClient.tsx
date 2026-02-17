@@ -1,4 +1,5 @@
 // src/components/pcc/llm/TenantLlmManagerClient.tsx
+
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -100,6 +101,21 @@ async function safeJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * ✅ Non-throwing JSON helper (for optional endpoints like key-policy probes).
+ * - If not JSON (e.g., 404 HTML), returns ok:false cleanly.
+ */
+async function safeJsonOptional<T>(res: Response): Promise<{ ok: true; data: T } | { ok: false; status: number; ct: string }> {
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) return { ok: false, status: res.status, ct };
+  try {
+    const data = (await res.json()) as T;
+    return { ok: true, data };
+  } catch {
+    return { ok: false, status: res.status, ct };
+  }
+}
+
 function safeStr(v: unknown, fallback = "") {
   const s = String(v ?? "").trim();
   return s || fallback;
@@ -129,9 +145,12 @@ function shortTs(ts: unknown) {
 }
 
 function chipClass(kind: "ok" | "warn" | "err" | "info") {
-  if (kind === "ok") return "border-green-200 bg-green-50 text-green-900 dark:border-green-900/40 dark:bg-green-900/20 dark:text-green-100";
-  if (kind === "warn") return "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-100";
-  if (kind === "err") return "border-red-200 bg-red-50 text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200";
+  if (kind === "ok")
+    return "border-green-200 bg-green-50 text-green-900 dark:border-green-900/40 dark:bg-green-900/20 dark:text-green-100";
+  if (kind === "warn")
+    return "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-100";
+  if (kind === "err")
+    return "border-red-200 bg-red-50 text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200";
   return "border-gray-200 bg-white text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
 }
 
@@ -260,21 +279,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     return {};
   }, [data]);
 
-  const okData = data && (data as any).ok ? (data as any) : null;
-  const effective: EffectiveShape | null = okData?.effective ?? null;
-  const effectiveBase: EffectiveShape | null = okData?.effectiveBase ?? null;
-  const platform = okData?.platform ?? null;
-  const permissions = okData?.permissions ?? null;
-
-  const baselineEstimator = safeStr(effectiveBase?.models?.estimatorModel, "gpt-4o-mini");
-  const baselineQa = safeStr(effectiveBase?.models?.qaModel, "gpt-4o-mini");
-  const baselineRender = safeStr(effectiveBase?.models?.renderModel, "gpt-image-1");
-
-  const effectiveEstimator = safeStr(effective?.models?.estimatorModel, baselineEstimator);
-  const effectiveQa = safeStr(effective?.models?.qaModel, baselineQa);
-  const effectiveRender = safeStr(effective?.models?.renderModel, baselineRender);
-
-  // ---------- form state ----------
   const [estimatorModel, setEstimatorModel] = useState("");
   const [qaModel, setQaModel] = useState("");
   const [renderModel, setRenderModel] = useState("");
@@ -285,45 +289,8 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
   const [maxQaQuestions, setMaxQaQuestions] = useState<number>(3);
 
-  // ---------- derived: dirty ----------
-  const dirty = useMemo(() => {
-    const t = tenant ?? {};
-    const m0 = {
-      estimatorModel: safeStr(t.models?.estimatorModel, ""),
-      qaModel: safeStr(t.models?.qaModel, ""),
-      renderModel: safeStr(t.models?.renderModel, ""),
-    };
-    const p0 = {
-      extraSystemPreamble: safeStr(t.prompts?.extraSystemPreamble, ""),
-      quoteEstimatorSystem: safeStr(t.prompts?.quoteEstimatorSystem, ""),
-      qaQuestionGeneratorSystem: safeStr(t.prompts?.qaQuestionGeneratorSystem, ""),
-    };
-    const q0 = numClamp(t.maxQaQuestions, 1, 10, 3);
-
-    return (
-      diffExists(estimatorModel, m0.estimatorModel) ||
-      diffExists(qaModel, m0.qaModel) ||
-      diffExists(renderModel, m0.renderModel) ||
-      diffExists(extraSystemPreamble, p0.extraSystemPreamble) ||
-      diffExists(quoteEstimatorSystem, p0.quoteEstimatorSystem) ||
-      diffExists(qaQuestionGeneratorSystem, p0.qaQuestionGeneratorSystem) ||
-      maxQaQuestions !== q0
-    );
-  }, [
-    tenant,
-    estimatorModel,
-    qaModel,
-    renderModel,
-    extraSystemPreamble,
-    quoteEstimatorSystem,
-    qaQuestionGeneratorSystem,
-    maxQaQuestions,
-  ]);
-
   async function ensureTenantCookie(): Promise<void> {
-    await safeJson<any>(
-      await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" })
-    );
+    await safeJson<any>(await fetch("/api/tenant/context", { method: "GET", cache: "no-store", credentials: "include" }));
   }
 
   async function apiGet(): Promise<ApiGetResp> {
@@ -346,27 +313,31 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     return safeJson<ApiPostResp>(res);
   }
 
-  async function apiGetKeyStatus(): Promise<KeyPolicyStatus> {
+  /**
+   * ✅ Key-policy probe (optional route).
+   * IMPORTANT: This MUST NOT throw if the route is missing or returns HTML.
+   *
+   * If your actual endpoint path differs, change KEY_POLICY_ENDPOINT below.
+   */
+  const KEY_POLICY_ENDPOINT = "/api/tenant/key-policy";
+
+  async function apiGetKeyPolicyStatus(): Promise<KeyPolicyStatus> {
     const qs = new URLSearchParams({ tenantId });
-    const res = await fetch(`/api/tenant/llm-key-status?${qs.toString()}`, {
+    const res = await fetch(`${KEY_POLICY_ENDPOINT}?${qs.toString()}`, {
       method: "GET",
       cache: "no-store",
       credentials: "include",
     });
-    return safeJson<KeyPolicyStatus>(res);
-  }
 
-  function applyLoadedToForm(r: ApiGetResp) {
-    const t = (r as any).tenant ?? {};
-    setEstimatorModel(safeStr(t.models?.estimatorModel, ""));
-    setQaModel(safeStr(t.models?.qaModel, ""));
-    setRenderModel(safeStr(t.models?.renderModel, ""));
+    const parsed = await safeJsonOptional<KeyPolicyStatus>(res);
+    if (!parsed.ok) {
+      // Clean, non-noisy message (no HTML snippet)
+      const hint = res.status === 404 ? "Endpoint not deployed" : `HTTP ${res.status}`;
+      return { ok: false, error: "UNAVAILABLE", message: hint };
+    }
 
-    setExtraSystemPreamble(safeStr(t.prompts?.extraSystemPreamble, ""));
-    setQuoteEstimatorSystem(safeStr(t.prompts?.quoteEstimatorSystem, ""));
-    setQaQuestionGeneratorSystem(safeStr(t.prompts?.qaQuestionGeneratorSystem, ""));
-
-    setMaxQaQuestions(numClamp(t.maxQaQuestions, 1, 10, 3));
+    // If endpoint returns JSON but not ok:true, still show it.
+    return parsed.data;
   }
 
   async function refresh() {
@@ -388,20 +359,30 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       }
 
       setData(r);
-      applyLoadedToForm(r);
 
-      // Key status is optional (endpoint may not exist yet); fail gracefully.
+      const t = (r as any).tenant ?? {};
+      setEstimatorModel(safeStr(t.models?.estimatorModel, ""));
+      setQaModel(safeStr(t.models?.qaModel, ""));
+      setRenderModel(safeStr(t.models?.renderModel, ""));
+
+      setExtraSystemPreamble(safeStr(t.prompts?.extraSystemPreamble, ""));
+      setQuoteEstimatorSystem(safeStr(t.prompts?.quoteEstimatorSystem, ""));
+      setQaQuestionGeneratorSystem(safeStr(t.prompts?.qaQuestionGeneratorSystem, ""));
+
+      setMaxQaQuestions(numClamp(t.maxQaQuestions, 1, 10, 3));
+
+      // Key policy status should never break the page.
       try {
-        let ks = await apiGetKeyStatus();
+        let ks = await apiGetKeyPolicyStatus();
         if (!("ok" in ks) || !ks.ok) {
           if ((ks as any).error === "NO_ACTIVE_TENANT") {
             await ensureTenantCookie();
-            ks = await apiGetKeyStatus();
+            ks = await apiGetKeyPolicyStatus();
           }
         }
         setKeyStatus(ks);
-      } catch (e: any) {
-        setKeyStatus({ ok: false, error: "UNAVAILABLE", message: e?.message ?? String(e) });
+      } catch {
+        setKeyStatus({ ok: false, error: "UNAVAILABLE", message: "Unavailable" });
       }
 
       setMsg({ kind: "ok", text: "Loaded tenant LLM settings." });
@@ -453,8 +434,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     }
   }
 
-  async function resetToInherited() {
-    // Clears tenant overrides by saving empty values. Your API should interpret as "inherit".
+  async function reset() {
     setMsg(null);
     setSaving(true);
     try {
@@ -462,7 +442,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
         updatedAt: tenant?.updatedAt ?? null,
         models: {},
         prompts: {},
-        maxQaQuestions: numClamp(platform?.guardrails?.maxQaQuestions, 1, 10, 3),
+        maxQaQuestions: undefined,
       };
 
       let r = await apiPost(overrides);
@@ -479,7 +459,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       }
 
       await refresh();
-      setMsg({ kind: "ok", text: "Cleared tenant overrides. Inheriting platform + industry defaults." });
+      setMsg({ kind: "ok", text: "Cleared tenant overrides (inheriting baseline)." });
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
@@ -492,82 +472,52 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, industryKey]);
 
-  const maxQaCap = numClamp(platform?.guardrails?.maxQaQuestions ?? 3, 1, 10, 3);
-  const effectiveMaxQa = numClamp(effective?.guardrails?.maxQaQuestions ?? maxQaCap, 1, 10, maxQaCap);
+  const okData = data && (data as any).ok ? (data as any) : null;
+  const effective: EffectiveShape | null = okData?.effective ?? null;
+  const effectiveBase: EffectiveShape | null = okData?.effectiveBase ?? null;
+  const platform = okData?.platform ?? null;
 
-  const keyCard = useMemo(() => {
-    if (!keyStatus) {
-      return (
-        <div className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-          Loading key policy…
-        </div>
-      );
-    }
+  const baselineEstimator = safeStr(effectiveBase?.models?.estimatorModel, "gpt-4o-mini");
+  const baselineQa = safeStr(effectiveBase?.models?.qaModel, "gpt-4o-mini");
+  const baselineRender = safeStr(effectiveBase?.models?.renderModel, "gpt-image-1");
 
-    if (!("ok" in keyStatus) || !keyStatus.ok) {
-      return (
-        <div className={`rounded-xl border px-3 py-2 text-sm ${chipClass("warn")}`}>
-          Key policy status unavailable.{" "}
-          <span className="opacity-80">{(keyStatus as any).message || (keyStatus as any).error || ""}</span>
-        </div>
-      );
-    }
+  const effectiveEstimator = safeStr(effective?.models?.estimatorModel, baselineEstimator);
+  const effectiveQa = safeStr(effective?.models?.qaModel, baselineQa);
+  const effectiveRender = safeStr(effective?.models?.renderModel, baselineRender);
 
-    const ks = keyStatus;
-    const using = ks.effectiveKeySourceNow;
-    const kind = using === "tenant" ? "ok" : "warn";
-    const title =
-      using === "tenant"
-        ? "Using tenant OpenAI key"
-        : "Using platform OpenAI key (tier0 / grace)";
-
-    const graceText =
-      ks.planTier === "tier0"
-        ? "Tier0: platform key allowed (token-limited elsewhere)."
-        : ks.wouldConsumeGraceOnNewQuote
-        ? "New quotes will consume a grace credit while platform key is used."
-        : "Platform key is allowed without consuming grace (phase2 or tier0).";
+  const dirty = useMemo(() => {
+    const t = tenant ?? {};
+    const m0 = {
+      estimatorModel: safeStr(t.models?.estimatorModel, ""),
+      qaModel: safeStr(t.models?.qaModel, ""),
+      renderModel: safeStr(t.models?.renderModel, ""),
+    };
+    const p0 = {
+      extraSystemPreamble: safeStr(t.prompts?.extraSystemPreamble, ""),
+      quoteEstimatorSystem: safeStr(t.prompts?.quoteEstimatorSystem, ""),
+      qaQuestionGeneratorSystem: safeStr(t.prompts?.qaQuestionGeneratorSystem, ""),
+    };
+    const q0 = numClamp(t.maxQaQuestions, 1, 10, 3);
 
     return (
-      <div className={`rounded-2xl border p-4 ${chipClass(kind as any)}`}>
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold">{title}</div>
-            <div className="mt-1 text-xs opacity-90">
-              Plan tier:{" "}
-              <span className="font-mono">{safeStr(ks.planTier, "(unknown)")}</span>{" "}
-              · Tenant key present:{" "}
-              <span className="font-mono">{ks.hasTenantOpenAiKey ? "yes" : "no"}</span>
-            </div>
-          </div>
-          <div className="text-right text-xs opacity-90">
-            <div>
-              Grace:{" "}
-              <span className="font-mono">
-                {Number(ks.activationGraceUsed ?? 0)}/{Number(ks.activationGraceCredits ?? 0)}
-              </span>
-            </div>
-            <div>
-              Source: <span className="font-mono">{using}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-3 text-xs opacity-90">{ks.reason ? ks.reason : graceText}</div>
-      </div>
+      diffExists(estimatorModel, m0.estimatorModel) ||
+      diffExists(qaModel, m0.qaModel) ||
+      diffExists(renderModel, m0.renderModel) ||
+      diffExists(extraSystemPreamble, p0.extraSystemPreamble) ||
+      diffExists(quoteEstimatorSystem, p0.quoteEstimatorSystem) ||
+      diffExists(qaQuestionGeneratorSystem, p0.qaQuestionGeneratorSystem) ||
+      maxQaQuestions !== q0
     );
-  }, [keyStatus]);
+  }, [tenant, estimatorModel, qaModel, renderModel, extraSystemPreamble, quoteEstimatorSystem, qaQuestionGeneratorSystem, maxQaQuestions]);
 
   return (
     <div className="space-y-6">
-      {/* Header / actions */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant LLM settings</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>.
-              Guardrails are platform-locked.
+              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>. Guardrails are platform-locked.
             </div>
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Tenant: <span className="font-mono">{tenantId}</span>
@@ -590,10 +540,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </button>
 
             <button
-              onClick={resetToInherited}
+              onClick={reset}
               disabled={saving || loading}
               className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-              title="Clear all tenant overrides (inherit everything)"
             >
               Reset
             </button>
@@ -608,14 +557,57 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
         </div>
 
-        {msg ? (
-          <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div>
-        ) : null}
+        {msg ? <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div> : null}
 
-        <div className="mt-5">{keyCard}</div>
+        {/* Key policy status block */}
+        <div className="mt-4">
+          {!keyStatus ? (
+            <div className={`rounded-xl border px-3 py-2 text-sm ${chipClass("info")}`}>Loading key policy…</div>
+          ) : !("ok" in keyStatus) || !keyStatus.ok ? (
+            <div className={`rounded-xl border px-3 py-2 text-sm ${chipClass("warn")}`}>
+              Key policy status unavailable.{" "}
+              <span className="opacity-80">
+                {(keyStatus as any).message ? String((keyStatus as any).message) : ""}
+              </span>
+            </div>
+          ) : (
+            <div className={`rounded-2xl border p-4 ${chipClass(keyStatus.effectiveKeySourceNow === "tenant" ? "ok" : "warn")}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold">
+                    {keyStatus.effectiveKeySourceNow === "tenant"
+                      ? "Using tenant OpenAI key"
+                      : "Using platform OpenAI key (tier0 / grace)"}
+                  </div>
+                  <div className="mt-1 text-xs opacity-90">
+                    Plan tier: <span className="font-mono">{safeStr(keyStatus.planTier, "(unknown)")}</span> · Tenant key present:{" "}
+                    <span className="font-mono">{keyStatus.hasTenantOpenAiKey ? "yes" : "no"}</span>
+                  </div>
+                </div>
+                <div className="text-right text-xs opacity-90">
+                  <div>
+                    Grace:{" "}
+                    <span className="font-mono">
+                      {Number(keyStatus.activationGraceUsed ?? 0)}/{Number(keyStatus.activationGraceCredits ?? 0)}
+                    </span>
+                  </div>
+                  <div>
+                    Source: <span className="font-mono">{keyStatus.effectiveKeySourceNow}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 text-xs opacity-90">
+                {safeStr(keyStatus.reason) ||
+                  (keyStatus.wouldConsumeGraceOnNewQuote
+                    ? "New quotes will consume a grace credit while platform key is used."
+                    : "Platform key use will not consume grace for this request type.")}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Two-column: Overrides + Guardrails */}
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Overrides</h2>
@@ -629,7 +621,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               onChange={setEstimatorModel}
               baselineValue={baselineEstimator}
               effectiveValue={effectiveEstimator}
-              showEffectiveLine
+              showEffectiveLine={true}
               help={`Baseline: ${baselineEstimator} · Effective: ${effectiveEstimator}`}
             />
 
@@ -640,7 +632,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               onChange={setQaModel}
               baselineValue={baselineQa}
               effectiveValue={effectiveQa}
-              showEffectiveLine
+              showEffectiveLine={true}
               help={`Baseline: ${baselineQa} · Effective: ${effectiveQa}`}
             />
 
@@ -651,8 +643,8 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               onChange={setRenderModel}
               baselineValue={baselineRender}
               effectiveValue={effectiveRender}
-              showEffectiveLine
-              help="Used by the image-render pipeline. (Actual render enablement is controlled by tenant settings + customer opt-in.)"
+              showEffectiveLine={true}
+              help="This controls which model is used by your render pipeline (when rendering is enabled)."
             />
 
             <div className="grid grid-cols-2 gap-3">
@@ -667,9 +659,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                   max={10}
                 />
                 <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Tenant can only tighten. Platform cap:{" "}
-                  <span className="font-mono">{maxQaCap}</span>. Effective:{" "}
-                  <span className="font-mono">{effectiveMaxQa}</span>.
+                  Tenant can only tighten. Platform cap still applies.
                 </div>
               </div>
             </div>
@@ -678,9 +668,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Guardrails (locked)</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            These are platform-owned and cannot be changed per tenant.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">These are platform-owned and cannot be changed per tenant.</p>
 
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
@@ -693,31 +681,22 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">
-                {(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}
-              </span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">{(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}</span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Max output tokens</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">
-                {safeStr(platform?.guardrails?.maxOutputTokens ?? 1200)}
-              </span>
-            </div>
-
-            <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 dark:border-gray-800 dark:bg-neutral-900/40 dark:text-gray-200">
-              Tip: prompt composition adds platform + industry + tenant layers; guardrails always remain platform-locked.
+              <span className="font-mono text-gray-900 dark:text-gray-100">{safeStr(platform?.guardrails?.maxOutputTokens ?? 1200)}</span>
             </div>
           </div>
         </section>
       </div>
 
-      {/* Prompts with preview */}
       <Collapsible
         title="Prompt overrides"
-        subtitle="Leave blank to inherit. Preview shows effective prompts after platform/industry/tenant composition."
+        subtitle="Leave blank to inherit. Preview shows effective prompts from platform + industry + tenant."
         defaultOpen
       >
-        <div className="grid gap-6 lg:grid-cols-3">
+        <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
             <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
             <textarea
@@ -726,9 +705,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               className="mt-1 h-64 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
               placeholder="(inherit)"
             />
-            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Adds additional system instructions above platform + industry defaults.
-            </div>
           </div>
 
           <div>
@@ -739,9 +715,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               className="mt-1 h-64 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
               placeholder="(inherit)"
             />
-            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              If blank, inherits baseline estimator prompt and then composition applies pricing policy + tenant context at runtime.
-            </div>
           </div>
 
           <div>
@@ -752,9 +725,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               className="mt-1 h-64 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
               placeholder="(inherit)"
             />
-            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Controls which clarifying questions get asked during Phase 1 when Live Q&A is enabled.
-            </div>
           </div>
         </div>
 
@@ -764,6 +734,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Baseline (platform + industry)</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">{shortTs(platform?.updatedAt)}</div>
             </div>
+
             <div className="mt-3 space-y-3">
               <div>
                 <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Estimator</div>
@@ -771,6 +742,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                   {effectiveBase?.prompts?.quoteEstimatorSystem ?? ""}
                 </pre>
               </div>
+
               <div>
                 <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Q&A</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
@@ -781,22 +753,18 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
 
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-neutral-900/40">
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective (includes tenant)</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">
-                {dirty ? "Unsaved changes (preview may differ after save)" : "Current effective preview"}
-              </div>
-            </div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective (includes tenant)</div>
 
-            <div className="mt-3 grid gap-4">
+            <div className="mt-3 space-y-3">
               <div>
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Effective estimator system</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Estimator</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {effective?.prompts?.quoteEstimatorSystem ?? ""}
                 </pre>
               </div>
+
               <div>
-                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Effective Q&A system</div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Q&A</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {effective?.prompts?.qaQuestionGeneratorSystem ?? ""}
                 </pre>
@@ -804,33 +772,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
           </div>
         </div>
-
-        <div className="mt-6 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-          <div className="font-semibold text-gray-900 dark:text-gray-100">How this applies at runtime</div>
-          <ul className="mt-2 list-disc pl-5 space-y-1">
-            <li>
-              <span className="font-mono">resolveTenantLlm()</span> loads tenant toggles + pricing payload; platform config comes
-              from PCC store.
-            </li>
-            <li>
-              Prompts are composed (platform → industry → tenant) and then pricing policy is enforced by server logic (both in
-              prompt and post-processing).
-            </li>
-            <li>
-              OpenAI key selection is enforced server-side and is frozen into each quote log (Phase 1) for auditability.
-            </li>
-          </ul>
-        </div>
       </Collapsible>
-
-      {/* Permissions (optional visibility) */}
-      {permissions ? (
-        <Collapsible title="Permissions" subtitle="Debug-only: what this user is allowed to edit." defaultOpen={false}>
-          <pre className="whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-            {JSON.stringify(permissions, null, 2)}
-          </pre>
-        </Collapsible>
-      ) : null}
     </div>
   );
 }
