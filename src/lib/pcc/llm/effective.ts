@@ -3,14 +3,18 @@ import type { PlatformLlmConfig } from "@/lib/pcc/llm/types";
 import type { TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
 /**
- * DB-backed industry packs will be normalized into this same shape (Partial<PlatformLlmConfig>).
- * No hardcoded keys, ever.
+ * Industry packs are DB-backed and will be normalized into Partial<PlatformLlmConfig>.
  *
- * Composition model (additive):
- *   Platform + Industry + Tenant
+ * ✅ RULE: no hardcoded industry keys, ever.
+ * This function exists as the single import point for "industry layer" resolution.
  *
- * Guardrails are PLATFORM-LOCKED (industry/tenant cannot change them).
+ * For now, it returns {} (no industry augmentation) until the DB-backed packs land.
+ * That unblocks builds while preserving the layering contract: Platform + Industry + Tenant.
  */
+export function getIndustryDefaults(_industryKey: string | null | undefined): Partial<PlatformLlmConfig> {
+  // TODO(DB_PACKS): load industry pack from DB by key and normalize into Partial<PlatformLlmConfig>
+  return {};
+}
 
 function safeStr(v: unknown) {
   return String(v ?? "").trim();
@@ -21,20 +25,23 @@ function joinBlocks(...xs: Array<unknown>) {
   return parts.join("\n\n");
 }
 
-function clampInt(v: unknown, fallback: number, min: number, max: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
+function minInt(a: unknown, b: unknown, fallback: number) {
+  const na = Number(a);
+  const nb = Number(b);
+  const va = Number.isFinite(na) ? Math.floor(na) : fallback;
+  const vb = Number.isFinite(nb) ? Math.floor(nb) : fallback;
+  return Math.min(va, vb);
 }
 
 /**
  * Merge rules:
- * - guardrails are LOCKED to platform (industry/tenant cannot change)
+ * - guardrails are LOCKED to platform (tenant/industry cannot change)
+ * - maxQaQuestions: tenant may only tighten: min(platform, tenant)
  * - prompts: additive merge: platform base + industry add + tenant add
  * - models: tenant may select different models, otherwise industry, otherwise platform
  *
- * NOTE: “tenant adds” means tenant does NOT replace platform prompt bodies; it appends.
- * If you need a true replacement, that belongs at PLATFORM (or by updating the industry pack).
+ * NOTE:
+ * “tenant adds” means we never replace platform prompt bodies; we *append*.
  */
 export function buildEffectiveLlmConfig(args: {
   platform: PlatformLlmConfig;
@@ -93,11 +100,12 @@ export function buildEffectiveLlmConfig(args: {
     safeStr(platformModels.renderModel) ||
     "gpt-image-1";
 
-  // ✅ Guardrails are platform-locked
+  // Guardrails are platform-locked
   const g = (platform.guardrails ?? {}) as any;
 
-  const maxQaQuestions = clampInt(g.maxQaQuestions, 3, 0, 50);
-  const maxOutputTokens = clampInt(g.maxOutputTokens, 1200, 1, 200_000);
+  // Tenant can only tighten maxQaQuestions
+  const maxQaQuestions = minInt(g.maxQaQuestions, tenant?.maxQaQuestions, Number(g.maxQaQuestions ?? 3));
+  const maxOutputTokens = Number.isFinite(Number(g.maxOutputTokens)) ? Number(g.maxOutputTokens) : 1200;
 
   return {
     platform,
