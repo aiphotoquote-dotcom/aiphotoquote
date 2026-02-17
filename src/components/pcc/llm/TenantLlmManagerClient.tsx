@@ -74,7 +74,6 @@ type ApiPostResp =
 
 /**
  * Key policy status (read-only)
- * NOTE: This expects an endpoint to exist. If it doesn't, we fail gracefully and show "Unavailable".
  */
 type KeyPolicyStatus =
   | {
@@ -84,7 +83,12 @@ type KeyPolicyStatus =
       activationGraceCredits: number | null;
       activationGraceUsed: number | null;
       hasTenantOpenAiKey: boolean;
-      effectiveKeySourceNow: "tenant" | "platform_grace";
+
+      hasPlatformKey: boolean;
+      platformAllowed: boolean;
+      graceRemaining: boolean;
+
+      effectiveKeySourceNow: "tenant" | "platform_grace" | "none";
       wouldConsumeGraceOnNewQuote: boolean;
       reason?: string | null;
     }
@@ -105,7 +109,9 @@ async function safeJson<T>(res: Response): Promise<T> {
  * ✅ Non-throwing JSON helper (for optional endpoints like key-policy probes).
  * - If not JSON (e.g., 404 HTML), returns ok:false cleanly.
  */
-async function safeJsonOptional<T>(res: Response): Promise<{ ok: true; data: T } | { ok: false; status: number; ct: string }> {
+async function safeJsonOptional<T>(
+  res: Response
+): Promise<{ ok: true; data: T } | { ok: false; status: number; ct: string }> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) return { ok: false, status: res.status, ct };
   try {
@@ -274,6 +280,11 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const [data, setData] = useState<ApiGetResp | null>(null);
   const [keyStatus, setKeyStatus] = useState<KeyPolicyStatus | null>(null);
 
+  // Tenant key management UI
+  const [openaiKeyInput, setOpenaiKeyInput] = useState("");
+  const [keySaving, setKeySaving] = useState(false);
+  const [keyMsg, setKeyMsg] = useState<{ kind: "ok" | "warn" | "err" | "info"; text: string } | null>(null);
+
   const tenant = useMemo<TenantOverrides>(() => {
     if (data && (data as any).ok) return ((data as any).tenant ?? {}) as TenantOverrides;
     return {};
@@ -315,9 +326,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
   /**
    * ✅ Key-policy probe (optional route).
-   * IMPORTANT: This MUST NOT throw if the route is missing or returns HTML.
-   *
-   * If your actual endpoint path differs, change KEY_POLICY_ENDPOINT below.
    */
   const KEY_POLICY_ENDPOINT = "/api/tenant/key-policy";
 
@@ -331,13 +339,50 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
     const parsed = await safeJsonOptional<KeyPolicyStatus>(res);
     if (!parsed.ok) {
-      // Clean, non-noisy message (no HTML snippet)
       const hint = res.status === 404 ? "Endpoint not deployed" : `HTTP ${res.status}`;
       return { ok: false, error: "UNAVAILABLE", message: hint };
     }
 
-    // If endpoint returns JSON but not ok:true, still show it.
     return parsed.data;
+  }
+
+  // Tenant OpenAI key management endpoint (new)
+  const OPENAI_KEY_ENDPOINT = "/api/tenant/openai-key";
+
+  async function apiSetTenantOpenAiKey(key: string) {
+    const res = await fetch(OPENAI_KEY_ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ tenantId, openaiApiKey: key }),
+    });
+    return safeJson<any>(res);
+  }
+
+  async function apiClearTenantOpenAiKey() {
+    const res = await fetch(OPENAI_KEY_ENDPOINT, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ tenantId }),
+    });
+    return safeJson<any>(res);
+  }
+
+  async function refreshKeyStatusOnly() {
+    // Key policy status should never break the page.
+    try {
+      let ks = await apiGetKeyPolicyStatus();
+      if (!("ok" in ks) || !ks.ok) {
+        if ((ks as any).error === "NO_ACTIVE_TENANT") {
+          await ensureTenantCookie();
+          ks = await apiGetKeyPolicyStatus();
+        }
+      }
+      setKeyStatus(ks);
+    } catch {
+      setKeyStatus({ ok: false, error: "UNAVAILABLE", message: "Unavailable" });
+    }
   }
 
   async function refresh() {
@@ -371,19 +416,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
       setMaxQaQuestions(numClamp(t.maxQaQuestions, 1, 10, 3));
 
-      // Key policy status should never break the page.
-      try {
-        let ks = await apiGetKeyPolicyStatus();
-        if (!("ok" in ks) || !ks.ok) {
-          if ((ks as any).error === "NO_ACTIVE_TENANT") {
-            await ensureTenantCookie();
-            ks = await apiGetKeyPolicyStatus();
-          }
-        }
-        setKeyStatus(ks);
-      } catch {
-        setKeyStatus({ ok: false, error: "UNAVAILABLE", message: "Unavailable" });
-      }
+      await refreshKeyStatusOnly();
 
       setMsg({ kind: "ok", text: "Loaded tenant LLM settings." });
     } catch (e: any) {
@@ -467,6 +500,62 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     }
   }
 
+  async function saveTenantKey() {
+    setKeyMsg(null);
+    setKeySaving(true);
+    try {
+      const k = safeStr(openaiKeyInput, "");
+      if (!k) {
+        setKeyMsg({ kind: "warn", text: "Paste an OpenAI API key first." });
+        return;
+      }
+
+      let r = await apiSetTenantOpenAiKey(k);
+      if (!r?.ok) {
+        if (r?.error === "NO_ACTIVE_TENANT") {
+          await ensureTenantCookie();
+          r = await apiSetTenantOpenAiKey(k);
+        }
+      }
+      if (!r?.ok) {
+        throw new Error(r?.message || r?.error || "Failed to save key.");
+      }
+
+      setOpenaiKeyInput("");
+      setKeyMsg({ kind: "ok", text: "Saved tenant OpenAI key." });
+      await refreshKeyStatusOnly();
+    } catch (e: any) {
+      setKeyMsg({ kind: "err", text: e?.message ?? String(e) });
+    } finally {
+      setKeySaving(false);
+    }
+  }
+
+  async function clearTenantKey() {
+    setKeyMsg(null);
+    setKeySaving(true);
+    try {
+      let r = await apiClearTenantOpenAiKey();
+      if (!r?.ok) {
+        if (r?.error === "NO_ACTIVE_TENANT") {
+          await ensureTenantCookie();
+          r = await apiClearTenantOpenAiKey();
+        }
+      }
+      if (!r?.ok) {
+        throw new Error(r?.message || r?.error || "Failed to clear key.");
+      }
+
+      setOpenaiKeyInput("");
+      setKeyMsg({ kind: "ok", text: "Cleared tenant OpenAI key." });
+      await refreshKeyStatusOnly();
+    } catch (e: any) {
+      setKeyMsg({ kind: "err", text: e?.message ?? String(e) });
+    } finally {
+      setKeySaving(false);
+    }
+  }
+
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -508,7 +597,16 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       diffExists(qaQuestionGeneratorSystem, p0.qaQuestionGeneratorSystem) ||
       maxQaQuestions !== q0
     );
-  }, [tenant, estimatorModel, qaModel, renderModel, extraSystemPreamble, quoteEstimatorSystem, qaQuestionGeneratorSystem, maxQaQuestions]);
+  }, [
+    tenant,
+    estimatorModel,
+    qaModel,
+    renderModel,
+    extraSystemPreamble,
+    quoteEstimatorSystem,
+    qaQuestionGeneratorSystem,
+    maxQaQuestions,
+  ]);
 
   return (
     <div className="space-y-6">
@@ -517,7 +615,8 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant LLM settings</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>. Guardrails are platform-locked.
+              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>.
+              Guardrails are platform-locked.
             </div>
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Tenant: <span className="font-mono">{tenantId}</span>
@@ -557,54 +656,124 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
         </div>
 
-        {msg ? <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div> : null}
+        {msg ? (
+          <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div>
+        ) : null}
 
         {/* Key policy status block */}
-        <div className="mt-4">
+        <div className="mt-4 space-y-4">
           {!keyStatus ? (
             <div className={`rounded-xl border px-3 py-2 text-sm ${chipClass("info")}`}>Loading key policy…</div>
           ) : !("ok" in keyStatus) || !keyStatus.ok ? (
             <div className={`rounded-xl border px-3 py-2 text-sm ${chipClass("warn")}`}>
               Key policy status unavailable.{" "}
-              <span className="opacity-80">
-                {(keyStatus as any).message ? String((keyStatus as any).message) : ""}
-              </span>
+              <span className="opacity-80">{(keyStatus as any).message ? String((keyStatus as any).message) : ""}</span>
             </div>
           ) : (
-            <div className={`rounded-2xl border p-4 ${chipClass(keyStatus.effectiveKeySourceNow === "tenant" ? "ok" : "warn")}`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold">
-                    {keyStatus.effectiveKeySourceNow === "tenant"
-                      ? "Using tenant OpenAI key"
-                      : "Using platform OpenAI key (tier0 / grace)"}
+            (() => {
+              const keyKind =
+                keyStatus.effectiveKeySourceNow === "tenant"
+                  ? "ok"
+                  : keyStatus.effectiveKeySourceNow === "platform_grace"
+                    ? "warn"
+                    : "err";
+
+              const title =
+                keyStatus.effectiveKeySourceNow === "tenant"
+                  ? "Using tenant OpenAI key"
+                  : keyStatus.effectiveKeySourceNow === "platform_grace"
+                    ? "Using platform OpenAI key (tier0 / grace)"
+                    : "No OpenAI key available";
+
+              return (
+                <div className={`rounded-2xl border p-4 ${chipClass(keyKind)}`}>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{title}</div>
+                      <div className="mt-1 text-xs opacity-90">
+                        Plan tier: <span className="font-mono">{safeStr(keyStatus.planTier, "(unknown)")}</span> · Tenant key present:{" "}
+                        <span className="font-mono">{keyStatus.hasTenantOpenAiKey ? "yes" : "no"}</span>
+                        {" · "}
+                        Platform key present: <span className="font-mono">{keyStatus.hasPlatformKey ? "yes" : "no"}</span>
+                      </div>
+                    </div>
+                    <div className="text-right text-xs opacity-90">
+                      <div>
+                        Grace:{" "}
+                        <span className="font-mono">
+                          {Number(keyStatus.activationGraceUsed ?? 0)}/{Number(keyStatus.activationGraceCredits ?? 0)}
+                        </span>
+                      </div>
+                      <div>
+                        Source: <span className="font-mono">{keyStatus.effectiveKeySourceNow}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="mt-1 text-xs opacity-90">
-                    Plan tier: <span className="font-mono">{safeStr(keyStatus.planTier, "(unknown)")}</span> · Tenant key present:{" "}
-                    <span className="font-mono">{keyStatus.hasTenantOpenAiKey ? "yes" : "no"}</span>
+
+                  <div className="mt-3 text-xs opacity-90">
+                    {safeStr(keyStatus.reason) ||
+                      (keyStatus.wouldConsumeGraceOnNewQuote
+                        ? "New quotes will consume a grace credit while platform key is used."
+                        : "Platform key use will not consume grace for this request type.")}
                   </div>
                 </div>
-                <div className="text-right text-xs opacity-90">
-                  <div>
-                    Grace:{" "}
-                    <span className="font-mono">
-                      {Number(keyStatus.activationGraceUsed ?? 0)}/{Number(keyStatus.activationGraceCredits ?? 0)}
-                    </span>
-                  </div>
-                  <div>
-                    Source: <span className="font-mono">{keyStatus.effectiveKeySourceNow}</span>
-                  </div>
+              );
+            })()
+          )}
+
+          {/* Tenant key manager */}
+          <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant OpenAI key</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  Paste a key to <span className="font-semibold">set or replace</span>. We store it encrypted and never display it back.
                 </div>
               </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={refreshKeyStatusOnly}
+                  disabled={keySaving || loading}
+                  className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                >
+                  Refresh status
+                </button>
 
-              <div className="mt-3 text-xs opacity-90">
-                {safeStr(keyStatus.reason) ||
-                  (keyStatus.wouldConsumeGraceOnNewQuote
-                    ? "New quotes will consume a grace credit while platform key is used."
-                    : "Platform key use will not consume grace for this request type.")}
+                <button
+                  onClick={clearTenantKey}
+                  disabled={keySaving || loading}
+                  className="rounded-xl border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-60 dark:border-red-900/40 dark:bg-gray-950 dark:text-red-200 dark:hover:bg-red-950/30"
+                >
+                  {keySaving ? "Working…" : "Clear key"}
+                </button>
               </div>
             </div>
-          )}
+
+            {keyMsg ? (
+              <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${chipClass(keyMsg.kind)}`}>{keyMsg.text}</div>
+            ) : null}
+
+            <div className="mt-3 grid gap-3 lg:grid-cols-[1fr_auto]">
+              <input
+                type="password"
+                value={openaiKeyInput}
+                onChange={(e) => setOpenaiKeyInput(e.target.value)}
+                placeholder="Paste OpenAI API key…"
+                className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              />
+              <button
+                onClick={saveTenantKey}
+                disabled={keySaving || loading}
+                className="rounded-xl bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-60 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+              >
+                {keySaving ? "Saving…" : "Save key"}
+              </button>
+            </div>
+
+            <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+              Tip: If you’re testing tier/grace behavior, clear the tenant key to force platform/grace evaluation.
+            </div>
+          </div>
         </div>
       </div>
 
@@ -658,9 +827,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                   min={1}
                   max={10}
                 />
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Tenant can only tighten. Platform cap still applies.
-                </div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Tenant can only tighten. Platform cap still applies.</div>
               </div>
             </div>
           </div>
@@ -681,7 +848,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">{(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}</span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">
+                {(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Max output tokens</span>
@@ -691,11 +860,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
         </section>
       </div>
 
-      <Collapsible
-        title="Prompt overrides"
-        subtitle="Leave blank to inherit. Preview shows effective prompts from platform + industry + tenant."
-        defaultOpen
-      >
+      <Collapsible title="Prompt overrides" subtitle="Leave blank to inherit. Preview shows effective prompts from platform + industry + tenant." defaultOpen>
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
             <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
