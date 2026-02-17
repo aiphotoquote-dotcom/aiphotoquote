@@ -165,6 +165,86 @@ function diffExists(a: string, b: string) {
 }
 
 /**
+ * ✅ Normalize key policy payloads across versions.
+ *
+ * Supports:
+ * - New shape (flat):
+ *   { ok:true, tenantId, planTier, hasPlatformKey, hasTenantOpenAiKey, ... }
+ *
+ * - Legacy shape:
+ *   { ok:true, tenantId, keyPolicy: { planTier, platformKeyPresent, hasTenantKey, ... } }
+ *
+ * And it self-heals inconsistent combos (e.g., effectiveKeySourceNow says platform_grace
+ * but hasPlatformKey is missing/false due to shape mismatch).
+ */
+function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
+  if (!anyResp || anyResp.ok !== true) return anyResp as KeyPolicyStatus;
+
+  const tenantId = safeStr(anyResp.tenantId, "");
+
+  // Legacy nesting
+  const kp = anyResp.keyPolicy && typeof anyResp.keyPolicy === "object" ? anyResp.keyPolicy : null;
+
+  const planTierRaw = kp ? kp.planTier : anyResp.planTier;
+  const planTier = safeStr(planTierRaw, "") || null;
+
+  const activationGraceCreditsRaw = kp ? kp.activationGraceCredits : anyResp.activationGraceCredits;
+  const activationGraceUsedRaw = kp ? kp.activationGraceUsed : anyResp.activationGraceUsed;
+
+  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw))
+    ? Number(activationGraceCreditsRaw)
+    : 0;
+  const activationGraceUsed = Number.isFinite(Number(activationGraceUsedRaw)) ? Number(activationGraceUsedRaw) : 0;
+
+  const hasTenantOpenAiKey = Boolean(
+    kp ? kp.hasTenantKey ?? kp.hasTenantOpenAiKey : anyResp.hasTenantOpenAiKey ?? anyResp.hasTenantKey
+  );
+
+  // "platformKeyPresent" (legacy) vs "hasPlatformKey" (new)
+  const hasPlatformKey = Boolean(kp ? kp.platformKeyPresent ?? kp.hasPlatformKey : anyResp.hasPlatformKey);
+
+  const platformAllowed = Boolean(kp ? kp.platformAllowed : anyResp.platformAllowed);
+  const graceRemaining = Boolean(kp ? kp.graceRemaining : anyResp.graceRemaining);
+
+  // New fields may not exist in legacy, so compute if missing.
+  let effectiveKeySourceNow: "tenant" | "platform_grace" | "none" =
+    safeStr(kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow) as any;
+
+  if (effectiveKeySourceNow !== "tenant" && effectiveKeySourceNow !== "platform_grace" && effectiveKeySourceNow !== "none") {
+    effectiveKeySourceNow = "none";
+  }
+
+  // Self-heal source based on actual booleans.
+  const computedSource: "tenant" | "platform_grace" | "none" = hasTenantOpenAiKey
+    ? "tenant"
+    : platformAllowed && hasPlatformKey
+      ? "platform_grace"
+      : "none";
+
+  if (effectiveKeySourceNow !== computedSource) effectiveKeySourceNow = computedSource;
+
+  const wouldConsumeGraceOnNewQuoteRaw = kp ? kp.wouldConsumeGraceOnNewQuote : anyResp.wouldConsumeGraceOnNewQuote;
+  const wouldConsumeGraceOnNewQuote = Boolean(wouldConsumeGraceOnNewQuoteRaw);
+
+  const reason = (kp ? kp.reason : anyResp.reason) ?? null;
+
+  return {
+    ok: true,
+    tenantId,
+    planTier,
+    activationGraceCredits,
+    activationGraceUsed,
+    hasTenantOpenAiKey,
+    hasPlatformKey,
+    platformAllowed,
+    graceRemaining,
+    effectiveKeySourceNow,
+    wouldConsumeGraceOnNewQuote,
+    reason,
+  };
+}
+
+/**
  * Model select behavior:
  * - stored override value is either "" (inherit) OR a concrete model id (including custom text)
  * - UI shows a first row: "Inherited — <baseline> (default)" with value ""
@@ -337,13 +417,14 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       credentials: "include",
     });
 
-    const parsed = await safeJsonOptional<KeyPolicyStatus>(res);
+    const parsed = await safeJsonOptional<any>(res);
     if (!parsed.ok) {
       const hint = res.status === 404 ? "Endpoint not deployed" : `HTTP ${res.status}`;
       return { ok: false, error: "UNAVAILABLE", message: hint };
     }
 
-    return parsed.data;
+    // ✅ Normalize legacy vs new shapes so tier/platform-key/grace display stays correct.
+    return normalizeKeyPolicyStatus(parsed.data);
   }
 
   // Tenant OpenAI key management endpoint (new)
@@ -370,7 +451,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   }
 
   async function refreshKeyStatusOnly() {
-    // Key policy status should never break the page.
     try {
       let ks = await apiGetKeyPolicyStatus();
       if (!("ok" in ks) || !ks.ok) {
@@ -615,8 +695,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant LLM settings</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>.
-              Guardrails are platform-locked.
+              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>. Guardrails are platform-locked.
             </div>
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Tenant: <span className="font-mono">{tenantId}</span>
@@ -656,9 +735,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
         </div>
 
-        {msg ? (
-          <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div>
-        ) : null}
+        {msg ? <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div> : null}
 
         {/* Key policy status block */}
         <div className="mt-4 space-y-4">
@@ -749,9 +826,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               </div>
             </div>
 
-            {keyMsg ? (
-              <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${chipClass(keyMsg.kind)}`}>{keyMsg.text}</div>
-            ) : null}
+            {keyMsg ? <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${chipClass(keyMsg.kind)}`}>{keyMsg.text}</div> : null}
 
             <div className="mt-3 grid gap-3 lg:grid-cols-[1fr_auto]">
               <input
@@ -848,9 +923,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">
-                {(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}
-              </span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">{(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}</span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Max output tokens</span>
@@ -860,7 +933,11 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
         </section>
       </div>
 
-      <Collapsible title="Prompt overrides" subtitle="Leave blank to inherit. Preview shows effective prompts from platform + industry + tenant." defaultOpen>
+      <Collapsible
+        title="Prompt overrides"
+        subtitle="Leave blank to inherit. Preview shows effective prompts from platform + industry + tenant."
+        defaultOpen
+      >
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
             <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
