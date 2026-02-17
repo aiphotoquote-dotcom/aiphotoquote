@@ -49,16 +49,21 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Prefer the *actual* request host over VERCEL_URL.
+ * VERCEL_URL can be a deployment URL that is protected (401), which breaks links and internal kicks.
+ */
 function getBaseUrl(req: Request) {
-  const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
+  const envBase = safeTrim(process.env.NEXT_PUBLIC_APP_URL) || safeTrim(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
-
-  const vercel = process.env.VERCEL_URL?.trim();
-  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  const vercel = safeTrim(process.env.VERCEL_URL);
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   return "";
 }
@@ -205,6 +210,9 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.brand_logo_variant,
       ts.lead_to_email,
 
+      -- ✅ plan tier gate lives in tenant_settings
+      ts.plan_tier,
+
       -- legacy + new (we'll reconcile below)
       ts.rendering_enabled,
       ts.ai_rendering_enabled,
@@ -269,6 +277,17 @@ function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: bool
   return false;
 }
 
+/**
+ * ✅ Plan gating (authoritative safety belt)
+ * Tier0 must never render, even if toggles are flipped.
+ */
+function isPlanAllowedToRender(planTierRaw: unknown) {
+  const plan = safeTrim(planTierRaw).toLowerCase();
+  if (!plan) return true; // if missing, don't accidentally brick existing tenants
+  if (plan === "tier0") return false;
+  return true;
+}
+
 async function handleCron(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -324,6 +343,29 @@ async function handleCron(req: Request) {
 
       const tenantSlug = String(ctx.tenant_slug ?? "");
       const tenantName = String(ctx.tenant_name ?? "Your Business");
+
+      // ✅ PLAN GATE (tier0 must never render)
+      if (!isPlanAllowedToRender(ctx.plan_tier)) {
+        const plan = safeTrim(ctx.plan_tier) || "unknown";
+        const msg = `Rendering is not available on plan tier: ${plan}.`;
+
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: msg,
+        });
+
+        await markJobDone(job.id, "failed", msg);
+        processed.push({
+          jobId: job.id,
+          quoteLogId: job.quoteLogId,
+          ok: false,
+          error: "PLAN_RENDERING_DISABLED",
+          planTier: plan,
+        });
+        continue;
+      }
 
       // ✅ Resolve tenant + PCC AI settings (authoritative)
       const resolved = await resolveTenantLlm(job.tenantId);
@@ -391,9 +433,7 @@ async function handleCron(req: Request) {
             ? safeTrim(presets.custom)
             : safeTrim(presets.photoreal);
 
-      const styleText =
-        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
-
+      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
       const renderPromptPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
 
       const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
