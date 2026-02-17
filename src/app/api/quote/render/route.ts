@@ -55,29 +55,29 @@ function pickJsonRow(r: any) {
 }
 
 async function getTenantBySlug(tenantSlug: string) {
-  // Keep schema select for id/slug (typed), but we also need plan_tier for tier0 key policy.
-  const rows = await db
-    .select({ id: tenants.id, slug: tenants.slug })
-    .from(tenants)
-    .where(eq(tenants.slug, tenantSlug))
-    .limit(1);
-
-  const t = rows[0] ?? null;
-  if (!t) return null;
-
-  // Pull plan_tier safely via SQL to avoid schema mismatch surprises.
+  /**
+   * ✅ NOTE:
+   * plan_tier lives in tenant_settings (NOT tenants).
+   * We fetch id/slug from tenants and plan tier from tenant_settings in one query.
+   */
   const r = await db.execute(sql`
-    select plan_tier
-    from tenants
-    where id = ${t.id}::uuid
+    select
+      t.id as id,
+      t.slug as slug,
+      ts.plan_tier as plan_tier
+    from tenants t
+    left join tenant_settings ts on ts.tenant_id = t.id
+    where t.slug = ${tenantSlug}
     limit 1
   `);
+
   const row: any = pickJsonRow(r);
+  if (!row?.id) return null;
 
   return {
-    id: t.id,
-    slug: t.slug,
-    planTier: safeTrim(row?.plan_tier) || null,
+    id: String(row.id),
+    slug: String(row.slug),
+    planTier: safeTrim(row.plan_tier) || null,
   };
 }
 
@@ -301,7 +301,7 @@ export async function POST(req: Request) {
 
     const { tenantSlug, quoteLogId } = parsed.data;
 
-    // 1) Resolve tenant (and plan tier for tier0 key policy)
+    // 1) Resolve tenant (and plan tier via tenant_settings.plan_tier)
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link." }, 404, debugId);
 
