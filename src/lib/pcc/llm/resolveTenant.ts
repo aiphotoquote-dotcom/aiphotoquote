@@ -3,7 +3,6 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { tenantSettings, tenantPricingRules } from "@/lib/db/schema";
 
-import type { PlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
 
 import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
@@ -79,9 +78,43 @@ export function computeRenderOptIn(args: {
     return customerOptIn === true;
   }
 
-  // not required: default ON unless explicitly false
   if (customerOptIn === false) return false;
   return true;
+}
+
+/**
+ * Minimal runtime guard for the platform cfg shape expected by buildEffectiveLlmConfig.
+ * We avoid importing a type that may not be exported in this branch.
+ */
+function normalizePlatformCfg(platformAny: any) {
+  const cfg = platformAny?.cfg ?? platformAny;
+
+  const ok =
+    cfg &&
+    typeof cfg === "object" &&
+    typeof cfg.version === "number" &&
+    typeof cfg.updatedAt === "string" &&
+    cfg.models &&
+    typeof cfg.models === "object" &&
+    typeof cfg.models.estimatorModel === "string" &&
+    typeof cfg.models.qaModel === "string" &&
+    // renderModel might be optional in some configs, but effective builder expects a value after defaults.
+    cfg.prompts &&
+    typeof cfg.prompts === "object" &&
+    typeof cfg.prompts.quoteEstimatorSystem === "string" &&
+    typeof cfg.prompts.qaQuestionGeneratorSystem === "string" &&
+    cfg.guardrails &&
+    typeof cfg.guardrails === "object" &&
+    Array.isArray(cfg.guardrails.blockedTopics) &&
+    typeof cfg.guardrails.maxQaQuestions === "number";
+
+  if (!ok) {
+    const e: any = new Error("PLATFORM_LLM_CONFIG_INVALID");
+    e.code = "PLATFORM_LLM_CONFIG_INVALID";
+    throw e;
+  }
+
+  return cfg as any;
 }
 
 /**
@@ -92,10 +125,9 @@ export function computeRenderOptIn(args: {
  * - TenantSettings provides feature toggles (rendering/QA/pricing gates)
  */
 export async function resolveTenantLlm(tenantId: string) {
-  // NOTE: getPlatformLlm() returns a “bundle” in some codepaths.
-  // We normalize to the raw PlatformLlmConfig expected by buildEffectiveLlmConfig().
+  // getPlatformLlm() may return either cfg or a bundle depending on branch
   const platformAny: any = await getPlatformLlm();
-  const platformCfg: PlatformLlmConfig = (platformAny?.cfg ?? platformAny) as PlatformLlmConfig;
+  const platformCfg = normalizePlatformCfg(platformAny);
 
   // Tenant settings (feature gates + render prefs + pricing gates)
   const settings = await db
