@@ -4,9 +4,11 @@ import { z } from "zod";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
-import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+
 import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
+
+import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +23,8 @@ function safeTrim(v: unknown) {
 }
 
 /**
- * Minimal runtime guard for platform cfg shape expected by buildEffectiveLlmConfig.
+ * Minimal runtime guard for the platform cfg shape expected by buildEffectiveLlmConfig.
+ * getPlatformLlm() may return { cfg, models, prompts, guardrails } or a raw cfg depending on branch.
  */
 function normalizePlatformCfg(platformAny: any) {
   const cfg = platformAny?.cfg ?? platformAny;
@@ -58,30 +61,29 @@ const GetQuery = z.object({
   industryKey: z.string().optional().nullable(),
 });
 
+const OverridesSchema = z.object({
+  updatedAt: z.string().optional().nullable(),
+  models: z
+    .object({
+      estimatorModel: z.string().optional(),
+      qaModel: z.string().optional(),
+      renderModel: z.string().optional(),
+    })
+    .optional(),
+  prompts: z
+    .object({
+      extraSystemPreamble: z.string().optional(),
+      quoteEstimatorSystem: z.string().optional(),
+      qaQuestionGeneratorSystem: z.string().optional(),
+    })
+    .optional(),
+  maxQaQuestions: z.number().int().min(1).max(10).optional(),
+});
+
 const PostBody = z.object({
   tenantId: z.string().uuid(),
   industryKey: z.string().optional().nullable(),
-  overrides: z
-    .object({
-      updatedAt: z.string().optional().nullable(),
-      models: z
-        .object({
-          estimatorModel: z.string().optional(),
-          qaModel: z.string().optional(),
-          renderModel: z.string().optional(),
-        })
-        .optional(),
-      prompts: z
-        .object({
-          extraSystemPreamble: z.string().optional(),
-          quoteEstimatorSystem: z.string().optional(),
-          qaQuestionGeneratorSystem: z.string().optional(),
-        })
-        .optional(),
-      maxQaQuestions: z.number().int().min(1).max(10).optional(),
-    })
-    .optional()
-    .nullable(),
+  overrides: OverridesSchema,
 });
 
 export async function GET(req: Request) {
@@ -89,62 +91,79 @@ export async function GET(req: Request) {
   if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
 
   const url = new URL(req.url);
-  const parsedQ = GetQuery.safeParse({
+  const parsed = GetQuery.safeParse({
     tenantId: url.searchParams.get("tenantId"),
     industryKey: url.searchParams.get("industryKey"),
   });
-  if (!parsedQ.success) {
-    return json({ ok: false, error: "BAD_REQUEST", message: "Invalid query", issues: parsedQ.error.issues }, 400);
+
+  if (!parsed.success) {
+    return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  // Must match active tenant context
-  if (parsedQ.data.tenantId !== gate.tenantId) {
+  // NOTE: we intentionally do not trust caller tenantId; must match active tenant context
+  if (parsed.data.tenantId !== gate.tenantId) {
     return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
   }
 
-  const platformAny: any = await getPlatformLlm();
-  const platformCfg = normalizePlatformCfg(platformAny);
+  try {
+    const platformAny: any = await getPlatformLlm();
+    const platformCfg = normalizePlatformCfg(platformAny);
 
-  // ✅ industry pack placeholder (DB-backed soon). No hardcoding.
-  const industryKey = safeTrim(parsedQ.data.industryKey) || null;
-  const industry: any = {};
+    // ✅ industry defaults are currently resolved from an industry key (no hardcoding in this route)
+    // If you later move industry packs to DB, this is the only place that should change.
+    const industryKey = safeTrim(parsed.data.industryKey) || null;
+    const industry = getIndustryDefaults(industryKey);
 
-  const row = await getTenantLlmOverrides(gate.tenantId);
-  const tenant: TenantLlmOverrides | null = row
-    ? normalizeTenantOverrides({
-        models: row.models ?? {},
-        prompts: row.prompts ?? {},
-        updatedAt: row.updatedAt ?? undefined,
-        maxQaQuestions: row.maxQaQuestions ?? undefined,
-      } as any)
-    : null;
+    // Tenant overrides row (jsonb)
+    const row = await getTenantLlmOverrides(gate.tenantId);
 
-  const effectiveBaseBundle = buildEffectiveLlmConfig({
-    platform: platformCfg,
-    industry,
-    tenant: null,
-  });
+    // IMPORTANT:
+    // TenantLlmOverridesRow currently doesn't type maxQaQuestions, but older/newer schemas may store it.
+    // So we read it safely from (row as any) to avoid TypeScript build breaks.
+    const tenantOverrides: TenantLlmOverrides | null = row
+      ? normalizeTenantOverrides({
+          models: (row as any).models ?? {},
+          prompts: (row as any).prompts ?? {},
+          updatedAt: (row as any).updatedAt ?? undefined,
+          maxQaQuestions: (row as any).maxQaQuestions ?? undefined,
+        } as any)
+      : null;
 
-  const effectiveBundle = buildEffectiveLlmConfig({
-    platform: platformCfg,
-    industry,
-    tenant,
-  });
+    const bundle = buildEffectiveLlmConfig({
+      platform: platformCfg,
+      industry,
+      tenant: tenantOverrides,
+    });
 
-  const canEdit = gate.role === "owner" || gate.role === "admin";
+    // baseline = platform + industry only (no tenant)
+    const baselineBundle = buildEffectiveLlmConfig({
+      platform: platformCfg,
+      industry,
+      tenant: null,
+    });
 
-  return json({
-    ok: true,
-    platform: platformCfg,
-    industry,
-    tenant,
-    effectiveBase: effectiveBaseBundle.effective,
-    effective: effectiveBundle.effective,
-    permissions: {
-      role: gate.role,
-      canEdit,
-    },
-  });
+    return json({
+      ok: true,
+      platform: platformCfg,
+      industry,
+      tenant: tenantOverrides,
+      effective: bundle.effective,
+      effectiveBase: baselineBundle.effective,
+      permissions: {
+        role: gate.role,
+        canEdit: gate.role === "owner" || gate.role === "admin",
+      },
+    });
+  } catch (e: any) {
+    return json(
+      {
+        ok: false,
+        error: e?.code || "LOAD_FAILED",
+        message: e?.message ?? String(e),
+      },
+      500
+    );
+  }
 }
 
 export async function POST(req: Request) {
@@ -154,50 +173,75 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => null);
   const parsed = PostBody.safeParse(body);
   if (!parsed.success) {
-    return json({ ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues }, 400);
+    return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
   if (parsed.data.tenantId !== gate.tenantId) {
     return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
   }
 
-  const overrides = parsed.data.overrides ?? null;
+  try {
+    const platformAny: any = await getPlatformLlm();
+    const platformCfg = normalizePlatformCfg(platformAny);
 
-  // Persist tenant overrides (or clear if null/empty)
-  const saved = await upsertTenantLlmOverrides(gate.tenantId, overrides);
+    const industryKey = safeTrim(parsed.data.industryKey) || null;
+    const industry = getIndustryDefaults(industryKey);
 
-  // Recompute effective after save
-  const platformAny: any = await getPlatformLlm();
-  const platformCfg = normalizePlatformCfg(platformAny);
+    // Normalize incoming overrides
+    const incoming = parsed.data.overrides ?? ({} as any);
 
-  const industryKey = safeTrim(parsed.data.industryKey) || null;
-  const industry: any = {};
+    const normalized: TenantLlmOverrides = normalizeTenantOverrides({
+      models: incoming.models ?? {},
+      prompts: incoming.prompts ?? {},
+      updatedAt: incoming.updatedAt ?? undefined,
+      maxQaQuestions: incoming.maxQaQuestions ?? undefined,
+    } as any);
 
-  const tenant: TenantLlmOverrides | null = saved
-    ? normalizeTenantOverrides({
-        models: saved.models ?? {},
-        prompts: saved.prompts ?? {},
-        updatedAt: saved.updatedAt ?? undefined,
-        maxQaQuestions: (saved as any).maxQaQuestions ?? undefined,
-      } as any)
-    : null;
+    // Persist overrides (tenantStore owns schema details; allow extra fields via `as any`)
+    await upsertTenantLlmOverrides(gate.tenantId, {
+      models: normalized.models ?? {},
+      prompts: normalized.prompts ?? {},
+      updatedAt: normalized.updatedAt ?? undefined,
+      maxQaQuestions: normalized.maxQaQuestions ?? undefined,
+    } as any);
 
-  const effectiveBaseBundle = buildEffectiveLlmConfig({
-    platform: platformCfg,
-    industry,
-    tenant: null,
-  });
+    const row = await getTenantLlmOverrides(gate.tenantId);
 
-  const effectiveBundle = buildEffectiveLlmConfig({
-    platform: platformCfg,
-    industry,
-    tenant,
-  });
+    const tenantOverrides: TenantLlmOverrides | null = row
+      ? normalizeTenantOverrides({
+          models: (row as any).models ?? {},
+          prompts: (row as any).prompts ?? {},
+          updatedAt: (row as any).updatedAt ?? undefined,
+          maxQaQuestions: (row as any).maxQaQuestions ?? undefined,
+        } as any)
+      : null;
 
-  return json({
-    ok: true,
-    tenant,
-    effectiveBase: effectiveBaseBundle.effective,
-    effective: effectiveBundle.effective,
-  });
+    const bundle = buildEffectiveLlmConfig({
+      platform: platformCfg,
+      industry,
+      tenant: tenantOverrides,
+    });
+
+    const baselineBundle = buildEffectiveLlmConfig({
+      platform: platformCfg,
+      industry,
+      tenant: null,
+    });
+
+    return json({
+      ok: true,
+      tenant: tenantOverrides,
+      effective: bundle.effective,
+      effectiveBase: baselineBundle.effective,
+    });
+  } catch (e: any) {
+    return json(
+      {
+        ok: false,
+        error: e?.code || "SAVE_FAILED",
+        message: e?.message ?? String(e),
+      },
+      500
+    );
+  }
 }

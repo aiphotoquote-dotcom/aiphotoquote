@@ -5,6 +5,11 @@ import type { TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 /**
  * DB-backed industry packs will be normalized into this same shape (Partial<PlatformLlmConfig>).
  * No hardcoded keys, ever.
+ *
+ * Composition model (additive):
+ *   Platform + Industry + Tenant
+ *
+ * Guardrails are PLATFORM-LOCKED (industry/tenant cannot change them).
  */
 
 function safeStr(v: unknown) {
@@ -16,24 +21,20 @@ function joinBlocks(...xs: Array<unknown>) {
   return parts.join("\n\n");
 }
 
-function minInt(a: unknown, b: unknown, fallback: number) {
-  const na = Number(a);
-  const nb = Number(b);
-  const va = Number.isFinite(na) ? Math.floor(na) : fallback;
-  const vb = Number.isFinite(nb) ? Math.floor(nb) : fallback;
-  return Math.min(va, vb);
+function clampInt(v: unknown, fallback: number, min: number, max: number) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
 /**
  * Merge rules:
- * - guardrails are LOCKED to platform (tenant/industry cannot change)
- * - maxQaQuestions: tenant may only tighten: min(platform, tenant)
+ * - guardrails are LOCKED to platform (industry/tenant cannot change)
  * - prompts: additive merge: platform base + industry add + tenant add
  * - models: tenant may select different models, otherwise industry, otherwise platform
  *
- * NOTE: “tenant adds” means we never pick tenant over platform; we *append* prompt bodies.
- * If you ever need a true replacement, that belongs at PLATFORM (or by updating the industry pack),
- * not at tenant.
+ * NOTE: “tenant adds” means tenant does NOT replace platform prompt bodies; it appends.
+ * If you need a true replacement, that belongs at PLATFORM (or by updating the industry pack).
  */
 export function buildEffectiveLlmConfig(args: {
   platform: PlatformLlmConfig;
@@ -47,12 +48,24 @@ export function buildEffectiveLlmConfig(args: {
   const tenantP = ((tenant?.prompts ?? {}) as any) ?? {};
 
   // ✅ additive preamble: platform -> industry -> tenant
-  const extraSystemPreamble = joinBlocks(platformP.extraSystemPreamble, industryP.extraSystemPreamble, tenantP.extraSystemPreamble);
+  const extraSystemPreamble = joinBlocks(
+    platformP.extraSystemPreamble,
+    industryP.extraSystemPreamble,
+    tenantP.extraSystemPreamble
+  );
 
   // ✅ additive prompt bodies: platform base -> industry add -> tenant add
-  // (If industry/tenant want to “specialize”, they append. Platform remains the canonical base.)
-  const quoteEstimatorSystem = joinBlocks(platformP.quoteEstimatorSystem, industryP.quoteEstimatorSystem, tenantP.quoteEstimatorSystem);
-  const qaQuestionGeneratorSystem = joinBlocks(platformP.qaQuestionGeneratorSystem, industryP.qaQuestionGeneratorSystem, tenantP.qaQuestionGeneratorSystem);
+  const quoteEstimatorSystem = joinBlocks(
+    platformP.quoteEstimatorSystem,
+    industryP.quoteEstimatorSystem,
+    tenantP.quoteEstimatorSystem
+  );
+
+  const qaQuestionGeneratorSystem = joinBlocks(
+    platformP.qaQuestionGeneratorSystem,
+    industryP.qaQuestionGeneratorSystem,
+    tenantP.qaQuestionGeneratorSystem
+  );
 
   // Always prepend extra preamble (if present)
   const estimatorSystemFinal = joinBlocks(extraSystemPreamble, quoteEstimatorSystem);
@@ -80,12 +93,11 @@ export function buildEffectiveLlmConfig(args: {
     safeStr(platformModels.renderModel) ||
     "gpt-image-1";
 
-  // Guardrails are platform-locked
+  // ✅ Guardrails are platform-locked
   const g = (platform.guardrails ?? {}) as any;
 
-  // Tenant can only tighten maxQaQuestions
-  const maxQaQuestions = minInt(g.maxQaQuestions, tenant?.maxQaQuestions, Number(g.maxQaQuestions ?? 3));
-  const maxOutputTokens = Number.isFinite(Number(g.maxOutputTokens)) ? Number(g.maxOutputTokens) : 1200;
+  const maxQaQuestions = clampInt(g.maxQaQuestions, 3, 0, 50);
+  const maxOutputTokens = clampInt(g.maxOutputTokens, 1200, 1, 200_000);
 
   return {
     platform,
