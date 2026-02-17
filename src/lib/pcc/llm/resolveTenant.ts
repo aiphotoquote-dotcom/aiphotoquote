@@ -3,10 +3,13 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { tenantSettings, tenantPricingRules } from "@/lib/db/schema";
 
-import { getPlatformLlm } from "./apply";
-import { getIndustryDefaults, buildEffectiveLlmConfig } from "./effective";
-import { getTenantLlmOverrides } from "./tenantStore";
-import { normalizeTenantOverrides, type TenantLlmOverrides } from "./tenantTypes";
+import type { PlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+
+import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
+import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
+
+import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
 
 type PricingModel =
   | "flat_per_job"
@@ -55,41 +58,48 @@ function safePricingModel(v: unknown): PricingModel | null {
 }
 
 /**
- * ✅ Single source of truth for render opt-in logic.
- *
- * Rules:
- * - If tenant rendering is disabled -> renderOptIn is always false.
- * - If rendering is enabled:
- *   - If customer opt-in is required -> renderOptIn equals user choice.
- *   - If opt-in is NOT required -> renderOptIn is true by default (auto render).
+ * ✅ Unified render opt-in rules:
+ * - If rendering disabled => false
+ * - If opt-in required:
+ *    - customerOptIn true => true
+ *    - missing/false => false
+ * - If opt-in NOT required:
+ *    - default true (unless explicitly false provided)
  */
 export function computeRenderOptIn(args: {
   tenantRenderEnabled: boolean;
   renderCustomerOptInRequired: boolean;
-  customerOptIn?: boolean | null;
-}) {
-  if (!args.tenantRenderEnabled) return false;
-  if (args.renderCustomerOptInRequired) return Boolean(args.customerOptIn);
+  customerOptIn: boolean | null | undefined;
+}): boolean {
+  const { tenantRenderEnabled, renderCustomerOptInRequired, customerOptIn } = args;
+
+  if (!tenantRenderEnabled) return false;
+
+  if (renderCustomerOptInRequired) {
+    return customerOptIn === true;
+  }
+
+  // not required: default ON unless explicitly false
+  if (customerOptIn === false) return false;
   return true;
 }
 
 /**
  * Tenant + PCC resolver:
- * - Platform provides defaults + guardrails + industry packs
- * - Industry defaults apply based on tenant_settings.industry_key (or caller-provided industryKey elsewhere)
- * - Tenant can override via tenant_llm_overrides (managed by Admin LLM Settings page)
- * - No env vars for tenant model selection
+ * - PCC provides platform defaults + guardrails
+ * - Industry defaults layered in
+ * - Tenant overrides via tenant_llm_overrides (jsonb)
+ * - TenantSettings provides feature toggles (rendering/QA/pricing gates)
  */
 export async function resolveTenantLlm(tenantId: string) {
-  // Platform config (base)
-  const platform = await getPlatformLlm();
+  // NOTE: getPlatformLlm() returns a “bundle” in some codepaths.
+  // We normalize to the raw PlatformLlmConfig expected by buildEffectiveLlmConfig().
+  const platformAny: any = await getPlatformLlm();
+  const platformCfg: PlatformLlmConfig = (platformAny?.cfg ?? platformAny) as PlatformLlmConfig;
 
-  // Tenant settings (toggles + pricing + render prefs + industry key)
+  // Tenant settings (feature gates + render prefs + pricing gates)
   const settings = await db
     .select({
-      // industry
-      industryKey: tenantSettings.industryKey,
-
       // AI toggles + render prefs
       aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
       renderingStyle: tenantSettings.renderingStyle,
@@ -100,10 +110,10 @@ export async function resolveTenantLlm(tenantId: string) {
       liveQaEnabled: tenantSettings.liveQaEnabled,
       liveQaMaxQuestions: tenantSettings.liveQaMaxQuestions,
 
-      // Optional: ai mode
+      // Optional: mode selector stored in DB
       aiMode: tenantSettings.aiMode,
 
-      // ✅ PRICING gate (numbers allowed)
+      // ✅ Pricing gate (numbers allowed)
       pricingEnabled: tenantSettings.pricingEnabled,
 
       // ✅ Pricing model + config (hybrid)
@@ -121,13 +131,16 @@ export async function resolveTenantLlm(tenantId: string) {
 
       assessmentFeeAmount: tenantSettings.assessmentFeeAmount,
       assessmentFeeCreditTowardJob: tenantSettings.assessmentFeeCreditTowardJob,
+
+      // ✅ Industry key (used for industry defaults)
+      industryKey: tenantSettings.industryKey,
     })
     .from(tenantSettings)
     .where(eq(tenantSettings.tenantId, tenantId))
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // Pricing guardrails (optional — used in computeEstimate + prompt composition)
+  // Pricing guardrails (optional — used in prompts later if you want)
   const pricingRules = await db
     .select({
       minJob: tenantPricingRules.minJob,
@@ -143,11 +156,7 @@ export async function resolveTenantLlm(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // Industry defaults derived from tenant settings
-  const industryKey = safeTrim(settings?.industryKey) || null;
-  const industry = getIndustryDefaults(industryKey);
-
-  // Tenant overrides from tenant_llm_overrides (saved by Admin LLM Settings page)
+  // Tenant overrides (models/prompts) from tenant_llm_overrides
   const tenantRow = await getTenantLlmOverrides(tenantId);
   const tenantOverrides: TenantLlmOverrides | null = tenantRow
     ? normalizeTenantOverrides({
@@ -157,24 +166,27 @@ export async function resolveTenantLlm(tenantId: string) {
       })
     : null;
 
+  // Industry defaults (from tenant settings industry key)
+  const industryKey = safeTrim(settings?.industryKey) || null;
+  const industry = getIndustryDefaults(industryKey);
+
   // ✅ Effective LLM config (platform + industry + tenant overrides)
   const effectiveBundle = buildEffectiveLlmConfig({
-    platform,
+    platform: platformCfg,
     industry,
     tenant: tenantOverrides,
   });
 
   const effective = effectiveBundle.effective;
 
-  // Render policy
+  // Tenant render / QA gates
   const tenantRenderEnabled = settings?.aiRenderingEnabled === true;
   const renderCustomerOptInRequired = settings?.renderingCustomerOptInRequired === true;
 
-  // Live QA caps: tenant can only lower, PCC caps the max.
   const tenantQaEnabled = settings?.liveQaEnabled === true;
   const tenantQaMaxRaw = Number(settings?.liveQaMaxQuestions ?? 3);
   const tenantQaMax = Number.isFinite(tenantQaMaxRaw) ? Math.max(1, Math.min(10, Math.floor(tenantQaMaxRaw))) : 3;
-  const platformQaMax = effective.guardrails.maxQaQuestions;
+  const platformQaMax = Number(effective.guardrails?.maxQaQuestions ?? 3);
 
   const liveQaEnabled = tenantQaEnabled;
   const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
@@ -210,7 +222,6 @@ export async function resolveTenantLlm(tenantId: string) {
       }
     : null;
 
-  // ✅ Normalize guardrails too (only when pricingEnabled === true)
   const normalizedPricingRules =
     pricingEnabled && pricingRules
       ? {
@@ -225,36 +236,34 @@ export async function resolveTenantLlm(tenantId: string) {
       : null;
 
   return {
-    platform, // keep for debugging / transparency
+    // Keep exposing platform config for downstream composition/debug.
+    platform: platformCfg,
 
-    // ✅ Effective models/prompts/guardrails are what the quoting pipeline should use
+    // ✅ Effective models/prompts/guardrails (already layered with tenant overrides)
     models: {
       estimatorModel: effective.models.estimatorModel,
       qaModel: effective.models.qaModel,
       renderModel: effective.models.renderModel,
     },
-    prompts: effective.prompts,
+    prompts: {
+      quoteEstimatorSystem: effective.prompts.quoteEstimatorSystem,
+      qaQuestionGeneratorSystem: effective.prompts.qaQuestionGeneratorSystem,
+    },
     guardrails: effective.guardrails,
 
     tenant: {
-      // Render policy + style
       tenantRenderEnabled,
       renderCustomerOptInRequired,
       tenantStyleKey: safeTrim(settings?.renderingStyle) || null,
       tenantRenderNotes: safeTrim(settings?.renderingNotes) || null,
-
-      // QA policy
       liveQaEnabled,
       liveQaMaxQuestions,
-
-      // other
       aiMode: safeTrim(settings?.aiMode) || null,
 
       // ✅ gate for “numbers”
       pricingEnabled,
     },
 
-    // ✅ Only expose pricing payload when enabled
     pricing: pricingEnabled
       ? {
           config: pricingConfig,
@@ -262,11 +271,12 @@ export async function resolveTenantLlm(tenantId: string) {
         }
       : null,
 
-    // Optional: meta/debug (safe to ignore by callers)
     meta: {
-      industryKeyApplied: industryKey,
+      industryKey,
+      hasTenantOverrides: Boolean(tenantOverrides),
       tenantOverridesUpdatedAt: tenantOverrides?.updatedAt ?? null,
-      effectiveComposition: effectiveBundle?.meta ?? null,
+      effectiveVersion: platformCfg?.version ?? null,
+      platformUpdatedAt: platformCfg?.updatedAt ?? null,
     },
   };
 }
