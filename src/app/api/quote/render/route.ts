@@ -31,6 +31,10 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function safeLower(v: unknown) {
+  return safeTrim(v).toLowerCase();
+}
+
 /**
  * ✅ IMPORTANT:
  * Prefer the *actual* request host over VERCEL_URL.
@@ -55,29 +59,35 @@ function pickJsonRow(r: any) {
 }
 
 async function getTenantBySlug(tenantSlug: string) {
+  // Keep schema select for id/slug (typed)…
+  const rows = await db
+    .select({ id: tenants.id, slug: tenants.slug })
+    .from(tenants)
+    .where(eq(tenants.slug, tenantSlug))
+    .limit(1);
+
+  const t = rows[0] ?? null;
+  if (!t) return null;
+
   /**
-   * ✅ NOTE:
-   * plan_tier lives in tenant_settings (NOT tenants).
-   * We fetch id/slug from tenants and plan tier from tenant_settings in one query.
+   * ✅ FIX:
+   * plan_tier lives on tenant_settings, NOT tenants.
+   * Pull via SQL to avoid any schema drift / typing surprises.
    */
   const r = await db.execute(sql`
-    select
-      t.id as id,
-      t.slug as slug,
-      ts.plan_tier as plan_tier
-    from tenants t
-    left join tenant_settings ts on ts.tenant_id = t.id
-    where t.slug = ${tenantSlug}
+    select ts.plan_tier
+    from tenant_settings ts
+    where ts.tenant_id = ${t.id}::uuid
     limit 1
   `);
-
   const row: any = pickJsonRow(r);
-  if (!row?.id) return null;
+
+  const planTier = safeLower(row?.plan_tier) || null;
 
   return {
-    id: String(row.id),
-    slug: String(row.slug),
-    planTier: safeTrim(row.plan_tier) || null,
+    id: t.id,
+    slug: t.slug,
+    planTier,
   };
 }
 
@@ -301,7 +311,7 @@ export async function POST(req: Request) {
 
     const { tenantSlug, quoteLogId } = parsed.data;
 
-    // 1) Resolve tenant (and plan tier via tenant_settings.plan_tier)
+    // 1) Resolve tenant (and plan tier for tier0 key policy)
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link." }, 404, debugId);
 
@@ -420,13 +430,14 @@ export async function POST(req: Request) {
     const hasTenantKey = await getTenantKeyPresence(tenant.id);
     const hasPlatformKey = Boolean(safeTrim(process.env.OPENAI_API_KEY));
 
-    const isTier0 = safeTrim(tenant.planTier) === "tier0";
-    const platformAllowed = isTier0; // (extend later if you want other tiers/grace rules)
+    const planTier = tenant.planTier; // already normalized lowercase (or null)
+    const isTier0 = planTier === "tier0";
+    const platformAllowed = isTier0; // extend later if you want tier grace rules
 
     const canRenderWithKey = hasTenantKey || (platformAllowed && hasPlatformKey);
 
     const keyPolicy = {
-      planTier: tenant.planTier,
+      planTier: planTier ?? "unknown",
       hasTenantKey,
       hasPlatformKey,
       platformAllowed,
