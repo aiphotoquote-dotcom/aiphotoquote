@@ -40,7 +40,6 @@ function getBaseUrl(req: Request) {
   const envBase = safeTrim(process.env.NEXT_PUBLIC_APP_URL) || safeTrim(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
 
-  // Prefer host headers (public domain) before VERCEL_URL
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
@@ -51,17 +50,70 @@ function getBaseUrl(req: Request) {
   return "";
 }
 
+function pickJsonRow(r: any) {
+  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+}
+
 async function getTenantBySlug(tenantSlug: string) {
+  // Keep schema select for id/slug (typed), but we also need plan_tier for tier0 key policy.
   const rows = await db
     .select({ id: tenants.id, slug: tenants.slug })
     .from(tenants)
     .where(eq(tenants.slug, tenantSlug))
     .limit(1);
-  return rows[0] ?? null;
+
+  const t = rows[0] ?? null;
+  if (!t) return null;
+
+  // Pull plan_tier safely via SQL to avoid schema mismatch surprises.
+  const r = await db.execute(sql`
+    select plan_tier
+    from tenants
+    where id = ${t.id}::uuid
+    limit 1
+  `);
+  const row: any = pickJsonRow(r);
+
+  return {
+    id: t.id,
+    slug: t.slug,
+    planTier: safeTrim(row?.plan_tier) || null,
+  };
 }
 
-function pickJsonRow(r: any) {
-  return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+async function getRenderPolicy(tenantId: string) {
+  // ✅ Matches your DB screenshot: tenant_settings.ai_rendering_enabled
+  const r = await db.execute(sql`
+    select
+      ai_rendering_enabled,
+      rendering_customer_opt_in_required,
+      rendering_max_per_day,
+      rendering_style,
+      rendering_notes
+    from tenant_settings
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+
+  const row: any = pickJsonRow(r);
+  return {
+    enabled: Boolean(row?.ai_rendering_enabled ?? false),
+    optInRequired: Boolean(row?.rendering_customer_opt_in_required ?? true),
+    maxPerDay: Number.isFinite(Number(row?.rendering_max_per_day)) ? Number(row?.rendering_max_per_day) : 20,
+    style: safeTrim(row?.rendering_style) || "photoreal",
+    notes: safeTrim(row?.rendering_notes) || "",
+  };
+}
+
+async function getTenantKeyPresence(tenantId: string) {
+  const r = await db.execute(sql`
+    select openai_key_enc
+    from tenant_secrets
+    where tenant_id = ${tenantId}::uuid
+    limit 1
+  `);
+  const row: any = pickJsonRow(r);
+  return Boolean(row?.openai_key_enc);
 }
 
 // If there is already a queued/running job, return it instead of inserting a new one
@@ -127,9 +179,7 @@ function buildRenderPrompt(args: {
   const visibleScope = Array.isArray(outputAny?.visible_scope) ? outputAny.visible_scope.map(safeTrim).filter(Boolean) : [];
 
   const qaPairs = normalizeQaAnswers(qaAny);
-  const qaText = qaPairs.length
-    ? qaPairs.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n")
-    : "";
+  const qaText = qaPairs.length ? qaPairs.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
 
   const styleKey =
     safeTrim(outputAny?.ai_snapshot?.tenantSettings?.tenantStyleKey) ||
@@ -138,9 +188,7 @@ function buildRenderPrompt(args: {
     "photoreal";
 
   const renderNotes =
-    safeTrim(outputAny?.ai_snapshot?.tenantSettings?.tenantRenderNotes) ||
-    safeTrim(inputAny?.tenantRenderNotes) ||
-    "";
+    safeTrim(outputAny?.ai_snapshot?.tenantSettings?.tenantRenderNotes) || safeTrim(inputAny?.tenantRenderNotes) || "";
 
   const lines: string[] = [];
 
@@ -175,9 +223,7 @@ function buildRenderPrompt(args: {
 
   lines.push(``);
   lines.push(`Rendering style: ${styleKey}`);
-  if (renderNotes) {
-    lines.push(`Tenant render notes: ${renderNotes}`);
-  }
+  if (renderNotes) lines.push(`Tenant render notes: ${renderNotes}`);
 
   lines.push(``);
   lines.push(
@@ -190,7 +236,6 @@ function buildRenderPrompt(args: {
 /**
  * ✅ Immediate “kick” of the cron worker.
  * Hard timeout so we never hang the customer flow.
- * Returns debug info so we can see if it actually hit the right URL and auth worked.
  */
 async function tryKickCronNow(req: Request) {
   const secret = safeTrim(process.env.CRON_SECRET);
@@ -256,11 +301,14 @@ export async function POST(req: Request) {
 
     const { tenantSlug, quoteLogId } = parsed.data;
 
-    // 1) Resolve tenant
+    // 1) Resolve tenant (and plan tier for tier0 key policy)
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link." }, 404, debugId);
 
-    // 2) Verify quote belongs to tenant (and read opt-in / current status)
+    // 2) Load render policy (DB truth)
+    const renderPolicy = await getRenderPolicy(tenant.id);
+
+    // 3) Verify quote belongs to tenant (and read opt-in / current status)
     const q = await db
       .select({
         id: quoteLogs.id,
@@ -289,9 +337,6 @@ export async function POST(req: Request) {
      * ✅ Opt-in source of truth:
      * - quote_logs.render_opt_in is the fast column used by UI
      * - BUT older/newer flows may have stored the actual customer opt-in in input.render_opt_in
-     *   (especially if the phase1 logic gated the column)
-     *
-     * We treat either as "opted in".
      */
     const optInFromColumn = Boolean(q.renderOptIn);
     const optInFromInput = Boolean(inputAny?.render_opt_in);
@@ -305,8 +350,40 @@ export async function POST(req: Request) {
         .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
     }
 
-    // If not opted-in, do not enqueue
-    if (!optedIn) {
+    // --- Render policy gating (don’t enqueue if disabled) ---
+    const renderRateDisabled = Number(renderPolicy.maxPerDay) <= 0;
+
+    if (!renderPolicy.enabled || renderRateDisabled) {
+      // Keep DB status helpful for UI
+      if (q.renderStatus !== "disabled") {
+        await db
+          .update(quoteLogs)
+          .set({
+            renderStatus: "disabled",
+            renderError: !renderPolicy.enabled
+              ? "Renderings are disabled for this tenant."
+              : "Renderings are disabled by rate limit (max per day = 0).",
+          })
+          .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+      }
+
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          status: "disabled",
+          jobId: null,
+          imageUrl: q.renderImageUrl ?? null,
+          optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+          renderPolicy,
+        },
+        200,
+        debugId
+      );
+    }
+
+    // If opt-in is required and not opted-in, do not enqueue
+    if (renderPolicy.optInRequired && !optedIn) {
       return json(
         {
           ok: true,
@@ -315,6 +392,7 @@ export async function POST(req: Request) {
           jobId: null,
           imageUrl: q.renderImageUrl ?? null,
           optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+          renderPolicy,
         },
         200,
         debugId
@@ -331,16 +409,62 @@ export async function POST(req: Request) {
           jobId: null,
           imageUrl: q.renderImageUrl,
           optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+          renderPolicy,
         },
         200,
         debugId
       );
     }
 
-    // 3) Idempotency: if queued/running exists, return it
+    // --- Key policy (tier0 platform fallback) ---
+    const hasTenantKey = await getTenantKeyPresence(tenant.id);
+    const hasPlatformKey = Boolean(safeTrim(process.env.OPENAI_API_KEY));
+
+    const isTier0 = safeTrim(tenant.planTier) === "tier0";
+    const platformAllowed = isTier0; // (extend later if you want other tiers/grace rules)
+
+    const canRenderWithKey = hasTenantKey || (platformAllowed && hasPlatformKey);
+
+    const keyPolicy = {
+      planTier: tenant.planTier,
+      hasTenantKey,
+      hasPlatformKey,
+      platformAllowed,
+      effectiveKeySourceNow: hasTenantKey ? "tenant" : platformAllowed && hasPlatformKey ? "platform_grace" : "none",
+    };
+
+    if (!canRenderWithKey) {
+      // Don’t enqueue doomed jobs. Save a clear error for the UI.
+      await db
+        .update(quoteLogs)
+        .set({
+          renderStatus: "failed",
+          renderError: hasPlatformKey
+            ? "Missing tenant OpenAI key (tenant_secrets.openai_key_enc)."
+            : "Missing platform OpenAI key (OPENAI_API_KEY).",
+        })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          status: "failed",
+          jobId: null,
+          imageUrl: null,
+          optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+          renderPolicy,
+          keyPolicy,
+          message: "Render blocked by key policy (not enqueued).",
+        },
+        200,
+        debugId
+      );
+    }
+
+    // 4) Idempotency: if queued/running exists, return it
     const existing = await findExistingQueuedJob(quoteLogId);
     if (existing) {
-      // keep quote log status aligned (helps UI/admin)
       if (q.renderStatus !== "running" && q.renderStatus !== "queued") {
         await db
           .update(quoteLogs)
@@ -358,6 +482,8 @@ export async function POST(req: Request) {
           jobId: existing.id,
           skipped: true,
           optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+          renderPolicy,
+          keyPolicy,
           kick,
         },
         200,
@@ -365,7 +491,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4) Enqueue job with a REAL prompt (includes summary/scope/Q&A)
+    // 5) Enqueue job with a REAL prompt (includes summary/scope/Q&A)
     const prompt = buildRenderPrompt({
       tenantSlug,
       quoteLogId,
@@ -376,7 +502,7 @@ export async function POST(req: Request) {
 
     const jobId = await enqueueRenderJob({ tenantId: tenant.id, quoteLogId, prompt });
 
-    // 5) Reflect queued status on quote log for UI/admin visibility
+    // 6) Reflect queued status on quote log for UI/admin visibility
     await db
       .update(quoteLogs)
       .set({ renderStatus: "queued", renderError: null })
@@ -391,6 +517,8 @@ export async function POST(req: Request) {
         status: "queued",
         jobId,
         optIn: { column: optInFromColumn, input: optInFromInput, effective: optedIn },
+        renderPolicy,
+        keyPolicy,
         kick,
       },
       200,
