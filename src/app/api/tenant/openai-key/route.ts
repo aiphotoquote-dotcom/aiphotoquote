@@ -1,11 +1,10 @@
 // src/app/api/tenant/openai-key/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { db } from "@/lib/db/client";
-import { tenantSecrets } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,11 +18,6 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-// NOTE: This route stores an *encrypted* value in tenant_secrets.openai_key_enc.
-// In your repo you already treat it as encrypted, so we do not attempt to "validate"
-// the key against OpenAI here — just store it.
-// If you later want real encryption-at-rest beyond "opaque storage", wire your
-// encryption helper here and keep column name openai_key_enc.
 function normalizeKey(raw: string) {
   return safeTrim(raw);
 }
@@ -72,24 +66,13 @@ export async function POST(req: Request) {
         updated_at = now()
     `);
 
-    // Quick confirm read (optional)
-    const row = await db
-      .select({
-        tenantId: tenantSecrets.tenantId,
-        openaiKeyLast4: tenantSecrets.openaiKeyLast4,
-        updatedAt: tenantSecrets.updatedAt,
-      })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
+    // ✅ Do NOT read back through typed drizzle schema (your schema currently doesn't expose openai_key_last4)
     return json({
       ok: true,
       tenantId,
       saved: true,
-      openaiKeyLast4: row?.openaiKeyLast4 ?? last4(key),
-      updatedAt: row?.updatedAt ?? new Date().toISOString(),
+      openaiKeyLast4: last4(key),
+      updatedAt: new Date().toISOString(),
     });
   } catch (e: any) {
     return json({ ok: false, error: "SAVE_FAILED", message: e?.message ?? String(e) }, 500);
@@ -111,7 +94,6 @@ export async function DELETE(req: Request) {
   const tenantId = parsed.data.tenantId;
 
   try {
-    // Either delete row or blank it out. I prefer delete.
     await db.execute(sql`
       delete from tenant_secrets
       where tenant_id = ${tenantId}::uuid
