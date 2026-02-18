@@ -326,16 +326,25 @@ export const tenantPricingRules = pgTable("tenant_pricing_rules", {
 
 /**
  * Encrypted tenant secrets (never returned raw)
+ *
+ * IMPORTANT: table has NO id / created_at in your real DB.
+ * Real columns:
+ * - tenant_id (uuid, PK)
+ * - openai_key_enc (text)
+ * - openai_key_last4 (text)
+ * - updated_at (timestamptz)
  */
 export const tenantSecrets = pgTable("tenant_secrets", {
-  id: uuid("id").defaultRandom().primaryKey(),
   tenantId: uuid("tenant_id")
     .notNull()
-    .references(() => tenants.id),
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: "cascade" }),
 
-  openaiKeyEnc: text("openai_key_enc").notNull(),
+  openaiKeyEnc: text("openai_key_enc"),
 
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  openaiKeyLast4: text("openai_key_last4"),
+
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 /**
