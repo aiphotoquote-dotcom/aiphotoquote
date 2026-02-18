@@ -18,6 +18,15 @@ function safeTrimLower(v: unknown) {
   return s ? s : "";
 }
 
+function detectPlatformKey(): { hasPlatformKey: boolean; envName: string | null } {
+  const candidates = ["OPENAI_API_KEY", "OPENAI_PLATFORM_API_KEY", "OPENAI_KEY"] as const;
+  for (const name of candidates) {
+    const v = String(process.env[name] ?? "").trim();
+    if (v) return { hasPlatformKey: true, envName: name };
+  }
+  return { hasPlatformKey: false, envName: null };
+}
+
 function hasGraceRemaining(credits: unknown, used: unknown): boolean {
   const c = Number(credits ?? 0);
   const u = Number(used ?? 0);
@@ -33,23 +42,12 @@ function isTier1or2(tier: string) {
 }
 
 /**
- * ✅ Robust platform key detection.
- * We accept multiple env names so Preview/Prod naming mismatches don't silently break key policy.
+ * We have schema drift between environments:
+ * - some DBs store plan_tier on tenants.plan_tier
+ * - others store plan_tier on tenant_settings.plan_tier
+ *
+ * This route must work in both.
  */
-function detectPlatformKey(): { hasPlatformKey: boolean; envName: string | null } {
-  const candidates = [
-    "OPENAI_API_KEY", // your stated canonical
-    "OPENAI_PLATFORM_API_KEY", // fallback (if you ever renamed)
-    "OPENAI_KEY", // fallback
-  ] as const;
-
-  for (const name of candidates) {
-    const v = String(process.env[name] ?? "").trim();
-    if (v) return { hasPlatformKey: true, envName: name };
-  }
-  return { hasPlatformKey: false, envName: null };
-}
-
 export async function GET(req: Request) {
   const gate = await requireTenantRole(["owner", "admin"]);
   if (!gate.ok) {
@@ -65,32 +63,70 @@ export async function GET(req: Request) {
     );
   }
 
-  // ✅ prevent probing other tenants
   if (parsed.data.tenantId !== gate.tenantId) {
     return NextResponse.json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, { status: 403 });
   }
 
   const tenantId = parsed.data.tenantId;
 
-  // ✅ Plan tier: tenants.plan_tier (source of truth)
-  // Grace counters: tenant_settings
-  // Tenant key presence: tenant_secrets.openai_key_enc
+  /**
+   * ✅ Schema-tolerant plan tier:
+   * Prefer tenant_settings.plan_tier (ts.plan_tier) when present,
+   * otherwise fallback to tenants.plan_tier if it exists.
+   *
+   * We avoid referencing t.plan_tier directly unless the column exists,
+   * otherwise Postgres throws at parse-time (your current 500).
+   */
   const r = await db.execute(sql`
+    with col as (
+      select
+        exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'tenants'
+            and column_name = 'plan_tier'
+        ) as tenants_has_plan_tier,
+        exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'tenant_settings'
+            and column_name = 'plan_tier'
+        ) as settings_has_plan_tier
+    )
     select
-      t.plan_tier as plan_tier,
+      -- plan tier (schema tolerant)
+      case
+        when (select settings_has_plan_tier from col) then ts.plan_tier::text
+        when (select tenants_has_plan_tier from col) then (
+          select (t_row->>'plan_tier')::text
+          from (
+            select row_to_json(t) as t_row
+            from tenants t
+            where t.id = ${tenantId}::uuid
+            limit 1
+          ) x
+        )
+        else null
+      end as plan_tier,
+
       ts.activation_grace_credits as activation_grace_credits,
       ts.activation_grace_used as activation_grace_used,
       sec.openai_key_enc as openai_key_enc
-    from tenants t
-    left join tenant_settings ts on ts.tenant_id = t.id
-    left join tenant_secrets sec on sec.tenant_id = t.id
-    where t.id = ${tenantId}::uuid
+
+    from tenant_settings ts
+    left join tenant_secrets sec on sec.tenant_id = ts.tenant_id
+    where ts.tenant_id = ${tenantId}::uuid
     limit 1
   `);
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   if (!row) {
-    return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND", message: "Tenant not found." }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "SETTINGS_MISSING", message: "Tenant settings not found." },
+      { status: 404 }
+    );
   }
 
   const planTier = safeTrimLower(row.plan_tier) || "tier0";
@@ -102,9 +138,6 @@ export async function GET(req: Request) {
 
   const graceRemaining = hasGraceRemaining(activationGraceCredits, activationGraceUsed);
 
-  // Policy:
-  // - tier0: platform allowed always
-  // - tier1/2: platform allowed only while grace remains
   const platformAllowed = isTier0(planTier) || (isTier1or2(planTier) && graceRemaining);
 
   const { hasPlatformKey, envName: platformKeyEnvName } = detectPlatformKey();
@@ -116,16 +149,14 @@ export async function GET(req: Request) {
       : "none";
 
   const wouldConsumeGraceOnNewQuote =
-    effectiveKeySourceNow === "platform_grace" && isTier1or2(planTier); // tier0 never consumes
+    effectiveKeySourceNow === "platform_grace" && isTier1or2(planTier);
 
-  // ✅ Reason text that matches the computed state (no contradictions)
   let reason: string | null = null;
-
   if (effectiveKeySourceNow === "tenant") {
     reason = "Tenant key is set.";
   } else if (!hasPlatformKey) {
     reason =
-      "Platform OpenAI key is not configured in this deployment environment (Vercel Preview/Prod env vars may differ).";
+      "Platform OpenAI key is not configured in this deployment environment (Preview/Prod env vars may differ).";
   } else if (!platformAllowed) {
     reason = "Platform key is configured but not allowed for this plan tier.";
   } else if (wouldConsumeGraceOnNewQuote) {
@@ -143,9 +174,8 @@ export async function GET(req: Request) {
     activationGraceUsed,
     hasTenantOpenAiKey,
 
-    // ✅ platform key visibility
     hasPlatformKey,
-    platformKeyEnvName, // helpful for debugging (non-secret)
+    platformKeyEnvName,
     platformAllowed,
     graceRemaining,
 
