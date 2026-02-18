@@ -528,24 +528,27 @@ async function resolveOpenAiClient(args: {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  const hasTenantSecret = Boolean(secretRow?.openaiKeyEnc);
+  // ✅ normalize nullable text column (Drizzle treats it as string|null)
+  const tenantOpenaiKeyEnc = safeTrim(secretRow?.openaiKeyEnc);
+  const hasTenantSecret = tenantOpenaiKeyEnc.length > 0;
+
   debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret });
 
   // 2) If forced to tenant (phase2 snapshot), enforce strictly.
   if (forceKeySource === "tenant") {
-    if (!secretRow?.openaiKeyEnc) {
+    if (!hasTenantSecret) {
       const e: any = new Error("MISSING_OPENAI_KEY");
       e.code = "MISSING_OPENAI_KEY";
       throw e;
     }
-    const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+    const openaiKey = decryptSecret(tenantOpenaiKeyEnc);
     debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
     return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
   }
 
   // 3) If we have a tenant key and we're not forced to platform, always use it.
   if (hasTenantSecret && forceKeySource !== "platform_grace") {
-    const openaiKey = decryptSecret(secretRow!.openaiKeyEnc);
+    const openaiKey = decryptSecret(tenantOpenaiKeyEnc);
     debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
     return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
   }
