@@ -1,11 +1,10 @@
 // src/app/api/tenant/key-policy/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { db } from "@/lib/db/client";
-import { tenantSecrets, tenantSettings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,17 +13,9 @@ const Query = z.object({
   tenantId: z.string().uuid(),
 });
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
+function safeTrimLower(v: unknown) {
+  const s = String(v ?? "").trim().toLowerCase();
   return s ? s : "";
-}
-
-function platformKeyPresent(): boolean {
-  return Boolean(safeTrim(process.env.OPENAI_API_KEY));
-}
-
-function isTier0(tier: unknown): boolean {
-  return safeTrim(tier).toLowerCase() === "tier0";
 }
 
 function hasGraceRemaining(credits: unknown, used: unknown): boolean {
@@ -34,99 +25,132 @@ function hasGraceRemaining(credits: unknown, used: unknown): boolean {
   return c > 0 && u < c;
 }
 
-export async function GET(req: Request) {
-  try {
-    const gate = await requireTenantRole(["owner", "admin"]);
-    if (!gate.ok) {
-      return NextResponse.json({ ok: false, error: gate.error, message: gate.message }, { status: gate.status });
-    }
+function isTier0(tier: string) {
+  return tier === "tier0";
+}
+function isTier1or2(tier: string) {
+  return tier === "tier1" || tier === "tier2";
+}
 
-    const url = new URL(req.url);
-    const parsed = Query.safeParse({ tenantId: url.searchParams.get("tenantId") || "" });
-    if (!parsed.success) {
-      return NextResponse.json(
-        { ok: false, error: "BAD_REQUEST", message: "Invalid query params", issues: parsed.error.issues },
-        { status: 400 }
-      );
-    }
+/**
+ * ✅ Robust platform key detection.
+ * We accept multiple env names so Preview/Prod naming mismatches don't silently break key policy.
+ */
+function detectPlatformKey(): { hasPlatformKey: boolean; envName: string | null } {
+  const candidates = [
+    "OPENAI_API_KEY", // your stated canonical
+    "OPENAI_PLATFORM_API_KEY", // fallback (if you ever renamed)
+    "OPENAI_KEY", // fallback
+  ] as const;
 
-    // ✅ Do NOT trust caller tenantId (must match active tenant context)
-    if (parsed.data.tenantId !== gate.tenantId) {
-      return NextResponse.json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, { status: 403 });
-    }
-
-    const settings = await db
-      .select({
-        tenantId: tenantSettings.tenantId,
-        planTier: tenantSettings.planTier,
-        activationGraceCredits: tenantSettings.activationGraceCredits,
-        activationGraceUsed: tenantSettings.activationGraceUsed,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, gate.tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    if (!settings) {
-      return NextResponse.json({ ok: false, error: "SETTINGS_MISSING", message: "Tenant settings not found." }, { status: 404 });
-    }
-
-    const secretRow = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, gate.tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
-
-    const planTier = safeTrim((settings as any)?.planTier) || null;
-
-    const activationGraceCredits = Number(settings.activationGraceCredits ?? 0);
-    const activationGraceUsed = Number(settings.activationGraceUsed ?? 0);
-    const graceRemaining = hasGraceRemaining(activationGraceCredits, activationGraceUsed);
-
-    const hasTenantOpenAiKey = Boolean(secretRow?.openaiKeyEnc);
-    const hasPlatformKey = platformKeyPresent();
-
-    // ✅ UI message is specifically "tier0 / grace" for platform key usage
-    // Policy here: allow platform key for tier0 always. (You can extend later.)
-    const platformAllowed = isTier0(planTier) && hasPlatformKey;
-
-    const effectiveKeySourceNow: "tenant" | "platform_grace" =
-      hasTenantOpenAiKey ? "tenant" : platformAllowed ? "platform_grace" : "platform_grace";
-
-    const wouldConsumeGraceOnNewQuote = false; // your UI copy says it won't consume for this request type
-
-    let reason: string | null = null;
-    if (hasTenantOpenAiKey) {
-      reason = "Tenant OpenAI key is present.";
-    } else if (!hasPlatformKey) {
-      reason = "No tenant key present and no platform key configured (OPENAI_API_KEY).";
-    } else if (!platformAllowed) {
-      reason = "Platform key is configured but not allowed for this plan tier.";
-    } else if (graceRemaining) {
-      reason = "Platform key allowed (tier0 / grace).";
-    } else {
-      reason = "Platform key allowed (tier0).";
-    }
-
-    // ✅ IMPORTANT: return the exact shape TenantLlmManagerClient expects
-    return NextResponse.json({
-      ok: true,
-      tenantId: gate.tenantId,
-
-      planTier,
-      activationGraceCredits,
-      activationGraceUsed,
-
-      hasTenantOpenAiKey,
-      effectiveKeySourceNow,
-      wouldConsumeGraceOnNewQuote,
-
-      reason,
-    });
-  } catch (e: any) {
-    const msg = e?.message ?? String(e);
-    const code = msg === "NO_ACTIVE_TENANT" ? 401 : 500;
-    return NextResponse.json({ ok: false, error: "REQUEST_FAILED", message: msg }, { status: code });
+  for (const name of candidates) {
+    const v = String(process.env[name] ?? "").trim();
+    if (v) return { hasPlatformKey: true, envName: name };
   }
+  return { hasPlatformKey: false, envName: null };
+}
+
+export async function GET(req: Request) {
+  const gate = await requireTenantRole(["owner", "admin"]);
+  if (!gate.ok) {
+    return NextResponse.json({ ok: false, error: gate.error, message: gate.message }, { status: gate.status });
+  }
+
+  const url = new URL(req.url);
+  const parsed = Query.safeParse({ tenantId: url.searchParams.get("tenantId") || "" });
+  if (!parsed.success) {
+    return NextResponse.json(
+      { ok: false, error: "BAD_REQUEST", message: "Invalid query params", issues: parsed.error.issues },
+      { status: 400 }
+    );
+  }
+
+  // ✅ prevent probing other tenants
+  if (parsed.data.tenantId !== gate.tenantId) {
+    return NextResponse.json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, { status: 403 });
+  }
+
+  const tenantId = parsed.data.tenantId;
+
+  // ✅ Plan tier: tenants.plan_tier (source of truth)
+  // Grace counters: tenant_settings
+  // Tenant key presence: tenant_secrets.openai_key_enc
+  const r = await db.execute(sql`
+    select
+      t.plan_tier as plan_tier,
+      ts.activation_grace_credits as activation_grace_credits,
+      ts.activation_grace_used as activation_grace_used,
+      sec.openai_key_enc as openai_key_enc
+    from tenants t
+    left join tenant_settings ts on ts.tenant_id = t.id
+    left join tenant_secrets sec on sec.tenant_id = t.id
+    where t.id = ${tenantId}::uuid
+    limit 1
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  if (!row) {
+    return NextResponse.json({ ok: false, error: "TENANT_NOT_FOUND", message: "Tenant not found." }, { status: 404 });
+  }
+
+  const planTier = safeTrimLower(row.plan_tier) || "tier0";
+
+  const activationGraceCredits = Number(row.activation_grace_credits ?? 0) || 0;
+  const activationGraceUsed = Number(row.activation_grace_used ?? 0) || 0;
+
+  const hasTenantOpenAiKey = Boolean(row.openai_key_enc);
+
+  const graceRemaining = hasGraceRemaining(activationGraceCredits, activationGraceUsed);
+
+  // Policy:
+  // - tier0: platform allowed always
+  // - tier1/2: platform allowed only while grace remains
+  const platformAllowed = isTier0(planTier) || (isTier1or2(planTier) && graceRemaining);
+
+  const { hasPlatformKey, envName: platformKeyEnvName } = detectPlatformKey();
+
+  const effectiveKeySourceNow: "tenant" | "platform_grace" | "none" = hasTenantOpenAiKey
+    ? "tenant"
+    : platformAllowed && hasPlatformKey
+      ? "platform_grace"
+      : "none";
+
+  const wouldConsumeGraceOnNewQuote =
+    effectiveKeySourceNow === "platform_grace" && isTier1or2(planTier); // tier0 never consumes
+
+  // ✅ Reason text that matches the computed state (no contradictions)
+  let reason: string | null = null;
+
+  if (effectiveKeySourceNow === "tenant") {
+    reason = "Tenant key is set.";
+  } else if (!hasPlatformKey) {
+    reason =
+      "Platform OpenAI key is not configured in this deployment environment (Vercel Preview/Prod env vars may differ).";
+  } else if (!platformAllowed) {
+    reason = "Platform key is configured but not allowed for this plan tier.";
+  } else if (wouldConsumeGraceOnNewQuote) {
+    reason = "Currently using platform key under grace. New quotes will consume a grace credit until grace runs out.";
+  } else {
+    reason = "Currently using platform key. This request type will not consume grace.";
+  }
+
+  return NextResponse.json({
+    ok: true,
+    tenantId,
+
+    planTier,
+    activationGraceCredits,
+    activationGraceUsed,
+    hasTenantOpenAiKey,
+
+    // ✅ platform key visibility
+    hasPlatformKey,
+    platformKeyEnvName, // helpful for debugging (non-secret)
+    platformAllowed,
+    graceRemaining,
+
+    effectiveKeySourceNow,
+    wouldConsumeGraceOnNewQuote,
+    reason,
+  });
 }
