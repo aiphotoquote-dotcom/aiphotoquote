@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { db } from "@/lib/db/client";
+import { encryptSecret, decryptSecret } from "@/lib/crypto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +26,42 @@ function normalizeKey(raw: string) {
 function last4(key: string) {
   const k = safeTrim(key);
   return k.length >= 4 ? k.slice(-4) : k;
+}
+
+function looksLikeOpenAiKey(v: string) {
+  const s = safeTrim(v);
+  // OpenAI keys are typically sk-... or sk-proj-...
+  return s.startsWith("sk-") || s.startsWith("sk-proj-");
+}
+
+/**
+ * Accepts either:
+ * - plaintext key => encrypt it
+ * - already-encrypted blob => verify by decrypting; if it decrypts to sk-..., accept as encrypted
+ */
+function coerceEncryptedKey(input: string): { enc: string; decrypted: string } {
+  const raw = normalizeKey(input);
+  if (!raw) throw new Error("KEY_EMPTY");
+
+  // Most common: plaintext pasted by tenant admin
+  if (looksLikeOpenAiKey(raw)) {
+    const enc = encryptSecret(raw);
+    return { enc, decrypted: raw };
+  }
+
+  // Otherwise: treat as possibly already-encrypted
+  // Validate by decrypting and ensuring it becomes a plausible OpenAI key.
+  try {
+    const dec = decryptSecret(raw);
+    if (!looksLikeOpenAiKey(dec)) {
+      throw new Error("DECRYPTED_NOT_OPENAI_KEY");
+    }
+    return { enc: raw, decrypted: dec };
+  } catch {
+    const e: any = new Error("INVALID_KEY_FORMAT");
+    e.code = "INVALID_KEY_FORMAT";
+    throw e;
+  }
 }
 
 const PostBody = z.object({
@@ -49,16 +86,19 @@ export async function POST(req: Request) {
   }
 
   const tenantId = parsed.data.tenantId;
-  const key = normalizeKey(parsed.data.openaiApiKey);
-
-  if (!key) return json({ ok: false, error: "BAD_REQUEST", message: "Key is empty." }, 400);
 
   try {
-    // ✅ IMPORTANT: your table has NO created_at column.
-    // Columns: tenant_id (PK), openai_key_enc, openai_key_last4, updated_at
+    const normalized = normalizeKey(parsed.data.openaiApiKey);
+    if (!normalized) return json({ ok: false, error: "BAD_REQUEST", message: "Key is empty." }, 400);
+
+    // ✅ ALWAYS store encrypted
+    const { enc, decrypted } = coerceEncryptedKey(normalized);
+
+    // ✅ IMPORTANT: your DB table columns:
+    // tenant_id (PK), openai_key_enc, openai_key_last4, updated_at
     await db.execute(sql`
       insert into tenant_secrets (tenant_id, openai_key_enc, openai_key_last4, updated_at)
-      values (${tenantId}::uuid, ${key}, ${last4(key)}, now())
+      values (${tenantId}::uuid, ${enc}, ${last4(decrypted)}, now())
       on conflict (tenant_id) do update
       set
         openai_key_enc = excluded.openai_key_enc,
@@ -66,15 +106,31 @@ export async function POST(req: Request) {
         updated_at = now()
     `);
 
-    // ✅ Do NOT read back through typed drizzle schema (your schema currently doesn't expose openai_key_last4)
     return json({
       ok: true,
       tenantId,
       saved: true,
-      openaiKeyLast4: last4(key),
+      openaiKeyLast4: last4(decrypted),
       updatedAt: new Date().toISOString(),
     });
   } catch (e: any) {
+    const code = e?.code || e?.message || "SAVE_FAILED";
+
+    if (code === "INVALID_KEY_FORMAT") {
+      return json(
+        {
+          ok: false,
+          error: "INVALID_KEY_FORMAT",
+          message: "Key must be a valid OpenAI key (sk-...) or a valid encrypted secret.",
+        },
+        400
+      );
+    }
+
+    if (code === "KEY_EMPTY") {
+      return json({ ok: false, error: "BAD_REQUEST", message: "Key is empty." }, 400);
+    }
+
     return json({ ok: false, error: "SAVE_FAILED", message: e?.message ?? String(e) }, 500);
   }
 }
