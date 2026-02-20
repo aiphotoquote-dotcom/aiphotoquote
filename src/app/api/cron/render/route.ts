@@ -28,6 +28,23 @@ function json(data: any, status = 200, debugId?: string) {
   return res;
 }
 
+type DebugFn = (stage: string, data?: Record<string, any>) => void;
+
+function mkDebug(debugId: string): DebugFn {
+  return (stage, data) => {
+    console.log(
+      JSON.stringify({
+        tag: "apq_debug",
+        debugId,
+        route: "/api/cron/render",
+        stage,
+        ts: new Date().toISOString(),
+        ...(data || {}),
+      })
+    );
+  };
+}
+
 function safeErr(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
   return msg.slice(0, 2000);
@@ -161,8 +178,26 @@ async function requireCronSecret(req: Request) {
   return { ok: false as const, error: "UNAUTHORIZED" as const };
 }
 
+/**
+ * Jobs can get stuck in "running" if the function crashes mid-run.
+ * We fail them after a TTL so the UI never hangs forever.
+ */
+const RUNNING_TTL_MINUTES = 12;
+
 // Claim jobs safely (SKIP LOCKED prevents double-run across concurrent cron executions)
-async function claimJob(max: number) {
+async function claimJobs(max: number) {
+  // 1) Fail stale running jobs
+  await db.execute(sql`
+    update render_jobs
+    set status = 'failed',
+        finished_at = now(),
+        error = coalesce(error, 'STALE_RUNNING_TIMEOUT')
+    where status = 'running'
+      and started_at is not null
+      and started_at < (now() - (${RUNNING_TTL_MINUTES}::int * interval '1 minute'))
+  `);
+
+  // 2) Claim queued jobs
   const r = await db.execute(sql`
     with picked as (
       select id
@@ -238,6 +273,17 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
   return row ?? null;
 }
 
+async function updateQuoteRendering(args: { tenantId: string; quoteLogId: string }) {
+  await db.execute(sql`
+    update quote_logs
+    set
+      render_status = 'rendering',
+      render_error = null
+    where id = ${args.quoteLogId}::uuid
+      and tenant_id = ${args.tenantId}::uuid
+  `);
+}
+
 async function updateQuoteRendered(args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
   await db.execute(sql`
     update quote_logs
@@ -265,7 +311,6 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
 }
 
 function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: boolean) {
-  // Prefer server resolver (authoritative), but fall back to DB columns if needed.
   if (typeof resolvedTenantRenderEnabled === "boolean") return resolvedTenantRenderEnabled;
 
   const ai = ctx?.ai_rendering_enabled;
@@ -288,15 +333,73 @@ function isPlanAllowedToRender(planTierRaw: unknown) {
   return true;
 }
 
+/**
+ * ✅ Key handling: tolerate historical plaintext rows safely.
+ * If openai_key_enc "looks like" a raw OpenAI key, use it directly.
+ * Otherwise decrypt via decryptSecret().
+ */
+function looksLikeOpenAiKey(raw: string) {
+  const s = safeTrim(raw);
+  // tolerate: sk-..., sk-proj-...
+  return s.startsWith("sk-") && s.length >= 20;
+}
+
+function resolveApiKeyFromDb(encOrPlain: string, debug: DebugFn) {
+  const raw = safeTrim(encOrPlain);
+  if (!raw) return null;
+
+  if (looksLikeOpenAiKey(raw)) {
+    debug("openaiKey.detected_plaintext_row", { prefix: raw.slice(0, 12), len: raw.length });
+    return raw;
+  }
+
+  // normal encrypted path
+  try {
+    const k = decryptSecret(raw);
+    if (looksLikeOpenAiKey(k)) return k;
+
+    debug("openaiKey.decrypt_succeeded_but_unexpected_shape", { len: safeTrim(k).length });
+    return k || null;
+  } catch (e: any) {
+    // important: this is exactly the error you saw
+    debug("openaiKey.decrypt_failed", { message: e?.message ?? String(e) });
+    return null;
+  }
+}
+
+/**
+ * Timeout wrapper for OpenAI calls so jobs can't hang forever.
+ */
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string) {
+  let t: any;
+  const timeout = new Promise<T>((_, reject) => {
+    t = setTimeout(() => reject(new Error(`${label}_TIMEOUT_${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function handleCron(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
+  const debug = mkDebug(debugId);
   const startedAt = Date.now();
 
   const url = new URL(req.url);
   const wantDebug = url.searchParams.get("debug") === "1";
 
+  debug("cron.start", {
+    method: (req as any)?.method ?? null,
+    url: req.url,
+    maxParam: url.searchParams.get("max") ?? null,
+    wantDebug,
+  });
+
   const auth = await requireCronSecret(req);
   if (!auth.ok) {
+    debug("cron.unauthorized", wantDebug ? { auth: buildAuthDebug(req) } : {});
     return json(
       {
         ok: false,
@@ -311,7 +414,9 @@ async function handleCron(req: Request) {
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
   // Claim jobs
-  const claimed = await claimJob(max);
+  const claimed = await claimJobs(max);
+  debug("jobs.claimed", { count: claimed.length, authMode: auth.mode });
+
   if (!claimed.length) {
     return json(
       {
@@ -335,13 +440,16 @@ async function handleCron(req: Request) {
 
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
+    const jlog = mkDebug(jobDebugId);
+
+    jlog("job.start", { jobId: job.id, tenantId: job.tenantId, quoteLogId: job.quoteLogId });
 
     try {
       // Load tenant + quote context
       const ctx = await loadRenderContext(job.tenantId, job.quoteLogId);
       if (!ctx) throw new Error("Missing tenant/quote context for job.");
 
-      const tenantSlug = String(ctx.tenant_slug ?? "");
+      const tenantSlug = safeTrim(ctx.tenant_slug) || "tenant";
       const tenantName = String(ctx.tenant_name ?? "Your Business");
 
       // ✅ PLAN GATE (tier0 must never render)
@@ -364,8 +472,12 @@ async function handleCron(req: Request) {
           error: "PLAN_RENDERING_DISABLED",
           planTier: plan,
         });
+        jlog("job.failed.plan_gate", { planTier: plan });
         continue;
       }
+
+      // Mark quote as rendering ASAP (prevents UI hang ambiguity)
+      await updateQuoteRendering({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
 
       // ✅ Resolve tenant + PCC AI settings (authoritative)
       const resolved = await resolveTenantLlm(job.tenantId);
@@ -383,6 +495,7 @@ async function handleCron(req: Request) {
         });
         await markJobDone(job.id, "failed", "Tenant disabled rendering.");
         processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
+        jlog("job.failed.tenant_disabled", {});
         continue;
       }
 
@@ -390,14 +503,12 @@ async function handleCron(req: Request) {
       const outputAny: any = safeJsonParse(ctx.output) ?? {};
 
       // Render opt-in should be explicit per quote (server stored)
-      const optIn =
-        Boolean(ctx.render_opt_in) ||
-        Boolean(inputAny?.render_opt_in) ||
-        Boolean(inputAny?.customer_context?.render_opt_in);
+      const optIn = Boolean(ctx.render_opt_in) || Boolean(inputAny?.render_opt_in);
 
       if (!optIn) {
         await markJobDone(job.id, "done", null);
         processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
+        jlog("job.skipped.not_opted_in", {});
         continue;
       }
 
@@ -411,14 +522,16 @@ async function handleCron(req: Request) {
         });
         await markJobDone(job.id, "failed", "No images.");
         processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
+        jlog("job.failed.no_images", {});
         continue;
       }
 
-      // OpenAI key
-      const enc = ctx.openai_key_enc;
+      // OpenAI key (plaintext-safe)
+      const enc = safeTrim(ctx.openai_key_enc);
       if (!enc) throw new Error("Missing tenant OpenAI key (tenant_secrets.openai_key_enc).");
-      const apiKey = decryptSecret(String(enc));
-      if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
+
+      const apiKey = resolveApiKeyFromDb(enc, jlog);
+      if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key (or key is invalid).");
 
       // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
       const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
@@ -472,6 +585,13 @@ async function handleCron(req: Request) {
         .join("\n")
         .trim();
 
+      jlog("job.prompt.built", {
+        renderModel,
+        tenantStyleKey,
+        promptLen: prompt.length,
+        imagesCount: images.length,
+      });
+
       // Debug payload (stored ONLY in output.render_debug)
       if (debugEnabled) {
         const renderDebug: any = {
@@ -508,13 +628,18 @@ async function handleCron(req: Request) {
         }
       }
 
-      // Generate image
+      // Generate image (hard timeout)
       const openai = new OpenAI({ apiKey });
-      const imgResp: any = await openai.images.generate({
-        model: renderModel,
-        prompt,
-        size: "1024x1024",
-      });
+
+      const imgResp: any = await withTimeout(
+        openai.images.generate({
+          model: renderModel,
+          prompt,
+          size: "1024x1024",
+        }),
+        90_000,
+        "OPENAI_IMAGES_GENERATE"
+      );
 
       const b64: string | undefined = imgResp?.data?.[0]?.b64_json;
       if (!b64) throw new Error("Image generation returned no b64_json.");
@@ -523,14 +648,15 @@ async function handleCron(req: Request) {
 
       // Upload to blob
       const key = `renders/${tenantSlug}/${job.quoteLogId}-${Date.now()}.png`;
-      const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
+      const blob = await withTimeout(put(key, bytes, { access: "public", contentType: "image/png" }), 45_000, "BLOB_PUT");
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
 
       // Update quote log
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
+      jlog("job.quote.updated_rendered", { imageUrl });
 
-      // Emails
+      // Emails (best-effort)
       try {
         const cfg = await getTenantEmailConfig(job.tenantId);
 
@@ -652,6 +778,8 @@ async function handleCron(req: Request) {
 
       await markJobDone(job.id, "done", null);
       processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl, renderModel });
+
+      jlog("job.done", { ok: true, imageUrl });
     } catch (e: any) {
       const msg = safeErr(e);
 
@@ -668,8 +796,12 @@ async function handleCron(req: Request) {
 
       await markJobDone(job.id, "failed", msg);
       processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: msg });
+
+      jlog("job.failed", { error: msg });
     }
   }
+
+  debug("cron.done", { claimed: claimed.length, processed: processed.length, durationMs: Date.now() - startedAt });
 
   return json(
     {
