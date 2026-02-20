@@ -106,10 +106,18 @@ async function getRenderPolicy(tenantId: string) {
   `);
 
   const row: any = pickJsonRow(r);
+
+  // ✅ Semantics:
+  // - maxPerDay <= 0 => unlimited / rate limit OFF
+  // - maxPerDay > 0  => enforce in cron (or here later if you choose)
+  const rawMax = Number(row?.rendering_max_per_day);
+  const maxPerDay =
+    Number.isFinite(rawMax) ? Math.trunc(rawMax) : 20;
+
   return {
     enabled: Boolean(row?.ai_rendering_enabled ?? false),
     optInRequired: Boolean(row?.rendering_customer_opt_in_required ?? true),
-    maxPerDay: Number.isFinite(Number(row?.rendering_max_per_day)) ? Number(row?.rendering_max_per_day) : 20,
+    maxPerDay,
     style: safeTrim(row?.rendering_style) || "photoreal",
     notes: safeTrim(row?.rendering_notes) || "",
   };
@@ -361,7 +369,9 @@ export async function POST(req: Request) {
     }
 
     // --- Render policy gating (don’t enqueue if disabled) ---
-    const renderRateDisabled = Number(renderPolicy.maxPerDay) <= 0;
+    // ✅ FIX: maxPerDay <= 0 means "unlimited", NOT disabled.
+    // Rate limiting is optional; enforcement lives in cron when maxPerDay > 0.
+    const renderRateDisabled = false;
 
     if (!renderPolicy.enabled || renderRateDisabled) {
       // Keep DB status helpful for UI
@@ -372,7 +382,7 @@ export async function POST(req: Request) {
             renderStatus: "disabled",
             renderError: !renderPolicy.enabled
               ? "Renderings are disabled for this tenant."
-              : "Renderings are disabled by rate limit (max per day = 0).",
+              : `Renderings are disabled by rate limit (max per day = ${renderPolicy.maxPerDay}).`,
           })
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
       }
