@@ -716,7 +716,7 @@ async function handleCron(req: Request) {
 
       if (inputFile?.file) {
         // Image-to-image (best anchor)
-        const editResp: any = await openai.images.edits({
+        const editResp: any = await openai.images.edit({
           model: renderModel,
           image: inputFile.file,
           prompt: finalPrompt,
