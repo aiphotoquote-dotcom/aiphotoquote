@@ -28,6 +28,16 @@ function isPlainObject(v: any) {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
+function safeJsonStringify(v: any) {
+  try {
+    // Keep DB stable: always store an object for jsonb columns
+    const obj = isPlainObject(v) ? v : {};
+    return JSON.stringify(obj);
+  } catch {
+    return "{}";
+  }
+}
+
 async function loadIndustryMeta(industryKey: string) {
   const r = await db.execute(sql`
     select
@@ -109,6 +119,8 @@ function normalizeGeneratedPack(args: {
  * Insert a new version row (append-only) for this industry_key.
  * Compatible with DB shape:
  * industry_key, enabled, version, pack, models, prompts, updated_at
+ *
+ * ✅ IMPORTANT: stringify jsonb params (Neon/driver will not accept raw objects)
  */
 async function insertIndustryPackVersion(args: { industryKey: string; pack: any }) {
   const key = args.industryKey;
@@ -124,8 +136,13 @@ async function insertIndustryPackVersion(args: { industryKey: string; pack: any 
 
   const id = crypto.randomUUID();
 
-  const models = isPlainObject(args.pack?.models) ? args.pack.models : {};
-  const prompts = isPlainObject(args.pack?.prompts) ? args.pack.prompts : {};
+  const packObj = isPlainObject(args.pack) ? args.pack : {};
+  const modelsObj = isPlainObject(packObj?.models) ? packObj.models : {};
+  const promptsObj = isPlainObject(packObj?.prompts) ? packObj.prompts : {};
+
+  const packJson = safeJsonStringify(packObj);
+  const modelsJson = safeJsonStringify(modelsObj);
+  const promptsJson = safeJsonStringify(promptsObj);
 
   await db.execute(sql`
     insert into industry_llm_packs (id, industry_key, enabled, version, pack, models, prompts, updated_at)
@@ -134,9 +151,9 @@ async function insertIndustryPackVersion(args: { industryKey: string; pack: any 
       ${key},
       true,
       ${nextVersion}::int,
-      ${args.pack}::jsonb,
-      ${models}::jsonb,
-      ${prompts}::jsonb,
+      ${packJson}::jsonb,
+      ${modelsJson}::jsonb,
+      ${promptsJson}::jsonb,
       now()
     )
   `);
@@ -161,10 +178,7 @@ const Req = {
 };
 
 // ✅ IMPORTANT: match Next’s typed route signature in this repo
-export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ industryKey: string }> }
-) {
+export async function POST(req: NextRequest, context: { params: Promise<{ industryKey: string }> }) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
   const p = await context.params;
