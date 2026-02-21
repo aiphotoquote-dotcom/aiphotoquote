@@ -37,9 +37,8 @@ function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
 }
 
-function jsonbParam(v: any) {
-  if (v === undefined) return null;
-  if (v === null) return null;
+function jsonbString(v: any) {
+  if (v === undefined || v === null) return null;
   if (typeof v === "string") return v;
   try {
     return JSON.stringify(v);
@@ -52,7 +51,7 @@ async function bestEffortAudit(tx: any, args: { industryKey: string; actor: stri
   try {
     await tx.execute(sql`
       insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
-      values ('delete', ${args.industryKey}, null, ${args.actor}, ${args.reason}, ${jsonbParam(args.payload)}::jsonb)
+      values ('delete', ${args.industryKey}, null, ${args.actor}, ${args.reason}, ${jsonbString(args.payload)}::jsonb)
     `);
   } catch {
     // ignore if audit table isn't present yet
@@ -94,7 +93,29 @@ export async function POST(req: Request) {
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
-      return { ok: false as const, status: 409, error: "HAS_TENANTS", message: `Cannot delete: ${nTenants} tenants still assigned.` };
+      return {
+        ok: false as const,
+        status: 409,
+        error: "HAS_TENANTS",
+        message: `Cannot delete: ${nTenants} tenants still assigned.`,
+      };
+    }
+
+    // Extra safety: refuse delete if there are still any tenant_sub_industries rows
+    // (should normally be fine to delete, but this catches surprises before we erase data)
+    const tsiCountR = await tx.execute(sql`
+      select count(*)::int as "n"
+      from tenant_sub_industries
+      where industry_key = ${industryKey}
+    `);
+    const nTsi = Number((tsiCountR as any)?.rows?.[0]?.n ?? 0);
+    if (nTsi > 0) {
+      return {
+        ok: false as const,
+        status: 409,
+        error: "HAS_TENANT_SUB_INDUSTRIES",
+        message: `Cannot delete: ${nTsi} tenant_sub_industries rows still reference this industry.`,
+      };
     }
 
     // Counts before (for response/audit)
@@ -106,15 +127,12 @@ export async function POST(req: Request) {
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // Delete dependents (even if empty)
-    const delTenantSubR = await tx.execute(sql`
-      delete from tenant_sub_industries
-      where industry_key = ${industryKey}
-    `);
+    // Delete dependents
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
       where industry_key = ${industryKey}
     `);
+
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
       where industry_key = ${industryKey}
@@ -130,7 +148,6 @@ export async function POST(req: Request) {
       industry: { key: industryKey, label: String(indRow.label ?? "") },
       countsBefore,
       deleted: {
-        tenantSubIndustries: Number((delTenantSubR as any)?.rowCount ?? 0),
         industrySubIndustries: Number((delIndustrySubR as any)?.rowCount ?? 0),
         industryLlmPacks: Number((delPacksR as any)?.rowCount ?? 0),
         industriesRow: Number((delIndustryR as any)?.rowCount ?? 0),
@@ -147,10 +164,7 @@ export async function POST(req: Request) {
   });
 
   if ((result as any)?.ok === false) {
-    return json(
-      { ok: false, error: (result as any).error, message: (result as any).message },
-      (result as any).status ?? 400
-    );
+    return json({ ok: false, error: (result as any).error, message: (result as any).message }, (result as any).status ?? 400);
   }
 
   return json(result, 200);
