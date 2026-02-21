@@ -49,18 +49,13 @@ function jsonbParam(v: any) {
   }
 }
 
-async function bestEffortAudit(
-  tx: any,
-  args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }
-) {
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
-      values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${jsonbParam(args.payload)}::jsonb)
-    `);
-  } catch {
-    // ignore if audit table isn't present yet
-  }
+async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }) {
+  // ✅ No longer best-effort. We WANT this to fail loud if audit can't be written.
+  const payloadJson = jsonbParam(args.payload);
+  await tx.execute(sql`
+    insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
+    values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
+  `);
 }
 
 export async function POST(req: Request) {
@@ -262,7 +257,8 @@ export async function POST(req: Request) {
       },
     };
 
-    await bestEffortAudit(tx, { sourceKey, targetKey, actor, reason, payload });
+    // ✅ Fail-loud audit
+    await auditMerge(tx, { sourceKey, targetKey, actor, reason, payload });
 
     return {
       ok: true as const,
