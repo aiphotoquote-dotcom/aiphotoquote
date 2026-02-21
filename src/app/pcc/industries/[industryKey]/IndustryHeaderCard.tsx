@@ -2,7 +2,10 @@
 
 import React from "react";
 import Link from "next/link";
+
 import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
+import MergeIndustryButton from "./MergeIndustryButton";
+import DeleteIndustryButton from "./DeleteIndustryButton";
 
 type Props = {
   industry: {
@@ -96,14 +99,19 @@ export default function IndustryHeaderCard(props: Props) {
                 db pack: v{dbLatest.version}
               </span>
             ) : (
-              <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 font-semibold", "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200")}>
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-full border px-2 py-0.5 font-semibold",
+                  "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200"
+                )}
+              >
                 db pack: none
               </span>
             )}
           </div>
         </div>
 
-        <div className="shrink-0 flex flex-col items-end gap-2">
+        <div className="shrink-0 flex flex-col items-end gap-3">
           <div className="flex gap-2">
             <Link
               href="/pcc/industries"
@@ -122,7 +130,24 @@ export default function IndustryHeaderCard(props: Props) {
             </button>
           </div>
 
-          <GenerateIndustryPackButton industryKey={props.industryKeyLower} industryLabel={industry.label} industryDescription={industry.description} />
+          {/* Actions */}
+          <div className="flex flex-col items-end gap-2">
+            <GenerateIndustryPackButton
+              industryKey={props.industryKeyLower}
+              industryLabel={industry.label}
+              industryDescription={industry.description}
+            />
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <MergeIndustryButton sourceKey={props.industryKeyLower} />
+              <DeleteIndustryButton industryKey={props.industryKeyLower} />
+            </div>
+
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
+              <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes the
+              source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
+            </div>
+          </div>
         </div>
       </div>
     </div>
