@@ -448,8 +448,14 @@ export const tenantOnboarding = pgTable(
 );
 
 /**
- * ✅ Industry LLM packs (DB-backed, no hardcoded industries)
- * Layering: Platform base + Industry pack + Tenant pack
+ * ✅ Industry prompt packs (DB-backed, no hardcoded industries)
+ *
+ * This table is the canonical storage for PCC-managed industry prompt packs used by:
+ * - estimator
+ * - QA generator
+ * - render prompt anchoring (cron)
+ *
+ * Layering: Platform base + Industry pack + Tenant overrides
  */
 export const industryLlmPacks = pgTable(
   "industry_llm_packs",
@@ -460,17 +466,36 @@ export const industryLlmPacks = pgTable(
     industryKey: text("industry_key").notNull(),
 
     /**
-     * Stored as Partial<PlatformLlmConfig> (models/prompts only).
-     * Guardrails remain platform-locked.
+     * Stored as a pack object (industry-scoped prompt overrides + render guidance).
+     * Shape is intentionally flexible and validated at the app layer.
      */
     pack: jsonb("pack").$type<any>().notNull(),
 
     // optional metadata
     version: integer("version").notNull().default(1),
+
+    /**
+     * ✅ NEW (safe): creation timestamp for audit + backfill logic
+     */
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+
+    /**
+     * ✅ NEW (safe): who last updated (portable identifier; set by app when available)
+     */
+    updatedBy: text("updated_by"),
+
+    /**
+     * ✅ NEW (safe): generation/source metadata (model, mode, hashes, etc.)
+     * Example:
+     * { mode: "onboarding"|"backfill"|"manual", model: "...", inputHash: "...", notes: "..." }
+     */
+    source: jsonb("source").$type<any>(),
+
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
     industryKeyUq: uniqueIndex("industry_llm_packs_industry_key_uq").on(t.industryKey),
     industryKeyIdx: index("industry_llm_packs_industry_key_idx").on(t.industryKey),
+    updatedAtIdx: index("industry_llm_packs_updated_at_idx").on(t.updatedAt),
   })
 );
