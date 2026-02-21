@@ -8,11 +8,10 @@ import type { PlatformLlmConfig } from "@/lib/pcc/llm/types";
  *
  * This module is PURE.
  * - No DB access
- * - No side effects
+ * - No side effects (other than calling the LLM)
  * - No route logic
  *
- * It generates a Partial<PlatformLlmConfig>
- * that is safe to store in industry_llm_packs.pack
+ * It generates a pack fragment that is safe to store in industry_llm_packs.pack
  *
  * Reusable by:
  * - onboarding
@@ -57,17 +56,22 @@ function hashInput(obj: any) {
   return crypto.createHash("sha256").update(JSON.stringify(obj)).digest("hex");
 }
 
+function requireString(name: string, v: any) {
+  const s = safeTrim(v);
+  if (!s) throw new Error(`LLM_MISSING_FIELD:${name}`);
+  return s;
+}
+
 export async function generateIndustryPack(input: GenerateIndustryPackInput): Promise<GenerateIndustryPackResult> {
   const industryKey = safeTrim(input.industryKey).toLowerCase();
-  if (!industryKey) {
-    throw new Error("INDUSTRY_KEY_REQUIRED");
-  }
+  if (!industryKey) throw new Error("INDUSTRY_KEY_REQUIRED");
 
   const model = safeTrim(input.model) || "gpt-4.1";
 
-  const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  });
+  const apiKey = safeTrim(process.env.OPENAI_API_KEY);
+  if (!apiKey) throw new Error("OPENAI_API_KEY_MISSING");
+
+  const openai = new OpenAI({ apiKey });
 
   const contextSummary = {
     industryKey,
@@ -95,7 +99,7 @@ Rules:
 - Focus on reasoning, constraints, realism, scope.
 - Render guidance must describe visual outcomes and prevent off-topic drift.
 - Return STRICT JSON only.
-`;
+`.trim();
 
   const userPrompt = `
 Industry Key: ${industryKey}
@@ -114,7 +118,7 @@ Return JSON:
   "renderPromptAddendum": "...",
   "renderNegativeGuidance": "..."
 }
-`;
+`.trim();
 
   const resp = await openai.responses.create({
     model,
@@ -125,9 +129,7 @@ Return JSON:
   });
 
   const text = resp.output_text?.trim();
-  if (!text) {
-    throw new Error("LLM_EMPTY_RESPONSE");
-  }
+  if (!text) throw new Error("LLM_EMPTY_RESPONSE");
 
   let parsed: any;
   try {
@@ -136,31 +138,33 @@ Return JSON:
     throw new Error("LLM_INVALID_JSON");
   }
 
-  // normalize + validate required strings (fail fast)
-  const quoteEstimatorSystem = safeTrim(parsed?.quoteEstimatorSystem);
-  const qaQuestionGeneratorSystem = safeTrim(parsed?.qaQuestionGeneratorSystem);
-  const renderPromptAddendum = safeTrim(parsed?.renderPromptAddendum);
-  const renderNegativeGuidance = safeTrim(parsed?.renderNegativeGuidance);
+  // Validate required fields so we never persist empty packs
+  const quoteEstimatorSystem = requireString("quoteEstimatorSystem", parsed?.quoteEstimatorSystem);
+  const qaQuestionGeneratorSystem = requireString("qaQuestionGeneratorSystem", parsed?.qaQuestionGeneratorSystem);
+  const renderPromptAddendum = requireString("renderPromptAddendum", parsed?.renderPromptAddendum);
+  const renderNegativeGuidance = requireString("renderNegativeGuidance", parsed?.renderNegativeGuidance);
 
-  if (!quoteEstimatorSystem) throw new Error("LLM_MISSING_quoteEstimatorSystem");
-  if (!qaQuestionGeneratorSystem) throw new Error("LLM_MISSING_qaQuestionGeneratorSystem");
-
-  // ✅ IMPORTANT:
-  // PlatformLlmConfig.prompts has required top-level keys (quoteEstimatorSystem, qaQuestionGeneratorSystem).
-  // But *industry packs* are stored/merged as PATCHES at prompts.industryPromptPacks[industryKey].
-  // So we intentionally return a Partial<PlatformLlmConfig> and do not attempt to satisfy the full prompts type here.
-  const pack = {
+  /**
+   * IMPORTANT:
+   * Your runtime expects industry packs under:
+   *   prompts.industryPromptPacks[industryKey].*
+   *
+   * And your PlatformLlmConfig typing has required top-level prompts fields,
+   * so we intentionally cast the minimal fragment as `any` to keep this generator pure
+   * and avoid accidentally overriding platform defaults.
+   */
+  const pack: Partial<PlatformLlmConfig> = {
     prompts: {
       industryPromptPacks: {
         [industryKey]: {
           quoteEstimatorSystem,
           qaQuestionGeneratorSystem,
-          renderPromptAddendum: renderPromptAddendum || undefined,
-          renderNegativeGuidance: renderNegativeGuidance || undefined,
+          renderPromptAddendum,
+          renderNegativeGuidance,
         },
       },
-    },
-  } as unknown as Partial<PlatformLlmConfig>;
+    } as any,
+  };
 
   return {
     pack,
