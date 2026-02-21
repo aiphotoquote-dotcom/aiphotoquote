@@ -1,5 +1,5 @@
 // src/app/api/pcc/industries/[industryKey]/llm-pack/generate/route.ts
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
 
@@ -73,8 +73,8 @@ async function loadExampleTenants(industryKey: string) {
 
 /**
  * Normalize the generated pack to the shape our runtime expects:
- * - cron render code reads: pcc.prompts.industryPromptPacks[industryKey].renderPromptAddendum / renderNegativeGuidance
- * - estimator/qa read: quoteEstimatorSystem / qaQuestionGeneratorSystem (same location)
+ * - estimator/qa read: prompts.industryPromptPacks[industryKey].quoteEstimatorSystem / qaQuestionGeneratorSystem
+ * - cron render reads: prompts.industryPromptPacks[industryKey].renderPromptAddendum / renderNegativeGuidance
  */
 function normalizeGeneratedPack(args: {
   industryKey: string;
@@ -93,13 +93,12 @@ function normalizeGeneratedPack(args: {
   const existingPack = base.prompts.industryPromptPacks[industryKey];
   const nextPack = isPlainObject(existingPack) ? { ...existingPack } : {};
 
-  // These are what matters for current production behavior.
   if (safeTrim(args.renderPromptAddendum)) nextPack.renderPromptAddendum = safeTrim(args.renderPromptAddendum);
   if (safeTrim(args.renderNegativeGuidance)) nextPack.renderNegativeGuidance = safeTrim(args.renderNegativeGuidance);
 
   base.prompts.industryPromptPacks[industryKey] = nextPack;
 
-  // If the generator mistakenly placed these at the root, remove them to keep the DB clean.
+  // If generator ever placed these at root, remove them (keep DB clean)
   if ("renderPromptAddendum" in base) delete base.renderPromptAddendum;
   if ("renderNegativeGuidance" in base) delete base.renderNegativeGuidance;
 
@@ -108,12 +107,12 @@ function normalizeGeneratedPack(args: {
 
 /**
  * Insert a new version row (append-only) for this industry_key.
- * We keep compatibility with the DB shape you described (enabled/version/pack/models/prompts).
+ * Compatible with DB shape:
+ * industry_key, enabled, version, pack, models, prompts, updated_at
  */
 async function insertIndustryPackVersion(args: { industryKey: string; pack: any }) {
   const key = args.industryKey;
 
-  // Get next version (max+1)
   const vr = await db.execute(sql`
     select coalesce(max(version), 0)::int as "v"
     from industry_llm_packs
@@ -146,8 +145,6 @@ async function insertIndustryPackVersion(args: { industryKey: string; pack: any 
 }
 
 const Req = {
-  // minimal “soft” schema: don’t force clients to send anything
-  // but allow optional overrides for backfill/refine flows
   parse(body: any) {
     const modeRaw = safeLower(body?.mode);
     const mode = modeRaw === "refine" || modeRaw === "backfill" || modeRaw === "create" ? modeRaw : "create";
@@ -163,19 +160,21 @@ const Req = {
   },
 };
 
+// ✅ IMPORTANT: match Next’s typed route signature in this repo
 export async function POST(
-  req: Request,
-  { params }: { params: { industryKey: string } }
+  req: NextRequest,
+  context: { params: Promise<{ industryKey: string }> }
 ) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
-  const industryKey = safeLower(decodeURIComponent(params?.industryKey ?? ""));
+  const p = await context.params;
+  const industryKey = safeLower(decodeURIComponent(p?.industryKey ?? ""));
   if (!industryKey) return json({ ok: false, error: "BAD_REQUEST", message: "Missing industryKey" }, 400);
 
   const body = await req.json().catch(() => ({}));
   const parsed = Req.parse(body);
 
-  // If caller didn’t provide label/description, try to pull canonical industry metadata.
+  // If caller didn’t provide label/description, try canonical industry metadata
   const meta = await loadIndustryMeta(industryKey);
 
   const label = parsed.industryLabel ?? meta?.label ?? null;
@@ -183,9 +182,10 @@ export async function POST(
 
   // If caller didn’t provide examples, derive from real tenants
   const examples =
-    parsed.exampleTenants && Array.isArray(parsed.exampleTenants) ? parsed.exampleTenants : await loadExampleTenants(industryKey);
+    parsed.exampleTenants && Array.isArray(parsed.exampleTenants)
+      ? parsed.exampleTenants
+      : await loadExampleTenants(industryKey);
 
-  // Generate pack via modular generator
   const result = await generateIndustryPack({
     industryKey,
     industryLabel: label,
@@ -195,11 +195,8 @@ export async function POST(
     model: parsed.model ?? undefined,
   });
 
-  // Extract render addendum fields from generator output (if they came back in meta-ish form)
-  // NOTE: generator currently returns pack + meta; render guidance may be placed on pack root in some versions
   const generatedAny: any = result.pack as any;
 
-  // Try common locations safely
   const renderPromptAddendum =
     safeTrim(generatedAny?.prompts?.industryPromptPacks?.[industryKey]?.renderPromptAddendum) ||
     safeTrim(generatedAny?.renderPromptAddendum) ||
@@ -217,7 +214,6 @@ export async function POST(
     renderNegativeGuidance,
   });
 
-  // Persist as new version row
   const saved = await insertIndustryPackVersion({ industryKey, pack: normalizedPack });
 
   return json({
@@ -226,7 +222,6 @@ export async function POST(
     version: saved.version,
     id: saved.id,
     meta: result.meta,
-    // small preview to verify content without dumping huge blobs
     preview: {
       hasModels: Boolean(normalizedPack?.models && Object.keys(normalizedPack.models).length),
       hasPrompts: Boolean(normalizedPack?.prompts && Object.keys(normalizedPack.prompts).length),
