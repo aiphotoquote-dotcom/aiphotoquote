@@ -50,7 +50,7 @@ function jsonbParam(v: any) {
 }
 
 async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }) {
-  // ✅ No longer best-effort. We WANT this to fail loud if audit can't be written.
+  // Fail-loud: we want merges/deletes to be auditable or not happen.
   const payloadJson = jsonbParam(args.payload);
   await tx.execute(sql`
     insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
@@ -98,7 +98,7 @@ export async function POST(req: Request) {
     if (!srcRow) return { ok: false as const, status: 404, error: "SOURCE_NOT_FOUND" };
     if (!tgtRow) return { ok: false as const, status: 404, error: "TARGET_NOT_FOUND" };
 
-    // Counts before (useful to show user + audit)
+    // Counts before (for UI + audit)
     const countsBeforeR = await tx.execute(sql`
       select
         (select count(*)::int from tenant_settings where industry_key = ${sourceKey}) as "tenantSettings",
@@ -117,15 +117,16 @@ export async function POST(req: Request) {
     `);
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
 
-    // 2) Merge tenant_sub_industries (insert missing tenant_id+key combos into target)
+    // 2) Merge tenant_sub_industries
+    // Keep target rows, insert missing tenant_id+industry_key+key combos.
+    // IMPORTANT: avoid referencing columns that might not exist; only use the known set here.
     const insertTenantSubR = await tx.execute(sql`
-      insert into tenant_sub_industries (tenant_id, industry_key, key, label, created_at, updated_at)
+      insert into tenant_sub_industries (tenant_id, industry_key, key, label, updated_at)
       select
         s.tenant_id,
         ${targetKey},
         s.key,
         s.label,
-        s.created_at,
         now()
       from tenant_sub_industries s
       where s.industry_key = ${sourceKey}
@@ -145,7 +146,7 @@ export async function POST(req: Request) {
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
-    // 3) Merge industry_sub_industries defaults (Option A: keep target, add missing keys from source)
+    // 3) Merge industry_sub_industries defaults (Option A: keep target, add missing subKeys from source)
     const insertIndustrySubR = await tx.execute(sql`
       insert into industry_sub_industries (id, industry_key, key, label, description, sort_order, is_active, created_at, updated_at)
       select
@@ -176,6 +177,7 @@ export async function POST(req: Request) {
     const deletedIndustrySub = Number((deletedIndustrySubR as any)?.rowCount ?? 0);
 
     // 4) Copy packs into target as NEW versions (append-only), then delete source packs.
+    // This preserves history but removes the source key completely (so onboarding can re-create later).
     const maxVR = await tx.execute(sql`
       select coalesce(max(version), 0)::int as "v"
       from industry_llm_packs
@@ -229,6 +231,22 @@ export async function POST(req: Request) {
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
+    // Extra safety: ensure no tenant_settings rows still point at sourceKey
+    const remainingTenantsR = await tx.execute(sql`
+      select count(*)::int as "n"
+      from tenant_settings
+      where industry_key = ${sourceKey}
+    `);
+    const remainingTenants = Number((remainingTenantsR as any)?.rows?.[0]?.n ?? 0);
+    if (remainingTenants > 0) {
+      return {
+        ok: false as const,
+        status: 409,
+        error: "MOVE_INCOMPLETE",
+        message: `Refusing to delete source: ${remainingTenants} tenant_settings rows still reference "${sourceKey}".`,
+      };
+    }
+
     // 5) Hard delete source industry row (optional)
     let deletedIndustry = 0;
     if (deleteSource) {
@@ -257,7 +275,7 @@ export async function POST(req: Request) {
       },
     };
 
-    // ✅ Fail-loud audit
+    // Fail-loud audit (last step before commit)
     await auditMerge(tx, { sourceKey, targetKey, actor, reason, payload });
 
     return {
@@ -270,7 +288,10 @@ export async function POST(req: Request) {
   });
 
   if ((result as any)?.ok === false) {
-    return json({ ok: false, error: (result as any).error }, (result as any).status ?? 400);
+    return json(
+      { ok: false, error: (result as any).error, message: (result as any).message },
+      (result as any).status ?? 400
+    );
   }
 
   return json(result, 200);
