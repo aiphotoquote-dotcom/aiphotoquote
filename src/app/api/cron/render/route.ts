@@ -52,11 +52,6 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-function safeInt(v: unknown) {
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.trunc(n) : 0;
-}
-
 /**
  * Prefer actual host over VERCEL_URL.
  */
@@ -222,6 +217,12 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.rendering_style,
       ts.rendering_notes,
 
+      -- ✅ NEW: keep cron render on-industry
+      ts.industry_key,
+
+      -- ✅ NEW: rate limit semantics live here (0 = unlimited)
+      ts.rendering_max_per_day,
+
       sec.openai_key_enc,
 
       q.id as quote_log_id,
@@ -280,18 +281,6 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
   `);
 }
 
-async function updateQuoteDisabled(args: { tenantId: string; quoteLogId: string; prompt: string; error: string }) {
-  await db.execute(sql`
-    update quote_logs
-    set
-      render_status = 'disabled',
-      render_prompt = ${args.prompt},
-      render_error = ${args.error}
-    where id = ${args.quoteLogId}::uuid
-      and tenant_id = ${args.tenantId}::uuid
-  `);
-}
-
 function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: boolean) {
   if (typeof resolvedTenantRenderEnabled === "boolean") return resolvedTenantRenderEnabled;
 
@@ -315,40 +304,46 @@ function isPlanAllowedToRender(planTierRaw: unknown) {
 }
 
 /**
- * ✅ Rate limit semantics (product rule)
- * - maxPerDay <= 0  => unlimited (rate limit OFF)
- * - maxPerDay > 0   => enforce
+ * ✅ Rate limit semantics:
+ * - maxPerDay <= 0 => unlimited (rate limit OFF)
+ * - maxPerDay > 0  => enforce
  */
-function normalizeMaxPerDay(raw: unknown): number {
-  const n = safeInt(raw);
-  return n > 0 ? n : 0;
+function normalizeMaxPerDay(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.trunc(n);
 }
 
-function getResolvedMaxPerDay(resolved: any): number {
-  const t = resolved?.tenant ?? {};
-  return normalizeMaxPerDay(
-    t.renderMaxPerDay ??
-      t.render_max_per_day ??
-      t.renderDailyMax ??
-      t.render_daily_max ??
-      t.renderMaxPerDayPerTenant ??
-      t.render_limit_per_day ??
-      0
-  );
-}
+async function isRateLimitedNow(args: { tenantId: string; maxPerDay: number }) {
+  const { tenantId, maxPerDay } = args;
 
-async function countRendersToday(tenantId: string) {
+  if (maxPerDay <= 0) {
+    return { limited: false as const, maxPerDay };
+  }
+
+  // Count renders today (UTC), per-tenant
   const r = await db.execute(sql`
     select count(*)::int as n
     from quote_logs
     where tenant_id = ${tenantId}::uuid
       and render_status = 'rendered'
+      and rendered_at is not null
       and rendered_at >= date_trunc('day', now())
   `);
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
-  const n = row?.n ?? row?.count ?? 0;
-  return safeInt(n);
+  const n = Number(row?.n ?? 0);
+
+  return { limited: n >= maxPerDay, maxPerDay, usedToday: Number.isFinite(n) ? n : 0 };
+}
+
+function collapseBlankLines(s: string) {
+  return s
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
+    .join("\n")
+    .trim();
 }
 
 async function handleCron(req: Request) {
@@ -388,24 +383,31 @@ async function handleCron(req: Request) {
   const processed: any[] = [];
   const debugEnabled = isRenderDebugEnabled();
 
+  // PCC prompt assets (templates/presets/packs) are platform-level
   const pcc = await loadPlatformLlmConfig();
 
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
+      // make quote show “running” immediately
+      try {
+        await markQuoteRunning({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
+      } catch {
+        // ignore
+      }
+
       const ctx = await loadRenderContext(job.tenantId, job.quoteLogId);
       if (!ctx) throw new Error("Missing tenant/quote context for job.");
 
       const tenantSlug = String(ctx.tenant_slug ?? "");
       const tenantName = String(ctx.tenant_name ?? "Your Business");
 
-      // PLAN GATE
       if (!isPlanAllowedToRender(ctx.plan_tier)) {
         const plan = safeTrim(ctx.plan_tier) || "unknown";
         const msg = `Rendering is not available on plan tier: ${plan}.`;
 
-        await updateQuoteDisabled({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
+        await updateQuoteFailed({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
         await markJobDone(job.id, "failed", msg);
         processed.push({
           jobId: job.id,
@@ -417,23 +419,52 @@ async function handleCron(req: Request) {
         continue;
       }
 
-      // Resolve tenant settings (authoritative)
+      // ✅ Resolve tenant + PCC AI settings (authoritative)
       const resolved = await resolveTenantLlm(job.tenantId);
-      const renderModel = safeTrim(resolved?.models?.renderModel) || "gpt-image-1";
+      const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
 
-      const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolved?.tenant?.tenantRenderEnabled);
+      const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolved.tenant.tenantRenderEnabled);
       if (tenantRenderEnabled === false) {
-        const msg = "Rendering disabled by tenant settings.";
-        await updateQuoteDisabled({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
-        await markJobDone(job.id, "failed", msg);
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: "Rendering disabled by tenant settings.",
+        });
+        await markJobDone(job.id, "failed", "Tenant disabled rendering.");
         processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
+        continue;
+      }
+
+      // ✅ Rate limit enforcement (0 = unlimited)
+      const maxPerDay = normalizeMaxPerDay(ctx.rendering_max_per_day);
+      const rate = await isRateLimitedNow({ tenantId: job.tenantId, maxPerDay });
+
+      if (rate.limited) {
+        const msg = `Renderings are disabled by rate limit (max per day = ${rate.maxPerDay}).`;
+
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: msg,
+        });
+
+        await markJobDone(job.id, "failed", msg);
+        processed.push({
+          jobId: job.id,
+          quoteLogId: job.quoteLogId,
+          ok: false,
+          error: "RATE_LIMITED",
+          maxPerDay: rate.maxPerDay,
+          usedToday: (rate as any).usedToday ?? null,
+        });
         continue;
       }
 
       const inputAny: any = safeJsonParse(ctx.input) ?? {};
       const outputAny: any = safeJsonParse(ctx.output) ?? {};
 
-      // Per-quote opt-in gate
       const optIn =
         Boolean(ctx.render_opt_in) ||
         Boolean(inputAny?.render_opt_in) ||
@@ -447,31 +478,15 @@ async function handleCron(req: Request) {
 
       const images = Array.isArray(inputAny?.images) ? inputAny.images : [];
       if (!images.length) {
-        const msg = "No images stored on quote.";
-        await updateQuoteFailed({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
-        await markJobDone(job.id, "failed", msg);
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: "No images stored on quote.",
+        });
+        await markJobDone(job.id, "failed", "No images.");
         processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
         continue;
-      }
-
-      // ✅ Rate limit (0 = unlimited)
-      const maxPerDay = getResolvedMaxPerDay(resolved);
-      if (maxPerDay > 0) {
-        const usedToday = await countRendersToday(job.tenantId);
-        if (usedToday >= maxPerDay) {
-          const msg = `Renderings are disabled by rate limit (max per day = ${maxPerDay}).`;
-          await updateQuoteDisabled({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
-          await markJobDone(job.id, "failed", msg);
-          processed.push({
-            jobId: job.id,
-            quoteLogId: job.quoteLogId,
-            ok: false,
-            error: "RATE_LIMIT_EXCEEDED",
-            maxPerDay,
-            usedToday,
-          });
-          continue;
-        }
       }
 
       // OpenAI key (tenant-only render right now)
@@ -480,19 +495,40 @@ async function handleCron(req: Request) {
       const apiKey = decryptSecret(String(enc));
       if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
 
-      const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved?.tenant?.tenantStyleKey) || "photoreal";
-      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved?.tenant?.tenantRenderNotes) || "";
+      // ✅ Industry key (keep render on-topic)
+      const industryKey = safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
 
-      const presets = (pcc?.prompts?.renderStylePresets ?? {}) as any;
+      // ✅ Pull industry render guidance from PCC packs (platform-owned)
+      const pack: any = industryKey ? (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] : null;
+
+      const industryAddendum =
+        safeTrim(pack?.renderPromptAddendum) ||
+        ""; // optional
+
+      const industryNegative =
+        safeTrim(pack?.renderNegativeGuidance) ||
+        ""; // optional
+
+      // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
+      const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
+      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved.tenant.tenantRenderNotes) || "";
+
+      // Build prompt from PCC (platform-level prompt assets)
+      const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
       const presetText =
         tenantStyleKey === "clean_oem"
           ? safeTrim(presets.clean_oem)
           : tenantStyleKey === "custom"
-            ? safeTrim(presets.custom)
-            : safeTrim(presets.photoreal);
+          ? safeTrim(presets.custom)
+          : safeTrim(presets.photoreal);
 
-      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
-      const renderPromptPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+      const styleText =
+        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+
+      const basePreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+      const renderPromptPreamble = collapseBlankLines(
+        [basePreamble, industryKey ? `Industry key: ${industryKey}` : "", industryAddendum].filter(Boolean).join("\n")
+      );
 
       const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
       const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
@@ -511,31 +547,28 @@ async function handleCron(req: Request) {
           "{tenantRenderNotesLine}",
         ].join("\n");
 
-      const prompt = renderPromptTemplate
-        .split("{renderPromptPreamble}")
-        .join(renderPromptPreamble)
-        .split("{style}")
-        .join(styleText)
-        .split("{serviceTypeLine}")
-        .join(serviceType ? `Service type: ${serviceType}` : "")
-        .split("{summaryLine}")
-        .join(summary ? `Estimate summary context: ${summary}` : "")
-        .split("{customerNotesLine}")
-        .join(customerNotes ? `Customer notes: ${customerNotes}` : "")
-        .split("{tenantRenderNotesLine}")
-        .join(tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "")
-        .split("\n")
-        .map((l) => l.trimEnd())
-        .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
-        .join("\n")
-        .trim();
+      // We inject negative guidance as a “tenant notes line” add-on so we don’t need new placeholders.
+      const notesPlusNegative = collapseBlankLines(
+        [tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "", industryNegative ? `Avoid: ${industryNegative}` : ""]
+          .filter(Boolean)
+          .join("\n")
+      );
 
-      // ✅ Only mark quote "running" once we’re actually about to render
-      try {
-        await markQuoteRunning({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
-      } catch {
-        // ignore
-      }
+      const prompt = collapseBlankLines(
+        renderPromptTemplate
+          .split("{renderPromptPreamble}")
+          .join(renderPromptPreamble)
+          .split("{style}")
+          .join(styleText)
+          .split("{serviceTypeLine}")
+          .join(serviceType ? `Service type: ${serviceType}` : industryKey ? `Service type: ${industryKey}` : "")
+          .split("{summaryLine}")
+          .join(summary ? `Estimate summary context: ${summary}` : "")
+          .split("{customerNotesLine}")
+          .join(customerNotes ? `Customer notes: ${customerNotes}` : "")
+          .split("{tenantRenderNotesLine}")
+          .join(notesPlusNegative ? notesPlusNegative : "")
+      );
 
       if (debugEnabled) {
         const renderDebug: any = {
@@ -553,14 +586,22 @@ async function handleCron(req: Request) {
             tenantRenderNotes,
             images,
           }),
+          industry: {
+            industryKey: industryKey || null,
+            hasIndustryPack: Boolean(pack),
+            renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
+            renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
+          },
+          rateLimit: {
+            maxPerDay,
+            // usedToday only exists when maxPerDay > 0
+            usedToday: (rate as any).usedToday ?? null,
+            enabled: maxPerDay > 0,
+          },
           env: {
             PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
             VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
             VERCEL_GIT_COMMIT_SHA: String(process.env.VERCEL_GIT_COMMIT_SHA ?? "").trim() || null,
-          },
-          rateLimit: {
-            maxPerDay,
-            semantics: "0=unlimited",
           },
         };
 
@@ -574,6 +615,7 @@ async function handleCron(req: Request) {
       // ✅ OpenAI image generation (fail fast; don’t hang the cron forever)
       const openai = new OpenAI({
         apiKey,
+        // supported by openai node client; keeps cron from hanging indefinitely
         timeout: 90_000,
         maxRetries: 1,
       } as any);
@@ -716,7 +758,7 @@ async function handleCron(req: Request) {
       }
 
       await markJobDone(job.id, "done", null);
-      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl, renderModel });
+      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl, renderModel, industryKey: industryKey || null });
     } catch (e: any) {
       const msg = safeErr(e);
 

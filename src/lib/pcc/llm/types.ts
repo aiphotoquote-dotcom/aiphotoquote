@@ -15,6 +15,23 @@ export type IndustryPromptPack = {
 
   /** Optional: QA generator system prompt override (industry-specific questions). */
   qaQuestionGeneratorSystem?: string;
+
+  /**
+   * ✅ NEW: render guidance for THIS industry (used by cron render worker).
+   * Think of this as the “industry anchor” to prevent generic/off-topic renders.
+   * Example for landscaping:
+   * - Must be outdoors, yard scene, matching house context
+   * - Use plants/stone/mulch/pavers/irrigation
+   * - Avoid furniture/interior/living room shots
+   */
+  renderPromptAddendum?: string;
+
+  /**
+   * ✅ NEW: render negative guidance (explicit “do not generate” list).
+   * This is useful because image models drift unless you tell them what NOT to do.
+   * Keep it short and practical.
+   */
+  renderNegativeGuidance?: string;
 };
 
 export type PlatformLlmConfig = {
@@ -42,7 +59,7 @@ export type PlatformLlmConfig = {
     // Optional extra preamble prepended to BOTH system prompts
     extraSystemPreamble?: string;
 
-    // ✅ NEW: used by /api/quote/render
+    // ✅ NEW: used by /api/quote/render + cron render prompt assembly
     renderPromptPreamble?: string;
 
     // ✅ NEW: template used by /api/quote/render
@@ -58,7 +75,7 @@ export type PlatformLlmConfig = {
     };
 
     /**
-     * ✅ NEW: Industry prompt packs (platform-owned).
+     * ✅ Industry prompt packs (platform-owned).
      * Keyed by industry_key (tenant_settings.industry_key), e.g.:
      * "marine_repair", "auto_upholstery", "general_contractor"
      */
@@ -165,6 +182,17 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
             "You generate short clarification questions for a MARINE service quote based on photos and notes.",
             "Ask about boat length, location (in-water vs trailer), access to power, prior repairs, and finish expectations.",
             "Keep each question one sentence. Return ONLY valid JSON: { questions: string[] }",
+          ].join("\n"),
+
+          // ✅ optional render anchors (starter example)
+          renderPromptAddendum: [
+            "Industry: marine repair / restoration.",
+            "Scene must remain on/near a boat context and match the customer's photos (deck, hull, interior cabin, marina).",
+            "Materials should be marine-correct (vinyl, marine canvas, stainless, gelcoat, teak) with realistic weathering.",
+          ].join("\n"),
+          renderNegativeGuidance: [
+            "Do not generate unrelated indoor living rooms, couches, residential kitchens, or office spaces.",
+            "Do not add branding, text overlays, watermarks, or UI.",
           ].join("\n"),
         },
       },
