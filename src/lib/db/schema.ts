@@ -151,23 +151,25 @@ export const tenantSubIndustries = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
 
-    // ✅ NEW: scope overrides to an industry
+    // scope overrides to an industry
     industryKey: text("industry_key").notNull(),
 
     key: text("key").notNull(),
     label: text("label").notNull(),
 
+    // ✅ match how your SQL uses it (merge route inserts created_at)
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // ✅ NEW unique key includes industryKey
+    // unique key includes industryKey
     tenantIndustryKeyUq: uniqueIndex("tenant_sub_industries_tenant_id_industry_key_key_uq").on(
       t.tenantId,
       t.industryKey,
       t.key
     ),
 
-    // ✅ fast reads by tenant+industry
+    // fast reads by tenant+industry
     tenantIndustryIdx: index("tenant_sub_industries_tenant_id_industry_key_idx").on(t.tenantId, t.industryKey),
 
     // keep tenant-only index for any legacy usage
@@ -232,10 +234,10 @@ export const tenantSettings = pgTable("tenant_settings", {
   aiMode: text("ai_mode"),
   pricingEnabled: boolean("pricing_enabled"),
 
-  // ✅ Onboarding “how you charge”
+  // Onboarding “how you charge”
   pricingModel: text("pricing_model"),
 
-  // ✅ Pricing model config (hybrid: AI suggests + backend computes)
+  // Pricing model config (hybrid: AI suggests + backend computes)
   flatRateDefault: integer("flat_rate_default"),
   hourlyLaborRate: integer("hourly_labor_rate"),
   materialMarkupPercent: integer("material_markup_percent"),
@@ -260,7 +262,7 @@ export const tenantSettings = pgTable("tenant_settings", {
   reportingTimezone: text("reporting_timezone"),
   weekStartsOn: integer("week_starts_on"),
 
-  // ✅ PLAN (matches your real DB)
+  // PLAN (matches your real DB)
   planTier: text("plan_tier").notNull().default("free"),
   monthlyQuoteLimit: integer("monthly_quote_limit"), // null => unlimited
   activationGraceCredits: integer("activation_grace_credits").notNull().default(0),
@@ -326,13 +328,6 @@ export const tenantPricingRules = pgTable("tenant_pricing_rules", {
 
 /**
  * Encrypted tenant secrets (never returned raw)
- *
- * IMPORTANT: table has NO id / created_at in your real DB.
- * Real columns:
- * - tenant_id (uuid, PK)
- * - openai_key_enc (text)
- * - openai_key_last4 (text)
- * - updated_at (timestamptz)
  */
 export const tenantSecrets = pgTable("tenant_secrets", {
   tenantId: uuid("tenant_id")
@@ -341,7 +336,6 @@ export const tenantSecrets = pgTable("tenant_secrets", {
     .references(() => tenants.id, { onDelete: "cascade" }),
 
   openaiKeyEnc: text("openai_key_enc"),
-
   openaiKeyLast4: text("openai_key_last4"),
 
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -378,24 +372,33 @@ export const quoteLogs = pgTable("quote_logs", {
 });
 
 /**
- * Industries
+ * Industries (✅ aligned to your Neon table shape)
  */
 export const industries = pgTable(
   "industries",
   {
-    id: uuid("id").primaryKey(),
+    id: uuid("id").defaultRandom().primaryKey(),
+
     key: text("key").notNull(),
     label: text("label").notNull(),
     description: text("description"),
+
+    // neon table has these (you pasted them)
+    status: text("status").notNull().default("approved"),
+    createdBy: text("created_by").notNull().default("ai"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
+    // keep your naming but align uniqueness
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
+    statusIdx: index("industries_status_idx").on(t.status),
   })
 );
 
 /**
- * ✅ Global default sub-industries (industry-wide defaults)
+ * Global default sub-industries (✅ aligned: includes is_active)
  */
 export const industrySubIndustries = pgTable(
   "industry_sub_industries",
@@ -403,13 +406,15 @@ export const industrySubIndustries = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
 
     industryKey: text("industry_key").notNull(),
-
     key: text("key").notNull(),
 
     label: text("label").notNull(),
     description: text("description"),
 
     sortOrder: integer("sort_order").notNull().default(1000),
+
+    // neon query uses isi.is_active
+    isActive: boolean("is_active").notNull().default(true),
 
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -418,6 +423,7 @@ export const industrySubIndustries = pgTable(
     industryKeyIdx: index("industry_sub_industries_industry_key_idx").on(t.industryKey),
     industryKeySubKeyUq: uniqueIndex("industry_sub_industries_industry_key_key_uq").on(t.industryKey, t.key),
     sortIdx: index("industry_sub_industries_sort_idx").on(t.industryKey, t.sortOrder),
+    activeIdx: index("industry_sub_industries_active_idx").on(t.industryKey, t.isActive),
   })
 );
 
@@ -448,67 +454,46 @@ export const tenantOnboarding = pgTable(
 );
 
 /**
- * ✅ Industry prompt packs (DB-backed, no hardcoded industries)
+ * Industry prompt packs (✅ aligned to what your PCC page + merge route query)
  *
- * This table is the canonical storage for PCC-managed industry prompt packs used by:
- * - estimator
- * - QA generator
- * - render prompt anchoring (cron)
+ * Your code queries:
+ * - enabled
+ * - version
+ * - pack
+ * - models
+ * - prompts
+ * - updated_at
  *
- * Layering: Platform base + Industry pack + Tenant overrides
+ * And uses "multiple versions per industry", so DO NOT unique industry_key here.
  */
 export const industryLlmPacks = pgTable(
   "industry_llm_packs",
   {
     id: uuid("id").defaultRandom().primaryKey(),
 
-    // joins by industries.key
     industryKey: text("industry_key").notNull(),
 
-    /**
-     * Stored as a pack object (industry-scoped prompt overrides + render guidance).
-     * Shape is intentionally flexible and validated at the app layer.
-     */
-    pack: jsonb("pack").$type<any>().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
 
-    // optional metadata
     version: integer("version").notNull().default(1),
 
-    /**
-     * ✅ NEW (safe): creation timestamp for audit + backfill logic
-     */
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-
-    /**
-     * ✅ NEW (safe): who last updated (portable identifier; set by app when available)
-     */
-    updatedBy: text("updated_by"),
-
-    /**
-     * ✅ NEW (safe): generation/source metadata (model, mode, hashes, etc.)
-     * Example:
-     * { mode: "onboarding"|"backfill"|"manual", model: "...", inputHash: "...", notes: "..." }
-     */
-    source: jsonb("source").$type<any>(),
+    pack: jsonb("pack").$type<any>(),
+    models: jsonb("models").$type<any>(),
+    prompts: jsonb("prompts").$type<any>(),
 
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    industryKeyUq: uniqueIndex("industry_llm_packs_industry_key_uq").on(t.industryKey),
     industryKeyIdx: index("industry_llm_packs_industry_key_idx").on(t.industryKey),
+    industryEnabledIdx: index("industry_llm_packs_industry_key_enabled_idx").on(t.industryKey, t.enabled),
+    industryVersionIdx: index("industry_llm_packs_industry_key_version_idx").on(t.industryKey, t.version),
     updatedAtIdx: index("industry_llm_packs_updated_at_idx").on(t.updatedAt),
   })
 );
 
 /**
- * ✅ Industry change log (append-only)
+ * Industry change log (append-only)
  * Used by PCC merge/delete flows.
- *
- * NOTE: This is intentionally portable + simple:
- * - action: 'merge' | 'delete' | (future) 'create' | 'approve' | 'reject'
- * - source_key: the industry key being acted on
- * - target_key: used for merge (nullable)
- * - payload: small JSON snapshot of what moved/deleted for forensics
  */
 export const industryChangeLog = pgTable(
   "industry_change_log",
@@ -516,7 +501,6 @@ export const industryChangeLog = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
 
     action: text("action").notNull(), // merge | delete | etc.
-
     sourceKey: text("source_key").notNull(),
     targetKey: text("target_key"), // nullable (delete has no target)
 
