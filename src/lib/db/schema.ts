@@ -499,3 +499,38 @@ export const industryLlmPacks = pgTable(
     updatedAtIdx: index("industry_llm_packs_updated_at_idx").on(t.updatedAt),
   })
 );
+
+/**
+ * ✅ Industry change log (append-only)
+ * Used by PCC merge/delete flows.
+ *
+ * NOTE: This is intentionally portable + simple:
+ * - action: 'merge' | 'delete' | (future) 'create' | 'approve' | 'reject'
+ * - source_key: the industry key being acted on
+ * - target_key: used for merge (nullable)
+ * - payload: small JSON snapshot of what moved/deleted for forensics
+ */
+export const industryChangeLog = pgTable(
+  "industry_change_log",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    action: text("action").notNull(), // merge | delete | etc.
+
+    sourceKey: text("source_key").notNull(),
+    targetKey: text("target_key"), // nullable (delete has no target)
+
+    actor: text("actor"),
+    reason: text("reason"),
+
+    payload: jsonb("payload").$type<any>(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    actionIdx: index("industry_change_log_action_idx").on(t.action),
+    sourceIdx: index("industry_change_log_source_key_idx").on(t.sourceKey),
+    targetIdx: index("industry_change_log_target_key_idx").on(t.targetKey),
+    createdIdx: index("industry_change_log_created_at_idx").on(t.createdAt),
+  })
+);
