@@ -6,13 +6,34 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
-import ConfirmIndustryButton from "./ConfirmIndustryButton";
-import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
-import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
 import IndustryPromptPackEditor from "./IndustryPromptPackEditor";
-import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+
+import {
+  rows,
+  firstRow,
+  fmtDate,
+  toBool,
+  toNum,
+  safeTrim,
+  titleFromKey,
+  safeJsonParse,
+  pick,
+  normalizeUrl,
+  asStringArray,
+  isPlainObject,
+  mergeEditorPacks,
+  packObjToEditorPack,
+  type EditorPack,
+} from "./pccIndustryUtils";
+
+import IndustryHeaderCard from "./IndustryHeaderCard";
+import ConfirmedTenantsSection from "./ConfirmedTenantsSection";
+import AiSuggestedTenantsSection from "./AiSuggestedTenantsSection";
+import RejectedTenantsSection from "./RejectedTenantsSection";
+import DefaultSubIndustriesSection from "./DefaultSubIndustriesSection";
+import TenantOverridesSection from "./TenantOverridesSection";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,152 +42,6 @@ type Props = {
   params: Promise<{ industryKey: string }>;
   searchParams?: Promise<{ showInactive?: string }>;
 };
-
-type EditorPack = {
-  quoteEstimatorSystem?: string;
-  qaQuestionGeneratorSystem?: string;
-  extraSystemPreamble?: string;
-
-  renderSystemAddendum?: string;
-  renderNegativeGuidance?: string;
-};
-
-function rows(r: any): any[] {
-  return (r as any)?.rows ?? (Array.isArray(r) ? r : []);
-}
-
-function firstRow(r: any): any | null {
-  const rr = rows(r);
-  return rr[0] ?? null;
-}
-
-function cn(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(" ");
-}
-
-function fmtDate(d: any) {
-  try {
-    if (!d) return "";
-    const dt = d instanceof Date ? d : new Date(d);
-    if (!Number.isFinite(dt.getTime())) return "";
-    return dt.toLocaleString();
-  } catch {
-    return "";
-  }
-}
-
-function toBool(v: any) {
-  if (v === true) return true;
-  if (v === false) return false;
-  const s = String(v ?? "").toLowerCase().trim();
-  return s === "true" || s === "t" || s === "1" || s === "yes";
-}
-
-function toNum(v: any, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function safeTrim(v: any) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
-function titleFromKey(key: string) {
-  const s = String(key ?? "").trim();
-  if (!s) return "";
-  return s
-    .split(/[_\-]+/g)
-    .filter(Boolean)
-    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-function safeJsonParse(v: any): any | null {
-  try {
-    if (!v) return null;
-    if (typeof v === "object") return v;
-    const s = String(v);
-    return s ? JSON.parse(s) : null;
-  } catch {
-    return null;
-  }
-}
-
-function pick(obj: any, paths: string[]): any {
-  for (const p of paths) {
-    const parts = p.split(".");
-    let cur = obj;
-    let ok = true;
-    for (const k of parts) {
-      if (!cur || typeof cur !== "object" || !(k in cur)) {
-        ok = false;
-        break;
-      }
-      cur = cur[k];
-    }
-    if (ok) return cur;
-  }
-  return null;
-}
-
-function normalizeUrl(u: string | null) {
-  const s = safeTrim(u);
-  if (!s) return null;
-  if (s.startsWith("http://") || s.startsWith("https://")) return s;
-  return `https://${s}`;
-}
-
-function asStringArray(v: any): string[] {
-  if (!Array.isArray(v)) return [];
-  return v.map((x) => String(x ?? "").trim()).filter(Boolean);
-}
-
-function isPlainObject(v: any) {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function packObjToEditorPack(industryKeyLower: string, obj: any): EditorPack | null {
-  if (!isPlainObject(obj)) return null;
-
-  const p = obj?.prompts?.industryPromptPacks?.[industryKeyLower];
-  const pack = isPlainObject(p) ? p : null;
-
-  if (!pack) return null;
-
-  const quoteEstimatorSystem = safeTrim(pack.quoteEstimatorSystem);
-  const qaQuestionGeneratorSystem = safeTrim(pack.qaQuestionGeneratorSystem);
-  const extraSystemPreamble = safeTrim(pack.extraSystemPreamble);
-
-  // NOTE: naming drift exists across code:
-  // - cron/render expects renderPromptAddendum
-  // - PCC editor currently calls it renderSystemAddendum
-  const renderSystemAddendum = safeTrim(pack.renderSystemAddendum) || safeTrim(pack.renderPromptAddendum);
-  const renderNegativeGuidance = safeTrim(pack.renderNegativeGuidance);
-
-  const out: EditorPack = {};
-  if (quoteEstimatorSystem) out.quoteEstimatorSystem = quoteEstimatorSystem;
-  if (qaQuestionGeneratorSystem) out.qaQuestionGeneratorSystem = qaQuestionGeneratorSystem;
-  if (extraSystemPreamble) out.extraSystemPreamble = extraSystemPreamble;
-  if (renderSystemAddendum) out.renderSystemAddendum = renderSystemAddendum;
-  if (renderNegativeGuidance) out.renderNegativeGuidance = renderNegativeGuidance;
-
-  return Object.keys(out).length ? out : null;
-}
-
-function mergeEditorPacks(base: EditorPack | null, overlay: EditorPack | null): EditorPack | null {
-  const b = base ?? {};
-  const o = overlay ?? {};
-  const out: EditorPack = { ...b };
-
-  // Only apply overlay fields if they are non-empty strings.
-  (Object.keys(o) as Array<keyof EditorPack>).forEach((k) => {
-    const v = safeTrim(o[k]);
-    if (v) (out as any)[k] = v;
-  });
-
-  return Object.keys(out).length ? out : null;
-}
 
 async function loadLatestDbIndustryPack(industryKeyLower: string) {
   const r = await db.execute(sql`
@@ -188,12 +63,11 @@ async function loadLatestDbIndustryPack(industryKeyLower: string) {
   const row = firstRow(r);
   if (!row) return null;
 
-  // ✅ FIX: jsonb may come back as string in some runtime paths
+  // jsonb may come back as string in some runtime paths
   const packVal = safeJsonParse(row.pack);
   const modelsVal = safeJsonParse(row.models);
   const promptsVal = safeJsonParse(row.prompts);
 
-  // Keep the canonical `pack` object when present; fall back to {models,prompts}
   const packObj = isPlainObject(packVal)
     ? packVal
     : {
@@ -240,16 +114,15 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   const industryKeyLower = String(key).toLowerCase();
 
-  // ✅ PCC platform config overrides (optional)
+  // -----------------------------------
+  // Packs (platform override + DB latest)
+  // -----------------------------------
   const pcc = await loadPlatformLlmConfig();
   const platformPackRaw = (pcc?.prompts?.industryPromptPacks ?? {})[industryKeyLower] ?? null;
 
-  // ✅ DB-backed versioned pack (industry_llm_packs)
   const dbLatest = await loadLatestDbIndustryPack(industryKeyLower);
-
   const dbEditorPack = dbLatest ? packObjToEditorPack(industryKeyLower, dbLatest.packObj) : null;
 
-  // Normalize platform pack into editor shape as well (supports naming drift)
   const platformEditorPack: EditorPack | null = platformPackRaw
     ? {
         quoteEstimatorSystem: safeTrim(platformPackRaw.quoteEstimatorSystem) || undefined,
@@ -263,13 +136,10 @@ export default async function PccIndustryDetailPage(props: Props) {
       }
     : null;
 
-  // Effective initial values:
-  // - start from DB pack (generated, versioned)
-  // - overlay platform overrides (if present)
   const initialEditorPack = mergeEditorPacks(dbEditorPack, platformEditorPack);
 
   // -----------------------------
-  // Industry metadata (optional)
+  // Industry metadata
   // -----------------------------
   const industryR = await db.execute(sql`
     select
@@ -294,7 +164,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   };
 
   // -----------------------------
-  // Confirmed tenants (tenant_settings.industry_key)
+  // Confirmed tenants
   // -----------------------------
   const confirmedR = await db.execute(sql`
     select
@@ -342,7 +212,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   const confirmedIds = new Set(confirmed.map((t: any) => t.tenantId));
 
   // -----------------------------
-  // AI-suggested tenants (exclude explicit rejections)
+  // AI suggested tenants
   // -----------------------------
   const aiR = await db.execute(sql`
     select
@@ -468,7 +338,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   const aiAlsoConfirmed = aiSuggestedAll.filter((t: any) => confirmedIds.has(t.tenantId));
 
   // -----------------------------
-  // Tenants who explicitly rejected THIS industry key
+  // Rejected tenants
   // -----------------------------
   const rejectedR = await db.execute(sql`
     select
@@ -502,8 +372,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   }));
 
   // -----------------------------
-  // ✅ Default sub-industries (global)
-  // - includes isActive + inUseCount
+  // Default sub-industries (global)
   // -----------------------------
   const defaultsR = await db.execute(sql`
     select
@@ -550,7 +419,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   const inactiveCount = defaultSubIndustriesAll.filter((s) => !s.isActive).length;
 
   // -----------------------------
-  // Tenant sub-industry overrides summary (scoped to confirmed tenants + this industry)
+  // Tenant overrides (summary)
   // -----------------------------
   const overridesR = await db.execute(sql`
     select
@@ -572,6 +441,9 @@ export default async function PccIndustryDetailPage(props: Props) {
     tenantCount: toNum(r.tenantCount, 0),
   }));
 
+  // -----------------------------
+  // Derived counts for header
+  // -----------------------------
   const confirmedCount = confirmed.length;
   const aiSuggestedCount = aiSuggestedAll.length;
   const aiUnconfirmedCount = aiUnconfirmed.length;
@@ -580,569 +452,50 @@ export default async function PccIndustryDetailPage(props: Props) {
   const runningCount = aiSuggestedAll.filter((x: any) => String(x.aiStatus ?? "").toLowerCase() === "running").length;
   const errorCount = aiSuggestedAll.filter((x: any) => String(x.aiStatus ?? "").toLowerCase() === "error").length;
 
-  // ✅ Force the editor to remount when DB pack version changes, so it rehydrates immediately after Generate.
+  // ✅ Force editor to remount when db pack version changes
   const editorKey = `industry-pack:${industryKeyLower}:v${dbLatest?.version ?? 0}`;
 
   return (
     <div className="space-y-6">
-      {/* ✅ Editable industry prompt pack UI (initially hydrated from DB latest + platform overrides) */}
       <IndustryPromptPackEditor key={editorKey} industryKey={industryKeyLower} initialPack={initialEditorPack as any} />
 
-      {/* Header */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className="text-xs text-gray-500 dark:text-gray-400">PCC • Industries</div>
+      <IndustryHeaderCard
+        industry={industry}
+        industryKeyLower={industryKeyLower}
+        dbLatest={dbLatest ? { version: dbLatest.version, updatedAt: dbLatest.updatedAt } : null}
+        counts={{
+          confirmedCount,
+          aiSuggestedCount,
+          needsConfirmCount,
+          runningCount,
+          errorCount,
+          aiUnconfirmedCount,
+          rejectedCount: rejectedTenants.length,
+        }}
+        fmtDate={fmtDate}
+      />
 
-            <h1 className="mt-1 text-xl font-semibold text-gray-900 dark:text-gray-100">{industry.label}</h1>
+      <ConfirmedTenantsSection confirmed={confirmed} fmtDate={fmtDate} />
 
-            <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
-              Key: <span className="font-mono text-xs">{industry.key}</span>
-              {!industry.isCanonical ? (
-                <span className="ml-2 text-[11px] text-amber-700 dark:text-amber-200">
-                  (derived — industries table has no row for this key yet)
-                </span>
-              ) : null}
-            </div>
+      <AiSuggestedTenantsSection
+        industryKey={key}
+        aiUnconfirmed={aiUnconfirmed}
+        aiAlsoConfirmed={aiAlsoConfirmed}
+        rejectedCount={rejectedTenants.length}
+        fmtDate={fmtDate}
+      />
 
-            {industry.description ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p> : null}
+      <RejectedTenantsSection industryKey={key} rejectedTenants={rejectedTenants} fmtDate={fmtDate} />
 
-            <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
-              <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                confirmed: {confirmedCount}
-              </span>
-              <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
-                AI suggested: {aiSuggestedCount}
-              </span>
-              <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                needs confirm: {needsConfirmCount}
-              </span>
-              {runningCount ? (
-                <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
-                  running: {runningCount}
-                </span>
-              ) : null}
-              {errorCount ? (
-                <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-0.5 font-semibold text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
-                  errors: {errorCount}
-                </span>
-              ) : null}
-              {aiUnconfirmedCount ? (
-                <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 font-semibold text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
-                  AI-only (unconfirmed): {aiUnconfirmedCount}
-                </span>
-              ) : null}
-              {rejectedTenants.length ? (
-                <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                  rejected: {rejectedTenants.length}
-                </span>
-              ) : null}
+      <DefaultSubIndustriesSection
+        industryKey={key}
+        showInactive={showInactive}
+        inactiveCount={inactiveCount}
+        defaultSubIndustries={defaultSubIndustries}
+        fmtDate={fmtDate}
+      />
 
-              {dbLatest ? (
-                <span
-                  className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  title={dbLatest.updatedAt ? `Latest DB pack updated: ${fmtDate(dbLatest.updatedAt)}` : "Latest DB pack"}
-                >
-                  db pack: v{dbLatest.version}
-                </span>
-              ) : (
-                <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                  db pack: none
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* ✅ Keep actions in a vertical stack so the Generate button never disappears again */}
-          <div className="shrink-0 flex flex-col items-end gap-2">
-            <div className="flex gap-2">
-              <Link
-                href="/pcc/industries"
-                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                Back
-              </Link>
-
-              <button
-                type="button"
-                disabled
-                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-                title="Industry metadata editing is not yet wired; prompt packs are editable above."
-              >
-                Edit industry (soon)
-              </button>
-            </div>
-
-            <GenerateIndustryPackButton
-              industryKey={industryKeyLower}
-              industryLabel={industry.label}
-              industryDescription={industry.description}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Confirmed tenants */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Confirmed tenants</div>
-          <div className="text-xs text-gray-500 dark:text-gray-400">
-            From <span className="font-mono">tenant_settings.industry_key</span>
-          </div>
-        </div>
-
-        {confirmed.length ? (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                  <th className="py-3 pr-3">Tenant</th>
-                  <th className="py-3 pr-3">Tier</th>
-                  <th className="py-3 pr-3">Monthly limit</th>
-                  <th className="py-3 pr-3">Grace credits</th>
-                  <th className="py-3 pr-3">Status</th>
-                  <th className="py-3 pr-0 text-right">Actions</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {confirmed.map((t: any) => (
-                  <tr key={t.tenantId} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
-                    <td className="py-3 pr-3">
-                      <div className="flex items-center gap-3">
-                        {t.brandLogoUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={t.brandLogoUrl}
-                            alt={`${t.name} logo`}
-                            className="h-9 w-9 rounded-lg border border-gray-200 bg-white object-contain p-1 dark:border-gray-800 dark:bg-black"
-                          />
-                        ) : (
-                          <div className="h-9 w-9 rounded-lg border border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-black" />
-                        )}
-
-                        <div className="min-w-0">
-                          <div className="truncate font-semibold text-gray-900 dark:text-gray-100">{t.name}</div>
-                          <div className="truncate font-mono text-[11px] text-gray-600 dark:text-gray-300">{t.slug}</div>
-                          <div className="truncate font-mono text-[11px] text-gray-500 dark:text-gray-400">
-                            {String(t.tenantId).slice(0, 8)} · {t.createdAt ? fmtDate(t.createdAt) : ""}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{t.planTier}</td>
-
-                    <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">
-                      {t.monthlyQuoteLimit === null ? "unlimited" : String(t.monthlyQuoteLimit)}
-                    </td>
-
-                    <td className="py-3 pr-3 text-xs text-gray-700 dark:text-gray-200">
-                      <span className="font-mono">{t.graceTotal}</span> total · <span className="font-mono">{t.graceUsed}</span> used ·{" "}
-                      <span className="font-mono">{t.graceRemaining}</span> left
-                    </td>
-
-                    <td className="py-3 pr-3">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                          String(t.tenantStatus).toLowerCase() === "archived"
-                            ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
-                            : "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                        )}
-                      >
-                        {String(t.tenantStatus).toUpperCase()}
-                      </span>
-                    </td>
-
-                    <td className="py-3 pr-0 text-right">
-                      <Link href={`/pcc/tenants/${encodeURIComponent(t.tenantId)}`} className="text-xs font-semibold underline">
-                        View tenant →
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-            No confirmed tenants for this industry yet.
-          </div>
-        )}
-      </div>
-
-      {/* AI suggested tenants */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI suggested tenants</div>
-          <div className="text-xs text-gray-500 dark:text-gray-400">
-            From <span className="font-mono">tenant_onboarding.ai_analysis.suggestedIndustryKey</span>
-          </div>
-        </div>
-
-        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          We split this into <span className="font-semibold">AI-only</span> (not yet confirmed) and{" "}
-          <span className="font-semibold">also confirmed</span> (useful to measure AI accuracy).
-          {rejectedTenants.length ? <span className="ml-1">Rejected tenants are excluded from this list and shown below.</span> : null}
-        </div>
-
-        {/* AI-only */}
-        <div className="mt-4">
-          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">AI-only (unconfirmed)</div>
-
-          {aiUnconfirmed.length ? (
-            <div className="mt-2 grid gap-2">
-              {aiUnconfirmed.map((t: any) => (
-                <div key={t.tenantId} className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-900 dark:text-gray-100 truncate">{t.name}</div>
-                      <div className="font-mono text-[11px] text-gray-600 dark:text-gray-300 truncate">{t.slug}</div>
-
-                      <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                        <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
-                          fit: {t.fit ?? "—"}
-                        </span>
-
-                        <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
-                          confidence: {Math.round((t.confidenceScore ?? 0) * 100)}%
-                        </span>
-
-                        {t.needsConfirmation ? (
-                          <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                            needs confirmation
-                          </span>
-                        ) : null}
-                      </div>
-
-                      <div className="mt-3 space-y-2">
-                        {t.suggestedLabel ? (
-                          <div className="text-sm text-gray-800 dark:text-gray-200">
-                            <span className="font-semibold">AI label:</span> {t.suggestedLabel}
-                          </div>
-                        ) : null}
-
-                        {t.businessGuess ? (
-                          <div className="text-sm text-gray-700 dark:text-gray-200">
-                            <span className="font-semibold">Business guess:</span> {t.businessGuess}
-                          </div>
-                        ) : null}
-
-                        {t.website ? (
-                          <div className="text-[11px] text-gray-600 dark:text-gray-300">
-                            <span className="font-semibold">Website:</span>{" "}
-                            <a href={t.website} className="underline" target="_blank" rel="noreferrer">
-                              {t.website}
-                            </a>
-                          </div>
-                        ) : null}
-
-                        {t.aiReason ? (
-                          <div className="text-[11px] text-gray-600 dark:text-gray-300">
-                            <span className="font-semibold">Reason:</span> {t.aiReason}
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div className="shrink-0 text-right space-y-2">
-                      <Link href={`/pcc/tenants/${encodeURIComponent(t.tenantId)}`} className="text-xs font-semibold underline">
-                        View →
-                      </Link>
-
-                      <div className="text-[11px] text-gray-500 dark:text-gray-400">{t.createdAt ? fmtDate(t.createdAt) : ""}</div>
-
-                      <ConfirmIndustryButton tenantId={t.tenantId} tenantName={t.name} industryKey={key} />
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-              No AI-only suggestions for this industry.
-            </div>
-          )}
-        </div>
-
-        {/* Also confirmed */}
-        <div className="mt-6">
-          <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">AI suggested (also confirmed)</div>
-
-          {aiAlsoConfirmed.length ? (
-            <div className="mt-2 overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                    <th className="py-3 pr-3">Tenant</th>
-                    <th className="py-3 pr-3">Fit</th>
-                    <th className="py-3 pr-3">Confidence</th>
-                    <th className="py-3 pr-3">Needs confirm</th>
-                    <th className="py-3 pr-0 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {aiAlsoConfirmed.map((t: any) => (
-                    <tr key={t.tenantId} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
-                      <td className="py-3 pr-3">
-                        <div className="font-semibold text-gray-900 dark:text-gray-100">{t.name}</div>
-                        <div className="font-mono text-[11px] text-gray-600 dark:text-gray-300">{t.slug}</div>
-                      </td>
-                      <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{t.fit ?? "—"}</td>
-                      <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">
-                        {Math.round((t.confidenceScore ?? 0) * 100)}%
-                      </td>
-                      <td className="py-3 pr-3 text-xs text-gray-700 dark:text-gray-200">{t.needsConfirmation ? "yes" : "no"}</td>
-                      <td className="py-3 pr-0 text-right">
-                        <Link href={`/pcc/tenants/${encodeURIComponent(t.tenantId)}`} className="text-xs font-semibold underline">
-                          View →
-                        </Link>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">None.</div>
-          )}
-        </div>
-      </div>
-
-      {/* Rejected tenants */}
-      {rejectedTenants.length ? (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900/40 dark:bg-amber-950/30">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-sm font-semibold text-amber-900 dark:text-amber-100">Rejected tenants</div>
-            <div className="text-xs text-amber-800/80 dark:text-amber-100/80">
-              Tenants who rejected <span className="font-mono">{key}</span> (stored in{" "}
-              <span className="font-mono">ai_analysis.rejectedIndustryKeys</span>)
-            </div>
-          </div>
-
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-amber-200/60 text-xs text-amber-900/80 dark:border-amber-900/40 dark:text-amber-100/80">
-                  <th className="py-3 pr-3">Tenant</th>
-                  <th className="py-3 pr-3">Website</th>
-                  <th className="py-3 pr-3">Meta</th>
-                  <th className="py-3 pr-0 text-right">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rejectedTenants.map((t: any) => (
-                  <tr key={t.tenantId} className="border-b border-amber-200/40 last:border-b-0 dark:border-amber-900/30">
-                    <td className="py-3 pr-3">
-                      <div className="font-semibold text-amber-950 dark:text-amber-100">{t.name}</div>
-                      <div className="font-mono text-[11px] text-amber-900/70 dark:text-amber-100/70">{t.slug}</div>
-                      <div className="mt-1 text-[11px] text-amber-900/70 dark:text-amber-100/70">
-                        {String(t.tenantId).slice(0, 8)} · {t.createdAt ? fmtDate(t.createdAt) : ""}
-                      </div>
-                    </td>
-
-                    <td className="py-3 pr-3 text-[11px] text-amber-900/80 dark:text-amber-100/80">
-                      {t.website ? (
-                        <a href={t.website} className="underline" target="_blank" rel="noreferrer">
-                          {t.website}
-                        </a>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-
-                    <td className="py-3 pr-3 text-[11px] text-amber-900/80 dark:text-amber-100/80">
-                      {t.aiStatus ? <div>status: {t.aiStatus}</div> : <div>status: —</div>}
-                      {t.aiSource ? (
-                        <div>
-                          source: <span className="font-mono">{t.aiSource}</span>
-                        </div>
-                      ) : (
-                        <div>source: —</div>
-                      )}
-                      {t.aiUpdatedAt ? <div>updated: {t.aiUpdatedAt}</div> : null}
-                    </td>
-
-                    <td className="py-3 pr-0 text-right">
-                      <Link href={`/pcc/tenants/${encodeURIComponent(t.tenantId)}`} className="text-xs font-semibold underline">
-                        View →
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      ) : null}
-
-      {/* ✅ Default sub-industries (global) */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Default sub-industries</div>
-            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              From <span className="font-mono">industry_sub_industries</span> where{" "}
-              <span className="font-mono">industry_key</span> = <span className="font-mono">{key}</span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Link
-              href={`/pcc/industries/${encodeURIComponent(key)}?showInactive=${showInactive ? "0" : "1"}`}
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              title="Toggle inactive rows visibility"
-            >
-              {showInactive ? "Hide inactive" : `Show inactive (${inactiveCount})`}
-            </Link>
-
-            <AddDefaultSubIndustryButton industryKey={key} />
-          </div>
-        </div>
-
-        <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-          Tenants can still override/extend via <span className="font-mono">tenant_sub_industries</span>. “In use” counts only
-          confirmed tenants for this industry.
-        </p>
-
-        {defaultSubIndustries.length ? (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                  <th className="py-3 pr-3">Sub-industry</th>
-                  <th className="py-3 pr-3">Key</th>
-                  <th className="py-3 pr-3">Sort</th>
-                  <th className="py-3 pr-3">In use</th>
-                  <th className="py-3 pr-3">Status</th>
-                  <th className="py-3 pr-0 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {defaultSubIndustries.map((s) => (
-                  <tr
-                    key={s.id}
-                    className={cn("border-b border-gray-100 last:border-b-0 dark:border-gray-900", !s.isActive && "opacity-60")}
-                  >
-                    <td className="py-3 pr-3">
-                      <div className="font-semibold text-gray-900 dark:text-gray-100">{s.subLabel}</div>
-                      {s.description ? <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{s.description}</div> : null}
-                    </td>
-                    <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{s.subKey}</td>
-                    <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{s.sortOrder}</td>
-                    <td className="py-3 pr-3">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                          s.inUseCount > 0
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                            : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200"
-                        )}
-                        title={
-                          s.inUseCount > 0
-                            ? "Confirmed tenants using this subKey (via tenant_sub_industries)"
-                            : "No confirmed tenants using this subKey yet"
-                        }
-                      >
-                        {s.inUseCount}
-                      </span>
-                    </td>
-                    <td className="py-3 pr-3">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                          s.isActive
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                            : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200"
-                        )}
-                      >
-                        {s.isActive ? "ACTIVE" : "INACTIVE"}
-                      </span>
-                    </td>
-                    <td className="py-3 pr-0 text-right">
-                      <div className="flex items-center justify-end gap-3">
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                          {s.updatedAt ? (
-                            <span title={`Created: ${s.createdAt ? fmtDate(s.createdAt) : "—"}`}>updated {fmtDate(s.updatedAt)}</span>
-                          ) : (
-                            "—"
-                          )}
-                        </div>
-
-                        <ToggleDefaultSubIndustryActiveButton
-                          industryKey={key}
-                          subKey={s.subKey}
-                          subLabel={s.subLabel}
-                          isActive={s.isActive}
-                        />
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-            No default sub-industries for this industry yet. Use <span className="font-semibold">Add default</span> to create the first
-            one.
-          </div>
-        )}
-      </div>
-
-      {/* Tenant overrides (summary) */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant overrides (summary)</div>
-          <button
-            type="button"
-            disabled
-            className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-            title="PCC v1 is read-only"
-          >
-            Review tenants (soon)
-          </button>
-        </div>
-
-        <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          Scoped to tenants where <span className="font-mono">tenant_settings.industry_key</span> ={" "}
-          <span className="font-mono">{key}</span> and <span className="font-mono">tenant_sub_industries.industry_key</span> ={" "}
-          <span className="font-mono">{key}</span>.
-        </p>
-
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
-                <th className="py-3 pr-3">Sub-industry label</th>
-                <th className="py-3 pr-3">Key</th>
-                <th className="py-3 pr-0 text-right">Tenants using</th>
-              </tr>
-            </thead>
-
-            <tbody>
-              {overrides.length ? (
-                overrides.map((r: any) => (
-                  <tr key={`${r.subKey}:${r.subLabel}`} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
-                    <td className="py-3 pr-3 font-semibold text-gray-900 dark:text-gray-100">{r.subLabel}</td>
-                    <td className="py-3 pr-3 font-mono text-xs text-gray-700 dark:text-gray-200">{r.subKey}</td>
-                    <td className="py-3 pr-0 text-right font-semibold text-gray-900 dark:text-gray-100">
-                      {Number(r.tenantCount || 0)}
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={3} className="py-10 text-center text-sm text-gray-600 dark:text-gray-300">
-                    No tenant overrides exist for confirmed tenants in this industry.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <TenantOverridesSection industryKey={key} overrides={overrides} />
     </div>
   );
 }
