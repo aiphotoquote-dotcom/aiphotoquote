@@ -3,6 +3,10 @@
 export type GuardrailsMode = "strict" | "balanced" | "permissive";
 export type PiiHandling = "redact" | "allow" | "deny";
 
+/**
+ * Industry prompt packs are PLATFORM-owned defaults layered in between:
+ * platform -> industry -> tenant overrides
+ */
 export type IndustryPromptPack = {
   /**
    * Optional override preamble for this industry.
@@ -17,20 +21,18 @@ export type IndustryPromptPack = {
   qaQuestionGeneratorSystem?: string;
 
   /**
-   * ✅ NEW: render guidance for THIS industry (used by cron render worker).
-   * Think of this as the “industry anchor” to prevent generic/off-topic renders.
-   * Example for landscaping:
-   * - Must be outdoors, yard scene, matching house context
-   * - Use plants/stone/mulch/pavers/irrigation
-   * - Avoid furniture/interior/living room shots
+   * ✅ NEW: Rendering guidance for this industry.
+   * These are injected into the render prompt builder in cron.
+   *
+   * renderSystemAddendum:
+   * - Use this to anchor the model to the domain ("upholstery shop", "marine canvas", etc.)
+   * - Include materials/finishes that are typical for the industry
+   *
+   * renderNegativeGuidance:
+   * - Use this to explicitly prevent drift ("do not produce kitchens, bathrooms, random rooms, etc.")
+   * - Also prevent unrelated objects/subjects
    */
-  renderPromptAddendum?: string;
-
-  /**
-   * ✅ NEW: render negative guidance (explicit “do not generate” list).
-   * This is useful because image models drift unless you tell them what NOT to do.
-   * Keep it short and practical.
-   */
+  renderSystemAddendum?: string;
   renderNegativeGuidance?: string;
 };
 
@@ -42,7 +44,7 @@ export type PlatformLlmConfig = {
     estimatorModel: string;
     qaModel: string;
 
-    // ✅ NEW: used for onboarding analysis (/api/onboarding/analyze-website)
+    // ✅ used for onboarding analysis (/api/onboarding/analyze-website)
     onboardingModel?: string;
 
     // Used for /api/quote/render (optional)
@@ -59,15 +61,16 @@ export type PlatformLlmConfig = {
     // Optional extra preamble prepended to BOTH system prompts
     extraSystemPreamble?: string;
 
-    // ✅ NEW: used by /api/quote/render + cron render prompt assembly
+    // ✅ used by cron render (/api/cron/render)
     renderPromptPreamble?: string;
 
-    // ✅ NEW: template used by /api/quote/render
+    // ✅ template used by cron render
     // Supports placeholders:
     // {renderPromptPreamble} {style} {serviceTypeLine} {summaryLine} {customerNotesLine} {tenantRenderNotesLine}
+    // plus we inject: {tenantLine} {industryLine} {industryAddendumLine} {industryNegativeLine}
     renderPromptTemplate?: string;
 
-    // ✅ NEW: PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
+    // ✅ PCC-owned style preset text; tenant selects key via ai-policy (photoreal/clean_oem/custom)
     renderStylePresets?: {
       photoreal?: string;
       clean_oem?: string;
@@ -83,17 +86,12 @@ export type PlatformLlmConfig = {
   };
 
   guardrails: {
-    // UI/API expects these (safe to default)
     mode?: GuardrailsMode;
     piiHandling?: PiiHandling;
 
-    // Simple keyword/topic blocks (V1). We'll evolve this later.
     blockedTopics: string[];
-
-    // Platform cap (tenant setting can be lower, not higher)
     maxQaQuestions: number;
 
-    // Optional: keep around for future response_format/token tuning
     maxOutputTokens?: number;
   };
 
@@ -106,11 +104,8 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
     models: {
       estimatorModel: "gpt-4o-mini",
       qaModel: "gpt-4o-mini",
-
-      // ✅ default onboarding model (safe)
       onboardingModel: "gpt-4.1",
-
-      // NOTE: this is just a stored value; image generation is separate.
+      // NOTE: stored value; image generation is separate.
       renderModel: "gpt-image-1",
     },
     prompts: {
@@ -138,23 +133,25 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "Return ONLY valid JSON matching the provided schema.",
       ].join("\n"),
 
-      // ✅ NEW defaults for render prompting
       renderPromptPreamble: [
         "You are generating a safe, non-violent, non-sexual concept render for legitimate service work.",
         "Do NOT add text, watermarks, logos, brand marks, or UI overlays.",
         "No nudity, no explicit content, no weapons, no illegal activity.",
+        "Keep the output grounded in the customer's photos; do not drift into unrelated scenes.",
       ].join("\n"),
 
       renderStylePresets: {
         photoreal: "photorealistic, natural colors, clean lighting, product photography look, high detail",
-        clean_oem:
-          "clean OEM refresh, factory-correct look, subtle improvements, accurate seams, realistic materials, neutral lighting",
-        custom:
-          "custom show-style finish, premium materials, elevated stitching detail, tasteful upgrades, studio lighting, high detail",
+        clean_oem: "clean OEM refresh, factory-correct look, subtle improvements, accurate seams, realistic materials, neutral lighting",
+        custom: "custom show-style finish, premium materials, elevated stitching detail, tasteful upgrades, studio lighting, high detail",
       },
 
       renderPromptTemplate: [
         "{renderPromptPreamble}",
+        "{tenantLine}",
+        "{industryLine}",
+        "{industryAddendumLine}",
+        "{industryNegativeLine}",
         "Generate a realistic 'after' concept rendering based on the customer's photos.",
         "Do NOT add text or watermarks.",
         "Style: {style}",
@@ -164,10 +161,6 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
         "{tenantRenderNotesLine}",
       ].join("\n"),
 
-      /**
-       * ✅ Industry prompt packs start empty.
-       * We'll add entries over time (PCC-managed).
-       */
       industryPromptPacks: {
         // Example starter pack (optional):
         marine_repair: {
@@ -183,16 +176,14 @@ export function defaultPlatformLlmConfig(): PlatformLlmConfig {
             "Ask about boat length, location (in-water vs trailer), access to power, prior repairs, and finish expectations.",
             "Keep each question one sentence. Return ONLY valid JSON: { questions: string[] }",
           ].join("\n"),
-
-          // ✅ optional render anchors (starter example)
-          renderPromptAddendum: [
+          renderSystemAddendum: [
             "Industry: marine repair / restoration.",
-            "Scene must remain on/near a boat context and match the customer's photos (deck, hull, interior cabin, marina).",
-            "Materials should be marine-correct (vinyl, marine canvas, stainless, gelcoat, teak) with realistic weathering.",
+            "Output should clearly look like a boat/marine environment (cockpit, interior, upholstery, gelcoat, canvas, hardware).",
+            "Use realistic marine-grade materials and finishes.",
           ].join("\n"),
           renderNegativeGuidance: [
-            "Do not generate unrelated indoor living rooms, couches, residential kitchens, or office spaces.",
-            "Do not add branding, text overlays, watermarks, or UI.",
+            "Do NOT output kitchens, bathrooms, living rooms, bedrooms, office spaces, or generic product mockups.",
+            "Do NOT introduce unrelated vehicles or unrelated furniture.",
           ].join("\n"),
         },
       },

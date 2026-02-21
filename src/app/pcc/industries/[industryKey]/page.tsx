@@ -10,6 +10,9 @@ import ConfirmIndustryButton from "./ConfirmIndustryButton";
 import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
 import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
+import IndustryPromptPackEditor from "./IndustryPromptPackEditor";
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -137,6 +140,10 @@ export default async function PccIndustryDetailPage(props: Props) {
       </div>
     );
   }
+
+  // ✅ PCC platform config (for industry prompt packs editable in UI)
+  const pcc = await loadPlatformLlmConfig();
+  const pack = (pcc?.prompts?.industryPromptPacks ?? {})[String(key).toLowerCase()] ?? null;
 
   // -----------------------------
   // Industry metadata (optional)
@@ -397,7 +404,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       where ts.industry_key = ${key}
         and tsi.industry_key = ${key}
       group by tsi.key
-    ) ov on ov."subKey" = isi.key
+    ) ov on ov."inUseCount" = isi.key
     where isi.industry_key = ${key}
     order by isi.sort_order asc, isi.label asc
     limit 500
@@ -452,6 +459,9 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   return (
     <div className="space-y-6">
+      {/* ✅ NEW: editable industry prompt pack (platform-owned) */}
+      <IndustryPromptPackEditor industryKey={String(key).toLowerCase()} initialPack={pack as any} />
+
       {/* Header */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-start justify-between gap-4">
@@ -516,7 +526,7 @@ export default async function PccIndustryDetailPage(props: Props) {
               type="button"
               disabled
               className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-              title="PCC v1 is read-only"
+              title="Industry metadata editing is not yet wired; prompt packs are editable above."
             >
               Edit industry (soon)
             </button>
@@ -869,10 +879,7 @@ export default async function PccIndustryDetailPage(props: Props) {
                 {defaultSubIndustries.map((s) => (
                   <tr
                     key={s.id}
-                    className={cn(
-                      "border-b border-gray-100 last:border-b-0 dark:border-gray-900",
-                      !s.isActive && "opacity-60"
-                    )}
+                    className={cn("border-b border-gray-100 last:border-b-0 dark:border-gray-900", !s.isActive && "opacity-60")}
                   >
                     <td className="py-3 pr-3">
                       <div className="font-semibold text-gray-900 dark:text-gray-100">{s.subLabel}</div>
