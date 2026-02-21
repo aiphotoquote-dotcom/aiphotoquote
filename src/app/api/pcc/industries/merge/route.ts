@@ -14,8 +14,7 @@ const Body = z.object({
   sourceKey: z.string().min(1),
   targetKey: z.string().min(1),
   reason: z.string().optional().nullable(),
-  // default: true (merge implies we hard-delete the source afterwards)
-  deleteSource: z.boolean().optional(),
+  deleteSource: z.boolean().optional(), // default true
 });
 
 function safeTrim(v: unknown) {
@@ -28,7 +27,6 @@ function safeLower(v: unknown) {
 }
 
 function actorFromReq(req: Request) {
-  // Best-effort; adjust later if desired.
   return (
     safeTrim(req.headers.get("x-clerk-user-id")) ||
     safeTrim(req.headers.get("x-user-id")) ||
@@ -42,9 +40,7 @@ function json(data: any, status = 200) {
 }
 
 function jsonbParam(v: any) {
-  if (v === undefined) return null;
-  if (v === null) return null;
-  // Drizzle/neon can sometimes hand us objects for jsonb; SQL params must be strings.
+  if (v === undefined || v === null) return null;
   if (typeof v === "string") return v;
   try {
     return JSON.stringify(v);
@@ -53,7 +49,10 @@ function jsonbParam(v: any) {
   }
 }
 
-async function bestEffortAudit(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }) {
+async function bestEffortAudit(
+  tx: any,
+  args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }
+) {
   try {
     await tx.execute(sql`
       insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
@@ -123,8 +122,7 @@ export async function POST(req: Request) {
     `);
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
 
-    // 2) Merge tenant_sub_industries
-    // Insert rows for target that don't already exist for the same tenant_id+key
+    // 2) Merge tenant_sub_industries (insert missing tenant_id+key combos into target)
     const insertTenantSubR = await tx.execute(sql`
       insert into tenant_sub_industries (tenant_id, industry_key, key, label, created_at, updated_at)
       select
@@ -152,8 +150,7 @@ export async function POST(req: Request) {
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
-    // 3) Merge industry_sub_industries (defaults)
-    // Keep target rows, only add missing subKeys from source (Option A: keep target + drop source duplicates)
+    // 3) Merge industry_sub_industries defaults (Option A: keep target, add missing keys from source)
     const insertIndustrySubR = await tx.execute(sql`
       insert into industry_sub_industries (id, industry_key, key, label, description, sort_order, is_active, created_at, updated_at)
       select
@@ -183,8 +180,7 @@ export async function POST(req: Request) {
     `);
     const deletedIndustrySub = Number((deletedIndustrySubR as any)?.rowCount ?? 0);
 
-    // 4) Move industry_llm_packs into target as NEW versions (append-only), then delete source packs.
-    // This keeps “versioning” while letting source be deleted.
+    // 4) Copy packs into target as NEW versions (append-only), then delete source packs.
     const maxVR = await tx.execute(sql`
       select coalesce(max(version), 0)::int as "v"
       from industry_llm_packs
@@ -238,7 +234,7 @@ export async function POST(req: Request) {
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
-    // 5) Finally delete source industry row (hard delete) if requested.
+    // 5) Hard delete source industry row (optional)
     let deletedIndustry = 0;
     if (deleteSource) {
       const delR = await tx.execute(sql`
