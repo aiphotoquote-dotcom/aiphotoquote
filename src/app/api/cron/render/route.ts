@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
@@ -210,6 +210,8 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.lead_to_email,
 
       ts.plan_tier,
+      ts.activation_grace_credits,
+      ts.activation_grace_used,
 
       ts.rendering_enabled,
       ts.ai_rendering_enabled,
@@ -217,10 +219,10 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.rendering_style,
       ts.rendering_notes,
 
-      -- ✅ NEW: keep cron render on-industry
+      -- ✅ keep cron render on-industry
       ts.industry_key,
 
-      -- ✅ NEW: rate limit semantics live here (0 = unlimited)
+      -- ✅ rate limit semantics live here (0 = unlimited)
       ts.rendering_max_per_day,
 
       sec.openai_key_enc,
@@ -294,13 +296,34 @@ function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: bool
 }
 
 /**
- * Tier0 must never render.
+ * ✅ Plan policy for renders
+ * - If tenant has its own key => allow on any tier
+ * - If tenant does NOT have a key:
+ *    - allow ONLY when plan tier is tier0 AND grace credits remain AND platform key exists
  */
-function isPlanAllowedToRender(planTierRaw: unknown) {
+function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedRaw: unknown) {
   const plan = safeTrim(planTierRaw).toLowerCase();
-  if (!plan) return true;
-  if (plan === "tier0") return false;
-  return true;
+  const total = Number(graceTotalRaw ?? 0);
+  const used = Number(graceUsedRaw ?? 0);
+  const t = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0;
+  const u = Number.isFinite(used) ? Math.max(0, Math.trunc(used)) : 0;
+
+  if (plan !== "tier0") return { plan, remaining: null as number | null };
+  return { plan, remaining: Math.max(0, t - u) };
+}
+
+async function bumpGraceUsedIfTier0(tenantId: string) {
+  try {
+    await db.execute(sql`
+      update tenant_settings
+      set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
+          updated_at = now()
+      where tenant_id = ${tenantId}::uuid
+        and lower(coalesce(plan_tier,'')) = 'tier0'
+    `);
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -344,6 +367,55 @@ function collapseBlankLines(s: string) {
     .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
     .join("\n")
     .trim();
+}
+
+function pickFirstImageUrl(images: any[]): string {
+  if (!Array.isArray(images)) return "";
+  // prefer "is_primary" if present
+  const primary = images.find((x) => x && (x.is_primary === true || x.isPrimary === true));
+  const cands = [primary, images[0]].filter(Boolean);
+
+  for (const it of cands) {
+    const url = safeTrim((it as any)?.url || (it as any)?.publicUrl || (it as any)?.blobUrl);
+    if (url) return url;
+  }
+
+  // scan
+  for (const it of images) {
+    const url = safeTrim((it as any)?.url || (it as any)?.publicUrl || (it as any)?.blobUrl);
+    if (url) return url;
+  }
+
+  return "";
+}
+
+async function fetchImageAsFile(url: string) {
+  const u = safeTrim(url);
+  if (!u) return null;
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15_000);
+
+  try {
+    const res = await fetch(u, { cache: "no-store", signal: controller.signal });
+    if (!res.ok) return null;
+
+    const ct = safeTrim(res.headers.get("content-type")) || "application/octet-stream";
+    const ab = await res.arrayBuffer();
+    const buf = Buffer.from(ab);
+
+    // try to infer extension
+    const ext =
+      ct.includes("png") ? "png" : ct.includes("jpeg") || ct.includes("jpg") ? "jpg" : ct.includes("webp") ? "webp" : "bin";
+
+    // OpenAI node supports toFile() which yields a File-like payload
+    const file = await toFile(buf, `input.${ext}`, { type: ct });
+    return { file, contentType: ct, bytes: buf.length };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function handleCron(req: Request) {
@@ -402,22 +474,6 @@ async function handleCron(req: Request) {
 
       const tenantSlug = String(ctx.tenant_slug ?? "");
       const tenantName = String(ctx.tenant_name ?? "Your Business");
-
-      if (!isPlanAllowedToRender(ctx.plan_tier)) {
-        const plan = safeTrim(ctx.plan_tier) || "unknown";
-        const msg = `Rendering is not available on plan tier: ${plan}.`;
-
-        await updateQuoteFailed({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
-        await markJobDone(job.id, "failed", msg);
-        processed.push({
-          jobId: job.id,
-          quoteLogId: job.quoteLogId,
-          ok: false,
-          error: "PLAN_RENDERING_DISABLED",
-          planTier: plan,
-        });
-        continue;
-      }
 
       // ✅ Resolve tenant + PCC AI settings (authoritative)
       const resolved = await resolveTenantLlm(job.tenantId);
@@ -489,31 +545,64 @@ async function handleCron(req: Request) {
         continue;
       }
 
-      // OpenAI key (tenant-only render right now)
+      // ✅ Key policy (tenant key OR tier0 grace w/ platform key)
       const enc = ctx.openai_key_enc;
-      if (!enc) throw new Error("Missing tenant OpenAI key (tenant_secrets.openai_key_enc).");
-      const apiKey = decryptSecret(String(enc));
-      if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
+      const hasTenantKey = Boolean(enc);
+      const platformKey = safeTrim(process.env.OPENAI_API_KEY);
+      const hasPlatformKey = Boolean(platformKey);
+
+      const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
+      const tier0GraceRemaining = grace.plan === "tier0" ? Number(grace.remaining ?? 0) : 0;
+
+      const canUsePlatformForTier0 = grace.plan === "tier0" && tier0GraceRemaining > 0 && hasPlatformKey;
+
+      if (!hasTenantKey && !canUsePlatformForTier0) {
+        const why =
+          grace.plan === "tier0"
+            ? !hasPlatformKey
+              ? "Missing platform OpenAI key (OPENAI_API_KEY)."
+              : "Tier0 grace exhausted for rendering."
+            : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
+
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: why,
+        });
+
+        await markJobDone(job.id, "failed", why);
+        processed.push({
+          jobId: job.id,
+          quoteLogId: job.quoteLogId,
+          ok: false,
+          error: "KEY_POLICY_BLOCK",
+          planTier: safeTrim(ctx.plan_tier) || null,
+          tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+          hasTenantKey,
+          hasPlatformKey,
+        });
+        continue;
+      }
+
+      const apiKey = hasTenantKey ? decryptSecret(String(enc)) : platformKey;
+      if (!apiKey) throw new Error(hasTenantKey ? "Unable to decrypt tenant OpenAI key." : "Missing platform OpenAI key.");
 
       // ✅ Industry key (keep render on-topic)
-      const industryKey = safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
+      const industryKey =
+        safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
 
       // ✅ Pull industry render guidance from PCC packs (platform-owned)
       const pack: any = industryKey ? (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] : null;
 
-      const industryAddendum =
-        safeTrim(pack?.renderPromptAddendum) ||
-        ""; // optional
-
-      const industryNegative =
-        safeTrim(pack?.renderNegativeGuidance) ||
-        ""; // optional
+      const industryAddendum = safeTrim(pack?.renderPromptAddendum) || "";
+      const industryNegative = safeTrim(pack?.renderNegativeGuidance) || "";
 
       // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
       const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
       const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved.tenant.tenantRenderNotes) || "";
 
-      // Build prompt from PCC (platform-level prompt assets)
+      // Build style from PCC presets
       const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
       const presetText =
         tenantStyleKey === "clean_oem"
@@ -522,52 +611,45 @@ async function handleCron(req: Request) {
           ? safeTrim(presets.custom)
           : safeTrim(presets.photoreal);
 
-      const styleText =
-        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
+      // ✅ IMPORTANT: anchor render to YOUR quote job prompt (scope/summary/Q&A) + industry pack + tenant notes.
+      // This prevents “random couch” drift.
       const basePreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+
       const renderPromptPreamble = collapseBlankLines(
-        [basePreamble, industryKey ? `Industry key: ${industryKey}` : "", industryAddendum].filter(Boolean).join("\n")
-      );
-
-      const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
-      const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
-      const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
-
-      const renderPromptTemplate =
-        safeTrim((pcc as any)?.prompts?.renderPromptTemplate) ||
         [
-          "{renderPromptPreamble}",
-          "Generate a realistic 'after' concept rendering based on the customer's photos.",
-          "Do NOT add text or watermarks.",
-          "Style: {style}",
-          "{serviceTypeLine}",
-          "{summaryLine}",
-          "{customerNotesLine}",
-          "{tenantRenderNotesLine}",
-        ].join("\n");
-
-      // We inject negative guidance as a “tenant notes line” add-on so we don’t need new placeholders.
-      const notesPlusNegative = collapseBlankLines(
-        [tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "", industryNegative ? `Avoid: ${industryNegative}` : ""]
+          basePreamble,
+          industryKey ? `Industry key: ${industryKey}` : "",
+          industryAddendum ? `Industry addendum:\n${industryAddendum}` : "",
+        ]
           .filter(Boolean)
-          .join("\n")
+          .join("\n\n")
       );
 
-      const prompt = collapseBlankLines(
-        renderPromptTemplate
-          .split("{renderPromptPreamble}")
-          .join(renderPromptPreamble)
-          .split("{style}")
-          .join(styleText)
-          .split("{serviceTypeLine}")
-          .join(serviceType ? `Service type: ${serviceType}` : industryKey ? `Service type: ${industryKey}` : "")
-          .split("{summaryLine}")
-          .join(summary ? `Estimate summary context: ${summary}` : "")
-          .split("{customerNotesLine}")
-          .join(customerNotes ? `Customer notes: ${customerNotes}` : "")
-          .split("{tenantRenderNotesLine}")
-          .join(notesPlusNegative ? notesPlusNegative : "")
+      const negativeBlock = industryNegative
+        ? collapseBlankLines(
+            [
+              "Hard negatives (must avoid):",
+              // allow multi-line negative guidance from PCC UI
+              industryNegative,
+            ].join("\n")
+          )
+        : "";
+
+      const jobContext = safeTrim(job.prompt);
+
+      const finalPrompt = collapseBlankLines(
+        [
+          renderPromptPreamble,
+          `Style: ${styleText}`,
+          tenantRenderNotes ? `Tenant render notes:\n${tenantRenderNotes}` : "",
+          negativeBlock,
+          jobContext ? `Job context (must honor):\n${jobContext}` : "",
+          "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
+        ]
+          .filter(Boolean)
+          .join("\n\n")
       );
 
       if (debugEnabled) {
@@ -578,11 +660,11 @@ async function handleCron(req: Request) {
             tenantStyleKey,
             styleText,
             renderPromptPreamble,
-            renderPromptTemplate,
-            finalPrompt: prompt,
-            serviceType,
-            summary,
-            customerNotes,
+            renderPromptTemplate: "(cron) composed prompt (preamble+style+tenant+industry+jobContext)",
+            finalPrompt,
+            serviceType: inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "",
+            summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
+            customerNotes: String(inputAny?.customer_context?.notes ?? "").trim(),
             tenantRenderNotes,
             images,
           }),
@@ -592,9 +674,15 @@ async function handleCron(req: Request) {
             renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
             renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
           },
+          keyPolicy: {
+            used: hasTenantKey ? "tenant" : "platform_grace",
+            planTier: safeTrim(ctx.plan_tier) || null,
+            tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+            hasTenantKey,
+            hasPlatformKey,
+          },
           rateLimit: {
             maxPerDay,
-            // usedToday only exists when maxPerDay > 0
             usedToday: (rate as any).usedToday ?? null,
             enabled: maxPerDay > 0,
           },
@@ -612,21 +700,41 @@ async function handleCron(req: Request) {
         }
       }
 
-      // ✅ OpenAI image generation (fail fast; don’t hang the cron forever)
+      // ✅ OpenAI image generation
+      // ✅ CRITICAL FIX: anchor to the customer's uploaded photo via image-to-image.
+      // Without this, prompt-only generation can drift (random couch, etc.)
       const openai = new OpenAI({
         apiKey,
-        // supported by openai node client; keeps cron from hanging indefinitely
         timeout: 90_000,
         maxRetries: 1,
       } as any);
 
-      const imgResp: any = await openai.images.generate({
-        model: renderModel,
-        prompt,
-        size: "1024x1024",
-      });
+      const inputUrl = pickFirstImageUrl(images);
+      const inputFile = await fetchImageAsFile(inputUrl);
 
-      const b64: string | undefined = imgResp?.data?.[0]?.b64_json;
+      let b64: string | undefined;
+
+      if (inputFile?.file) {
+        // Image-to-image (best anchor)
+        const editResp: any = await openai.images.edits({
+          model: renderModel,
+          image: inputFile.file,
+          prompt: finalPrompt,
+          size: "1024x1024",
+        });
+
+        b64 = editResp?.data?.[0]?.b64_json;
+      } else {
+        // Fallback (still works, but can drift more)
+        const genResp: any = await openai.images.generate({
+          model: renderModel,
+          prompt: finalPrompt,
+          size: "1024x1024",
+        });
+
+        b64 = genResp?.data?.[0]?.b64_json;
+      }
+
       if (!b64) throw new Error("Image generation returned no b64_json.");
 
       const bytes = Buffer.from(b64, "base64");
@@ -636,7 +744,12 @@ async function handleCron(req: Request) {
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
 
-      await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
+      await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
+
+      // If we used platform grace (tier0), consume 1 credit on success.
+      if (!hasTenantKey && canUsePlatformForTier0) {
+        await bumpGraceUsedIfTier0(job.tenantId);
+      }
 
       // Emails (best-effort)
       try {
@@ -655,6 +768,7 @@ async function handleCron(req: Request) {
 
         const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
         const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
+        const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
         const baseUrl = getBaseUrl(req);
         const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
@@ -758,7 +872,16 @@ async function handleCron(req: Request) {
       }
 
       await markJobDone(job.id, "done", null);
-      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl, renderModel, industryKey: industryKey || null });
+      processed.push({
+        jobId: job.id,
+        quoteLogId: job.quoteLogId,
+        ok: true,
+        imageUrl,
+        renderModel,
+        industryKey: industryKey || null,
+        usedKey: hasTenantKey ? "tenant" : "platform_grace",
+        anchoredToInputImage: Boolean(inputFile?.file),
+      });
     } catch (e: any) {
       const msg = safeErr(e);
 
