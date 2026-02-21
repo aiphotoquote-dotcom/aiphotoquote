@@ -6,11 +6,14 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
+
 import ConfirmIndustryButton from "./ConfirmIndustryButton";
 import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
 import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
 import IndustryPromptPackEditor from "./IndustryPromptPackEditor";
+import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
+
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
@@ -514,22 +517,31 @@ export default async function PccIndustryDetailPage(props: Props) {
             </div>
           </div>
 
-          <div className="shrink-0 flex gap-2">
-            <Link
-              href="/pcc/industries"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            >
-              Back
-            </Link>
+          <div className="shrink-0 flex flex-col items-end gap-2">
+            <div className="flex gap-2">
+              <Link
+                href="/pcc/industries"
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                Back
+              </Link>
 
-            <button
-              type="button"
-              disabled
-              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-              title="Industry metadata editing is not yet wired; prompt packs are editable above."
-            >
-              Edit industry (soon)
-            </button>
+              <button
+                type="button"
+                disabled
+                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+                title="Industry metadata editing is not yet wired; prompt packs are editable above."
+              >
+                Edit industry (soon)
+              </button>
+            </div>
+
+            {/* ✅ NEW: backfill/generate stored industry LLM pack */}
+            <GenerateIndustryPackButton
+              industryKey={industry.key}
+              industryLabel={industry.label}
+              industryDescription={industry.description}
+            />
           </div>
         </div>
       </div>
