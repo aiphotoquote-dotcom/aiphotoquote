@@ -35,6 +35,9 @@ function cn(...xs: Array<string | false | null | undefined>) {
 export default function IndustryHeaderCard(props: Props) {
   const { industry, counts, dbLatest, fmtDate } = props;
 
+  // ✅ Always use the canonical key for destructive operations
+  const canonicalKey = String(industry.key ?? "").trim();
+
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
       <div className="flex items-start justify-between gap-4">
@@ -139,8 +142,8 @@ export default function IndustryHeaderCard(props: Props) {
             />
 
             <div className="flex flex-wrap justify-end gap-2">
-              <MergeIndustryButton sourceKey={props.industryKeyLower} />
-              <DeleteIndustryButton industryKey={props.industryKeyLower} />
+              <MergeIndustryButton sourceKey={canonicalKey} />
+              <DeleteIndustryButton industryKey={canonicalKey} />
             </div>
 
             <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
