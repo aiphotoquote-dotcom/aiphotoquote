@@ -47,15 +47,16 @@ function jsonbString(v: any) {
   }
 }
 
-async function bestEffortAudit(tx: any, args: { industryKey: string; actor: string; reason: string | null; payload: any }) {
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
-      values ('delete', ${args.industryKey}, null, ${args.actor}, ${args.reason}, ${jsonbString(args.payload)}::jsonb)
-    `);
-  } catch {
-    // ignore if audit table isn't present yet
-  }
+async function auditDelete(
+  tx: any,
+  args: { industryKey: string; actor: string; reason: string | null; payload: any }
+) {
+  // ✅ Fail-loud. If audit can't be written, the delete should not proceed.
+  const payloadJson = jsonbString(args.payload);
+  await tx.execute(sql`
+    insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
+    values ('delete', ${args.industryKey}, null, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
+  `);
 }
 
 export async function POST(req: Request) {
@@ -102,7 +103,6 @@ export async function POST(req: Request) {
     }
 
     // Extra safety: refuse delete if there are still any tenant_sub_industries rows
-    // (should normally be fine to delete, but this catches surprises before we erase data)
     const tsiCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_sub_industries
@@ -121,7 +121,6 @@ export async function POST(req: Request) {
     // Counts before (for response/audit)
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
         (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
         (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks"
     `);
@@ -154,7 +153,8 @@ export async function POST(req: Request) {
       },
     };
 
-    await bestEffortAudit(tx, { industryKey, actor, reason, payload });
+    // ✅ Fail-loud audit
+    await auditDelete(tx, { industryKey, actor, reason, payload });
 
     return {
       ok: true as const,
@@ -164,7 +164,10 @@ export async function POST(req: Request) {
   });
 
   if ((result as any)?.ok === false) {
-    return json({ ok: false, error: (result as any).error, message: (result as any).message }, (result as any).status ?? 400);
+    return json(
+      { ok: false, error: (result as any).error, message: (result as any).message },
+      (result as any).status ?? 400
+    );
   }
 
   return json(result, 200);
