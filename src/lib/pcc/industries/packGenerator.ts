@@ -57,9 +57,7 @@ function hashInput(obj: any) {
   return crypto.createHash("sha256").update(JSON.stringify(obj)).digest("hex");
 }
 
-export async function generateIndustryPack(
-  input: GenerateIndustryPackInput
-): Promise<GenerateIndustryPackResult> {
+export async function generateIndustryPack(input: GenerateIndustryPackInput): Promise<GenerateIndustryPackResult> {
   const industryKey = safeTrim(input.industryKey).toLowerCase();
   if (!industryKey) {
     throw new Error("INDUSTRY_KEY_REQUIRED");
@@ -138,21 +136,31 @@ Return JSON:
     throw new Error("LLM_INVALID_JSON");
   }
 
-  const pack: Partial<PlatformLlmConfig> = {
-  prompts: ({
-    industryPromptPacks: {
-      [industryKey]: {
-        quoteEstimatorSystem: parsed.quoteEstimatorSystem,
-        qaQuestionGeneratorSystem: parsed.qaQuestionGeneratorSystem,
+  // normalize + validate required strings (fail fast)
+  const quoteEstimatorSystem = safeTrim(parsed?.quoteEstimatorSystem);
+  const qaQuestionGeneratorSystem = safeTrim(parsed?.qaQuestionGeneratorSystem);
+  const renderPromptAddendum = safeTrim(parsed?.renderPromptAddendum);
+  const renderNegativeGuidance = safeTrim(parsed?.renderNegativeGuidance);
+
+  if (!quoteEstimatorSystem) throw new Error("LLM_MISSING_quoteEstimatorSystem");
+  if (!qaQuestionGeneratorSystem) throw new Error("LLM_MISSING_qaQuestionGeneratorSystem");
+
+  // ✅ IMPORTANT:
+  // PlatformLlmConfig.prompts has required top-level keys (quoteEstimatorSystem, qaQuestionGeneratorSystem).
+  // But *industry packs* are stored/merged as PATCHES at prompts.industryPromptPacks[industryKey].
+  // So we intentionally return a Partial<PlatformLlmConfig> and do not attempt to satisfy the full prompts type here.
+  const pack = {
+    prompts: {
+      industryPromptPacks: {
+        [industryKey]: {
+          quoteEstimatorSystem,
+          qaQuestionGeneratorSystem,
+          renderPromptAddendum: renderPromptAddendum || undefined,
+          renderNegativeGuidance: renderNegativeGuidance || undefined,
+        },
       },
     },
-  } as Partial<PlatformLlmConfig["prompts"]>),
-};
-
-  // We store render guidance inside prompts for now
-  // (keeps pack structure aligned with resolver expectations)
-  (pack as any).renderPromptAddendum = parsed.renderPromptAddendum;
-  (pack as any).renderNegativeGuidance = parsed.renderNegativeGuidance;
+  } as unknown as Partial<PlatformLlmConfig>;
 
   return {
     pack,
