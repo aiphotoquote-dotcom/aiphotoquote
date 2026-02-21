@@ -404,7 +404,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       where ts.industry_key = ${key}
         and tsi.industry_key = ${key}
       group by tsi.key
-    ) ov on ov."inUseCount" = isi.key
+    ) ov on ov."subKey" = isi.key
     where isi.industry_key = ${key}
     order by isi.sort_order asc, isi.label asc
     limit 500
@@ -459,7 +459,7 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   return (
     <div className="space-y-6">
-      {/* ✅ NEW: editable industry prompt pack (platform-owned) */}
+      {/* ✅ Editable industry prompt pack (platform-owned) */}
       <IndustryPromptPackEditor industryKey={String(key).toLowerCase()} initialPack={pack as any} />
 
       {/* Header */}
@@ -533,9 +533,6 @@ export default async function PccIndustryDetailPage(props: Props) {
           </div>
         </div>
       </div>
-
-      {/* Confirmed tenants */}
-      {/* ... UNCHANGED UI BELOW ... */}
 
       {/* Confirmed tenants */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
@@ -628,7 +625,6 @@ export default async function PccIndustryDetailPage(props: Props) {
       </div>
 
       {/* AI suggested tenants */}
-      {/* (unchanged) */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">AI suggested tenants</div>
