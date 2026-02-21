@@ -11,7 +11,6 @@ import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
 import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
 import IndustryPromptPackEditor from "./IndustryPromptPackEditor";
-import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
@@ -188,12 +187,17 @@ async function loadLatestDbIndustryPack(industryKeyLower: string) {
   const row = firstRow(r);
   if (!row) return null;
 
+  // ✅ FIX: jsonb may come back as string in some runtime paths
+  const packVal = safeJsonParse(row.pack);
+  const modelsVal = safeJsonParse(row.models);
+  const promptsVal = safeJsonParse(row.prompts);
+
   // Keep the canonical `pack` object when present; fall back to {models,prompts}
-  const packObj = isPlainObject(row.pack)
-    ? row.pack
+  const packObj = isPlainObject(packVal)
+    ? packVal
     : {
-        ...(isPlainObject(row.models) ? { models: row.models } : {}),
-        ...(isPlainObject(row.prompts) ? { prompts: row.prompts } : {}),
+        ...(isPlainObject(modelsVal) ? { models: modelsVal } : {}),
+        ...(isPlainObject(promptsVal) ? { prompts: promptsVal } : {}),
       };
 
   return {
@@ -645,31 +649,22 @@ export default async function PccIndustryDetailPage(props: Props) {
             </div>
           </div>
 
-          <div className="shrink-0 flex flex-col items-end gap-2">
-            {/* ✅ DB-backed generator button */}
-            <GenerateIndustryPackButton
-              industryKey={industryKeyLower}
-              industryLabel={industry.label}
-              industryDescription={industry.description}
-            />
+          <div className="shrink-0 flex gap-2">
+            <Link
+              href="/pcc/industries"
+              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+            >
+              Back
+            </Link>
 
-            <div className="flex gap-2">
-              <Link
-                href="/pcc/industries"
-                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              >
-                Back
-              </Link>
-
-              <button
-                type="button"
-                disabled
-                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-                title="Industry metadata editing is not yet wired; prompt packs are editable above."
-              >
-                Edit industry (soon)
-              </button>
-            </div>
+            <button
+              type="button"
+              disabled
+              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+              title="Industry metadata editing is not yet wired; prompt packs are editable above."
+            >
+              Edit industry (soon)
+            </button>
           </div>
         </div>
       </div>
