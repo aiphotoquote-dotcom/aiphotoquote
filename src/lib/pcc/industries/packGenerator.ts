@@ -139,15 +139,15 @@ Return JSON:
   }
 
   const pack: Partial<PlatformLlmConfig> = {
-    prompts: {
-      industryPromptPacks: {
-        [industryKey]: {
-          quoteEstimatorSystem: parsed.quoteEstimatorSystem,
-          qaQuestionGeneratorSystem: parsed.qaQuestionGeneratorSystem,
-        },
+  prompts: ({
+    industryPromptPacks: {
+      [industryKey]: {
+        quoteEstimatorSystem: parsed.quoteEstimatorSystem,
+        qaQuestionGeneratorSystem: parsed.qaQuestionGeneratorSystem,
       },
     },
-  };
+  } as Partial<PlatformLlmConfig["prompts"]>),
+};
 
   // We store render guidance inside prompts for now
   // (keeps pack structure aligned with resolver expectations)
