@@ -11,6 +11,8 @@ import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
 import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
 import IndustryPromptPackEditor from "./IndustryPromptPackEditor";
+import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
+
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
@@ -19,15 +21,6 @@ export const dynamic = "force-dynamic";
 type Props = {
   params: Promise<{ industryKey: string }>;
   searchParams?: Promise<{ showInactive?: string }>;
-};
-
-type EditorPack = {
-  quoteEstimatorSystem?: string;
-  qaQuestionGeneratorSystem?: string;
-  extraSystemPreamble?: string;
-
-  renderSystemAddendum?: string;
-  renderNegativeGuidance?: string;
 };
 
 function rows(r: any): any[] {
@@ -121,89 +114,6 @@ function asStringArray(v: any): string[] {
   return v.map((x) => String(x ?? "").trim()).filter(Boolean);
 }
 
-function isPlainObject(v: any) {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function packObjToEditorPack(industryKeyLower: string, obj: any): EditorPack | null {
-  if (!isPlainObject(obj)) return null;
-
-  const p = obj?.prompts?.industryPromptPacks?.[industryKeyLower];
-  const pack = isPlainObject(p) ? p : null;
-
-  if (!pack) return null;
-
-  const quoteEstimatorSystem = safeTrim(pack.quoteEstimatorSystem);
-  const qaQuestionGeneratorSystem = safeTrim(pack.qaQuestionGeneratorSystem);
-  const extraSystemPreamble = safeTrim(pack.extraSystemPreamble);
-
-  // NOTE: naming drift exists across code:
-  // - cron/render expects renderPromptAddendum
-  // - PCC editor currently calls it renderSystemAddendum
-  const renderSystemAddendum =
-    safeTrim(pack.renderSystemAddendum) || safeTrim(pack.renderPromptAddendum);
-  const renderNegativeGuidance = safeTrim(pack.renderNegativeGuidance);
-
-  const out: EditorPack = {};
-  if (quoteEstimatorSystem) out.quoteEstimatorSystem = quoteEstimatorSystem;
-  if (qaQuestionGeneratorSystem) out.qaQuestionGeneratorSystem = qaQuestionGeneratorSystem;
-  if (extraSystemPreamble) out.extraSystemPreamble = extraSystemPreamble;
-  if (renderSystemAddendum) out.renderSystemAddendum = renderSystemAddendum;
-  if (renderNegativeGuidance) out.renderNegativeGuidance = renderNegativeGuidance;
-
-  return Object.keys(out).length ? out : null;
-}
-
-function mergeEditorPacks(base: EditorPack | null, overlay: EditorPack | null): EditorPack | null {
-  const b = base ?? {};
-  const o = overlay ?? {};
-  const out: EditorPack = { ...b };
-
-  // Only apply overlay fields if they are non-empty strings.
-  (Object.keys(o) as Array<keyof EditorPack>).forEach((k) => {
-    const v = safeTrim(o[k]);
-    if (v) (out as any)[k] = v;
-  });
-
-  return Object.keys(out).length ? out : null;
-}
-
-async function loadLatestDbIndustryPack(industryKeyLower: string) {
-  const r = await db.execute(sql`
-    select
-      industry_key::text as "industryKey",
-      enabled as "enabled",
-      version::int as "version",
-      pack as "pack",
-      models as "models",
-      prompts as "prompts",
-      updated_at as "updatedAt"
-    from industry_llm_packs
-    where industry_key = ${industryKeyLower}
-      and enabled = true
-    order by version desc, updated_at desc
-    limit 1
-  `);
-
-  const row = firstRow(r);
-  if (!row) return null;
-
-  // Keep the canonical `pack` object when present; fall back to {models,prompts}
-  const packObj = isPlainObject(row.pack)
-    ? row.pack
-    : {
-        ...(isPlainObject(row.models) ? { models: row.models } : {}),
-        ...(isPlainObject(row.prompts) ? { prompts: row.prompts } : {}),
-      };
-
-  return {
-    industryKey: String(row.industryKey ?? industryKeyLower),
-    version: toNum(row.version, 0),
-    updatedAt: row.updatedAt ?? null,
-    packObj,
-  };
-}
-
 export default async function PccIndustryDetailPage(props: Props) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
@@ -233,35 +143,9 @@ export default async function PccIndustryDetailPage(props: Props) {
     );
   }
 
-  const industryKeyLower = String(key).toLowerCase();
-
-  // ✅ PCC platform config overrides (optional)
+  // ✅ PCC platform config (for industry prompt packs editable in UI)
   const pcc = await loadPlatformLlmConfig();
-  const platformPackRaw = (pcc?.prompts?.industryPromptPacks ?? {})[industryKeyLower] ?? null;
-
-  // ✅ DB-backed versioned pack (industry_llm_packs)
-  const dbLatest = await loadLatestDbIndustryPack(industryKeyLower);
-
-  const dbEditorPack = dbLatest ? packObjToEditorPack(industryKeyLower, dbLatest.packObj) : null;
-
-  // Normalize platform pack into editor shape as well (supports naming drift)
-  const platformEditorPack: EditorPack | null = platformPackRaw
-    ? {
-        quoteEstimatorSystem: safeTrim(platformPackRaw.quoteEstimatorSystem) || undefined,
-        qaQuestionGeneratorSystem: safeTrim(platformPackRaw.qaQuestionGeneratorSystem) || undefined,
-        extraSystemPreamble: safeTrim(platformPackRaw.extraSystemPreamble) || undefined,
-        renderSystemAddendum:
-          safeTrim(platformPackRaw.renderSystemAddendum) ||
-          safeTrim((platformPackRaw as any).renderPromptAddendum) ||
-          undefined,
-        renderNegativeGuidance: safeTrim(platformPackRaw.renderNegativeGuidance) || undefined,
-      }
-    : null;
-
-  // Effective initial values:
-  // - start from DB pack (generated, versioned)
-  // - overlay platform overrides (if present)
-  const initialEditorPack = mergeEditorPacks(dbEditorPack, platformEditorPack);
+  const pack = (pcc?.prompts?.industryPromptPacks ?? {})[String(key).toLowerCase()] ?? null;
 
   // -----------------------------
   // Industry metadata (optional)
@@ -577,8 +461,8 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   return (
     <div className="space-y-6">
-      {/* ✅ Editable industry prompt pack UI (initially hydrated from DB latest + platform overrides) */}
-      <IndustryPromptPackEditor industryKey={industryKeyLower} initialPack={initialEditorPack as any} />
+      {/* ✅ Editable industry prompt pack (platform-owned) */}
+      <IndustryPromptPackEditor industryKey={String(key).toLowerCase()} initialPack={pack as any} />
 
       {/* Header */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
@@ -629,38 +513,34 @@ export default async function PccIndustryDetailPage(props: Props) {
                   rejected: {rejectedTenants.length}
                 </span>
               ) : null}
-
-              {dbLatest ? (
-                <span
-                  className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                  title={dbLatest.updatedAt ? `Latest DB pack updated: ${fmtDate(dbLatest.updatedAt)}` : "Latest DB pack"}
-                >
-                  db pack: v{dbLatest.version}
-                </span>
-              ) : (
-                <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                  db pack: none
-                </span>
-              )}
             </div>
           </div>
 
-          <div className="shrink-0 flex gap-2">
-            <Link
-              href="/pcc/industries"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            >
-              Back
-            </Link>
+          <div className="shrink-0 flex flex-col items-end gap-2">
+            {/* ✅ DB-backed generator (creates industry_llm_packs version row) */}
+            <GenerateIndustryPackButton
+              industryKey={key}
+              industryLabel={industry.label}
+              industryDescription={industry.description}
+            />
 
-            <button
-              type="button"
-              disabled
-              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-              title="Industry metadata editing is not yet wired; prompt packs are editable above."
-            >
-              Edit industry (soon)
-            </button>
+            <div className="flex gap-2">
+              <Link
+                href="/pcc/industries"
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                Back
+              </Link>
+
+              <button
+                type="button"
+                disabled
+                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+                title="Industry metadata editing is not yet wired; prompt packs are editable above."
+              >
+                Edit industry (soon)
+              </button>
+            </div>
           </div>
         </div>
       </div>
