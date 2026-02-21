@@ -88,7 +88,7 @@ export default function GenerateIndustryPackButton(props: Props) {
 
       setLast(data as ApiOk);
 
-      // ✅ Critical: refresh the server component so "db pack: vN" updates
+      // ✅ Force server components (and dbLatest/version badge) to update immediately.
       router.refresh();
     } catch (e: any) {
       setErr(e?.message ?? String(e ?? "Unknown error"));

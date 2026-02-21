@@ -11,6 +11,7 @@ import AddDefaultSubIndustryButton from "./AddDefaultSubIndustryButton";
 import ToggleDefaultSubIndustryActiveButton from "./ToggleDefaultSubIndustryActiveButton";
 
 import IndustryPromptPackEditor from "./IndustryPromptPackEditor";
+import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 
 export const runtime = "nodejs";
@@ -579,10 +580,13 @@ export default async function PccIndustryDetailPage(props: Props) {
   const runningCount = aiSuggestedAll.filter((x: any) => String(x.aiStatus ?? "").toLowerCase() === "running").length;
   const errorCount = aiSuggestedAll.filter((x: any) => String(x.aiStatus ?? "").toLowerCase() === "error").length;
 
+  // ✅ Force the editor to remount when DB pack version changes, so it rehydrates immediately after Generate.
+  const editorKey = `industry-pack:${industryKeyLower}:v${dbLatest?.version ?? 0}`;
+
   return (
     <div className="space-y-6">
       {/* ✅ Editable industry prompt pack UI (initially hydrated from DB latest + platform overrides) */}
-      <IndustryPromptPackEditor industryKey={industryKeyLower} initialPack={initialEditorPack as any} />
+      <IndustryPromptPackEditor key={editorKey} industryKey={industryKeyLower} initialPack={initialEditorPack as any} />
 
       {/* Header */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
@@ -649,22 +653,31 @@ export default async function PccIndustryDetailPage(props: Props) {
             </div>
           </div>
 
-          <div className="shrink-0 flex gap-2">
-            <Link
-              href="/pcc/industries"
-              className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-            >
-              Back
-            </Link>
+          {/* ✅ Keep actions in a vertical stack so the Generate button never disappears again */}
+          <div className="shrink-0 flex flex-col items-end gap-2">
+            <div className="flex gap-2">
+              <Link
+                href="/pcc/industries"
+                className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+              >
+                Back
+              </Link>
 
-            <button
-              type="button"
-              disabled
-              className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-              title="Industry metadata editing is not yet wired; prompt packs are editable above."
-            >
-              Edit industry (soon)
-            </button>
+              <button
+                type="button"
+                disabled
+                className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
+                title="Industry metadata editing is not yet wired; prompt packs are editable above."
+              >
+                Edit industry (soon)
+              </button>
+            </div>
+
+            <GenerateIndustryPackButton
+              industryKey={industryKeyLower}
+              industryLabel={industry.label}
+              industryDescription={industry.description}
+            />
           </div>
         </div>
       </div>
