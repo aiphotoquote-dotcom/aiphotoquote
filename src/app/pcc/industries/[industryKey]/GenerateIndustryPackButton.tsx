@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -10,12 +11,6 @@ function safeTrim(v: unknown) {
 
 function safeLower(v: unknown) {
   return safeTrim(v).toLowerCase();
-}
-
-function clip(s: string, n = 900) {
-  const t = safeTrim(s);
-  if (!t) return "";
-  return t.length > n ? `${t.slice(0, n)}…` : t;
 }
 
 type Props = {
@@ -48,6 +43,7 @@ type ApiErr = {
 };
 
 export default function GenerateIndustryPackButton(props: Props) {
+  const router = useRouter();
   const industryKey = useMemo(() => safeLower(props.industryKey), [props.industryKey]);
 
   const [busy, setBusy] = useState(false);
@@ -59,109 +55,41 @@ export default function GenerateIndustryPackButton(props: Props) {
     setBusy(true);
 
     try {
-      const body: any = { mode: "backfill" };
+      const body: any = {
+        mode: "backfill",
+      };
 
       // If the page already knows these, we send them (helps generator quality).
       if (safeTrim(props.industryLabel)) body.industryLabel = props.industryLabel;
       if (safeTrim(props.industryDescription)) body.industryDescription = props.industryDescription;
 
-      const url = `/api/pcc/industries/${encodeURIComponent(industryKey)}/llm-pack/generate`;
-
-      // ✅ redirect: "manual" lets us SEE if auth/middleware is redirecting the POST
-      const res = await fetch(url, {
+      const res = await fetch(`/api/pcc/industries/${encodeURIComponent(industryKey)}/llm-pack/generate`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
-        cache: "no-store",
-        redirect: "manual",
       });
 
-      const ct = safeTrim(res.headers.get("content-type") || "");
-      const location = safeTrim(res.headers.get("location") || "");
-
-      // If we got a redirect, show it explicitly (most common cause of “mystery 405”)
-      if (res.status >= 300 && res.status < 400) {
-        setErr(
-          [
-            `HTTP_${res.status} redirect while calling: ${url}`,
-            location ? `Location: ${location}` : `Location: (missing)`,
-            `Content-Type: ${ct || "—"}`,
-            `Likely auth/middleware redirect. If this turns POST -> GET, downstream can 405.`,
-          ].join("\n")
-        );
-        return;
-      }
-
-      // Try JSON first if it looks like JSON
-      let data: any = null;
-
-      if (ct.includes("application/json")) {
-        data = await res.json().catch(() => null);
-      } else {
-        // Not JSON (common when redirected to HTML login or error page)
-        const text = await res.text().catch(() => "");
-        if (!res.ok) {
-          setErr(
-            [
-              `Request failed (${res.status})`,
-              `URL: ${url}`,
-              `Content-Type: ${ct || "—"}`,
-              location ? `Location: ${location}` : null,
-              "",
-              "Body (first 900 chars):",
-              clip(text, 900) || "(empty body)",
-            ]
-              .filter(Boolean)
-              .join("\n")
-          );
-          return;
-        }
-
-        // If res.ok but non-json, still treat as unexpected
-        setErr(
-          [
-            `Unexpected non-JSON response (${res.status})`,
-            `URL: ${url}`,
-            `Content-Type: ${ct || "—"}`,
-            "",
-            "Body (first 900 chars):",
-            clip(text, 900) || "(empty body)",
-          ].join("\n")
-        );
-        return;
-      }
+      const data = (await res.json().catch(() => null)) as ApiOk | ApiErr | null;
 
       if (!res.ok) {
         const msg =
-          safeTrim(data?.message) ||
-          safeTrim(data?.error) ||
+          safeTrim((data as any)?.message) ||
+          safeTrim((data as any)?.error) ||
           `Request failed (${res.status})`;
-        setErr(
-          [
-            msg,
-            `HTTP_${res.status}`,
-            `URL: ${url}`,
-            location ? `Location: ${location}` : null,
-          ]
-            .filter(Boolean)
-            .join("\n")
-        );
+        setErr(msg);
         return;
       }
 
-      if (!data || data?.ok !== true) {
-        const msg = safeTrim(data?.message) || safeTrim(data?.error) || "Unexpected response";
-        setErr(
-          [
-            msg,
-            `HTTP_${res.status}`,
-            `URL: ${url}`,
-          ].join("\n")
-        );
+      if (!data || (data as any)?.ok !== true) {
+        const msg = safeTrim((data as any)?.message) || safeTrim((data as any)?.error) || "Unexpected response";
+        setErr(msg);
         return;
       }
 
       setLast(data as ApiOk);
+
+      // ✅ Critical: refresh the server component so "db pack: vN" updates
+      router.refresh();
     } catch (e: any) {
       setErr(e?.message ?? String(e ?? "Unknown error"));
     } finally {
@@ -184,7 +112,7 @@ export default function GenerateIndustryPackButton(props: Props) {
       {err ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
           <div className="font-semibold">Generation failed</div>
-          <pre className="mt-2 whitespace-pre-wrap font-mono break-words">{err}</pre>
+          <div className="mt-1 font-mono break-words">{err}</div>
         </div>
       ) : null}
 
@@ -211,8 +139,7 @@ export default function GenerateIndustryPackButton(props: Props) {
 
               {Array.isArray(last.preview.industryPackKeys) && last.preview.industryPackKeys.length ? (
                 <div className="truncate">
-                  pack keys:{" "}
-                  <span className="font-mono">{last.preview.industryPackKeys.slice(0, 6).join(", ")}</span>
+                  pack keys: <span className="font-mono">{last.preview.industryPackKeys.slice(0, 6).join(", ")}</span>
                   {last.preview.industryPackKeys.length > 6 ? "…" : ""}
                 </div>
               ) : null}
