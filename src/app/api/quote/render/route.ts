@@ -37,17 +37,32 @@ function safeLower(v: unknown) {
 
 /**
  * ✅ IMPORTANT:
- * Prefer the *actual* request host over VERCEL_URL.
- * VERCEL_URL can be a deployment URL that is protected (401), which breaks the kick.
+ * Prefer request origin first.
+ * Then forwarded host.
+ * Then env vars.
+ * Finally VERCEL_URL.
+ *
+ * This prevents preview deployments from “kicking” the wrong host.
  */
 function getBaseUrl(req: Request) {
+  // 1) Most reliable: request URL origin (works in preview/prod)
+  try {
+    const origin = new URL(req.url).origin;
+    if (origin) return origin.replace(/\/+$/, "");
+  } catch {
+    // ignore
+  }
+
+  // 2) Explicit env base (optional)
   const envBase = safeTrim(process.env.NEXT_PUBLIC_APP_URL) || safeTrim(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
 
+  // 3) Forwarded host
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
 
+  // 4) Vercel URL last resort
   const vercel = safeTrim(process.env.VERCEL_URL);
   if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
@@ -111,8 +126,7 @@ async function getRenderPolicy(tenantId: string) {
   // - maxPerDay <= 0 => unlimited / rate limit OFF
   // - maxPerDay > 0  => enforce in cron (or here later if you choose)
   const rawMax = Number(row?.rendering_max_per_day);
-  const maxPerDay =
-    Number.isFinite(rawMax) ? Math.trunc(rawMax) : 20;
+  const maxPerDay = Number.isFinite(rawMax) ? Math.trunc(rawMax) : 20;
 
   return {
     enabled: Boolean(row?.ai_rendering_enabled ?? false),
@@ -310,11 +324,7 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => null);
     const parsed = Req.safeParse(body);
     if (!parsed.success) {
-      return json(
-        { ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues },
-        400,
-        debugId
-      );
+      return json({ ok: false, error: "BAD_REQUEST", message: "Invalid payload", issues: parsed.error.issues }, 400, debugId);
     }
 
     const { tenantSlug, quoteLogId } = parsed.data;
@@ -362,27 +372,19 @@ export async function POST(req: Request) {
 
     // Self-heal: if input says opted-in but column is false, update column.
     if (optInFromInput && !optInFromColumn) {
-      await db
-        .update(quoteLogs)
-        .set({ renderOptIn: true })
-        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+      await db.update(quoteLogs).set({ renderOptIn: true }).where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
     }
 
     // --- Render policy gating (don’t enqueue if disabled) ---
-    // ✅ FIX: maxPerDay <= 0 means "unlimited", NOT disabled.
-    // Rate limiting is optional; enforcement lives in cron when maxPerDay > 0.
-    const renderRateDisabled = false;
-
-    if (!renderPolicy.enabled || renderRateDisabled) {
-      // Keep DB status helpful for UI
+    // ✅ Rate limiting is optional.
+    // maxPerDay <= 0 means "unlimited / rate limit OFF" (do NOT disable rendering).
+    if (!renderPolicy.enabled) {
       if (q.renderStatus !== "disabled") {
         await db
           .update(quoteLogs)
           .set({
             renderStatus: "disabled",
-            renderError: !renderPolicy.enabled
-              ? "Renderings are disabled for this tenant."
-              : `Renderings are disabled by rate limit (max per day = ${renderPolicy.maxPerDay}).`,
+            renderError: "Renderings are disabled for this tenant.",
           })
           .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
       }
@@ -455,14 +457,11 @@ export async function POST(req: Request) {
     };
 
     if (!canRenderWithKey) {
-      // Don’t enqueue doomed jobs. Save a clear error for the UI.
       await db
         .update(quoteLogs)
         .set({
           renderStatus: "failed",
-          renderError: hasPlatformKey
-            ? "Missing tenant OpenAI key (tenant_secrets.openai_key_enc)."
-            : "Missing platform OpenAI key (OPENAI_API_KEY).",
+          renderError: hasPlatformKey ? "Missing tenant OpenAI key (tenant_secrets.openai_key_enc)." : "Missing platform OpenAI key (OPENAI_API_KEY).",
         })
         .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
@@ -513,21 +512,12 @@ export async function POST(req: Request) {
     }
 
     // 5) Enqueue job with a REAL prompt (includes summary/scope/Q&A)
-    const prompt = buildRenderPrompt({
-      tenantSlug,
-      quoteLogId,
-      inputAny,
-      qaAny,
-      outputAny,
-    });
+    const prompt = buildRenderPrompt({ tenantSlug, quoteLogId, inputAny, qaAny, outputAny });
 
     const jobId = await enqueueRenderJob({ tenantId: tenant.id, quoteLogId, prompt });
 
     // 6) Reflect queued status on quote log for UI/admin visibility
-    await db
-      .update(quoteLogs)
-      .set({ renderStatus: "queued", renderError: null })
-      .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+    await db.update(quoteLogs).set({ renderStatus: "queued", renderError: null }).where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
     const kick = await tryKickCronNow(req);
 
