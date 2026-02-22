@@ -1,5 +1,4 @@
 // src/app/api/pcc/industries/merge/route.ts
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -60,7 +59,6 @@ function jsonbString(v: any) {
 
 async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; snapshot: any }) {
   const snapshotJson = jsonbString(args.snapshot);
-  // ✅ keep consistent with your delete route + real DB
   await tx.execute(sql`
     insert into industry_change_log (action, source_industry_key, target_industry_key, actor, reason, snapshot)
     values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${snapshotJson}::jsonb)
@@ -129,15 +127,14 @@ export async function POST(req: Request) {
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
 
     // 2) Merge tenant_sub_industries
+    // ✅ IMPORTANT: your real DB table does NOT have created_at, so we insert only existing cols.
     const insertTenantSubR = await tx.execute(sql`
-      insert into tenant_sub_industries (tenant_id, industry_key, key, label, created_at, updated_at)
+      insert into tenant_sub_industries (tenant_id, industry_key, key, label)
       select
         s.tenant_id,
         ${targetKey},
         s.key,
-        s.label,
-        s.created_at,
-        now()
+        s.label
       from tenant_sub_industries s
       where lower(s.industry_key) = ${sourceKey}
         and not exists (
@@ -156,7 +153,7 @@ export async function POST(req: Request) {
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
-    // 3) Merge industry_sub_industries defaults
+    // 3) Merge industry_sub_industries defaults (this table DOES have created_at/updated_at in your schema)
     const insertIndustrySubR = await tx.execute(sql`
       insert into industry_sub_industries (id, industry_key, key, label, description, sort_order, is_active, created_at, updated_at)
       select
@@ -234,7 +231,7 @@ export async function POST(req: Request) {
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
-    // 5) ✅ Move onboarding AI signals (so derived counts collapse into target)
+    // 5) Move onboarding AI signals (so derived counts collapse into target)
     const movedSuggestedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis = jsonb_set(
@@ -247,7 +244,6 @@ export async function POST(req: Request) {
     `);
     const movedSuggested = Number((movedSuggestedR as any)?.rowCount ?? 0);
 
-    // Replace sourceKey -> targetKey inside rejectedIndustryKeys arrays, de-dupe
     const movedRejectedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis = jsonb_set(
