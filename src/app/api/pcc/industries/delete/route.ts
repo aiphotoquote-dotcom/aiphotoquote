@@ -170,7 +170,8 @@ export async function POST(req: Request) {
 
     await auditDelete(tx, { industryKey, actor, reason, snapshot });
 
-    return { ok: true as const, industryKey, ...snapshot };
+    // ✅ snapshot already includes industryKey
+    return { ok: true as const, ...snapshot };
   });
 
   if ((result as any)?.ok === false) {
