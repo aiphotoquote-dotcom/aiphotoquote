@@ -2,10 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
-
 import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
-import MergeIndustryButton from "./MergeIndustryButton";
-import DeleteIndustryButton from "./DeleteIndustryButton";
 
 type Props = {
   industry: {
@@ -52,7 +49,9 @@ export default function IndustryHeaderCard(props: Props) {
             ) : null}
           </div>
 
-          {industry.description ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p> : null}
+          {industry.description ? (
+            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p>
+          ) : null}
 
           <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
             <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
@@ -111,7 +110,8 @@ export default function IndustryHeaderCard(props: Props) {
           </div>
         </div>
 
-        <div className="shrink-0 flex flex-col items-end gap-3">
+        {/* Right side: keep ONLY navigation (no actions; actions live in editor toolbar above) */}
+        <div className="shrink-0 flex flex-col items-end gap-2">
           <div className="flex gap-2">
             <Link
               href="/pcc/industries"
@@ -130,56 +130,14 @@ export default function IndustryHeaderCard(props: Props) {
             </button>
           </div>
 
-          {/* Actions */}
-          <div className="flex flex-col items-end gap-2">
-            {/* ✅ Only render this ONCE (no duplicates) */}
+          {/* Optional: keep this here if you want quick access in header too.
+              If you prefer ONLY one toolbar total, delete this block. */}
+          <div className="hidden">
             <GenerateIndustryPackButton
               industryKey={props.industryKeyLower}
               industryLabel={industry.label}
               industryDescription={industry.description}
             />
-
-            <div className="flex flex-wrap justify-end gap-2">
-              {industry.isCanonical ? (
-                <>
-                  <MergeIndustryButton sourceKey={props.industryKeyLower} />
-                  <DeleteIndustryButton industryKey={props.industryKeyLower} />
-                </>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    disabled
-                    className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950 opacity-60 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
-                    title='Merge requires a canonical industries row. This key is "derived" (not in industries table).'
-                  >
-                    Merge…
-                  </button>
-                  <button
-                    type="button"
-                    disabled
-                    className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-900 opacity-60 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200"
-                    title='Delete requires a canonical industries row. This key is "derived" (not in industries table).'
-                  >
-                    Delete
-                  </button>
-                </>
-              )}
-            </div>
-
-            <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
-              <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes the
-              source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
-              {!industry.isCanonical ? (
-                <>
-                  {" "}
-                  <span className="font-semibold text-amber-700 dark:text-amber-200">
-                    This industry is derived
-                  </span>{" "}
-                  (no `industries` row), so destructive actions are disabled.
-                </>
-              ) : null}
-            </div>
           </div>
         </div>
       </div>
