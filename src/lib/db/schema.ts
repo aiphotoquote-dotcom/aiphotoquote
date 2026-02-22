@@ -493,28 +493,32 @@ export const industryLlmPacks = pgTable(
 
 /**
  * Industry change log (append-only)
- * Used by PCC merge/delete flows.
+ * ✅ MUST match prod DB:
+ * - source_industry_key / target_industry_key
+ * - snapshot (jsonb)
+ * - created_at
+ * - action check in DB (we'll expand to include canonicalize)
  */
 export const industryChangeLog = pgTable(
   "industry_change_log",
   {
     id: uuid("id").defaultRandom().primaryKey(),
 
-    action: text("action").notNull(), // merge | delete | etc.
-    sourceKey: text("source_key").notNull(),
-    targetKey: text("target_key"), // nullable (delete has no target)
+    action: text("action").notNull(), // delete | merge | canonicalize (after migration)
 
-    actor: text("actor"),
+    sourceIndustryKey: text("source_industry_key").notNull(),
+    targetIndustryKey: text("target_industry_key"), // nullable for delete/canonicalize
+
+    actor: text("actor").notNull().default("platform"),
     reason: text("reason"),
 
-    payload: jsonb("payload").$type<any>(),
+    snapshot: jsonb("snapshot").$type<any>().notNull().default({}),
 
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    actionIdx: index("industry_change_log_action_idx").on(t.action),
-    sourceIdx: index("industry_change_log_source_key_idx").on(t.sourceKey),
-    targetIdx: index("industry_change_log_target_key_idx").on(t.targetKey),
     createdIdx: index("industry_change_log_created_at_idx").on(t.createdAt),
+    sourceIdx: index("industry_change_log_source_idx").on(t.sourceIndustryKey),
+    targetIdx: index("industry_change_log_target_idx").on(t.targetIndustryKey),
   })
 );
