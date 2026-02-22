@@ -47,29 +47,6 @@ function jsonbString(v: any) {
   }
 }
 
-// Postgres-side “normalize industry key” expression:
-// - lowercase
-// - convert any run of non-alphanumerics to underscore
-// - collapse multiple underscores
-// - trim leading/trailing underscores
-//
-// IMPORTANT: this is an SQL snippet builder, not a JS function.
-function normSql(expr: any) {
-  return sql`lower(
-    regexp_replace(
-      regexp_replace(
-        regexp_replace(coalesce(${expr}::text,''), '[^a-zA-Z0-9]+', '_', 'g'),
-        '_+',
-        '_',
-        'g'
-      ),
-      '^_|_$',
-      '',
-      'g'
-    )
-  )`;
-}
-
 async function auditDelete(tx: any, args: { industryKey: string; actor: string; reason: string | null; snapshot: any }) {
   const snapshotJson = jsonbString(args.snapshot);
   await tx.execute(sql`
@@ -95,11 +72,11 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // 1) Block if confirmed tenants are still assigned to this key.
+    // ✅ Block if any tenants are still assigned (case/trim insensitive)
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_settings
-      where industry_key = ${industryKey}
+      where lower(btrim(industry_key)) = ${industryKey}
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
@@ -111,54 +88,41 @@ export async function POST(req: Request) {
       };
     }
 
-    // 2) Counts before (for audit/response) — MUST use normalized comparisons (onboarding keys can be "Auto Detailing")
+    // ✅ Counts before (case/trim insensitive)
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
-        (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
-        (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks",
-        (select count(*)::int from industries where lower(key) = ${industryKey}) as "industriesRow",
-
-        (select count(*)::int
-          from tenant_onboarding
-          where ${normSql(sql`tenant_onboarding.ai_analysis->>'suggestedIndustryKey'`)} = ${industryKey}
-        ) as "onboardingSuggestedRows",
-
-        (select count(*)::int
-          from tenant_onboarding
-          where exists (
-            select 1
-            from jsonb_array_elements_text(coalesce(tenant_onboarding.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
-            where ${normSql(sql`v.value`)} = ${industryKey}
-          )
-        ) as "onboardingRejectedRows"
+        (select count(*)::int from tenant_sub_industries where lower(btrim(industry_key)) = ${industryKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where lower(btrim(industry_key)) = ${industryKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where lower(btrim(industry_key)) = ${industryKey}) as "industryLlmPacks",
+        (select count(*)::int from industries where lower(btrim(key)) = ${industryKey}) as "industriesRow",
+        (select count(*)::int from tenant_onboarding where lower(btrim((ai_analysis->>'suggestedIndustryKey')::text)) = ${industryKey}) as "onboardingSuggestedRows",
+        (select count(*)::int from tenant_onboarding where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ?| array[${industryKey}]) as "onboardingRejectedRowsExact"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // 3) Delete platform artifacts for this key (works for derived + canonical)
+    // 1) Delete platform artifacts (case/trim insensitive)
     const delTenantSubR = await tx.execute(sql`
       delete from tenant_sub_industries
-      where industry_key = ${industryKey}
+      where lower(btrim(industry_key)) = ${industryKey}
     `);
 
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where industry_key = ${industryKey}
+      where lower(btrim(industry_key)) = ${industryKey}
     `);
 
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where industry_key = ${industryKey}
+      where lower(btrim(industry_key)) = ${industryKey}
     `);
 
-    // If it exists, delete the canonical row too. If not, no-op.
+    // 2) Delete canonical row if it exists (case/trim insensitive)
     const delIndustryR = await tx.execute(sql`
       delete from industries
-      where lower(key) = ${industryKey}
+      where lower(btrim(key)) = ${industryKey}
     `);
 
-    // 4) Scrub onboarding AI signals so it disappears from the derived list immediately.
-    //    MUST scrub where normalized(suggestedIndustryKey) == industryKey (handles "Auto Detailing", "auto-detailing", etc.)
+    // 3) Scrub onboarding AI signals (case/trim insensitive)
     const scrubSuggestedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis =
@@ -166,11 +130,10 @@ export async function POST(req: Request) {
         - 'suggestedIndustryKey'
         - 'suggestedIndustryLabel'
         - 'needsConfirmation'
-      where ${normSql(sql`tenant_onboarding.ai_analysis->>'suggestedIndustryKey'`)} = ${industryKey}
+      where lower(btrim((ai_analysis->>'suggestedIndustryKey')::text)) = ${industryKey}
     `);
 
-    // Remove any rejectedIndustryKeys entries whose normalized value matches the industryKey.
-    // Also only run where we actually have a matching element (normalized), otherwise it pointlessly rewrites json.
+    // Remove from rejectedIndustryKeys even if array items have different case/whitespace
     const scrubRejectedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis = jsonb_set(
@@ -178,9 +141,9 @@ export async function POST(req: Request) {
         '{rejectedIndustryKeys}',
         coalesce(
           (
-            select jsonb_agg(v2.value)
-            from jsonb_array_elements_text(coalesce(tenant_onboarding.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v2(value)
-            where ${normSql(sql`v2.value`)} <> ${industryKey}
+            select jsonb_agg(v.value)
+            from jsonb_array_elements_text(coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+            where lower(btrim(v.value)) <> ${industryKey}
           ),
           '[]'::jsonb
         ),
@@ -188,8 +151,8 @@ export async function POST(req: Request) {
       )
       where exists (
         select 1
-        from jsonb_array_elements_text(coalesce(tenant_onboarding.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
-        where ${normSql(sql`v.value`)} = ${industryKey}
+        from jsonb_array_elements_text(coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+        where lower(btrim(v.value)) = ${industryKey}
       )
     `);
 
@@ -224,7 +187,7 @@ export async function POST(req: Request) {
   return json(result, 200);
 }
 
-// ✅ Back-compat: if any UI still calls DELETE, treat it the same as POST.
+// Back-compat: if any UI still calls DELETE, treat it the same as POST.
 export async function DELETE(req: Request) {
   return POST(req);
 }
