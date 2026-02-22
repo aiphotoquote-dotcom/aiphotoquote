@@ -170,7 +170,6 @@ export async function POST(req: Request) {
 
     await auditDelete(tx, { industryKey, actor, reason, snapshot });
 
-    // ✅ snapshot already includes industryKey
     return { ok: true as const, ...snapshot };
   });
 
@@ -182,4 +181,9 @@ export async function POST(req: Request) {
   }
 
   return json(result, 200);
+}
+
+// ✅ Back-compat: if any UI still calls DELETE, treat it the same as POST.
+export async function DELETE(req: Request) {
+  return POST(req);
 }
