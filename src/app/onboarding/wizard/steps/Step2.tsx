@@ -129,16 +129,33 @@ function normalizeKey(raw: string) {
     .slice(0, 64);
 }
 
-function isParseFail(err: string) {
+/**
+ * IMPORTANT: UI-only categorization.
+ * - PARSE_FAIL means: we DID read the site, but failed to convert into structured JSON.
+ * - read failures mean: we could not fetch/interpret the site at all (blocked/timeout/fetch/etc).
+ *
+ * This is intentionally conservative: only treat explicit "parse fail" as PARSE_FAIL.
+ */
+function isWebsiteParseFail(err: string) {
   const e = safeTrim(err).toLowerCase();
+  return e.includes("parse_fail") || (e.includes("parse") && e.includes("fail"));
+}
+
+function isWebsiteReadFail(err: string) {
+  const e = safeTrim(err).toLowerCase();
+  if (!e) return false;
+  if (isWebsiteParseFail(e)) return false;
+
+  // Treat these as "couldn't read site"
   return (
-    e.includes("parse_fail") ||
-    e.includes("parse fail") ||
-    e.includes("parse") && e.includes("fail") ||
     e.includes("fetch_fail") ||
-    e.includes("fetch fail") ||
+    (e.includes("fetch") && e.includes("fail")) ||
     e.includes("blocked") ||
-    e.includes("timeout")
+    e.includes("timeout") ||
+    e.includes("empty_web_result") ||
+    e.includes("empty web result") ||
+    e.includes("no_website") ||
+    e.includes("no website")
   );
 }
 
@@ -280,14 +297,19 @@ export function Step2(props: {
     return "We matched your website content against known industry patterns.";
   }, [hasWebsite, conf]);
 
-  // ✅ Treat PARSE_FAIL (and similar) as "analysis not usable"
-  const parseFail = hasWebsite && Boolean(aiErr) && isParseFail(aiErr);
+  // Distinguish "read failure" vs "parse failure"
+  const parseFail = hasWebsite && Boolean(aiErr) && isWebsiteParseFail(aiErr);
+  const readFail = hasWebsite && Boolean(aiErr) && isWebsiteReadFail(aiErr);
 
-  // ✅ Only show the green “recommended industry” card when we have a real key AND no parse failure.
+  // Any error that is not PARSE_FAIL is treated as a hard error for "analysis usable"
+  const hardErr = Boolean(aiErr) && !parseFail;
+
+  // ✅ Only show the green “recommended industry” card when we have a real key AND no hard error.
+  // Note: PARSE_FAIL is not "couldn't read"; it's "couldn't structure" — still not usable for auto-advance.
   const analysisUsable = Boolean(
     hasWebsite &&
-      !parseFail &&
-      !aiErr &&
+      !hardErr &&
+      !parseFail && // keep existing behavior: parse fail is not "usable"
       hasAnalysisRaw &&
       safeTrim(suggestedKeyNorm) &&
       (conf === null ? true : conf > 0)
@@ -367,7 +389,10 @@ export function Step2(props: {
 
     setShowInterview(false);
 
-    // If parse failed, don't keep trying automatically.
+    // If the site couldn't be read, don't keep trying automatically.
+    if (readFail) return;
+
+    // If parsing failed, don't keep trying automatically either (encourage interview).
     if (parseFail) return;
 
     if (hasAnalysis) return;
@@ -378,7 +403,7 @@ export function Step2(props: {
       runAnalysisSafely("auto").catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, hasAnalysis, isRunning, tid, parseFail]);
+  }, [hasWebsite, hasAnalysis, isRunning, tid, readFail, parseFail]);
 
   /* -------------------- Interview mode -------------------- */
 
@@ -640,8 +665,8 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* ✅ Parse fail / fetch fail path */}
-            {parseFail && !showBusy ? (
+            {/* ✅ READ FAIL: truly couldn't read/fetch site */}
+            {readFail && !showBusy ? (
               <div className="mt-4">
                 <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
                   <div className="font-semibold">We couldn’t read your website.</div>
@@ -682,8 +707,51 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* Not analyzed / needs input (non-parse-fail) */}
-            {!hasAnalysis && !showBusy && !parseFail ? (
+            {/* ✅ PARSE FAIL: read succeeded, structuring failed */}
+            {parseFail && !showBusy ? (
+              <div className="mt-4">
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                  <div className="font-semibold">We read your website, but need a quick clarification.</div>
+                  <div className="mt-1 text-xs opacity-90">
+                    We pulled website details successfully, but couldn’t convert them into structured onboarding data.
+                    The interview will lock this in fast.
+                  </div>
+                  {debugOn ? <div className="mt-2 text-[11px] font-mono opacity-80">Error: {aiErr}</div> : null}
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
+                    onClick={() => runAnalysisSafely("manual").catch(() => null)}
+                    disabled={working || !tid}
+                  >
+                    Try again
+                  </button>
+
+                  <button
+                    type="button"
+                    className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
+                    onClick={() => setShowInterview(true)}
+                    disabled={working}
+                  >
+                    Run interview →
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
+                  onClick={props.onBack}
+                  disabled={working}
+                >
+                  Back
+                </button>
+              </div>
+            ) : null}
+
+            {/* Not analyzed / needs input (non-read-fail, non-parse-fail) */}
+            {!hasAnalysis && !showBusy && !readFail && !parseFail ? (
               <div className="mt-4">
                 {aiErr ? (
                   <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
