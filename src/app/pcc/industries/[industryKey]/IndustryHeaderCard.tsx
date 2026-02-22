@@ -124,13 +124,13 @@ export default function IndustryHeaderCard(props: Props) {
               type="button"
               disabled
               className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold opacity-50 dark:border-gray-800"
-              title="Industry metadata editing is not yet wired; prompt packs are editable above."
+              title="Industry metadata editing is not yet wired; prompt packs are editable below."
             >
               Edit industry (soon)
             </button>
           </div>
 
-          {/* ✅ Actions belong HERE */}
+          {/* Actions */}
           <div className="flex flex-col items-end gap-2">
             <GenerateIndustryPackButton
               industryKey={props.industryKeyLower}
@@ -138,16 +138,25 @@ export default function IndustryHeaderCard(props: Props) {
               industryDescription={industry.description}
             />
 
-            <div className="flex flex-wrap justify-end gap-2">
-              {/* Only allow merge/delete when canonical */}
-              {industry.isCanonical ? <MergeIndustryButton sourceKey={props.industryKeyLower} /> : null}
-              {industry.isCanonical ? <DeleteIndustryButton industryKey={props.industryKeyLower} /> : null}
-            </div>
+            {/* ✅ Merge/Delete only make sense if there is a canonical industries row */}
+            {industry.isCanonical ? (
+              <>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <MergeIndustryButton sourceKey={props.industryKeyLower} />
+                  <DeleteIndustryButton industryKey={props.industryKeyLower} />
+                </div>
 
-            <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
-              <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes the
-              source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
-            </div>
+                <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
+                  <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes
+                  the source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
+                </div>
+              </>
+            ) : (
+              <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
+                This industry is <span className="font-semibold">derived</span> (no row in <span className="font-mono">industries</span>),
+                so merge/delete are disabled.
+              </div>
+            )}
           </div>
         </div>
       </div>
