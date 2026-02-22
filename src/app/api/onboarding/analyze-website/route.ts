@@ -68,6 +68,19 @@ function safeJsonParseObject(txt: string): any | null {
     if (!v || typeof v !== "object") return null;
     return v;
   } catch {
+    // Try a minimal "extract the first JSON object" fallback (still same logic: PASS 2 must produce JSON)
+    const start = s.indexOf("{");
+    const end = s.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      const chunk = s.slice(start, end + 1);
+      try {
+        const v = JSON.parse(chunk);
+        if (!v || typeof v !== "object") return null;
+        return v;
+      } catch {
+        return null;
+      }
+    }
     return null;
   }
 }
@@ -89,83 +102,56 @@ async function upsertAnalysis(tenantId: string, website: string | null, analysis
   `);
 }
 
-/* --------------------- canonical match helpers (SAFE, best-effort) --------------------- */
-
-function normalizeIndustryKey(raw: unknown) {
+function normalizeIndustryKey(raw: string) {
   const s = safeTrim(raw).toLowerCase();
   if (!s) return "";
   return s
     .replace(/&/g, "and")
-    .replace(/[\s\-]+/g, "_")
-    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
-    .replace(/_+/g, "_")
     .slice(0, 64);
 }
 
-function titleFromKey(key: string) {
-  return safeTrim(key)
-    .split("_")
-    .filter(Boolean)
-    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-    .join(" ");
-}
+/* --------------------- schema (coercive, same fields) --------------------- */
 
-/**
- * Try to map a derived/suggested key to a canonical industries row.
- *
- * Rules:
- * - Do NOT throw (caller should treat as best-effort)
- * - Prefer exact key match first
- * - Then try "normalized key" variants (spaces/dashes/underscores already normalized)
- * - Then try exact label match against TitleFromKey(key)
- */
-async function tryResolveCanonicalIndustryKey(
-  suggestedKeyRaw: string
-): Promise<{ key: string; label: string; method: "key" | "label" } | null> {
-  const suggestedKey = normalizeIndustryKey(suggestedKeyRaw);
-  if (!suggestedKey) return null;
+const FitSchema = z.preprocess((v) => safeTrim(v).toLowerCase(), z.enum(["good", "maybe", "poor"]));
 
-  // 1) exact key match (case-insensitive)
-  const rKey = await db.execute(sql`
-    select key::text as "key", label::text as "label"
-    from industries
-    where lower(key) = ${suggestedKey}
-    limit 1
-  `);
-  const rowKey = firstRow(rKey);
-  if (rowKey?.key) {
-    return { key: normalizeIndustryKey(rowKey.key), label: safeTrim(rowKey.label) || titleFromKey(rowKey.key), method: "key" };
-  }
+const StringArraySchema = z.preprocess((v) => {
+  if (Array.isArray(v)) return v;
+  const s = safeTrim(v);
+  if (!s) return [];
+  // allow single string or newline/bullet/comma separated
+  const parts = s
+    .split(/\r?\n|•|- |\u2022|,|;|\|/g)
+    .map((x) => safeTrim(x))
+    .filter(Boolean);
+  return parts.length ? parts : [s];
+}, z.array(z.string()));
 
-  // 2) exact label match (case-insensitive) against titleFromKey
-  const guessLabel = titleFromKey(suggestedKey);
-  const rLabel = await db.execute(sql`
-    select key::text as "key", label::text as "label"
-    from industries
-    where lower(coalesce(label,'')) = lower(${guessLabel})
-    limit 1
-  `);
-  const rowLabel = firstRow(rLabel);
-  if (rowLabel?.key) {
-    return { key: normalizeIndustryKey(rowLabel.key), label: safeTrim(rowLabel.label) || titleFromKey(rowLabel.key), method: "label" };
-  }
+const BoolSchema = z.preprocess((v) => {
+  if (typeof v === "boolean") return v;
+  const s = safeTrim(v).toLowerCase();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  return v;
+}, z.boolean().optional());
 
-  return null;
-}
-
-/* --------------------- schema --------------------- */
+const Num01Schema = z.preprocess((v) => {
+  if (typeof v === "number") return v;
+  const n = Number(String(v ?? "").trim());
+  return Number.isFinite(n) ? n : v;
+}, z.number().min(0).max(1));
 
 const AnalysisSchema = z.object({
-  businessGuess: z.string().min(1),
-  fit: z.enum(["good", "maybe", "poor"]),
-  fitReason: z.string().min(1),
-  suggestedIndustryKey: z.string().min(1),
-  questions: z.array(z.string()).min(1).max(6),
-  confidenceScore: z.number().min(0).max(1),
-  needsConfirmation: z.boolean(),
-  detectedServices: z.array(z.string()).default([]),
-  billingSignals: z.array(z.string()).default([]),
+  businessGuess: z.preprocess((v) => safeTrim(v), z.string().min(1)),
+  fit: FitSchema,
+  fitReason: z.preprocess((v) => safeTrim(v), z.string().min(1)),
+  suggestedIndustryKey: z.preprocess((v) => safeTrim(v), z.string().min(1)),
+  questions: StringArraySchema.min(1).max(6),
+  confidenceScore: Num01Schema,
+  needsConfirmation: BoolSchema,
+  detectedServices: StringArraySchema.default([]),
+  billingSignals: StringArraySchema.default([]),
 });
 
 /* --------------------- prompts --------------------- */
@@ -200,7 +186,7 @@ Return JSON with:
 - businessGuess (2–5 sentences)
 - fit: good | maybe | poor (photo-based quoting)
 - fitReason
-- suggestedIndustryKey
+- suggestedIndustryKey (snake_case if possible)
 - questions (3–6)
 - detectedServices
 - billingSignals
@@ -281,7 +267,7 @@ export async function POST(req: Request) {
       input: websiteIntelPrompt(website),
     });
 
-    const rawIntel = safeTrim(intelResp.output_text ?? "");
+    const rawIntel = safeTrim((intelResp as any)?.output_text ?? "");
     if (!rawIntel) throw new Error("EMPTY_WEB_RESULT");
 
     const mid = {
@@ -305,7 +291,7 @@ export async function POST(req: Request) {
       input: normalizePrompt(rawIntel),
     });
 
-    const jsonText = safeTrim(normalizedResp.output_text ?? "");
+    const jsonText = safeTrim((normalizedResp as any)?.output_text ?? "");
     const obj = safeJsonParseObject(jsonText);
     const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
 
@@ -352,44 +338,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
-    // ---------------------
-    // ✅ Enhancement-only: normalize + canonical-match suggestedIndustryKey
-    // (Does NOT affect web_search or JSON normalization)
-    // ---------------------
-    let canonicalMeta: any = null;
-    let suggestedIndustryKey = normalizeIndustryKey(parsed.data.suggestedIndustryKey) || "service";
-    let suggestedIndustryLabel: string | null = null;
-
-    try {
-      const resolved = await tryResolveCanonicalIndustryKey(suggestedIndustryKey);
-      if (resolved?.key) {
-        canonicalMeta = {
-          from: suggestedIndustryKey,
-          to: resolved.key,
-          method: resolved.method,
-        };
-        suggestedIndustryKey = resolved.key;
-        suggestedIndustryLabel = resolved.label;
-      }
-    } catch (e: any) {
-      // Never fail onboarding for canonical match issues
-      canonicalMeta = {
-        warning: "CANONICAL_MATCH_FAILED",
-        error: safeTrim(e?.message ?? String(e)),
-      };
-    }
+    // Keep same shape, just normalize key + ensure needsConfirmation consistent
+    const suggestedKeyNorm = normalizeIndustryKey(parsed.data.suggestedIndustryKey) || "service";
+    const needsConfirmation =
+      typeof parsed.data.needsConfirmation === "boolean"
+        ? parsed.data.needsConfirmation
+        : parsed.data.confidenceScore < 0.8;
 
     const analysis = {
       ...parsed.data,
-      // keep schema fields intact, but enforce normalized/canonical suggestion
-      suggestedIndustryKey,
-      ...(suggestedIndustryLabel ? { suggestedIndustryLabel } : {}),
-
+      suggestedIndustryKey: suggestedKeyNorm,
+      needsConfirmation,
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
       modelUsed: model,
       rawWebIntelPreview: clamp(rawIntel, 1200),
+      rawModelJsonPreview: clamp(jsonText, 1200),
       meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,
@@ -397,7 +362,6 @@ export async function POST(req: Request) {
         error: null,
         finishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        ...(canonicalMeta ? { canonicalMatch: canonicalMeta } : {}),
       }),
     };
 
