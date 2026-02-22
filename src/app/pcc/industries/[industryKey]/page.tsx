@@ -35,10 +35,6 @@ import RejectedTenantsSection from "./RejectedTenantsSection";
 import DefaultSubIndustriesSection from "./DefaultSubIndustriesSection";
 import TenantOverridesSection from "./TenantOverridesSection";
 
-import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
-import MergeIndustryButton from "./MergeIndustryButton";
-import DeleteIndustryButton from "./DeleteIndustryButton";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -118,6 +114,31 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   const industryKeyLower = String(key).toLowerCase();
 
+  // -----------------------------
+  // Industry metadata (need this BEFORE editor so we can hide merge/delete on derived)
+  // -----------------------------
+  const industryR = await db.execute(sql`
+    select
+      id::text as "id",
+      key::text as "key",
+      label::text as "label",
+      description::text as "description",
+      created_at as "createdAt"
+    from industries
+    where key = ${key}
+    limit 1
+  `);
+
+  const industryRow = firstRow(industryR);
+
+  const industry = {
+    key,
+    label: industryRow?.label ? String(industryRow.label) : titleFromKey(key) || key,
+    description: industryRow?.description ? String(industryRow.description) : null,
+    createdAt: industryRow?.createdAt ?? null,
+    isCanonical: Boolean(industryRow?.key),
+  };
+
   // -----------------------------------
   // Packs (platform override + DB latest)
   // -----------------------------------
@@ -141,31 +162,6 @@ export default async function PccIndustryDetailPage(props: Props) {
     : null;
 
   const initialEditorPack = mergeEditorPacks(dbEditorPack, platformEditorPack);
-
-  // -----------------------------
-  // Industry metadata
-  // -----------------------------
-  const industryR = await db.execute(sql`
-    select
-      id::text as "id",
-      key::text as "key",
-      label::text as "label",
-      description::text as "description",
-      created_at as "createdAt"
-    from industries
-    where key = ${key}
-    limit 1
-  `);
-
-  const industryRow = firstRow(industryR);
-
-  const industry = {
-    key,
-    label: industryRow?.label ? String(industryRow.label) : titleFromKey(key) || key,
-    description: industryRow?.description ? String(industryRow.description) : null,
-    createdAt: industryRow?.createdAt ?? null,
-    isCanonical: Boolean(industryRow?.key),
-  };
 
   // -----------------------------
   // Confirmed tenants
@@ -459,23 +455,21 @@ export default async function PccIndustryDetailPage(props: Props) {
   // ✅ Force editor to remount when db pack version changes
   const editorKey = `industry-pack:${industryKeyLower}:v${dbLatest?.version ?? 0}`;
 
-  const dbBadge = dbLatest ? { version: dbLatest.version, updatedAt: dbLatest.updatedAt } : null;
-
   return (
     <div className="space-y-6">
-      <IndustryPromptPackEditor key={editorKey} industryKey={industryKeyLower} initialPack={initialEditorPack as any} />
-
-      {/* Action row (kept outside header card to avoid changing your card internals) */}
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        <GenerateIndustryPackButton industryKey={industryKeyLower} industryLabel={industry.label} industryDescription={industry.description} />
-        <MergeIndustryButton sourceKey={industryKeyLower} />
-        <DeleteIndustryButton industryKey={industryKeyLower} />
-      </div>
+      <IndustryPromptPackEditor
+        key={editorKey}
+        industryKey={industryKeyLower}
+        industryLabel={industry.label}
+        industryDescription={industry.description}
+        isCanonical={industry.isCanonical}
+        initialPack={initialEditorPack as any}
+      />
 
       <IndustryHeaderCard
         industry={industry}
         industryKeyLower={industryKeyLower}
-        dbLatest={dbBadge}
+        dbLatest={dbLatest ? { version: dbLatest.version, updatedAt: dbLatest.updatedAt } : null}
         counts={{
           confirmedCount,
           aiSuggestedCount,
