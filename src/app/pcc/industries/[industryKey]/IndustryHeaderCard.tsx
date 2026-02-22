@@ -35,9 +35,6 @@ function cn(...xs: Array<string | false | null | undefined>) {
 export default function IndustryHeaderCard(props: Props) {
   const { industry, counts, dbLatest, fmtDate } = props;
 
-  // ✅ Always use the canonical key for destructive operations
-  const canonicalKey = String(industry.key ?? "").trim();
-
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
       <div className="flex items-start justify-between gap-4">
@@ -135,6 +132,7 @@ export default function IndustryHeaderCard(props: Props) {
 
           {/* Actions */}
           <div className="flex flex-col items-end gap-2">
+            {/* ✅ Only render this ONCE (no duplicates) */}
             <GenerateIndustryPackButton
               industryKey={props.industryKeyLower}
               industryLabel={industry.label}
@@ -142,13 +140,45 @@ export default function IndustryHeaderCard(props: Props) {
             />
 
             <div className="flex flex-wrap justify-end gap-2">
-              <MergeIndustryButton sourceKey={canonicalKey} />
-              <DeleteIndustryButton industryKey={canonicalKey} />
+              {industry.isCanonical ? (
+                <>
+                  <MergeIndustryButton sourceKey={props.industryKeyLower} />
+                  <DeleteIndustryButton industryKey={props.industryKeyLower} />
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    disabled
+                    className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950 opacity-60 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100"
+                    title='Merge requires a canonical industries row. This key is "derived" (not in industries table).'
+                  >
+                    Merge…
+                  </button>
+                  <button
+                    type="button"
+                    disabled
+                    className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-900 opacity-60 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200"
+                    title='Delete requires a canonical industries row. This key is "derived" (not in industries table).'
+                  >
+                    Delete
+                  </button>
+                </>
+              )}
             </div>
 
             <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
               <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes the
               source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
+              {!industry.isCanonical ? (
+                <>
+                  {" "}
+                  <span className="font-semibold text-amber-700 dark:text-amber-200">
+                    This industry is derived
+                  </span>{" "}
+                  (no `industries` row), so destructive actions are disabled.
+                </>
+              ) : null}
             </div>
           </div>
         </div>
