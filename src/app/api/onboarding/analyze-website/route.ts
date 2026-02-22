@@ -7,8 +7,6 @@ import { z } from "zod";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { resolveIndustryCandidate, titleFromKey } from "@/lib/pcc/industries/resolveIndustryCandidate";
-import { ensureIndustryPack } from "@/lib/onboarding/ensureIndustryPack";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -89,6 +87,71 @@ async function upsertAnalysis(tenantId: string, website: string | null, analysis
           current_step = greatest(tenant_onboarding.current_step, excluded.current_step),
           updated_at = now()
   `);
+}
+
+/* --------------------- canonical match helpers (SAFE, best-effort) --------------------- */
+
+function normalizeIndustryKey(raw: unknown) {
+  const s = safeTrim(raw).toLowerCase();
+  if (!s) return "";
+  return s
+    .replace(/&/g, "and")
+    .replace(/[\s\-]+/g, "_")
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_")
+    .slice(0, 64);
+}
+
+function titleFromKey(key: string) {
+  return safeTrim(key)
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/**
+ * Try to map a derived/suggested key to a canonical industries row.
+ *
+ * Rules:
+ * - Do NOT throw (caller should treat as best-effort)
+ * - Prefer exact key match first
+ * - Then try "normalized key" variants (spaces/dashes/underscores already normalized)
+ * - Then try exact label match against TitleFromKey(key)
+ */
+async function tryResolveCanonicalIndustryKey(
+  suggestedKeyRaw: string
+): Promise<{ key: string; label: string; method: "key" | "label" } | null> {
+  const suggestedKey = normalizeIndustryKey(suggestedKeyRaw);
+  if (!suggestedKey) return null;
+
+  // 1) exact key match (case-insensitive)
+  const rKey = await db.execute(sql`
+    select key::text as "key", label::text as "label"
+    from industries
+    where lower(key) = ${suggestedKey}
+    limit 1
+  `);
+  const rowKey = firstRow(rKey);
+  if (rowKey?.key) {
+    return { key: normalizeIndustryKey(rowKey.key), label: safeTrim(rowKey.label) || titleFromKey(rowKey.key), method: "key" };
+  }
+
+  // 2) exact label match (case-insensitive) against titleFromKey
+  const guessLabel = titleFromKey(suggestedKey);
+  const rLabel = await db.execute(sql`
+    select key::text as "key", label::text as "label"
+    from industries
+    where lower(coalesce(label,'')) = lower(${guessLabel})
+    limit 1
+  `);
+  const rowLabel = firstRow(rLabel);
+  if (rowLabel?.key) {
+    return { key: normalizeIndustryKey(rowLabel.key), label: safeTrim(rowLabel.label) || titleFromKey(rowLabel.key), method: "label" };
+  }
+
+  return null;
 }
 
 /* --------------------- schema --------------------- */
@@ -258,7 +321,6 @@ export async function POST(req: Request) {
               fit: "maybe" as const,
               fitReason: "Website intelligence was available, but structured parsing failed.",
               suggestedIndustryKey: "service",
-              suggestedIndustryLabel: "Service",
               detectedServices: [],
               billingSignals: [],
             }),
@@ -290,16 +352,39 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
-    // ✅ Resolve to canonical (when it exists) instead of inventing variants
-    const resolved = await resolveIndustryCandidate({
-      proposedKey: parsed.data.suggestedIndustryKey,
-      proposedLabel: null,
-    });
+    // ---------------------
+    // ✅ Enhancement-only: normalize + canonical-match suggestedIndustryKey
+    // (Does NOT affect web_search or JSON normalization)
+    // ---------------------
+    let canonicalMeta: any = null;
+    let suggestedIndustryKey = normalizeIndustryKey(parsed.data.suggestedIndustryKey) || "service";
+    let suggestedIndustryLabel: string | null = null;
+
+    try {
+      const resolved = await tryResolveCanonicalIndustryKey(suggestedIndustryKey);
+      if (resolved?.key) {
+        canonicalMeta = {
+          from: suggestedIndustryKey,
+          to: resolved.key,
+          method: resolved.method,
+        };
+        suggestedIndustryKey = resolved.key;
+        suggestedIndustryLabel = resolved.label;
+      }
+    } catch (e: any) {
+      // Never fail onboarding for canonical match issues
+      canonicalMeta = {
+        warning: "CANONICAL_MATCH_FAILED",
+        error: safeTrim(e?.message ?? String(e)),
+      };
+    }
 
     const analysis = {
       ...parsed.data,
-      suggestedIndustryKey: resolved.key,
-      suggestedIndustryLabel: resolved.label || titleFromKey(resolved.key),
+      // keep schema fields intact, but enforce normalized/canonical suggestion
+      suggestedIndustryKey,
+      ...(suggestedIndustryLabel ? { suggestedIndustryLabel } : {}),
+
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
@@ -308,27 +393,15 @@ export async function POST(req: Request) {
       meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,
-        lastAction: resolved.isCanonical
-          ? `AI analysis complete (matched canonical by ${resolved.matchedBy}).`
-          : "AI analysis complete.",
+        lastAction: "AI analysis complete.",
         error: null,
         finishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        ...(canonicalMeta ? { canonicalMatch: canonicalMeta } : {}),
       }),
     };
 
     await upsertAnalysis(tenantId, website, analysis, 2);
-
-    // ✅ Ensure pack exists ONLY when we are confident enough to not need confirmation.
-    if (analysis.needsConfirmation === false) {
-      await ensureIndustryPack({
-        tenantId,
-        industryKey: analysis.suggestedIndustryKey,
-        industryLabel: analysis.suggestedIndustryLabel || titleFromKey(analysis.suggestedIndustryKey),
-        industryDescription: null,
-      });
-    }
-
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
