@@ -56,26 +56,9 @@ function pill(active: boolean) {
     : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-950";
 }
 
-// Postgres-side normalizer (same intent as purge route):
-// - lowercase
-// - non-alphanumerics -> underscore
-// - collapse underscores
-// - trim underscores
-function normSql(expr: any) {
-  return sql`lower(
-    regexp_replace(
-      regexp_replace(
-        regexp_replace(coalesce(${expr}::text,''), '[^a-zA-Z0-9]+', '_', 'g'),
-        '_+',
-        '_',
-        'g'
-      ),
-      '^_|_$',
-      '',
-      'g'
-    )
-  )`;
-}
+// ✅ SQL normalization: trim, lower, spaces/hyphens -> underscore
+const NORM_SQL = (expr: any) =>
+  sql`lower(regexp_replace(trim(${expr}), '[\\s\\-]+', '_', 'g'))`;
 
 export default async function PccIndustriesPage(props: {
   searchParams?: { [key: string]: string | string[] | undefined };
@@ -114,15 +97,14 @@ export default async function PccIndustriesPage(props: {
   };
 
   // -----------------------------
-  // Canonical industries (normalize keys)
+  // Canonical industries (normalized key)
   // -----------------------------
   const canonicalR = await db.execute(sql`
     select
-      ${normSql(sql`key`)}::text as "key",
+      ${NORM_SQL(sql`key`)}::text as "key",
       label::text as "label",
       description::text as "description"
     from industries
-    where ${normSql(sql`key`)} <> ''
     order by label asc
     limit 500
   `);
@@ -139,15 +121,16 @@ export default async function PccIndustriesPage(props: {
   for (const c of canonical) canonicalMap.set(c.key, c);
 
   // -----------------------------
-  // Confirmed counts (normalize)
+  // Confirmed counts (ACTIVE tenants only, normalized)
   // -----------------------------
   const confirmedCountsR = await db.execute(sql`
     select
-      ${normSql(sql`ts.industry_key`)}::text as "key",
+      ${NORM_SQL(sql`ts.industry_key`)}::text as "key",
       count(*)::int as "confirmedCount"
     from tenant_settings ts
-    where ${normSql(sql`ts.industry_key`)} <> ''
-    group by ${normSql(sql`ts.industry_key`)}
+    join tenants t on t.id = ts.tenant_id
+    where coalesce(t.status,'active') = 'active'
+    group by 1
   `);
 
   const confirmedCounts = new Map<string, number>();
@@ -158,11 +141,11 @@ export default async function PccIndustriesPage(props: {
   }
 
   // -----------------------------
-  // AI suggested counts + needsConfirmation (normalize + normalized reject filter)
+  // AI suggested counts + needsConfirmation (normalized)
   // -----------------------------
   const aiCountsR = await db.execute(sql`
     select
-      ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)}::text as "key",
+      ${NORM_SQL(sql`(ob.ai_analysis->>'suggestedIndustryKey')`)}::text as "key",
       count(*)::int as "aiSuggestedCount",
       sum(
         case
@@ -172,13 +155,10 @@ export default async function PccIndustriesPage(props: {
         end
       )::int as "needsConfirmCount"
     from tenant_onboarding ob
-    where ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)} <> ''
-      and not exists (
-        select 1
-        from jsonb_array_elements_text(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
-        where ${normSql(sql`v.value`)} = ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)}
-      )
-    group by ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)}
+    where (ob.ai_analysis->>'suggestedIndustryKey') is not null
+      and (ob.ai_analysis->>'suggestedIndustryKey') <> ''
+      and not (coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? (ob.ai_analysis->>'suggestedIndustryKey'))
+    group by 1
   `);
 
   const aiSuggestedCounts = new Map<string, number>();
@@ -191,19 +171,19 @@ export default async function PccIndustriesPage(props: {
   }
 
   // -----------------------------
-  // Rejected counts (normalize)
+  // Rejected counts (normalized)
   // -----------------------------
   const rejectedCountsR = await db.execute(sql`
     select
-      ${normSql(sql`x.key`)}::text as "key",
+      ${NORM_SQL(sql`x.key`)}::text as "key",
       count(*)::int as "rejectedCount"
     from (
       select
         jsonb_array_elements_text(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) as key
       from tenant_onboarding ob
     ) x
-    where ${normSql(sql`x.key`)} <> ''
-    group by ${normSql(sql`x.key`)}
+    where x.key is not null and x.key <> ''
+    group by 1
   `);
 
   const rejectedCounts = new Map<string, number>();
@@ -235,9 +215,6 @@ export default async function PccIndustriesPage(props: {
       };
     });
 
-  // -----------------------------
-  // Augment rows for sorting/filter/search
-  // -----------------------------
   const augmented = list.map((it) => {
     const confirmed = confirmedCounts.get(it.key) ?? 0;
     const aiSuggested = aiSuggestedCounts.get(it.key) ?? 0;
@@ -258,16 +235,13 @@ export default async function PccIndustriesPage(props: {
     };
   });
 
-  // Search
   let filtered = q ? augmented.filter((x) => x._hay.includes(q)) : augmented;
 
-  // Filter
   if (filter === "needsConfirm") filtered = filtered.filter((x) => x.aiSuggested > 0 && x.needsConfirm > 0);
   if (filter === "aiOnly") filtered = filtered.filter((x) => x._isAiOnly);
   if (filter === "confirmedOnly") filtered = filtered.filter((x) => x.confirmed > 0);
   if (filter === "hasRejected") filtered = filtered.filter((x) => x._hasRejected);
 
-  // Sort
   filtered.sort((a, b) => {
     if (sort === "label") return a.label.localeCompare(b.label);
     if (sort === "confirmed") return b.confirmed - a.confirmed || a.label.localeCompare(b.label);
@@ -287,7 +261,7 @@ export default async function PccIndustriesPage(props: {
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industries</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
               Canonical industry list <span className="font-semibold">plus</span> onboarding AI signals (suggested industry + confirmation
-              state + rejections) and confirmed tenant assignments.
+              state + rejections) and confirmed active tenant assignments.
             </p>
 
             <div className="mt-4 grid gap-3 lg:grid-cols-3">
