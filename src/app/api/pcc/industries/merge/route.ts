@@ -21,9 +21,18 @@ function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
 }
-
 function safeLower(v: unknown) {
   return safeTrim(v).toLowerCase();
+}
+
+function titleFromKey(key: string) {
+  const s = safeTrim(key);
+  if (!s) return "";
+  return s
+    .split(/[_\-]+/g)
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
 }
 
 function actorFromReq(req: Request) {
@@ -50,9 +59,8 @@ function jsonbString(v: any) {
 }
 
 async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; snapshot: any }) {
-  // ✅ Matches DB schema:
-  // action, source_industry_key, target_industry_key, actor, reason, snapshot
   const snapshotJson = jsonbString(args.snapshot);
+  // ✅ keep consistent with your delete route + real DB
   await tx.execute(sql`
     insert into industry_change_log (action, source_industry_key, target_industry_key, actor, reason, snapshot)
     values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${snapshotJson}::jsonb)
@@ -68,49 +76,46 @@ export async function POST(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  const sourceKeyIn = safeLower(parsed.data.sourceKey);
-  const targetKeyIn = safeLower(parsed.data.targetKey);
+  const sourceKey = safeLower(parsed.data.sourceKey);
+  const targetKey = safeLower(parsed.data.targetKey);
   const reason = safeTrim(parsed.data.reason ?? "") || null;
   const deleteSource = parsed.data.deleteSource ?? true;
 
-  if (!sourceKeyIn || !targetKeyIn) return json({ ok: false, error: "BAD_REQUEST", message: "Missing keys" }, 400);
-  if (sourceKeyIn === targetKeyIn) return json({ ok: false, error: "BAD_REQUEST", message: "sourceKey == targetKey" }, 400);
+  if (!sourceKey || !targetKey) return json({ ok: false, error: "BAD_REQUEST", message: "Missing keys" }, 400);
+  if (sourceKey === targetKey) return json({ ok: false, error: "BAD_REQUEST", message: "sourceKey == targetKey" }, 400);
 
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // ✅ Case-insensitive lookup to resolve stored keys
-    const srcR = await tx.execute(sql`
+    // Optional labels (for audit + response only)
+    const srcCanonR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
-      where lower(key) = ${sourceKeyIn}
+      where lower(key) = ${sourceKey}
       limit 1
     `);
-    const tgtR = await tx.execute(sql`
+    const tgtCanonR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
-      where lower(key) = ${targetKeyIn}
+      where lower(key) = ${targetKey}
       limit 1
     `);
 
-    const srcRow: any = (srcR as any)?.rows?.[0] ?? null;
-    const tgtRow: any = (tgtR as any)?.rows?.[0] ?? null;
+    const srcCanon: any = (srcCanonR as any)?.rows?.[0] ?? null;
+    const tgtCanon: any = (tgtCanonR as any)?.rows?.[0] ?? null;
 
-    if (!srcRow) return { ok: false as const, status: 404, error: "SOURCE_NOT_FOUND" };
-    if (!tgtRow) return { ok: false as const, status: 404, error: "TARGET_NOT_FOUND" };
+    const srcLabel = safeTrim(srcCanon?.label) || titleFromKey(sourceKey) || sourceKey;
+    const tgtLabel = safeTrim(tgtCanon?.label) || titleFromKey(targetKey) || targetKey;
 
-    const sourceKey = safeLower(srcRow.key);
-    const targetKey = safeLower(tgtRow.key);
-
-    if (sourceKey === targetKey) return { ok: false as const, status: 400, error: "BAD_REQUEST" };
-
-    // Counts before (useful to show user + audit)
+    // Counts before (for audit/debug)
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from tenant_settings where industry_key = ${sourceKey}) as "tenantSettings",
-        (select count(*)::int from tenant_sub_industries where industry_key = ${sourceKey}) as "tenantSubIndustries",
-        (select count(*)::int from industry_sub_industries where industry_key = ${sourceKey}) as "industrySubIndustries",
-        (select count(*)::int from industry_llm_packs where industry_key = ${sourceKey}) as "industryLlmPacks"
+        (select count(*)::int from tenant_settings where lower(industry_key) = ${sourceKey}) as "tenantSettings",
+        (select count(*)::int from tenant_sub_industries where lower(industry_key) = ${sourceKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where lower(industry_key) = ${sourceKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where lower(industry_key) = ${sourceKey}) as "industryLlmPacks",
+        (select count(*)::int from tenant_onboarding where lower((ai_analysis->>'suggestedIndustryKey')::text) = ${sourceKey}) as "onboardingSuggestedRows",
+        (select count(*)::int from tenant_onboarding where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${sourceKey}) as "onboardingRejectedRows"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
@@ -118,7 +123,7 @@ export async function POST(req: Request) {
     const movedTenantsR = await tx.execute(sql`
       update tenant_settings
       set industry_key = ${targetKey}, updated_at = now()
-      where industry_key = ${sourceKey}
+      where lower(industry_key) = ${sourceKey}
       returning tenant_id
     `);
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
@@ -134,11 +139,11 @@ export async function POST(req: Request) {
         s.created_at,
         now()
       from tenant_sub_industries s
-      where s.industry_key = ${sourceKey}
+      where lower(s.industry_key) = ${sourceKey}
         and not exists (
           select 1
           from tenant_sub_industries t
-          where t.industry_key = ${targetKey}
+          where lower(t.industry_key) = ${targetKey}
             and t.tenant_id = s.tenant_id
             and t.key = s.key
         )
@@ -147,7 +152,7 @@ export async function POST(req: Request) {
 
     const deletedTenantSubR = await tx.execute(sql`
       delete from tenant_sub_industries
-      where industry_key = ${sourceKey}
+      where lower(industry_key) = ${sourceKey}
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
@@ -165,11 +170,11 @@ export async function POST(req: Request) {
         s.created_at,
         now()
       from industry_sub_industries s
-      where s.industry_key = ${sourceKey}
+      where lower(s.industry_key) = ${sourceKey}
         and not exists (
           select 1
           from industry_sub_industries t
-          where t.industry_key = ${targetKey}
+          where lower(t.industry_key) = ${targetKey}
             and t.key = s.key
         )
     `);
@@ -177,29 +182,23 @@ export async function POST(req: Request) {
 
     const deletedIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where industry_key = ${sourceKey}
+      where lower(industry_key) = ${sourceKey}
     `);
     const deletedIndustrySub = Number((deletedIndustrySubR as any)?.rowCount ?? 0);
 
-    // 4) Packs (keep your existing behavior)
+    // 4) Packs (copy into new versions under target)
     const maxVR = await tx.execute(sql`
       select coalesce(max(version), 0)::int as "v"
       from industry_llm_packs
-      where industry_key = ${targetKey}
+      where lower(industry_key) = ${targetKey}
     `);
     const maxVRow: any = (maxVR as any)?.rows?.[0] ?? null;
     let nextV = Number(maxVRow?.v ?? 0);
 
     const srcPacksR = await tx.execute(sql`
-      select
-        enabled as "enabled",
-        version::int as "version",
-        pack as "pack",
-        models as "models",
-        prompts as "prompts",
-        updated_at as "updatedAt"
+      select enabled as "enabled", version::int as "version", pack as "pack", models as "models", prompts as "prompts"
       from industry_llm_packs
-      where industry_key = ${sourceKey}
+      where lower(industry_key) = ${sourceKey}
       order by version asc, updated_at asc
     `);
     const srcPacks: any[] = (srcPacksR as any)?.rows ?? [];
@@ -231,11 +230,50 @@ export async function POST(req: Request) {
 
     const deletedPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where industry_key = ${sourceKey}
+      where lower(industry_key) = ${sourceKey}
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
-    // 5) Hard delete source industry row (optional)
+    // 5) ✅ Move onboarding AI signals (so derived counts collapse into target)
+    const movedSuggestedR = await tx.execute(sql`
+      update tenant_onboarding
+      set ai_analysis = jsonb_set(
+        coalesce(ai_analysis,'{}'::jsonb),
+        '{suggestedIndustryKey}',
+        to_jsonb(${targetKey}::text),
+        true
+      )
+      where lower((ai_analysis->>'suggestedIndustryKey')::text) = ${sourceKey}
+    `);
+    const movedSuggested = Number((movedSuggestedR as any)?.rowCount ?? 0);
+
+    // Replace sourceKey -> targetKey inside rejectedIndustryKeys arrays, de-dupe
+    const movedRejectedR = await tx.execute(sql`
+      update tenant_onboarding
+      set ai_analysis = jsonb_set(
+        coalesce(ai_analysis,'{}'::jsonb),
+        '{rejectedIndustryKeys}',
+        coalesce(
+          (
+            select jsonb_agg(distinct v2.val)
+            from (
+              select
+                case
+                  when v.value = ${sourceKey} then ${targetKey}
+                  else v.value
+                end as val
+              from jsonb_array_elements_text(coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+            ) v2
+          ),
+          '[]'::jsonb
+        ),
+        true
+      )
+      where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${sourceKey}
+    `);
+    const movedRejected = Number((movedRejectedR as any)?.rowCount ?? 0);
+
+    // 6) Optional: delete source industries row (if it exists)
     let deletedIndustry = 0;
     if (deleteSource) {
       const delR = await tx.execute(sql`
@@ -246,9 +284,9 @@ export async function POST(req: Request) {
     }
 
     const snapshot = {
-      mode: "merge",
-      source: { key: sourceKey, label: String(srcRow.label ?? "") },
-      target: { key: targetKey, label: String(tgtRow.label ?? "") },
+      mode: "merge_industry_key",
+      source: { key: sourceKey, label: srcLabel, wasCanonical: Boolean(srcCanon) },
+      target: { key: targetKey, label: tgtLabel, wasCanonical: Boolean(tgtCanon) },
       countsBefore,
       moved: {
         tenantSettings: movedTenants,
@@ -258,6 +296,8 @@ export async function POST(req: Request) {
         industrySubIndustriesDeleted: deletedIndustrySub,
         industryLlmPacksCopied: copiedPacks,
         industryLlmPacksDeleted: deletedPacks,
+        onboardingSuggestedMoved: movedSuggested,
+        onboardingRejectedMoved: movedRejected,
       },
       deleted: { industriesRow: deletedIndustry },
     };
@@ -266,10 +306,6 @@ export async function POST(req: Request) {
 
     return { ok: true as const, sourceKey, targetKey, moved: snapshot.moved, deleted: snapshot.deleted };
   });
-
-  if ((result as any)?.ok === false) {
-    return json({ ok: false, error: (result as any).error }, (result as any).status ?? 400);
-  }
 
   return json(result, 200);
 }
