@@ -15,6 +15,10 @@ const Query = z.object({
   limit: z.coerce.number().optional(),
 });
 
+function rows(r: any): any[] {
+  return (r as any)?.rows ?? (Array.isArray(r) ? r : []);
+}
+
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -118,9 +122,9 @@ export async function GET(req: Request) {
     limit ${limit}::int
   `);
 
-  const rows = (r as any)?.rows ?? [];
+  const rs = rows(r);
 
-  const options = rows
+  const options = rs
     .map((x: any) => {
       const key = normalizeKey(x.key);
       if (!key) return null;
