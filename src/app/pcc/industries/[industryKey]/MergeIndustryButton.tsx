@@ -5,7 +5,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type Option = { key: string; label: string; isCanonical: boolean };
+type Option = { key: string; label: string; isCanonical: boolean; tenantCount: number };
 
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
@@ -35,57 +35,37 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
     return options.filter((o) => o.key.includes(qq) || o.label.toLowerCase().includes(qq));
   }, [options, q]);
 
-  // Load options when modal opens
-  useEffect(() => {
-    if (!open) return;
-
-    let alive = true;
-    (async () => {
-      setErr(null);
-      setLoading(true);
-      try {
-        const r = await fetch(`/api/pcc/industries/options?limit=250&q=${encodeURIComponent(q)}`, {
-          method: "GET",
-          headers: { "content-type": "application/json" },
-        });
-        const data = await r.json().catch(() => null);
-        if (!r.ok) throw new Error(data?.error || data?.message || `HTTP_${r.status}`);
-        const opts: Option[] = Array.isArray(data?.options) ? data.options : [];
-
-        // remove source key from list
-        const cleaned = opts.filter((o) => safeTrim(o.key).toLowerCase() !== sourceKey);
-
-        if (alive) setOptions(cleaned);
-      } catch (e: any) {
-        if (alive) setErr(e?.message ?? String(e));
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  async function refreshOptions() {
+  async function loadOptions(query: string) {
     setErr(null);
     setLoading(true);
     try {
-      const r = await fetch(`/api/pcc/industries/options?limit=250&q=${encodeURIComponent(q)}`, {
+      const r = await fetch(`/api/pcc/industries/options?limit=300&q=${encodeURIComponent(query)}`, {
         method: "GET",
         headers: { "content-type": "application/json" },
       });
       const data = await r.json().catch(() => null);
       if (!r.ok) throw new Error(data?.error || data?.message || `HTTP_${r.status}`);
+
       const opts: Option[] = Array.isArray(data?.options) ? data.options : [];
-      setOptions(opts.filter((o) => safeTrim(o.key).toLowerCase() !== sourceKey));
+      const cleaned = opts.filter((o) => safeTrim(o.key).toLowerCase() !== sourceKey);
+
+      setOptions(cleaned);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     } finally {
       setLoading(false);
     }
+  }
+
+  // Load once on open (default ordering comes from API)
+  useEffect(() => {
+    if (!open) return;
+    loadOptions("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  async function onSearch() {
+    await loadOptions(q);
   }
 
   async function doMerge() {
@@ -105,7 +85,7 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
 
     if (
       !confirm(
-        `Merge "${sourceKey}" INTO "${targetKey}"?\n\nThis will move tenants/sub-industries/packs and then hard-delete the source (if canonical).`
+        `Merge "${sourceKey}" INTO "${targetKey}"?\n\nMoves tenants/sub-industries/packs to the target. If the source has an industries row, it will be hard-deleted.`
       )
     ) {
       return;
@@ -180,12 +160,12 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
                 <input
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
-                  placeholder="Search industries…"
+                  placeholder="Search industries… (sorted: canonical then most used)"
                   className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs text-gray-900 outline-none dark:border-gray-800 dark:bg-black dark:text-gray-100"
                 />
                 <button
                   type="button"
-                  onClick={refreshOptions}
+                  onClick={onSearch}
                   disabled={loading || busy}
                   className={cn(
                     "rounded-xl border px-3 py-2 text-xs font-semibold",
@@ -197,13 +177,14 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
                 </button>
               </div>
 
-              <div className="max-h-[320px] overflow-auto rounded-xl border border-gray-200 dark:border-gray-800">
+              <div className="max-h-[340px] overflow-auto rounded-xl border border-gray-200 dark:border-gray-800">
                 {loading ? (
                   <div className="p-3 text-xs text-gray-500 dark:text-gray-400">Loading…</div>
                 ) : filtered.length ? (
                   <ul className="divide-y divide-gray-100 dark:divide-gray-900">
                     {filtered.map((o) => {
                       const active = o.key === selectedKey;
+
                       return (
                         <li key={o.key}>
                           <button
@@ -226,16 +207,28 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
                                 </div>
                               </div>
 
-                              <span
-                                className={cn(
-                                  "shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                                  o.isCanonical
-                                    ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
-                                    : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
-                                )}
-                              >
-                                {o.isCanonical ? "canonical" : "derived"}
-                              </span>
+                              <div className="shrink-0 flex items-center gap-2">
+                                <span
+                                  className={cn(
+                                    "rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                                    o.isCanonical
+                                      ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100"
+                                      : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100"
+                                  )}
+                                >
+                                  {o.isCanonical ? "canonical" : "derived"}
+                                </span>
+
+                                <span
+                                  className={cn(
+                                    "rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                                    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200"
+                                  )}
+                                  title="Tenants currently assigned (tenant_settings.industry_key)"
+                                >
+                                  tenants: {o.tenantCount}
+                                </span>
+                              </div>
                             </div>
                           </button>
                         </li>
@@ -256,8 +249,7 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
 
               <div className="flex items-center justify-between gap-3">
                 <div className="text-xs text-gray-600 dark:text-gray-300">
-                  Target:{" "}
-                  <span className="font-mono">{selectedKey ? selectedKey : "—"}</span>
+                  Target: <span className="font-mono">{selectedKey ? selectedKey : "—"}</span>
                 </div>
 
                 <button
@@ -275,7 +267,7 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
               </div>
 
               <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                Merge moves tenants, tenant sub-industries, default sub-industries, and packs. Source industry row is hard-deleted if it exists.
+                Sorted: canonical first, then highest tenant usage. (Tenant usage = rows in tenant_settings with that industry_key.)
               </div>
             </div>
           </div>
