@@ -6,6 +6,7 @@ import Link from "next/link";
 import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
 import MergeIndustryButton from "./MergeIndustryButton";
 import DeleteIndustryButton from "./DeleteIndustryButton";
+import CanonicalizeIndustryButton from "./CanonicalizeIndustryButton";
 
 type Props = {
   industry: {
@@ -130,7 +131,6 @@ export default function IndustryHeaderCard(props: Props) {
             </button>
           </div>
 
-          {/* Actions */}
           <div className="flex flex-col items-end gap-2">
             <GenerateIndustryPackButton
               industryKey={props.industryKeyLower}
@@ -138,25 +138,34 @@ export default function IndustryHeaderCard(props: Props) {
               industryDescription={industry.description}
             />
 
-            {/* ✅ Merge/Delete only make sense if there is a canonical industries row */}
-            {industry.isCanonical ? (
-              <>
-                <div className="flex flex-wrap justify-end gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
+              {!industry.isCanonical ? (
+                <>
+                  <CanonicalizeIndustryButton industryKey={props.industryKeyLower} defaultLabel={industry.label} />
+                  <DeleteIndustryButton industryKey={props.industryKeyLower} />
+                </>
+              ) : (
+                <>
                   <MergeIndustryButton sourceKey={props.industryKeyLower} />
                   <DeleteIndustryButton industryKey={props.industryKeyLower} />
-                </div>
+                </>
+              )}
+            </div>
 
-                <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
+              {!industry.isCanonical ? (
+                <>
+                  <span className="font-semibold">Make canonical</span> creates an <span className="font-mono">industries</span> row for this
+                  key. <span className="font-semibold">Delete</span> purges DB artifacts for this key and is blocked if any tenants are
+                  assigned.
+                </>
+              ) : (
+                <>
                   <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes
                   the source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
-                </div>
-              </>
-            ) : (
-              <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
-                This industry is <span className="font-semibold">derived</span> (no row in <span className="font-mono">industries</span>),
-                so merge/delete are disabled.
-              </div>
-            )}
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
