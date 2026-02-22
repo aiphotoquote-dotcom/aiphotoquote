@@ -64,32 +64,19 @@ export async function POST(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  const industryKeyIn = safeLower(parsed.data.industryKey);
+  const industryKey = safeLower(parsed.data.industryKey);
   const reason = safeTrim(parsed.data.reason ?? "") || null;
 
-  if (!industryKeyIn) return json({ ok: false, error: "BAD_REQUEST", message: "industryKey is required" }, 400);
+  if (!industryKey) return json({ ok: false, error: "BAD_REQUEST", message: "industryKey is required" }, 400);
 
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // ✅ Canonical delete requires industries row (case-insensitive lookup)
-    const indR = await tx.execute(sql`
-      select key::text as "key", label::text as "label"
-      from industries
-      where lower(key) = ${industryKeyIn}
-      limit 1
-    `);
-    const indRow: any = (indR as any)?.rows?.[0] ?? null;
-    if (!indRow) return { ok: false as const, status: 404, error: "NOT_FOUND" };
-
-    // Normalize to lowercase key for all subsequent operations
-    const industryKey = safeLower(indRow.key);
-
-    // ✅ Block delete if ANY tenants are still assigned (case-insensitive)
+    // 1) Block if confirmed tenants are still assigned to this key.
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_settings
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
@@ -97,44 +84,77 @@ export async function POST(req: Request) {
         ok: false as const,
         status: 409,
         error: "HAS_TENANTS",
-        message: `Cannot delete: ${nTenants} tenants still assigned.`,
+        message: `Cannot delete: ${nTenants} tenants still assigned (tenant_settings.industry_key).`,
       };
     }
 
-    // Counts before (case-insensitive so we see reality)
+    // 2) Counts before (for audit/response)
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from tenant_sub_industries where lower(industry_key) = ${industryKey}) as "tenantSubIndustries",
-        (select count(*)::int from industry_sub_industries where lower(industry_key) = ${industryKey}) as "industrySubIndustries",
-        (select count(*)::int from industry_llm_packs where lower(industry_key) = ${industryKey}) as "industryLlmPacks",
-        (select count(*)::int from industries where lower(key) = ${industryKey}) as "industriesRow"
+        (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks",
+        (select count(*)::int from industries where lower(key) = ${industryKey}) as "industriesRow",
+        (select count(*)::int from tenant_onboarding where (ai_analysis->>'suggestedIndustryKey')::text = ${industryKey}) as "onboardingSuggestedRows",
+        (select count(*)::int from tenant_onboarding where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${industryKey}) as "onboardingRejectedRows"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // ✅ Canonical delete = full purge for this key (case-insensitive everywhere)
+    // 3) Delete platform artifacts for this key (works for derived + canonical)
     const delTenantSubR = await tx.execute(sql`
       delete from tenant_sub_industries
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
 
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
 
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
 
+    // If it exists, delete the canonical row too. If not, no-op.
     const delIndustryR = await tx.execute(sql`
       delete from industries
       where lower(key) = ${industryKey}
     `);
 
+    // 4) Scrub onboarding AI signals so it disappears from the derived list immediately.
+    //    (Does NOT prevent future rediscovery by new onboardings.)
+    const scrubSuggestedR = await tx.execute(sql`
+      update tenant_onboarding
+      set ai_analysis =
+        coalesce(ai_analysis,'{}'::jsonb)
+        - 'suggestedIndustryKey'
+        - 'suggestedIndustryLabel'
+        - 'needsConfirmation'
+      where (ai_analysis->>'suggestedIndustryKey')::text = ${industryKey}
+    `);
+
+    const scrubRejectedR = await tx.execute(sql`
+      update tenant_onboarding
+      set ai_analysis = jsonb_set(
+        coalesce(ai_analysis,'{}'::jsonb),
+        '{rejectedIndustryKeys}',
+        coalesce(
+          (
+            select jsonb_agg(v.value)
+            from jsonb_array_elements_text(coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+            where v.value <> ${industryKey}
+          ),
+          '[]'::jsonb
+        ),
+        true
+      )
+      where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${industryKey}
+    `);
+
     const snapshot = {
-      mode: "delete_canonical",
-      industry: { key: industryKey, label: String(indRow.label ?? "") },
+      mode: "delete_industry",
+      industryKey,
       countsBefore,
       deleted: {
         tenantSubIndustries: Number((delTenantSubR as any)?.rowCount ?? 0),
@@ -142,12 +162,15 @@ export async function POST(req: Request) {
         industryLlmPacks: Number((delPacksR as any)?.rowCount ?? 0),
         industriesRow: Number((delIndustryR as any)?.rowCount ?? 0),
       },
+      scrubbed: {
+        onboardingSuggestedRows: Number((scrubSuggestedR as any)?.rowCount ?? 0),
+        onboardingRejectedRows: Number((scrubRejectedR as any)?.rowCount ?? 0),
+      },
     };
 
-    // ✅ Fail-loud audit
     await auditDelete(tx, { industryKey, actor, reason, snapshot });
 
-    return { ok: true as const, industryKey, deleted: snapshot.deleted };
+    return { ok: true as const, industryKey, ...snapshot };
   });
 
   if ((result as any)?.ok === false) {
