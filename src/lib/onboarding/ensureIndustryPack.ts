@@ -1,14 +1,21 @@
-// src/lib/onboarding/platformConfig.ts
+// src/lib/onboarding/ensureIndustryPack.ts
 
 import { sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { generateIndustryPack } from "@/lib/pcc/industries/packGenerator";
+import { generateIndustryPack, type IndustryPackGenerationMode } from "@/lib/pcc/industries/packGenerator";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
 }
 
+/**
+ * Keep consistent with your platform-wide normalization style:
+ * - lowercase
+ * - collapse non-alnum to "_"
+ * - trim underscores
+ * - max 64
+ */
 function normalizeIndustryKey(raw: string) {
   const s = safeTrim(raw).toLowerCase();
   if (!s) return "";
@@ -30,31 +37,34 @@ function jsonbString(v: any) {
 }
 
 /**
- * Ensure a baseline industry pack exists for an industry.
- * This helper is safe to call during onboarding / setup.
- *
- * IMPORTANT:
- * - generateIndustryPack() does NOT accept tenantId.
- * - If you want tenant context, pass it via exampleTenants summary/website.
+ * Ensure that an industry has at least one industry_llm_packs row.
+ * This is used by onboarding so a tenant is "truly set up" once industry is known.
  */
-export async function ensureIndustryPackInDb(args: {
-  tenantId?: string | null; // kept for caller convenience/logging, NOT passed to generator
+export async function ensureIndustryPack(args: {
   industryKey: string;
   industryLabel?: string | null;
   industryDescription?: string | null;
+
+  // Optional context from onboarding (helps pack quality, but not required)
+  tenantId?: string | null;
   website?: string | null;
   summary?: string | null;
-  model?: string | null;
+
+  // Advanced / optional
+  mode?: IndustryPackGenerationMode; // default: "create"
+  model?: string | null; // optional override to packGenerator
 }) {
   const industryKey = normalizeIndustryKey(args.industryKey);
-  if (!industryKey) return { ok: false as const, error: "INDUSTRY_KEY_REQUIRED" };
+  if (!industryKey) {
+    return { ok: false as const, error: "INDUSTRY_KEY_REQUIRED" };
+  }
 
   const industryLabel = safeTrim(args.industryLabel) || null;
   const industryDescription = safeTrim(args.industryDescription) || null;
 
-  // Already exists?
+  // 1) If a pack already exists for this industry, we’re done.
   const existsR = await db.execute(sql`
-    select id::text as "id", version::int as "version"
+    select id::text as "id", version::int as "version", enabled as "enabled"
     from industry_llm_packs
     where lower(industry_key) = ${industryKey}
     order by version desc, updated_at desc
@@ -69,10 +79,11 @@ export async function ensureIndustryPackInDb(args: {
       existed: true as const,
       id: String(existing.id),
       version: Number(existing.version ?? 0),
+      enabled: Boolean(existing.enabled),
     };
   }
 
-  // Next version
+  // 2) Compute next version (usually 1 since none exist, but safe anyway)
   const maxVR = await db.execute(sql`
     select coalesce(max(version), 0)::int as "v"
     from industry_llm_packs
@@ -81,29 +92,33 @@ export async function ensureIndustryPackInDb(args: {
   const maxVRow: any = (maxVR as any)?.rows?.[0] ?? null;
   const nextV = Number(maxVRow?.v ?? 0) + 1;
 
-  // Generate pack (✅ no tenantId; ✅ include required mode)
+  // 3) Generate pack (PURE generator, requires mode)
+  const mode: IndustryPackGenerationMode = (args.mode ?? "create") as IndustryPackGenerationMode;
+
   const exampleTenants =
     safeTrim(args.website) || safeTrim(args.summary)
       ? [
           {
+            name: undefined,
             website: safeTrim(args.website) || undefined,
             summary: safeTrim(args.summary) || undefined,
           },
         ]
       : [];
 
-  const packResult = await generateIndustryPack({
+  const gen = await generateIndustryPack({
     industryKey,
     industryLabel,
     industryDescription,
     exampleTenants,
-    mode: "create",
+    mode,
     model: safeTrim(args.model) || undefined,
   });
 
-  const packJson = jsonbString(packResult.pack);
-  const promptsJson = jsonbString((packResult.pack as any)?.prompts ?? {});
-  const modelsJson = jsonbString((packResult.pack as any)?.models ?? {});
+  // 4) Persist row
+  const packJson = jsonbString(gen.pack);
+  const promptsJson = jsonbString((gen.pack as any)?.prompts ?? {});
+  const modelsJson = jsonbString((gen.pack as any)?.models ?? {});
 
   const insR = await db.execute(sql`
     insert into industry_llm_packs (id, industry_key, enabled, version, pack, models, prompts, updated_at)
@@ -128,6 +143,6 @@ export async function ensureIndustryPackInDb(args: {
     existed: false as const,
     id: safeTrim(inserted?.id) || null,
     version: Number(inserted?.version ?? nextV),
-    meta: packResult.meta,
+    meta: gen.meta,
   };
 }
