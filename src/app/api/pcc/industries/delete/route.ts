@@ -72,7 +72,7 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // ✅ Canonical delete requires industries row (but case-insensitive)
+    // ✅ Canonical delete requires industries row (case-insensitive lookup)
     const indR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
@@ -82,40 +82,49 @@ export async function POST(req: Request) {
     const indRow: any = (indR as any)?.rows?.[0] ?? null;
     if (!indRow) return { ok: false as const, status: 404, error: "NOT_FOUND" };
 
+    // Normalize to lowercase key for all subsequent operations
     const industryKey = safeLower(indRow.key);
 
-    // Block delete if ANY tenants are still assigned
+    // ✅ Block delete if ANY tenants are still assigned (case-insensitive)
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_settings
-      where industry_key = ${industryKey}
+      where lower(industry_key) = ${industryKey}
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
-      return { ok: false as const, status: 409, error: "HAS_TENANTS", message: `Cannot delete: ${nTenants} tenants still assigned.` };
+      return {
+        ok: false as const,
+        status: 409,
+        error: "HAS_TENANTS",
+        message: `Cannot delete: ${nTenants} tenants still assigned.`,
+      };
     }
 
-    // Counts before
+    // Counts before (case-insensitive so we see reality)
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
-        (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
-        (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks"
+        (select count(*)::int from tenant_sub_industries where lower(industry_key) = ${industryKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where lower(industry_key) = ${industryKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where lower(industry_key) = ${industryKey}) as "industryLlmPacks",
+        (select count(*)::int from industries where lower(key) = ${industryKey}) as "industriesRow"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // Delete dependents (canonical delete = full purge for this key)
+    // ✅ Canonical delete = full purge for this key (case-insensitive everywhere)
     const delTenantSubR = await tx.execute(sql`
       delete from tenant_sub_industries
-      where industry_key = ${industryKey}
+      where lower(industry_key) = ${industryKey}
     `);
+
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where industry_key = ${industryKey}
+      where lower(industry_key) = ${industryKey}
     `);
+
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where industry_key = ${industryKey}
+      where lower(industry_key) = ${industryKey}
     `);
 
     const delIndustryR = await tx.execute(sql`
@@ -135,6 +144,7 @@ export async function POST(req: Request) {
       },
     };
 
+    // ✅ Fail-loud audit
     await auditDelete(tx, { industryKey, actor, reason, snapshot });
 
     return { ok: true as const, industryKey, deleted: snapshot.deleted };
