@@ -71,6 +71,23 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
+    // ✅ Refuse derived-delete if an industries row exists (canonical by definition).
+    const canonR = await tx.execute(sql`
+      select 1
+      from industries
+      where lower(key) = ${industryKey}
+      limit 1
+    `);
+    const isCanonical = Boolean((canonR as any)?.rows?.length);
+    if (isCanonical) {
+      return {
+        ok: false as const,
+        status: 409,
+        error: "IS_CANONICAL",
+        message: "Refusing derived delete: industries row exists for this key. Use canonical delete.",
+      };
+    }
+
     // ✅ Still block if tenants are actively assigned to this industry key.
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
@@ -79,7 +96,12 @@ export async function POST(req: Request) {
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
-      return { ok: false as const, status: 409, error: "HAS_TENANTS", message: `Cannot delete: ${nTenants} tenants still assigned.` };
+      return {
+        ok: false as const,
+        status: 409,
+        error: "HAS_TENANTS",
+        message: `Cannot delete: ${nTenants} tenants still assigned.`,
+      };
     }
 
     // Counts before
@@ -92,7 +114,7 @@ export async function POST(req: Request) {
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // ✅ Derived delete = artifacts-only. We do NOT delete industries row (if it exists, it’s canonical by definition).
+    // ✅ Derived delete = artifacts-only.
     const delTenantSubR = await tx.execute(sql`
       delete from tenant_sub_industries
       where industry_key = ${industryKey}

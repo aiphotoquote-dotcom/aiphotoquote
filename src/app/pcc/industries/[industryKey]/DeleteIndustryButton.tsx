@@ -14,55 +14,43 @@ function safeLower(v: unknown) {
   return safeTrim(v).toLowerCase();
 }
 
-async function isCanonicalIndustry(industryKeyLower: string): Promise<boolean> {
-  // Best-effort check: if this page can load it already knows,
-  // but we only received industryKey here. So we probe the list route.
-  // If you already have a better canonical-check endpoint, swap this.
-  try {
-    const r = await fetch(`/api/pcc/industries/exists?industryKey=${encodeURIComponent(industryKeyLower)}`, {
-      method: "GET",
-      cache: "no-store",
-    });
-    const data = await r.json().catch(() => null);
-    return Boolean(data?.ok && data?.isCanonical);
-  } catch {
-    return false;
-  }
-}
-
-export default function DeleteIndustryButton(props: { industryKey: string }) {
+export default function DeleteIndustryButton(props: {
+  industryKey: string;
+  mode: "canonical" | "derived";
+}) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const industryKey = safeLower(props.industryKey);
 
+  const endpoint =
+    props.mode === "canonical"
+      ? "/api/pcc/industries/delete"
+      : "/api/pcc/industries/delete-derived";
+
   async function run() {
     setErr(null);
-    if (!industryKey) return;
+
+    const confirmWord = props.mode === "canonical" ? "DELETE" : "DELETE_DERIVED";
+    const confirmText = safeTrim(
+      prompt(
+        `Type ${confirmWord} to permanently delete "${industryKey}" (${
+          props.mode === "canonical"
+            ? "removes industries row + all artifacts"
+            : "removes artifacts only (no industries row)"
+        }).`
+      ) ?? ""
+    );
+
+    if (confirmText !== confirmWord) return;
+
+    const reason =
+      safeTrim(prompt("Reason (optional, stored in audit log):") ?? "") || null;
 
     setBusy(true);
     try {
-      // Determine canonical vs derived
-      // If this probe fails, we assume derived (safer: doesn't hard-delete industries row).
-      const canonical = await isCanonicalIndustry(industryKey);
-
-      // Confirm text differs by type
-      const confirmPrompt = canonical
-        ? `Type DELETE to permanently delete canonical industry "${industryKey}" (hard delete).`
-        : `Type DELETE to delete PCC artifacts for derived industry "${industryKey}". (It can reappear later.)`;
-
-      setBusy(false); // release for prompt UX
-      const confirmText = safeTrim(prompt(confirmPrompt) ?? "");
-      if (confirmText !== "DELETE") return;
-
-      const reason = safeTrim(prompt("Reason (optional, stored in audit log):") ?? "") || null;
-
-      setBusy(true);
-
-      const url = canonical ? "/api/pcc/industries/delete" : "/api/pcc/industries/delete-derived";
-
-      const r = await fetch(url, {
+      const r = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ industryKey, reason }),
@@ -71,8 +59,8 @@ export default function DeleteIndustryButton(props: { industryKey: string }) {
       const data = await r.json().catch(() => null);
       if (!r.ok) throw new Error(data?.error || data?.message || `HTTP_${r.status}`);
 
-      // Canonical delete will make the page 404. Derived delete should keep page alive
-      // but UI will be cleaner if we return to list either way.
+      // Canonical delete: the detail page will 404; return to list.
+      // Derived delete: same behavior is fine (it’s gone from DB artifacts).
       router.push("/pcc/industries");
       router.refresh();
     } catch (e: any) {
@@ -89,7 +77,11 @@ export default function DeleteIndustryButton(props: { industryKey: string }) {
         onClick={run}
         disabled={busy || !industryKey}
         className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-900 hover:bg-red-100 disabled:opacity-60 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/60"
-        title='Delete industry. Canonical: hard delete (blocked if tenants assigned). Derived: deletes PCC artifacts only; may reappear later.'
+        title={
+          props.mode === "canonical"
+            ? "Hard delete canonical industry (blocked if any tenants assigned). Audit logged."
+            : "Delete derived artifacts for this key (blocked if any tenants assigned). Audit logged."
+        }
       >
         {busy ? "Deleting…" : "Delete"}
       </button>

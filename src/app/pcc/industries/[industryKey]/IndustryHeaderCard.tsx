@@ -100,12 +100,7 @@ export default function IndustryHeaderCard(props: Props) {
                 db pack: v{dbLatest.version}
               </span>
             ) : (
-              <span
-                className={cn(
-                  "inline-flex items-center rounded-full border px-2 py-0.5 font-semibold",
-                  "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200"
-                )}
-              >
+              <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 font-semibold", "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200")}>
                 db pack: none
               </span>
             )}
@@ -142,12 +137,12 @@ export default function IndustryHeaderCard(props: Props) {
               {!industry.isCanonical ? (
                 <>
                   <CanonicalizeIndustryButton industryKey={props.industryKeyLower} defaultLabel={industry.label} />
-                  <DeleteIndustryButton industryKey={props.industryKeyLower} />
+                  <DeleteIndustryButton industryKey={props.industryKeyLower} mode="derived" />
                 </>
               ) : (
                 <>
                   <MergeIndustryButton sourceKey={props.industryKeyLower} />
-                  <DeleteIndustryButton industryKey={props.industryKeyLower} />
+                  <DeleteIndustryButton industryKey={props.industryKeyLower} mode="canonical" />
                 </>
               )}
             </div>
@@ -156,13 +151,14 @@ export default function IndustryHeaderCard(props: Props) {
               {!industry.isCanonical ? (
                 <>
                   <span className="font-semibold">Make canonical</span> creates an <span className="font-mono">industries</span> row for this
-                  key. <span className="font-semibold">Delete</span> purges DB artifacts for this key and is blocked if any tenants are
+                  key. <span className="font-semibold">Delete</span> removes derived artifacts for this key and is blocked if any tenants are
                   assigned.
                 </>
               ) : (
                 <>
                   <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes
-                  the source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
+                  the source. <span className="font-semibold">Delete</span> removes the industries row + all artifacts; blocked if any tenants
+                  are still assigned.
                 </>
               )}
             </div>
