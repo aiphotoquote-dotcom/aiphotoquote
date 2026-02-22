@@ -47,6 +47,29 @@ function jsonbString(v: any) {
   }
 }
 
+// Postgres-side “normalize industry key” expression:
+// - lowercase
+// - convert any run of non-alphanumerics to underscore
+// - collapse multiple underscores
+// - trim leading/trailing underscores
+//
+// IMPORTANT: this is an SQL snippet builder, not a JS function.
+function normSql(expr: any) {
+  return sql`lower(
+    regexp_replace(
+      regexp_replace(
+        regexp_replace(coalesce(${expr}::text,''), '[^a-zA-Z0-9]+', '_', 'g'),
+        '_+',
+        '_',
+        'g'
+      ),
+      '^_|_$',
+      '',
+      'g'
+    )
+  )`;
+}
+
 async function auditDelete(tx: any, args: { industryKey: string; actor: string; reason: string | null; snapshot: any }) {
   const snapshotJson = jsonbString(args.snapshot);
   await tx.execute(sql`
@@ -88,15 +111,27 @@ export async function POST(req: Request) {
       };
     }
 
-    // 2) Counts before (for audit/response)
+    // 2) Counts before (for audit/response) — MUST use normalized comparisons (onboarding keys can be "Auto Detailing")
     const countsBeforeR = await tx.execute(sql`
       select
         (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
         (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
         (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks",
         (select count(*)::int from industries where lower(key) = ${industryKey}) as "industriesRow",
-        (select count(*)::int from tenant_onboarding where (ai_analysis->>'suggestedIndustryKey')::text = ${industryKey}) as "onboardingSuggestedRows",
-        (select count(*)::int from tenant_onboarding where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${industryKey}) as "onboardingRejectedRows"
+
+        (select count(*)::int
+          from tenant_onboarding
+          where ${normSql(sql`tenant_onboarding.ai_analysis->>'suggestedIndustryKey'`)} = ${industryKey}
+        ) as "onboardingSuggestedRows",
+
+        (select count(*)::int
+          from tenant_onboarding
+          where exists (
+            select 1
+            from jsonb_array_elements_text(coalesce(tenant_onboarding.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+            where ${normSql(sql`v.value`)} = ${industryKey}
+          )
+        ) as "onboardingRejectedRows"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
@@ -123,7 +158,7 @@ export async function POST(req: Request) {
     `);
 
     // 4) Scrub onboarding AI signals so it disappears from the derived list immediately.
-    //    (Does NOT prevent future rediscovery by new onboardings.)
+    //    MUST scrub where normalized(suggestedIndustryKey) == industryKey (handles "Auto Detailing", "auto-detailing", etc.)
     const scrubSuggestedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis =
@@ -131,9 +166,11 @@ export async function POST(req: Request) {
         - 'suggestedIndustryKey'
         - 'suggestedIndustryLabel'
         - 'needsConfirmation'
-      where (ai_analysis->>'suggestedIndustryKey')::text = ${industryKey}
+      where ${normSql(sql`tenant_onboarding.ai_analysis->>'suggestedIndustryKey'`)} = ${industryKey}
     `);
 
+    // Remove any rejectedIndustryKeys entries whose normalized value matches the industryKey.
+    // Also only run where we actually have a matching element (normalized), otherwise it pointlessly rewrites json.
     const scrubRejectedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis = jsonb_set(
@@ -141,15 +178,19 @@ export async function POST(req: Request) {
         '{rejectedIndustryKeys}',
         coalesce(
           (
-            select jsonb_agg(v.value)
-            from jsonb_array_elements_text(coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
-            where v.value <> ${industryKey}
+            select jsonb_agg(v2.value)
+            from jsonb_array_elements_text(coalesce(tenant_onboarding.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v2(value)
+            where ${normSql(sql`v2.value`)} <> ${industryKey}
           ),
           '[]'::jsonb
         ),
         true
       )
-      where coalesce(ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${industryKey}
+      where exists (
+        select 1
+        from jsonb_array_elements_text(coalesce(tenant_onboarding.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+        where ${normSql(sql`v.value`)} = ${industryKey}
+      )
     `);
 
     const snapshot = {
