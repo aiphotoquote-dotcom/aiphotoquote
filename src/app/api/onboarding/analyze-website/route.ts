@@ -147,7 +147,9 @@ const AnalysisSchema = z.object({
   fit: FitSchema,
   fitReason: z.preprocess((v) => safeTrim(v), z.string().min(1)),
   suggestedIndustryKey: z.preprocess((v) => safeTrim(v), z.string().min(1)),
-  questions: StringArraySchema.min(1).max(6),
+ questions: z.array(z.string()).min(1).max(6).parse(
+  Array.isArray(obj?.questions) ? obj.questions : []
+),
   confidenceScore: Num01Schema,
   needsConfirmation: BoolSchema,
   detectedServices: StringArraySchema.default([]),
