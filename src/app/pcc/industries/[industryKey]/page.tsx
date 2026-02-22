@@ -90,10 +90,10 @@ export default async function PccIndustryDetailPage(props: Props) {
   const sp = (await props.searchParams) ?? {};
   const showInactive = toBool(sp?.showInactive);
 
-  const industryKey = p?.industryKey;
-  const key = decodeURIComponent(industryKey || "").trim();
+  const industryKeyParam = p?.industryKey;
+  const keyRaw = decodeURIComponent(industryKeyParam || "").trim();
 
-  if (!key) {
+  if (!keyRaw) {
     return (
       <div className="space-y-6">
         <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
@@ -112,10 +112,11 @@ export default async function PccIndustryDetailPage(props: Props) {
     );
   }
 
-  const industryKeyLower = String(key).toLowerCase();
+  // ✅ Canonical key used everywhere (DB + sections)
+  const industryKeyLower = String(keyRaw).toLowerCase();
 
   // -----------------------------
-  // Industry metadata (need this BEFORE editor so we can hide merge/delete on derived)
+  // Industry metadata (canonical vs derived)
   // -----------------------------
   const industryR = await db.execute(sql`
     select
@@ -125,15 +126,18 @@ export default async function PccIndustryDetailPage(props: Props) {
       description::text as "description",
       created_at as "createdAt"
     from industries
-    where key = ${key}
+    where lower(key) = ${industryKeyLower}
     limit 1
   `);
 
   const industryRow = firstRow(industryR);
 
+  // If the DB row exists but has mixed-case key, preserve that as display key
+  const displayKey = industryRow?.key ? String(industryRow.key) : industryKeyLower;
+
   const industry = {
-    key,
-    label: industryRow?.label ? String(industryRow.label) : titleFromKey(key) || key,
+    key: displayKey,
+    label: industryRow?.label ? String(industryRow.label) : titleFromKey(industryKeyLower) || industryKeyLower,
     description: industryRow?.description ? String(industryRow.description) : null,
     createdAt: industryRow?.createdAt ?? null,
     isCanonical: Boolean(industryRow?.key),
@@ -164,7 +168,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   const initialEditorPack = mergeEditorPacks(dbEditorPack, platformEditorPack);
 
   // -----------------------------
-  // Confirmed tenants
+  // Confirmed tenants (by tenant_settings.industry_key)
   // -----------------------------
   const confirmedR = await db.execute(sql`
     select
@@ -183,7 +187,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       ts.brand_logo_url::text as "brandLogoUrl"
     from tenant_settings ts
     join tenants t on t.id = ts.tenant_id
-    where ts.industry_key = ${key}
+    where ts.industry_key = ${industryKeyLower}
     order by t.created_at desc
     limit 500
   `);
@@ -212,7 +216,7 @@ export default async function PccIndustryDetailPage(props: Props) {
   const confirmedIds = new Set(confirmed.map((t: any) => t.tenantId));
 
   // -----------------------------
-  // AI suggested tenants
+  // AI suggested tenants (by onboarding suggestedIndustryKey)
   // -----------------------------
   const aiR = await db.execute(sql`
     select
@@ -243,8 +247,8 @@ export default async function PccIndustryDetailPage(props: Props) {
       (ob.ai_analysis->'industryInterview'->'proposedIndustry'->>'label')::text as "proposedLabel"
     from tenant_onboarding ob
     join tenants t on t.id = ob.tenant_id
-    where (ob.ai_analysis->>'suggestedIndustryKey') = ${key}
-      and not (coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${key})
+    where lower(ob.ai_analysis->>'suggestedIndustryKey') = ${industryKeyLower}
+      and not (coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${industryKeyLower})
     order by t.created_at desc
     limit 500
   `);
@@ -354,7 +358,7 @@ export default async function PccIndustryDetailPage(props: Props) {
       (ob.ai_analysis->'meta'->>'updatedAt')::text as "aiUpdatedAt"
     from tenant_onboarding ob
     join tenants t on t.id = ob.tenant_id
-    where coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${key}
+    where coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? ${industryKeyLower}
     order by t.created_at desc
     limit 200
   `);
@@ -393,18 +397,18 @@ export default async function PccIndustryDetailPage(props: Props) {
         count(distinct tsi.tenant_id)::int as "inUseCount"
       from tenant_sub_industries tsi
       join tenant_settings ts on ts.tenant_id = tsi.tenant_id
-      where ts.industry_key = ${key}
-        and tsi.industry_key = ${key}
+      where ts.industry_key = ${industryKeyLower}
+        and tsi.industry_key = ${industryKeyLower}
       group by tsi.key
     ) ov on ov."subKey" = isi.key
-    where isi.industry_key = ${key}
+    where isi.industry_key = ${industryKeyLower}
     order by isi.sort_order asc, isi.label asc
     limit 500
   `);
 
   const defaultSubIndustriesAll = rows(defaultsR).map((r: any) => ({
     id: String(r.id ?? ""),
-    industryKey: String(r.industryKey ?? key),
+    industryKey: String(r.industryKey ?? industryKeyLower),
     subKey: String(r.subKey ?? ""),
     subLabel: String(r.subLabel ?? ""),
     description: r.description ? String(r.description) : null,
@@ -428,8 +432,8 @@ export default async function PccIndustryDetailPage(props: Props) {
       count(distinct tsi.tenant_id)::int as "tenantCount"
     from tenant_sub_industries tsi
     join tenant_settings ts on ts.tenant_id = tsi.tenant_id
-    where ts.industry_key = ${key}
-      and tsi.industry_key = ${key}
+    where ts.industry_key = ${industryKeyLower}
+      and tsi.industry_key = ${industryKeyLower}
     group by tsi.key, tsi.label
     order by count(distinct tsi.tenant_id) desc, tsi.label asc
     limit 100
@@ -457,15 +461,7 @@ export default async function PccIndustryDetailPage(props: Props) {
 
   return (
     <div className="space-y-6">
-      <IndustryPromptPackEditor
-        key={editorKey}
-        industryKey={industryKeyLower}
-        industryLabel={industry.label}
-        industryDescription={industry.description}
-        isCanonical={industry.isCanonical}
-        initialPack={initialEditorPack as any}
-      />
-
+      {/* ✅ Header first (buttons + pills belong here) */}
       <IndustryHeaderCard
         industry={industry}
         industryKeyLower={industryKeyLower}
@@ -482,27 +478,30 @@ export default async function PccIndustryDetailPage(props: Props) {
         fmtDate={fmtDate}
       />
 
+      {/* ✅ Editor takes ONLY these props now */}
+      <IndustryPromptPackEditor key={editorKey} industryKey={industryKeyLower} initialPack={initialEditorPack as any} />
+
       <ConfirmedTenantsSection confirmed={confirmed} fmtDate={fmtDate} />
 
       <AiSuggestedTenantsSection
-        industryKey={key}
+        industryKey={industryKeyLower}
         aiUnconfirmed={aiUnconfirmed}
         aiAlsoConfirmed={aiAlsoConfirmed}
         rejectedCount={rejectedTenants.length}
         fmtDate={fmtDate}
       />
 
-      <RejectedTenantsSection industryKey={key} rejectedTenants={rejectedTenants} fmtDate={fmtDate} />
+      <RejectedTenantsSection industryKey={industryKeyLower} rejectedTenants={rejectedTenants} fmtDate={fmtDate} />
 
       <DefaultSubIndustriesSection
-        industryKey={key}
+        industryKey={industryKeyLower}
         showInactive={showInactive}
         inactiveCount={inactiveCount}
         defaultSubIndustries={defaultSubIndustries}
         fmtDate={fmtDate}
       />
 
-      <TenantOverridesSection industryKey={key} overrides={overrides} />
+      <TenantOverridesSection industryKey={industryKeyLower} overrides={overrides} />
     </div>
   );
 }
