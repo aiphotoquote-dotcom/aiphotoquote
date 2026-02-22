@@ -3,56 +3,26 @@ import type { PlatformLlmConfig } from "@/lib/pcc/llm/types";
 import type { TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
 /**
- * Industry defaults are "locked templates" that sit between platform and tenant.
- * For now: keep these light. You can evolve to DB-backed per-industry prompt packs later.
+ * Industry packs are DB-backed and will be normalized into Partial<PlatformLlmConfig>.
+ *
+ * ✅ RULE: no hardcoded industry keys, ever.
+ * This function exists as the single import point for "industry layer" resolution.
+ *
+ * For now, it returns {} (no industry augmentation) until the DB-backed packs land.
+ * That unblocks builds while preserving the layering contract: Platform + Industry + Tenant.
  */
-export function getIndustryDefaults(industryKey: string | null | undefined): Partial<PlatformLlmConfig> {
-  const key = String(industryKey || "").toLowerCase().trim();
-
-  // Default: no special overrides
-  if (!key) return {};
-
-  // Example: you can specialize prompts by industry without changing guardrails
-  if (key === "marine") {
-    return {
-      prompts: {
-        extraSystemPreamble: [
-          "You are producing an estimate for legitimate marine service work.",
-          "Assume salt + sun exposure can accelerate wear; ask clarifying questions if unclear.",
-        ].join("\n"),
-      } as any,
-    };
-  }
-
-  if (key === "auto") {
-    return {
-      prompts: {
-        extraSystemPreamble: [
-          "You are producing an estimate for legitimate automotive service work.",
-          "Pay attention to OEM fitment and safety-related trim constraints; ask clarifying questions if needed.",
-        ].join("\n"),
-      } as any,
-    };
-  }
-
-  if (key === "motorcycle") {
-    return {
-      prompts: {
-        extraSystemPreamble: [
-          "You are producing an estimate for legitimate motorcycle service work.",
-          "Pay attention to weather exposure, UV, and seam durability; ask clarifying questions if unclear.",
-        ].join("\n"),
-      } as any,
-    };
-  }
-
-  // "service" or unknown
+export function getIndustryDefaults(_industryKey: string | null | undefined): Partial<PlatformLlmConfig> {
+  // TODO(DB_PACKS): load industry pack from DB by key and normalize into Partial<PlatformLlmConfig>
   return {};
 }
 
 function safeStr(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s;
+  return String(v ?? "").trim();
+}
+
+function joinBlocks(...xs: Array<unknown>) {
+  const parts = xs.map(safeStr).filter(Boolean);
+  return parts.join("\n\n");
 }
 
 function minInt(a: unknown, b: unknown, fallback: number) {
@@ -65,47 +35,52 @@ function minInt(a: unknown, b: unknown, fallback: number) {
 
 /**
  * Merge rules:
- * - guardrails are LOCKED to platform (tenant cannot change)
+ * - guardrails are LOCKED to platform (tenant/industry cannot change)
  * - maxQaQuestions: tenant may only tighten: min(platform, tenant)
- * - prompts: tenant may override prompt bodies; platform extra preamble always prepends
- * - industry provides defaults between platform and tenant
+ * - prompts: additive merge: platform base + industry add + tenant add
+ * - models: tenant may select different models, otherwise industry, otherwise platform
+ *
+ * NOTE:
+ * “tenant adds” means we never replace platform prompt bodies; we *append*.
  */
 export function buildEffectiveLlmConfig(args: {
   platform: PlatformLlmConfig;
-  industry: Partial<PlatformLlmConfig>;
+  industry: Partial<PlatformLlmConfig> | null;
   tenant: TenantLlmOverrides | null;
 }) {
   const { platform, industry, tenant } = args;
 
-  const platformP = platform.prompts ?? ({} as any);
-  const industryP = (industry.prompts ?? {}) as any;
-  const tenantP = (tenant?.prompts ?? {}) as any;
+  const platformP = (platform.prompts ?? {}) as any;
+  const industryP = ((industry?.prompts ?? {}) as any) ?? {};
+  const tenantP = ((tenant?.prompts ?? {}) as any) ?? {};
 
-  const extraSystemPreamble =
-    safeStr(tenantP.extraSystemPreamble) ||
-    safeStr(industryP.extraSystemPreamble) ||
-    safeStr(platformP.extraSystemPreamble) ||
-    "";
+  // ✅ additive preamble: platform -> industry -> tenant
+  const extraSystemPreamble = joinBlocks(
+    platformP.extraSystemPreamble,
+    industryP.extraSystemPreamble,
+    tenantP.extraSystemPreamble
+  );
 
-  const quoteEstimatorSystem =
-    safeStr(tenantP.quoteEstimatorSystem) ||
-    safeStr(industryP.quoteEstimatorSystem) ||
-    safeStr(platformP.quoteEstimatorSystem) ||
-    "";
+  // ✅ additive prompt bodies: platform base -> industry add -> tenant add
+  const quoteEstimatorSystem = joinBlocks(
+    platformP.quoteEstimatorSystem,
+    industryP.quoteEstimatorSystem,
+    tenantP.quoteEstimatorSystem
+  );
 
-  const qaQuestionGeneratorSystem =
-    safeStr(tenantP.qaQuestionGeneratorSystem) ||
-    safeStr(industryP.qaQuestionGeneratorSystem) ||
-    safeStr(platformP.qaQuestionGeneratorSystem) ||
-    "";
+  const qaQuestionGeneratorSystem = joinBlocks(
+    platformP.qaQuestionGeneratorSystem,
+    industryP.qaQuestionGeneratorSystem,
+    tenantP.qaQuestionGeneratorSystem
+  );
 
-  // Always prepend extra preamble if present
-  const estimatorSystemFinal = [extraSystemPreamble, quoteEstimatorSystem].filter(Boolean).join("\n\n");
-  const qaSystemFinal = [extraSystemPreamble, qaQuestionGeneratorSystem].filter(Boolean).join("\n\n");
+  // Always prepend extra preamble (if present)
+  const estimatorSystemFinal = joinBlocks(extraSystemPreamble, quoteEstimatorSystem);
+  const qaSystemFinal = joinBlocks(extraSystemPreamble, qaQuestionGeneratorSystem);
 
-  const platformModels = platform.models ?? ({} as any);
-  const industryModels = (industry.models ?? {}) as any;
-  const tenantModels = (tenant?.models ?? {}) as any;
+  const platformModels = (platform.models ?? {}) as any;
+  const industryModels = ((industry?.models ?? {}) as any) ?? {};
+  const tenantModels = ((tenant?.models ?? {}) as any) ?? {};
 
   const estimatorModel =
     safeStr(tenantModels.estimatorModel) ||
@@ -114,7 +89,10 @@ export function buildEffectiveLlmConfig(args: {
     "gpt-4o-mini";
 
   const qaModel =
-    safeStr(tenantModels.qaModel) || safeStr(industryModels.qaModel) || safeStr(platformModels.qaModel) || "gpt-4o-mini";
+    safeStr(tenantModels.qaModel) ||
+    safeStr(industryModels.qaModel) ||
+    safeStr(platformModels.qaModel) ||
+    "gpt-4o-mini";
 
   const renderModel =
     safeStr(tenantModels.renderModel) ||
@@ -123,7 +101,7 @@ export function buildEffectiveLlmConfig(args: {
     "gpt-image-1";
 
   // Guardrails are platform-locked
-  const g = platform.guardrails ?? ({} as any);
+  const g = (platform.guardrails ?? {}) as any;
 
   // Tenant can only tighten maxQaQuestions
   const maxQaQuestions = minInt(g.maxQaQuestions, tenant?.maxQaQuestions, Number(g.maxQaQuestions ?? 3));
@@ -142,9 +120,8 @@ export function buildEffectiveLlmConfig(args: {
         qaQuestionGeneratorSystem: qaSystemFinal,
       },
       guardrails: {
-        // locked
-        mode: (g as any).mode ?? "balanced",
-        piiHandling: (g as any).piiHandling ?? "redact",
+        mode: g.mode ?? "balanced",
+        piiHandling: g.piiHandling ?? "redact",
         blockedTopics: Array.isArray(g.blockedTopics) ? g.blockedTopics : [],
         maxQaQuestions,
         maxOutputTokens,

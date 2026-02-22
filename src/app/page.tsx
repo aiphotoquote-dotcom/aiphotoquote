@@ -16,11 +16,133 @@ function Icon({
   name,
   className,
 }: {
-  name: "spark" | "camera" | "bolt" | "mail" | "wand" | "check" | "arrow";
+  name:
+    | "camera"
+    | "bolt"
+    | "check"
+    | "mail"
+    | "shield"
+    | "clock"
+    | "wrench"
+    | "chart"
+    | "arrow"
+    | "spark";
   className?: string;
 }) {
   const common = { className: cx("h-5 w-5", className) };
   switch (name) {
+    case "camera":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path
+            d="M7 7l1.5-2h7L17 7h2a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9a2 2 0 012-2h2z"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
+          <path d="M12 18a4 4 0 100-8 4 4 0 000 8z" stroke="currentColor" strokeWidth="1.8" />
+        </svg>
+      );
+    case "bolt":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path
+            d="M13 2L3 14h8l-1 8 11-14h-8l0-6z"
+            stroke="currentColor"
+            strokeWidth="1.9"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "check":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path
+            d="M20 6L9 17l-5-5"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "mail":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path
+            d="M4 6h16a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
+          <path d="M22 8l-10 7L2 8" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+        </svg>
+      );
+    case "shield":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path
+            d="M12 2l8 4v6c0 5-3.4 9.4-8 10-4.6-.6-8-5-8-10V6l8-4z"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M9 12l2 2 4-5"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "clock":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path d="M12 22a10 10 0 100-20 10 10 0 000 20z" stroke="currentColor" strokeWidth="1.8" />
+          <path
+            d="M12 6v6l4 2"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "wrench":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path
+            d="M21 7.5a5 5 0 01-6.8 4.7L8 18.4a2 2 0 01-2.8 0l-.6-.6a2 2 0 010-2.8l6.2-6.2A5 5 0 0116.5 3l-2.2 2.2 2.5 2.5L21 7.5z"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "chart":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path d="M4 19V5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          <path d="M4 19h16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          <path d="M8 15V11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          <path d="M12 15V8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          <path d="M16 15V10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      );
+    case "arrow":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
+          <path d="M5 12h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          <path
+            d="M13 6l6 6-6 6"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
     case "spark":
       return (
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
@@ -38,218 +160,49 @@ function Icon({
           />
         </svg>
       );
-    case "camera":
-      return (
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path
-            d="M7 7l1.5-2h7L17 7h2a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9a2 2 0 012-2h2z"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M12 18a4 4 0 100-8 4 4 0 000 8z"
-            stroke="currentColor"
-            strokeWidth="1.8"
-          />
-        </svg>
-      );
-    case "bolt":
-      return (
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path
-            d="M13 2L3 14h8l-1 8 11-14h-8l0-6z"
-            stroke="currentColor"
-            strokeWidth="1.9"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
-    case "mail":
-      return (
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path
-            d="M4 6h16a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M22 8l-10 7L2 8"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
-    case "wand":
-      return (
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path
-            d="M4 20l10.5-10.5"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          />
-          <path
-            d="M14.5 9.5L19 5a2 2 0 012.8 2.8l-4.5 4.5"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M13 3l.7 2.2L16 6l-2.3.8L13 9l-.7-2.2L10 6l2.3-.8L13 3z"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
-    case "check":
-      return (
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path
-            d="M20 6L9 17l-5-5"
-            stroke="currentColor"
-            strokeWidth="2.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
-    case "arrow":
-      return (
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...common}>
-          <path
-            d="M5 12h12"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          />
-          <path
-            d="M13 6l6 6-6 6"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
   }
 }
 
-function Badge({
-  children,
-  tone = "neutral",
-}: {
-  children: React.ReactNode;
-  tone?: "neutral" | "ai" | "good";
-}) {
-  const toneClass =
-    tone === "ai"
-      ? "border-indigo-200 bg-indigo-50 text-indigo-700"
-      : tone === "good"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-      : "border-gray-200 bg-white text-gray-700";
+function Pill({ children }: { children: React.ReactNode }) {
   return (
-    <span
-      className={cx(
-        "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold",
-        toneClass
-      )}
-    >
+    <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-extrabold tracking-wide text-white">
       {children}
     </span>
   );
 }
 
-/**
- * Card pop styling by "tone" so everything can have subtle color + definition.
- * - top gradient accent
- * - tinted background
- * - stronger shadow + hover
- * - icon badge tint
- */
-function PopCard({
-  tone,
-  icon,
-  corner,
+function SteelCard({
   title,
   desc,
-  bullets,
-  footer,
+  icon,
+  tone = "steel",
 }: {
-  tone: "sky" | "indigo" | "emerald" | "amber" | "slate" | "fuchsia";
-  icon: React.ReactNode;
-  corner?: React.ReactNode;
   title: string;
-  desc?: string;
-  bullets?: string[];
-  footer?: React.ReactNode;
+  desc: string;
+  icon: React.ReactNode;
+  tone?: "steel" | "blueprint" | "olive";
 }) {
-  const T: Record<
-    string,
-    {
-      cardBg: string;
-      ring: string;
-      top: string;
-      iconWrap: string;
-      corner: string;
-      softText: string;
-    }
-  > = {
-    sky: {
-      cardBg: "bg-gradient-to-b from-sky-50/70 to-white",
-      ring: "ring-sky-200",
-      top: "from-sky-500 to-indigo-500",
-      iconWrap: "border-sky-200 bg-sky-50 text-sky-700",
-      corner: "border-sky-200 bg-sky-50 text-sky-700",
-      softText: "text-sky-700",
-    },
-    indigo: {
-      cardBg: "bg-gradient-to-b from-indigo-50/70 to-white",
-      ring: "ring-indigo-200",
-      top: "from-indigo-500 to-violet-500",
-      iconWrap: "border-indigo-200 bg-indigo-50 text-indigo-700",
-      corner: "border-indigo-200 bg-indigo-50 text-indigo-700",
-      softText: "text-indigo-700",
-    },
-    emerald: {
-      cardBg: "bg-gradient-to-b from-emerald-50/70 to-white",
-      ring: "ring-emerald-200",
-      top: "from-emerald-500 to-teal-500",
-      iconWrap: "border-emerald-200 bg-emerald-50 text-emerald-700",
-      corner: "border-emerald-200 bg-emerald-50 text-emerald-700",
-      softText: "text-emerald-700",
-    },
-    amber: {
-      cardBg: "bg-gradient-to-b from-amber-50/70 to-white",
-      ring: "ring-amber-200",
-      top: "from-amber-500 to-orange-500",
-      iconWrap: "border-amber-200 bg-amber-50 text-amber-700",
-      corner: "border-amber-200 bg-amber-50 text-amber-700",
-      softText: "text-amber-700",
-    },
-    fuchsia: {
-      cardBg: "bg-gradient-to-b from-fuchsia-50/70 to-white",
-      ring: "ring-fuchsia-200",
-      top: "from-fuchsia-500 to-pink-500",
-      iconWrap: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700",
-      corner: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700",
-      softText: "text-fuchsia-700",
-    },
-    slate: {
-      cardBg: "bg-gradient-to-b from-slate-50/70 to-white",
-      ring: "ring-gray-200",
-      top: "from-gray-700 to-gray-900",
-      iconWrap: "border-gray-200 bg-gray-50 text-gray-900",
-      corner: "border-gray-200 bg-gray-50 text-gray-700",
-      softText: "text-gray-700",
-    },
-  };
-
-  const st = T[tone] ?? T.slate;
+  const tones =
+    tone === "blueprint"
+      ? {
+          top: "from-slate-700 to-slate-950",
+          ring: "ring-slate-300/40",
+          iconWrap: "border-slate-300/40 bg-slate-50 text-slate-900",
+          bg: "bg-gradient-to-b from-white to-slate-50",
+        }
+      : tone === "olive"
+      ? {
+          top: "from-emerald-900 to-lime-950",
+          ring: "ring-emerald-300/30",
+          iconWrap: "border-emerald-300/30 bg-emerald-50 text-emerald-950",
+          bg: "bg-gradient-to-b from-white to-emerald-50/60",
+        }
+      : {
+          top: "from-zinc-700 to-zinc-950",
+          ring: "ring-zinc-300/40",
+          iconWrap: "border-zinc-300/40 bg-zinc-50 text-zinc-950",
+          bg: "bg-gradient-to-b from-white to-zinc-50",
+        };
 
   return (
     <div
@@ -257,577 +210,598 @@ function PopCard({
         "group relative rounded-3xl border border-gray-200 p-6 shadow-sm transition",
         "hover:-translate-y-0.5 hover:shadow-md",
         "ring-1 ring-black/5",
-        st.cardBg
+        tones.bg
       )}
     >
-      <div className={cx("absolute inset-x-0 top-0 h-1.5 rounded-t-3xl bg-gradient-to-r", st.top)} />
-
-      <div className="flex items-center justify-between">
-        <div
-          className={cx(
-            "inline-flex h-10 w-10 items-center justify-center rounded-2xl border",
-            st.iconWrap
-          )}
-        >
+      <div className={cx("absolute inset-x-0 top-0 h-1.5 rounded-t-3xl bg-gradient-to-r", tones.top)} />
+      <div className="flex items-start gap-3">
+        <div className={cx("mt-0.5 inline-flex h-10 w-10 items-center justify-center rounded-2xl border", tones.iconWrap)}>
           {icon}
         </div>
-
-        {corner ? (
-          <span className={cx("rounded-full border px-2.5 py-1 text-xs font-semibold", st.corner)}>
-            {corner}
-          </span>
-        ) : null}
+        <div>
+          <div className="text-sm font-extrabold text-gray-900">{title}</div>
+          <div className="mt-2 text-sm text-gray-600">{desc}</div>
+        </div>
       </div>
 
-      <div className="mt-4 text-sm font-extrabold text-gray-900">{title}</div>
-      {desc ? <div className="mt-2 text-sm text-gray-600">{desc}</div> : null}
-
-      {bullets?.length ? (
-        <ul className="mt-4 space-y-2 text-sm text-gray-700">
-          {bullets.map((b) => (
-            <li key={b} className="flex items-start gap-2">
-              <Icon name="check" className={cx("mt-0.5 h-4 w-4", st.softText)} />
-              <span>{b}</span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-
-      {footer ? <div className="mt-5">{footer}</div> : null}
-
-      <div
-        className={cx(
-          "pointer-events-none absolute inset-0 rounded-3xl ring-2 opacity-0 transition group-hover:opacity-100",
-          st.ring
-        )}
-      />
+      <div className={cx("pointer-events-none absolute inset-0 rounded-3xl ring-2 opacity-0 transition group-hover:opacity-100", tones.ring)} />
     </div>
   );
 }
 
-function PricingCard({
-  name,
-  price,
-  note,
-  items,
-  cta,
-  featured,
-  tone,
-}: {
-  name: string;
-  price: string;
-  note: string;
-  items: string[];
-  cta: string;
-  featured?: boolean;
-  tone: "sky" | "indigo" | "emerald";
-}) {
-  const pillTone =
-    tone === "sky"
-      ? "border-sky-200 bg-sky-50 text-sky-700"
-      : tone === "emerald"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-      : "border-indigo-200 bg-indigo-50 text-indigo-700";
-
-  const buttonClass =
-    featured
-      ? "bg-gray-900 text-white hover:opacity-90"
-      : "border border-gray-200 bg-white text-gray-900 hover:bg-gray-50";
-
+function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-[34px] border border-gray-200 bg-white p-2 shadow-sm">
-      <div className="rounded-[28px] border border-gray-200 bg-white shadow-sm">
-        <div className="p-7">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-extrabold text-gray-900">{name}</div>
-            {featured ? (
-              <span className={cx("rounded-full border px-3 py-1 text-xs font-extrabold", pillTone)}>
-                Most popular
-              </span>
-            ) : (
-              <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", pillTone)}>
-                {tone === "sky" ? "Starter" : tone === "indigo" ? "Best value" : "Scale"}
-              </span>
-            )}
-          </div>
+    <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+      <div className="text-xs font-semibold text-white/70">{label}</div>
+      <div className="mt-1 text-xl font-extrabold tracking-tight text-white">{value}</div>
+    </div>
+  );
+}
 
-          <div className="mt-3 text-5xl font-extrabold tracking-tight text-gray-900">{price}</div>
-          <div className="mt-2 text-sm text-gray-600">{note}</div>
-
-          <ul className="mt-6 space-y-3 text-sm text-gray-700">
-            {items.map((x) => (
-              <li key={x} className="flex items-start gap-2">
-                <Icon name="check" className="mt-0.5 h-4 w-4 text-gray-900" />
-                <span>{x}</span>
-              </li>
-            ))}
-          </ul>
-
-          <a
-            href="/sign-in"
-            className={cx(
-              "mt-7 inline-flex w-full items-center justify-center rounded-2xl px-6 py-3 text-sm font-extrabold",
-              buttonClass
-            )}
-          >
-            {cta}
-          </a>
-
-          <div className="mt-3 text-xs text-gray-500">(Placeholder pricing)</div>
-        </div>
+function PhotoTile({
+  src,
+  label,
+}: {
+  src: string;
+  label: string;
+}) {
+  return (
+    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-black/20 shadow-2xl">
+      <div
+        className="h-44 w-full bg-cover bg-center"
+        style={{ backgroundImage: `url('${src}')` }}
+      />
+      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-transparent" />
+      <div className="absolute bottom-3 left-3">
+        <span className="rounded-full border border-white/15 bg-black/30 px-3 py-1 text-xs font-extrabold text-white">
+          {label}
+        </span>
       </div>
     </div>
   );
+}
+
+function Divider() {
+  return <div className="h-px w-full bg-gradient-to-r from-transparent via-gray-200 to-transparent" />;
 }
 
 export default async function HomePage() {
   const { userId } = await auth();
   if (userId) redirect("/admin");
 
+  // Industrial / service stock imagery (used as CSS backgrounds, no Next/Image config needed)
+  const heroImg =
+    "https://images.unsplash.com/photo-1581092918484-8313c8e7c9c5?auto=format&fit=crop&w=1800&q=80";
+  const tile1 =
+    "https://images.unsplash.com/photo-1557324232-b8917d3c3dcb?auto=format&fit=crop&w=1400&q=80";
+  const tile2 =
+    "https://images.unsplash.com/photo-1517048676732-d65bc937f952?auto=format&fit=crop&w=1400&q=80";
+  const tile3 =
+    "https://images.unsplash.com/photo-1581093588401-12c38a6c9f33?auto=format&fit=crop&w=1400&q=80";
+  const stripImg =
+    "https://images.unsplash.com/photo-1520607162513-77705c0f0d4a?auto=format&fit=crop&w=1800&q=80";
+
   return (
     <div className="min-h-screen bg-white text-gray-900">
       <MarketingTopNav />
 
-      {/* HERO — bright “Apple/Stripe clean” */}
-      <section className="relative overflow-hidden">
-        <div className="pointer-events-none absolute inset-0">
-          <div className="absolute -top-48 left-1/2 h-[520px] w-[980px] -translate-x-1/2 rounded-full bg-gradient-to-r from-indigo-200 via-sky-200 to-emerald-200 blur-3xl opacity-70" />
-          <div className="absolute -bottom-56 left-1/2 h-[480px] w-[920px] -translate-x-1/2 rounded-full bg-gradient-to-r from-fuchsia-200 via-amber-200 to-lime-200 blur-3xl opacity-50" />
-          <div className="absolute inset-0 bg-gradient-to-b from-white/70 via-white/80 to-white" />
+      {/* ================= HERO ================= */}
+      <section className="relative isolate overflow-hidden">
+        {/* Background photo */}
+        <div className="absolute inset-0">
+          <div
+            className="absolute inset-0 bg-cover bg-center"
+            style={{ backgroundImage: `url('${heroImg}')` }}
+          />
+          {/* Contrast */}
+          <div className="absolute inset-0 bg-black/70" />
+          {/* “Brushed steel” + “blueprint grid” overlays (no external assets) */}
+          <svg className="absolute inset-0 h-full w-full opacity-[0.22]" aria-hidden="true">
+            <defs>
+              <pattern id="grid" width="72" height="72" patternUnits="userSpaceOnUse">
+                <path d="M72 0H0V72" fill="none" stroke="rgba(255,255,255,0.10)" strokeWidth="1" />
+                <path d="M36 0V72M0 36H72" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+              </pattern>
+              <linearGradient id="steel" x1="0" x2="1">
+                <stop offset="0" stopColor="rgba(255,255,255,0.06)" />
+                <stop offset="0.2" stopColor="rgba(255,255,255,0.02)" />
+                <stop offset="0.5" stopColor="rgba(255,255,255,0.10)" />
+                <stop offset="0.8" stopColor="rgba(255,255,255,0.03)" />
+                <stop offset="1" stopColor="rgba(255,255,255,0.06)" />
+              </linearGradient>
+              <pattern id="brushed" width="6" height="6" patternUnits="userSpaceOnUse">
+                <rect width="6" height="6" fill="rgba(0,0,0,0)" />
+                <path d="M0 1H6M0 3H6M0 5H6" stroke="url(#steel)" strokeWidth="1" />
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#grid)" />
+            <rect width="100%" height="100%" fill="url(#brushed)" />
+          </svg>
+          {/* Vignette */}
+          <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-black/60 to-black/85" />
         </div>
 
-        <div className="relative mx-auto max-w-6xl px-4 pt-12 pb-10 sm:px-6 sm:pt-16 sm:pb-16">
-          <div className="grid gap-10 lg:grid-cols-2 lg:gap-12">
+        <div className="relative mx-auto max-w-6xl px-4 py-14 sm:px-6 sm:py-20">
+          <div className="grid gap-10 lg:grid-cols-[1.2fr_0.8fr] lg:items-start">
+            {/* Left */}
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <Badge tone="ai">
+                <Pill>
                   <Icon name="spark" className="h-4 w-4" />
-                  AI-Powered
-                </Badge>
-                <Badge tone="good">Built for service business owners</Badge>
-                <Badge>Photos → Estimate → Close</Badge>
+                  AI-as-a-Service for Main Street
+                </Pill>
+                <Pill>
+                  <Icon name="wrench" className="h-4 w-4" />
+                  Built for working owners
+                </Pill>
               </div>
 
-              <h1 className="mt-6 text-4xl font-extrabold tracking-tight sm:text-6xl">
-                Quote jobs from photos{" "}
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 via-sky-600 to-emerald-600">
-                  in seconds
-                </span>
-                .
+              <h1 className="mt-6 text-4xl font-extrabold tracking-tight text-white sm:text-6xl">
+                Industrial-speed quoting.
+                <br />
+                <span className="text-white/70">From photos to estimate drafts.</span>
               </h1>
 
-              <p className="mt-5 max-w-xl text-lg text-gray-700">
-                Customers upload photos and answer a few quick questions. AI generates a quote-ready scope
-                summary, estimate range, and smart follow-ups — with optional “after” concept renderings to help
-                you win bigger jobs.
+              <p className="mt-6 max-w-2xl text-lg text-white/80">
+                AI Photo Quote turns customer photos into a structured scope, estimate range, and follow-up questions —
+                so you can respond fast, stay consistent, and close more jobs without living in your inbox.
               </p>
 
-              <div className="mt-7 flex flex-wrap gap-3">
+              <div className="mt-8 flex flex-wrap gap-3">
                 <a
-                  href="/sign-in"
-                  className="inline-flex items-center justify-center rounded-2xl bg-gray-900 px-6 py-3 text-sm font-extrabold text-white shadow-sm hover:opacity-90"
+                  href="/sign-up"
+                  className="inline-flex items-center justify-center rounded-2xl bg-white px-6 py-3 text-sm font-extrabold text-gray-950 shadow-lg hover:bg-gray-100"
                 >
-                  Start free
+                  Create account
                 </a>
                 <a
-                  href="#demo"
-                  className="inline-flex items-center justify-center rounded-2xl border border-gray-200 bg-white px-6 py-3 text-sm font-semibold text-gray-900 shadow-sm hover:bg-gray-50"
+                  href="#how-it-works"
+                  className="inline-flex items-center justify-center rounded-2xl border border-white/20 bg-white/5 px-6 py-3 text-sm font-semibold text-white hover:bg-white/10"
                 >
-                  See it in action
+                  See the workflow
                 </a>
               </div>
 
-              <div className="mt-8 grid gap-3 sm:grid-cols-3">
-                {[
-                  ["Save time", "Stop typing quotes at night."],
-                  ["Fewer wasted trips", "AI flags when inspection is needed."],
-                  ["Close more jobs", "Fast replies stay top-of-mind."],
-                ].map(([t, d]) => (
-                  <PopCard
-                    key={t}
-                    tone={t === "Save time" ? "indigo" : t === "Fewer wasted trips" ? "emerald" : "sky"}
-                    icon={<Icon name={t === "Save time" ? "bolt" : t === "Fewer wasted trips" ? "check" : "mail"} />}
-                    title={t}
-                    desc={d}
-                  />
-                ))}
+              <div className="mt-10 grid gap-3 sm:grid-cols-3">
+                <Stat label="Speed" value="Seconds per draft" />
+                <Stat label="Clarity" value="Scope + assumptions" />
+                <Stat label="Control" value="You set final price" />
               </div>
 
-              <div className="mt-7 flex flex-wrap gap-x-6 gap-y-2 text-sm text-gray-600">
+              <div className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-sm text-white/70">
                 {[
                   "Upholstery • Marine • Roofing • Paving • Remodeling",
-                  "Branded lead + customer receipt emails",
-                  "Optional AI “after” render toggle",
+                  "Branded owner alerts + customer receipts",
+                  "Optional AI “after” concept render toggle",
                 ].map((x) => (
                   <div key={x} className="inline-flex items-center gap-2">
-                    <span className="h-1.5 w-1.5 rounded-full bg-gray-400" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-white/40" />
                     {x}
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Right: light “product snapshot” with clean borders */}
-            <div id="demo" className="relative">
-              <div className="rounded-[34px] border border-gray-200 bg-white shadow-xl">
-                <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-                  <div className="text-sm font-extrabold text-gray-900">AI Estimate Preview</div>
-                  <div className="text-xs font-semibold text-gray-500">Example output</div>
-                </div>
-
-                <div className="p-6">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
-                      <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                        <Icon name="camera" className="h-4 w-4" />
-                        Customer photos
-                      </div>
-                      <div className="mt-3 grid grid-cols-3 gap-2">
-                        {Array.from({ length: 6 }).map((_, i) => (
-                          <div
-                            key={i}
-                            className="aspect-square rounded-2xl border border-gray-200 bg-gradient-to-br from-gray-50 to-gray-100"
-                          />
-                        ))}
-                      </div>
-                      <div className="mt-3 text-xs text-gray-500">Upload → AI analysis → draft estimate</div>
-                    </div>
-
-                    <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-sm font-semibold text-gray-700">AI assessment</div>
-                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-extrabold text-emerald-700">
-                          Confidence: High
-                        </span>
-                      </div>
-
-                      <div className="mt-3 space-y-3">
-                        <div>
-                          <div className="text-sm font-extrabold text-gray-900">Scope summary</div>
-                          <div className="mt-1 text-sm text-gray-600">
-                            Quote-ready scope, assumptions, and what to ask next — based on what’s visible.
-                          </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
-                          <div className="text-xs font-semibold text-gray-500">Estimate range</div>
-                          <div className="mt-1 text-2xl font-extrabold tracking-tight text-gray-900">
-                            $1,250 – $1,950
-                          </div>
-                          <div className="mt-1 text-xs text-gray-500">Includes assumptions + follow-ups</div>
-                        </div>
-
-                        <div className="grid gap-2 text-sm text-gray-700">
-                          {["Inspection required flag", "Assumptions included", "Follow-up questions"].map((x) => (
-                            <div key={x} className="flex items-start gap-2">
-                              <Icon name="check" className="mt-0.5 h-4 w-4 text-gray-900" />
-                              <span>{x}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 rounded-3xl border border-gray-200 bg-white p-4 shadow-sm">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                        <Icon name="wand" className="h-4 w-4" />
-                        Optional AI “after” concept render
-                      </div>
-                      <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-extrabold text-sky-700">
-                        Toggle per business
-                      </span>
-                    </div>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <div className="aspect-[16/9] rounded-2xl border border-gray-200 bg-gradient-to-br from-gray-50 to-gray-100" />
-                      <div className="aspect-[16/9] rounded-2xl border border-gray-200 bg-gradient-to-br from-gray-50 to-gray-100" />
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                    {[
-                      ["Owner alert", "Lead email with photos + AI summary."],
-                      ["Customer receipt", "Branded confirmation email."],
-                      ["Dashboard", "Track stages, notes, follow-ups."],
-                    ].map(([t, d], idx) => (
-                      <PopCard
-                        key={t}
-                        tone={idx === 0 ? "amber" : idx === 1 ? "sky" : "indigo"}
-                        icon={<Icon name={idx === 0 ? "mail" : idx === 1 ? "mail" : "bolt"} />}
-                        title={t}
-                        desc={d}
-                      />
-                    ))}
-                  </div>
+            {/* Right: graphical collage + “sample output” */}
+            <div className="space-y-4">
+              <div className="grid gap-4">
+                <PhotoTile src={tile1} label="Job Photos" />
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-2">
+                  <PhotoTile src={tile2} label="Customer Intake" />
+                  <PhotoTile src={tile3} label="Shop Workflow" />
                 </div>
               </div>
 
-              {/* subtle callout */}
-              <div className="pointer-events-none absolute -bottom-6 left-6 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-sm font-extrabold text-gray-900 shadow-lg">
-                Respond faster. Win more.
+              <div className="rounded-3xl border border-white/10 bg-black/35 p-5 backdrop-blur">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-extrabold text-white">Example AI Draft Output</div>
+                  <span className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-extrabold text-white/80">
+                    Preview
+                  </span>
+                </div>
+
+                <div className="mt-4 rounded-2xl border border-white/10 bg-black/40 p-4">
+                  <div className="grid gap-3 text-sm text-white/85">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="font-semibold text-white/70">Confidence</div>
+                      <div className="font-extrabold">High</div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="font-semibold text-white/70">Inspection</div>
+                      <div className="font-extrabold">Not required</div>
+                    </div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="font-semibold text-white/70">Estimate range</div>
+                      <div className="font-extrabold">$1,250 – $1,950</div>
+                    </div>
+                    <Divider />
+                    <div className="text-xs font-semibold text-white/60">Included:</div>
+                    <div className="grid gap-2">
+                      {["Scope summary", "Assumptions", "Follow-up questions"].map((x) => (
+                        <div key={x} className="flex items-start gap-2">
+                          <Icon name="check" className="mt-0.5 h-4 w-4 text-white" />
+                          <span className="text-sm text-white/80">{x}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex gap-2">
+                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/75">
+                    <Icon name="mail" className="h-4 w-4" /> Owner alert
+                  </span>
+                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/75">
+                    <Icon name="mail" className="h-4 w-4" /> Customer receipt
+                  </span>
+                </div>
               </div>
             </div>
           </div>
-
-          {/* space for callout */}
-          <div className="h-10 sm:h-14" />
-        </div>
-      </section>
-
-      {/* HOW IT WORKS — POP cards */}
-      <section id="how-it-works" className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 className="text-3xl font-extrabold tracking-tight">How it works</h2>
-            <p className="mt-2 max-w-2xl text-gray-600">
-              A simple, repeatable process your business can run every day.
-            </p>
-          </div>
-          <a
-            href="/sign-in"
-            className="inline-flex items-center justify-center rounded-2xl bg-gray-900 px-5 py-2.5 text-sm font-extrabold text-white hover:opacity-90"
-          >
-            Try it now
-          </a>
         </div>
 
-        <div className="mt-8 rounded-[34px] border border-gray-200 bg-white p-6 shadow-sm">
-          <div className="grid gap-4 lg:grid-cols-4">
-            <PopCard
-              tone="sky"
-              icon={<Icon name="camera" className="h-5 w-5" />}
-              corner="1/4"
-              title="Customer uploads"
-              desc="Photos + quick details."
-            />
-            <PopCard
-              tone="indigo"
-              icon={<Icon name="bolt" className="h-5 w-5" />}
-              corner="2/4"
-              title="AI analyzes"
-              desc="Scope + range + questions."
-            />
-            <PopCard
-              tone="emerald"
-              icon={<Icon name="check" className="h-5 w-5" />}
-              corner="3/4"
-              title="You review"
-              desc="Approve and progress the lead."
-            />
-            <PopCard
-              tone="amber"
-              icon={<Icon name="mail" className="h-5 w-5" />}
-              corner="4/4"
-              title="Send & close"
-              desc="Branded receipt + optional render."
-            />
+        {/* “logo strip” style divider */}
+        <div className="relative border-t border-white/10 bg-black/65">
+          <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-white/55">
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">Upholstery</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">Roofing</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">Paving</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">Remodeling</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">Marine</span>
+              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">Specialty Trades</span>
+            </div>
           </div>
         </div>
       </section>
 
-      {/* FEATURES — now converted to POP cards */}
-      <section id="features" className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
-        <div className="grid gap-6 lg:grid-cols-2">
-          <PopCard
-            tone="indigo"
-            icon={<Icon name="spark" className="h-5 w-5" />}
-            corner={<span>Owner-first</span>}
-            title="Designed for owners"
-            desc="AI Photo Quote helps you respond faster and win more jobs — without adding admin work."
-            bullets={[
-              "Generate quote-ready drafts in seconds",
-              "Flag when inspection is truly needed",
-              "Optional renderings help sell the vision",
-              "Branded receipts make you look pro",
-            ]}
-            footer={
-              <a
-                href="/sign-in"
-                className="inline-flex items-center gap-2 rounded-2xl bg-gray-900 px-6 py-3 text-sm font-extrabold text-white hover:opacity-90"
-              >
-                Start free <Icon name="arrow" className="h-4 w-4" />
-              </a>
-            }
-          />
+      {/* ================= WHY IT EXISTS ================= */}
+      <section className="bg-white py-16">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="grid gap-10 lg:grid-cols-2 lg:items-start">
+            <div>
+              <div className="text-xs font-extrabold tracking-widest uppercase text-gray-500">The reality</div>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">
+                Most owners are still quoting at night.
+              </h2>
+              <p className="mt-4 text-lg text-gray-600">
+                Wasted trips, slow responses, and inconsistent estimates cost you real money. This is the
+                “digital estimator” your business should’ve had years ago.
+              </p>
 
-          <div className="grid gap-4">
-            <PopCard
-              tone="sky"
-              icon={<Icon name="bolt" className="h-5 w-5" />}
-              title="Instant AI estimate drafts"
-              desc="Structured scope + estimate ranges + follow-up questions."
-            />
-            <PopCard
-              tone="emerald"
-              icon={<Icon name="camera" className="h-5 w-5" />}
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                <SteelCard
+                  tone="steel"
+                  icon={<Icon name="clock" />}
+                  title="Faster response"
+                  desc="Reply while the customer is still shopping — not tomorrow."
+                />
+                <SteelCard
+                  tone="blueprint"
+                  icon={<Icon name="chart" />}
+                  title="Consistent drafts"
+                  desc="Same quality output every time — with assumptions spelled out."
+                />
+              </div>
+            </div>
+
+            <div className="rounded-[34px] border border-gray-200 bg-gradient-to-b from-gray-50 to-white p-6 shadow-sm">
+              <div className="text-sm font-extrabold text-gray-900">Before vs After</div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
+                  <div className="text-xs font-extrabold text-gray-500 uppercase">Before</div>
+                  <ul className="mt-3 space-y-2 text-sm text-gray-700">
+                    {[
+                      "Inbox chaos",
+                      "Scope written from scratch",
+                      "Pricing logic varies",
+                      "Slow follow-up",
+                    ].map((x) => (
+                      <li key={x} className="flex items-start gap-2">
+                        <span className="mt-1 h-2 w-2 rounded-full bg-gray-300" />
+                        <span>{x}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
+                  <div className="text-xs font-extrabold text-gray-500 uppercase">After</div>
+                  <ul className="mt-3 space-y-2 text-sm text-gray-700">
+                    {[
+                      "Structured lead record",
+                      "AI scope + assumptions",
+                      "Estimate range draft",
+                      "Follow-ups generated",
+                    ].map((x) => (
+                      <li key={x} className="flex items-start gap-2">
+                        <Icon name="check" className="mt-0.5 h-4 w-4 text-gray-900" />
+                        <span>{x}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                <span className="font-extrabold">Owner-friendly AI:</span> no prompts, no tinkering — just a repeatable
+                quoting workflow.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ================= HOW IT WORKS (graphical) ================= */}
+      <section id="how-it-works" className="bg-gray-50 py-16">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="text-xs font-extrabold tracking-widest uppercase text-gray-500">The workflow</div>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">
+                A quoting pipeline that looks like work — not software.
+              </h2>
+              <p className="mt-4 max-w-3xl text-lg text-gray-600">
+                Capture → Analyze → Review → Send. Each step produces something you can actually use.
+              </p>
+            </div>
+            <a
+              href="/sign-up"
+              className="inline-flex items-center justify-center rounded-2xl bg-gray-900 px-6 py-3 text-sm font-extrabold text-white hover:opacity-90"
+            >
+              Create account <Icon name="arrow" className="h-4 w-4" />
+            </a>
+          </div>
+
+          <div className="mt-10 rounded-[34px] border border-gray-200 bg-white p-6 shadow-sm">
+            {/* Graphical pipeline */}
+            <div className="grid gap-4 lg:grid-cols-4">
+              {[
+                { t: "1) Capture", d: "Customer uploads photos + quick details.", i: "camera" as const, tone: "steel" as const },
+                { t: "2) Analyze", d: "AI generates scope, assumptions, range, questions.", i: "bolt" as const, tone: "blueprint" as const },
+                { t: "3) Review", d: "You adjust/approve and progress the lead.", i: "check" as const, tone: "steel" as const },
+                { t: "4) Send", d: "Owner alert + customer receipt. Optional render.", i: "mail" as const, tone: "olive" as const },
+              ].map((s) => (
+                <SteelCard
+                  key={s.t}
+                  tone={s.tone}
+                  icon={<Icon name={s.i} />}
+                  title={s.t}
+                  desc={s.d}
+                />
+              ))}
+            </div>
+
+            <div className="mt-6 rounded-3xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="text-sm font-extrabold text-gray-900">What you get every time</div>
+                  <div className="mt-1 text-sm text-gray-600">A repeatable output package you can send or refine.</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {["Scope", "Assumptions", "Estimate range", "Follow-ups", "Confidence flag"].map((x) => (
+                    <span key={x} className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-700">
+                      {x}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ================= FEATURE GRID (meat) ================= */}
+      <section id="features" className="bg-white py-16">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="text-xs font-extrabold tracking-widest uppercase text-gray-500">What’s inside</div>
+          <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">
+            Built like a tool — not a toy.
+          </h2>
+          <p className="mt-4 max-w-3xl text-lg text-gray-600">
+            Everything here is designed to move jobs through your pipeline faster and cleaner.
+          </p>
+
+          <div className="mt-10 grid gap-4 lg:grid-cols-3">
+            <SteelCard
+              tone="steel"
+              icon={<Icon name="camera" />}
               title="Photo-first intake"
-              desc="Works with real-world customer photos — not perfect studio shots."
+              desc="Optimized for real customer photos — not perfect studio shots."
             />
-            <PopCard
-              tone="fuchsia"
-              icon={<Icon name="wand" className="h-5 w-5" />}
-              title="Optional AI “after” concept renders"
-              desc="Help customers visualize the result and increase upsells."
+            <SteelCard
+              tone="blueprint"
+              icon={<Icon name="bolt" />}
+              title="AI estimate drafts"
+              desc="Consistent scope + assumptions + estimate ranges you can refine."
             />
-            <PopCard
-              tone="amber"
-              icon={<Icon name="mail" className="h-5 w-5" />}
-              title="Automatic branded emails"
-              desc="Owner lead alerts + customer receipts sent instantly."
+            <SteelCard
+              tone="olive"
+              icon={<Icon name="shield" />}
+              title="Confidence + inspection flag"
+              desc="Know when you can quote remotely vs. when a site visit is required."
+            />
+            <SteelCard
+              tone="steel"
+              icon={<Icon name="mail" />}
+              title="Automatic emails"
+              desc="Owner alerts + customer receipts sent instantly with your branding."
+            />
+            <SteelCard
+              tone="blueprint"
+              icon={<Icon name="chart" />}
+              title="Admin pipeline"
+              desc="Stage leads, track follow-ups, and keep your quoting organized."
+            />
+            <SteelCard
+              tone="olive"
+              icon={<Icon name="wrench" />}
+              title="Optional concept renders"
+              desc="Help customers visualize the finished work — great for upgrades and higher-ticket jobs."
             />
           </div>
         </div>
+      </section>
 
-        {/* industries */}
-        <div className="mt-6">
-          <PopCard
-            tone="slate"
-            icon={<Icon name="check" className="h-5 w-5" />}
-            corner={<span>Flexible</span>}
-            title="Works across industries"
-            desc="If your customers can snap a picture of the job, you can quote faster with AI."
-            footer={
-              <div className="mt-1 flex flex-wrap gap-2">
-                {[
-                  "Marine & Auto Upholstery",
-                  "Roofing",
-                  "Paving & Concrete",
-                  "Remodeling",
-                  "Landscaping",
-                  "Specialty Trades",
-                ].map((x) => (
-                  <span
-                    key={x}
-                    className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-700"
-                  >
+      {/* ================= INDUSTRIAL STRIP (graphic / photo) ================= */}
+      <section className="relative overflow-hidden py-16">
+        <div
+          className="absolute inset-0 bg-cover bg-center"
+          style={{ backgroundImage: `url('${stripImg}')` }}
+        />
+        <div className="absolute inset-0 bg-slate-950/80" />
+        <svg className="absolute inset-0 h-full w-full opacity-[0.18]" aria-hidden="true">
+          <defs>
+            <pattern id="diag" width="18" height="18" patternUnits="userSpaceOnUse" patternTransform="rotate(25)">
+              <path d="M0 9H18" stroke="rgba(255,255,255,0.12)" strokeWidth="2" />
+              <path d="M0 9H18" stroke="rgba(255,255,255,0.05)" strokeWidth="6" />
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#diag)" />
+        </svg>
+
+        <div className="relative mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
+            <div className="text-white">
+              <div className="text-xs font-extrabold tracking-widest uppercase text-white/60">
+                AIaaS for service owners
+              </div>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight sm:text-4xl">
+                You don’t need “AI.” You need jobs to close.
+              </h2>
+              <p className="mt-4 text-lg text-white/75">
+                AI Photo Quote runs behind the scenes like an estimator who never gets tired: consistent drafts,
+                faster replies, cleaner records.
+              </p>
+
+              <div className="mt-6 flex flex-wrap gap-2">
+                {["No prompt engineering", "Owner controls final price", "Optional renders", "Works across trades"].map((x) => (
+                  <span key={x} className="rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-semibold text-white/80">
                     {x}
                   </span>
                 ))}
               </div>
-            }
-          />
+
+              <div className="mt-8 flex flex-wrap gap-3">
+                <a
+                  href="/sign-up"
+                  className="inline-flex items-center justify-center rounded-2xl bg-white px-6 py-3 text-sm font-extrabold text-gray-950 hover:bg-gray-100"
+                >
+                  Create account
+                </a>
+                <a
+                  href="/sign-in"
+                  className="inline-flex items-center justify-center rounded-2xl border border-white/20 bg-white/5 px-6 py-3 text-sm font-semibold text-white hover:bg-white/10"
+                >
+                  Sign in
+                </a>
+              </div>
+            </div>
+
+            <div className="rounded-[34px] border border-white/10 bg-white/5 p-6 backdrop-blur">
+              <div className="text-sm font-extrabold text-white">“Owner language” marketing, not tech-speak</div>
+              <div className="mt-4 grid gap-3">
+                {[
+                  ["Fewer wasted trips", "Confidence flag tells you when a visit is needed."],
+                  ["Faster replies", "Send a clean draft while competitors are still “getting back to them.”"],
+                  ["More consistency", "Same structure every estimate — easier to scale."],
+                ].map(([t, d]) => (
+                  <div key={t} className="rounded-3xl border border-white/10 bg-black/25 p-4">
+                    <div className="text-sm font-extrabold text-white">{t}</div>
+                    <div className="mt-1 text-sm text-white/75">{d}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      {/* PRICING */}
-      <section id="pricing" className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
-        <h2 className="text-3xl font-extrabold tracking-tight">Pricing</h2>
-        <p className="mt-2 max-w-2xl text-gray-600">
-          Placeholder tiers for now — we’ll wire these to your real SaaS billing when ready.
-        </p>
-
-        <div className="mt-8 grid gap-4 lg:grid-cols-3">
-          <PricingCard
-            name="Starter"
-            price="$0"
-            note="Try it and prove the workflow."
-            items={["AI estimate drafts", "Lead capture page", "Basic admin workflow", "Email receipts"]}
-            cta="Start free"
-            tone="sky"
-          />
-          <PricingCard
-            name="Pro"
-            price="$29"
-            note="Best for most shops."
-            items={["Everything in Starter", "Smarter follow-up questions", "Business settings", "Cleaner workflow"]}
-            cta="Choose Pro"
-            featured
-            tone="indigo"
-          />
-          <PricingCard
-            name="Scale"
-            price="$79"
-            note="Higher volume and teams."
-            items={["Everything in Pro", "Optional AI concept render", "More customization", "Team workflows"]}
-            cta="Choose Scale"
-            tone="emerald"
-          />
-        </div>
-      </section>
-
-      {/* FAQ — POP cards */}
-      <section className="mx-auto max-w-6xl px-4 py-14 sm:px-6">
-        <div className="rounded-[34px] border border-gray-200 bg-white p-8 shadow-sm">
-          <h2 className="text-3xl font-extrabold tracking-tight">FAQ</h2>
-
-          <div className="mt-8 grid gap-4 lg:grid-cols-2">
-            <PopCard
-              tone="indigo"
-              icon={<Icon name="spark" className="h-5 w-5" />}
-              title="Does AI replace my pricing?"
-              desc="No. It accelerates a quote-ready draft. You stay in control of the final number."
-            />
-            <PopCard
-              tone="emerald"
-              icon={<Icon name="check" className="h-5 w-5" />}
-              title="What if photos are bad?"
-              desc="AI asks better follow-up questions and can flag inspection-required when confidence is low."
-            />
-            <PopCard
-              tone="fuchsia"
-              icon={<Icon name="wand" className="h-5 w-5" />}
-              title="Do I have to use AI renderings?"
-              desc="No. It’s optional and can be toggled per business."
-            />
-            <PopCard
-              tone="amber"
-              icon={<Icon name="camera" className="h-5 w-5" />}
-              title="What businesses does this work for?"
-              desc="Any service business quoting from photos: upholstery, roofing, paving, remodeling, landscaping, and more."
-            />
+      {/* ================= PRICING (simple placeholder) ================= */}
+      <section id="pricing" className="bg-white py-16">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <div className="text-xs font-extrabold tracking-widest uppercase text-gray-500">Pricing</div>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">
+                Simple tiers. Built for real shops.
+              </h2>
+              <p className="mt-4 max-w-3xl text-lg text-gray-600">
+                Placeholder tiers for now — we’ll wire billing to your real SaaS plans next.
+              </p>
+            </div>
           </div>
 
-          <div className="mt-10 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
-            <div className="text-sm text-gray-600">Ready to see it on your business?</div>
-            <div className="flex flex-wrap gap-3">
-              <a
-                href="/sign-in"
-                className="inline-flex items-center justify-center rounded-2xl bg-gray-900 px-6 py-3 text-sm font-extrabold text-white hover:opacity-90"
-              >
-                Start free
-              </a>
-              <a
-                href="#features"
-                className="inline-flex items-center justify-center rounded-2xl border border-gray-200 bg-white px-6 py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50"
-              >
-                Review features
-              </a>
+          <div className="mt-10 grid gap-4 lg:grid-cols-3">
+            <SteelCard tone="steel" icon={<Icon name="check" />} title="Starter" desc="$0 — prove the workflow." />
+            <SteelCard tone="blueprint" icon={<Icon name="bolt" />} title="Pro" desc="$29 — best for most shops." />
+            <SteelCard tone="olive" icon={<Icon name="shield" />} title="Scale" desc="$79 — higher volume & teams." />
+          </div>
+
+          <div className="mt-8 rounded-[34px] border border-gray-200 bg-gray-50 p-8 shadow-sm">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-2xl font-extrabold tracking-tight text-gray-900">
+                  Put quoting on autopilot this week.
+                </div>
+                <div className="mt-1 text-sm text-gray-600">
+                  Create an account, publish your intake link, and start capturing photo-based leads.
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <a
+                  href="/sign-up"
+                  className="inline-flex items-center justify-center rounded-2xl bg-gray-900 px-6 py-3 text-sm font-extrabold text-white hover:opacity-90"
+                >
+                  Create account
+                </a>
+                <a
+                  href="/sign-in"
+                  className="inline-flex items-center justify-center rounded-2xl border border-gray-200 bg-white px-6 py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                >
+                  Sign in
+                </a>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
       {/* FOOTER */}
-      <footer className="mx-auto max-w-6xl px-4 pb-16 sm:px-6">
-        <div className="flex flex-col items-start justify-between gap-6 border-t border-gray-200 pt-8 sm:flex-row sm:items-center">
-          <div>
-            <div className="text-sm font-extrabold tracking-tight text-gray-900">AI Photo Quote</div>
-            <div className="mt-1 text-sm text-gray-600">
-              AI-powered estimating that helps service businesses respond faster and win more.
+      <footer className="bg-white pb-14">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="border-t border-gray-200 pt-8">
+            <div className="flex flex-col items-start justify-between gap-6 sm:flex-row sm:items-center">
+              <div>
+                <div className="text-sm font-extrabold tracking-tight text-gray-900">AI Photo Quote</div>
+                <div className="mt-1 text-sm text-gray-600">
+                  AI-powered estimating that helps service businesses respond faster and win more.
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 text-sm">
+                {[
+                  ["How it works", "#how-it-works"],
+                  ["Features", "#features"],
+                  ["Pricing", "#pricing"],
+                ].map(([t, href]) => (
+                  <a key={t} href={href} className="rounded-xl px-3 py-2 font-semibold text-gray-700 hover:bg-gray-50">
+                    {t}
+                  </a>
+                ))}
+                <a
+                  href="/sign-in"
+                  className="rounded-xl border border-gray-200 bg-white px-3 py-2 font-extrabold text-gray-900 hover:bg-gray-50"
+                >
+                  Sign in
+                </a>
+                <a
+                  href="/sign-up"
+                  className="rounded-xl bg-gray-900 px-3 py-2 font-extrabold text-white hover:opacity-90"
+                >
+                  Create account
+                </a>
+              </div>
             </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2 text-sm">
-            {[
-              ["How it works", "#how-it-works"],
-              ["Features", "#features"],
-              ["Pricing", "#pricing"],
-            ].map(([t, href]) => (
-              <a
-                key={t}
-                href={href}
-                className="rounded-xl px-3 py-2 font-semibold text-gray-700 hover:bg-gray-50"
-              >
-                {t}
-              </a>
-            ))}
-            <a
-              href="/sign-in"
-              className="rounded-xl bg-gray-900 px-3 py-2 font-extrabold text-white hover:opacity-90"
-            >
-              Sign in
-            </a>
           </div>
         </div>
       </footer>

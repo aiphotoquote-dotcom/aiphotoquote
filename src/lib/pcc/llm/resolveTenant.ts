@@ -2,7 +2,14 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { tenantSettings, tenantPricingRules } from "@/lib/db/schema";
-import { getPlatformLlm } from "./apply";
+
+import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+
+import { getTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
+import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
+
+import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+import { getIndustryLlmPack } from "@/lib/pcc/llm/industryStore";
 
 type PricingModel =
   | "flat_per_job"
@@ -51,33 +58,91 @@ function safePricingModel(v: unknown): PricingModel | null {
 }
 
 /**
+ * ✅ Unified render opt-in rules:
+ * - If rendering disabled => false
+ * - If opt-in required:
+ *    - customerOptIn true => true
+ *    - missing/false => false
+ * - If opt-in NOT required:
+ *    - default true (unless explicitly false provided)
+ */
+export function computeRenderOptIn(args: {
+  tenantRenderEnabled: boolean;
+  renderCustomerOptInRequired: boolean;
+  customerOptIn: boolean | null | undefined;
+}): boolean {
+  const { tenantRenderEnabled, renderCustomerOptInRequired, customerOptIn } = args;
+
+  if (!tenantRenderEnabled) return false;
+
+  if (renderCustomerOptInRequired) {
+    return customerOptIn === true;
+  }
+
+  if (customerOptIn === false) return false;
+  return true;
+}
+
+/**
+ * Minimal runtime guard for the platform cfg shape expected by buildEffectiveLlmConfig.
+ * We avoid importing a type that may not be exported in this branch.
+ */
+function normalizePlatformCfg(platformAny: any) {
+  const cfg = platformAny?.cfg ?? platformAny;
+
+  const ok =
+    cfg &&
+    typeof cfg === "object" &&
+    typeof cfg.version === "number" &&
+    typeof cfg.updatedAt === "string" &&
+    cfg.models &&
+    typeof cfg.models === "object" &&
+    typeof cfg.models.estimatorModel === "string" &&
+    typeof cfg.models.qaModel === "string" &&
+    cfg.prompts &&
+    typeof cfg.prompts === "object" &&
+    typeof cfg.prompts.quoteEstimatorSystem === "string" &&
+    typeof cfg.prompts.qaQuestionGeneratorSystem === "string" &&
+    cfg.guardrails &&
+    typeof cfg.guardrails === "object" &&
+    Array.isArray(cfg.guardrails.blockedTopics) &&
+    typeof cfg.guardrails.maxQaQuestions === "number";
+
+  if (!ok) {
+    const e: any = new Error("PLATFORM_LLM_CONFIG_INVALID");
+    e.code = "PLATFORM_LLM_CONFIG_INVALID";
+    throw e;
+  }
+
+  return cfg as any;
+}
+
+/**
  * Tenant + PCC resolver:
- * - PCC provides defaults + allowed guardrails
- * - Tenant can override via settings (drop-down selection stored in DB)
- * - NO env vars for tenant model selection
+ * - PCC provides platform defaults + guardrails
+ * - Industry pack (DB) layered in
+ * - Tenant overrides via tenant_llm_overrides (jsonb)
+ * - TenantSettings provides feature toggles (rendering/QA/pricing gates)
  */
 export async function resolveTenantLlm(tenantId: string) {
-  const platform = await getPlatformLlm();
+  // getPlatformLlm() may return either cfg or a bundle depending on branch
+  const platformAny: any = await getPlatformLlm();
+  const platformCfg = normalizePlatformCfg(platformAny);
 
   const settings = await db
     .select({
-      // AI toggles + render prefs
       aiRenderingEnabled: tenantSettings.aiRenderingEnabled,
+      renderingEnabled: tenantSettings.renderingEnabled, // legacy
       renderingStyle: tenantSettings.renderingStyle,
       renderingNotes: tenantSettings.renderingNotes,
       renderingCustomerOptInRequired: tenantSettings.renderingCustomerOptInRequired,
 
-      // Live QA
       liveQaEnabled: tenantSettings.liveQaEnabled,
       liveQaMaxQuestions: tenantSettings.liveQaMaxQuestions,
 
-      // Optional: model selector stored in DB (if you add it later)
       aiMode: tenantSettings.aiMode,
 
-      // ✅ PRICING gate (numbers allowed)
       pricingEnabled: tenantSettings.pricingEnabled,
-
-      // ✅ Pricing model + config (hybrid)
       pricingModel: tenantSettings.pricingModel,
 
       flatRateDefault: tenantSettings.flatRateDefault,
@@ -92,13 +157,16 @@ export async function resolveTenantLlm(tenantId: string) {
 
       assessmentFeeAmount: tenantSettings.assessmentFeeAmount,
       assessmentFeeCreditTowardJob: tenantSettings.assessmentFeeCreditTowardJob,
+
+      industryKey: tenantSettings.industryKey,
+
+      planTier: tenantSettings.planTier,
     })
     .from(tenantSettings)
     .where(eq(tenantSettings.tenantId, tenantId))
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // Pricing guardrails (optional — used in prompts later if you want)
   const pricingRules = await db
     .select({
       minJob: tenantPricingRules.minJob,
@@ -114,55 +182,60 @@ export async function resolveTenantLlm(tenantId: string) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // Model selection (PCC defaults for now)
-  const estimatorModel = platform.models.estimatorModel;
-  const qaModel = platform.models.qaModel;
-  const renderModel = platform.models.renderModel;
+  const tenantRow = await getTenantLlmOverrides(tenantId);
+  const tenantOverrides: TenantLlmOverrides | null = tenantRow
+    ? normalizeTenantOverrides({
+        models: tenantRow.models ?? {},
+        prompts: tenantRow.prompts ?? {},
+        updatedAt: tenantRow.updatedAt ?? undefined,
+      })
+    : null;
 
-  const tenantRenderEnabled = settings?.aiRenderingEnabled === true;
+  const industryKey = safeTrim(settings?.industryKey).toLowerCase() || null;
+  const industryPack = await getIndustryLlmPack(industryKey);
+
+  const effectiveBundle = buildEffectiveLlmConfig({
+    platform: platformCfg,
+    industry: industryPack,
+    tenant: tenantOverrides,
+  });
+
+  const effective = effectiveBundle.effective;
+
+  const tenantRenderEnabled = settings?.aiRenderingEnabled === true || settings?.renderingEnabled === true;
   const renderCustomerOptInRequired = settings?.renderingCustomerOptInRequired === true;
 
-  // Live QA caps: tenant can only lower, PCC caps the max.
   const tenantQaEnabled = settings?.liveQaEnabled === true;
   const tenantQaMaxRaw = Number(settings?.liveQaMaxQuestions ?? 3);
   const tenantQaMax = Number.isFinite(tenantQaMaxRaw) ? Math.max(1, Math.min(10, Math.floor(tenantQaMaxRaw))) : 3;
-  const platformQaMax = platform.guardrails.maxQaQuestions;
+  const platformQaMax = Number(effective.guardrails?.maxQaQuestions ?? 3);
 
   const liveQaEnabled = tenantQaEnabled;
   const liveQaMaxQuestions = tenantQaEnabled ? Math.min(tenantQaMax, platformQaMax) : 0;
 
-  // ✅ Pricing enabled gate
   const pricingEnabled = settings?.pricingEnabled === true;
-
-  // ✅ Pricing model + config normalization (only when pricingEnabled === true)
   const pricingModel = pricingEnabled ? safePricingModel(settings?.pricingModel) : null;
 
   const pricingConfig = pricingEnabled
     ? {
         model: pricingModel,
 
-        // flat
         flatRateDefault: clampMoneyInt(settings?.flatRateDefault, null),
 
-        // hourly + materials
         hourlyLaborRate: clampMoneyInt(settings?.hourlyLaborRate, null),
         materialMarkupPercent: clampPercent(settings?.materialMarkupPercent, null),
 
-        // per-unit
         perUnitRate: clampMoneyInt(settings?.perUnitRate, null),
         perUnitLabel: safeTrim(settings?.perUnitLabel) || null,
 
-        // packages / line items (structure validated later at use-site)
         packageJson: (settings?.packageJson ?? null) as any,
         lineItemsJson: (settings?.lineItemsJson ?? null) as any,
 
-        // assessment fee
         assessmentFeeAmount: clampMoneyInt(settings?.assessmentFeeAmount, null),
         assessmentFeeCreditTowardJob: settings?.assessmentFeeCreditTowardJob === true,
       }
     : null;
 
-  // ✅ Normalize guardrails too (only when pricingEnabled === true)
   const normalizedPricingRules =
     pricingEnabled && pricingRules
       ? {
@@ -177,10 +250,19 @@ export async function resolveTenantLlm(tenantId: string) {
       : null;
 
   return {
-    platform,
-    models: { estimatorModel, qaModel, renderModel },
-    prompts: platform.prompts,
-    guardrails: platform.guardrails,
+    platform: platformCfg,
+
+    models: {
+      estimatorModel: effective.models.estimatorModel,
+      qaModel: effective.models.qaModel,
+      renderModel: effective.models.renderModel,
+    },
+    prompts: {
+      extraSystemPreamble: effective.prompts.extraSystemPreamble,
+      quoteEstimatorSystem: effective.prompts.quoteEstimatorSystem,
+      qaQuestionGeneratorSystem: effective.prompts.qaQuestionGeneratorSystem,
+    },
+    guardrails: effective.guardrails,
 
     tenant: {
       tenantRenderEnabled,
@@ -190,17 +272,24 @@ export async function resolveTenantLlm(tenantId: string) {
       liveQaEnabled,
       liveQaMaxQuestions,
       aiMode: safeTrim(settings?.aiMode) || null,
-
-      // ✅ gate for “numbers”
       pricingEnabled,
+      planTier: safeTrim(settings?.planTier) || null,
     },
 
-    // ✅ Only expose pricing payload when enabled
     pricing: pricingEnabled
       ? {
           config: pricingConfig,
           rules: normalizedPricingRules,
         }
       : null,
+
+    meta: {
+      industryKey,
+      hasIndustryPack: Boolean(industryPack),
+      hasTenantOverrides: Boolean(tenantOverrides),
+      tenantOverridesUpdatedAt: tenantOverrides?.updatedAt ?? null,
+      effectiveVersion: platformCfg?.version ?? null,
+      platformUpdatedAt: platformCfg?.updatedAt ?? null,
+    },
   };
 }

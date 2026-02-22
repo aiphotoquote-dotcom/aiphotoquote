@@ -14,9 +14,9 @@ import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
 import { renderLeadNewEmailHTML } from "@/lib/email/templates/leadNew";
 import { renderCustomerReceiptEmailHTML } from "@/lib/email/templates/customerReceipt";
 
-import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
-import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
-import { resolvePromptsForIndustry } from "@/lib/pcc/llm/resolvePrompts";
+import { resolveTenantLlm, computeRenderOptIn } from "@/lib/pcc/llm/resolveTenant";
+import { getPlatformLlm } from "@/lib/pcc/llm/apply";
+import { composeEstimatorPrompt, composeQaPrompt } from "@/lib/pcc/llm/composePrompts";
 
 import {
   computeEstimate,
@@ -97,6 +97,8 @@ type PricingModel =
   | "inspection_only"
   | "assessment_fee";
 
+type PlanTier = "tier0" | "tier1" | "tier2" | "tier3" | "tier4" | string;
+
 // ----------------- helpers -----------------
 function normalizePhone(raw: string) {
   const d = String(raw ?? "").replace(/\D/g, "");
@@ -127,16 +129,22 @@ function normalizeBrandLogoVariant(v: unknown): BrandLogoVariant {
   return s;
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Prefer the *actual* request host over VERCEL_URL.
+ * VERCEL_URL can be a deployment URL that is protected (401), which breaks render kicks.
+ */
 function getBaseUrl(req: Request) {
   const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
   if (envBase) return envBase.replace(/\/+$/, "");
 
-  const vercel = process.env.VERCEL_URL?.trim();
-  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
-
+  // Prefer host headers (public domain) before VERCEL_URL
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  const vercel = process.env.VERCEL_URL?.trim();
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   return "";
 }
@@ -182,6 +190,20 @@ function isPricingModel(v: string): v is PricingModel {
     v === "inspection_only" ||
     v === "assessment_fee"
   );
+}
+
+function isTier0(tier: unknown): boolean {
+  return safeTrim(tier) === "tier0";
+}
+function isTier1or2(tier: unknown): boolean {
+  const t = safeTrim(tier);
+  return t === "tier1" || t === "tier2";
+}
+function hasGraceRemaining(credits: unknown, used: unknown): boolean {
+  const c = Number(credits ?? 0);
+  const u = Number(used ?? 0);
+  if (!Number.isFinite(c) || !Number.isFinite(u)) return false;
+  return c > 0 && u < c;
 }
 
 /**
@@ -287,14 +309,8 @@ type DebugFn = (stage: string, data?: Record<string, any>) => void;
  * - assessment_only => 0/0
  * - fixed => high == low
  * - range => as-is
- *
- * Note: we keep both keys for schema/email compatibility.
- * UI will treat low==high as a single fixed estimate.
  */
-function applyAiModeToEstimates(
-  policy: PricingPolicySnapshot,
-  estimates: { estimate_low: number; estimate_high: number }
-) {
+function applyAiModeToEstimates(policy: PricingPolicySnapshot, estimates: { estimate_low: number; estimate_high: number }) {
   const p = normalizePricingPolicy(policy);
 
   if (!p.pricing_enabled || p.ai_mode === "assessment_only") {
@@ -304,11 +320,9 @@ function applyAiModeToEstimates(
   const { low, high } = ensureLowHigh(estimates.estimate_low, estimates.estimate_high);
 
   if (p.ai_mode === "fixed") {
-    // single-number intent
     return { estimate_low: low, estimate_high: low };
   }
 
-  // range
   return { estimate_low: low, estimate_high: high };
 }
 
@@ -465,88 +479,90 @@ async function loadPricingPolicySnapshot(args: { tenantId: string; debug?: Debug
   return normalized;
 }
 
-/**
- * Prompt-level guardrail (still useful as defense-in-depth)
- */
-function wrapEstimatorSystemWithPricingPolicy(baseSystem: string, policy: PricingPolicySnapshot) {
-  const p = normalizePricingPolicy(policy);
-  const { ai_mode, pricing_enabled, pricing_model } = p;
+type ResolveKeyPolicyArgs = {
+  planTier: PlanTier | null;
+  activationGraceCredits: number | null;
+  activationGraceUsed: number | null;
+};
 
-  const policyBlock = [
-    "### POLICY (must follow exactly)",
-    "- You are generating a photo-based quote response in a fixed JSON schema.",
-    pricing_enabled
-      ? "- Pricing is ENABLED."
-      : "- Pricing is DISABLED. Do not output any price numbers. Set estimate_low=0 and estimate_high=0.",
-    ai_mode === "assessment_only"
-      ? "- AI mode is ASSESSMENT ONLY. Do not output any price numbers. Set estimate_low=0 and estimate_high=0."
-      : ai_mode === "fixed"
-        ? "- AI mode is FIXED ESTIMATE. Output a single-number estimate by setting estimate_low == estimate_high."
-        : "- AI mode is RANGE. Output a low/high range.",
-    "- If you are unsure, prefer inspection_required=true and keep estimates conservative.",
-    "",
-  ].join("\n");
-
-  if (!pricing_enabled) return [policyBlock, baseSystem].join("\n");
-
-  const modelHint =
-    pricing_model === "flat_per_job"
-      ? "Pricing methodology hint: think a single job total."
-      : pricing_model === "hourly_plus_materials"
-        ? "Pricing methodology hint: think hours and material costs/markup."
-        : pricing_model === "per_unit"
-          ? "Pricing methodology hint: estimate per-unit and multiply."
-          : pricing_model === "packages"
-            ? "Pricing methodology hint: think Basic/Standard/Premium tiers."
-            : pricing_model === "line_items"
-              ? "Pricing methodology hint: think add-ons; base service + optional items."
-              : pricing_model === "inspection_only"
-                ? "Pricing methodology hint: prefer inspection_required=true."
-                : pricing_model === "assessment_fee"
-                  ? "Pricing methodology hint: assessment/diagnostic fee model."
-                  : "";
-
-  return [policyBlock, modelHint ? `### PRICING MODEL NOTES\n${modelHint}\n` : "", baseSystem].join("\n");
+function isPlatformKeyAllowedByPlan(args: ResolveKeyPolicyArgs) {
+  const { planTier, activationGraceCredits, activationGraceUsed } = args;
+  if (isTier0(planTier)) return true;
+  if (isTier1or2(planTier) && hasGraceRemaining(activationGraceCredits, activationGraceUsed)) return true;
+  return false;
 }
 
 /**
- * Resolve OpenAI client (tenant key OR platform grace)
+ * Resolve OpenAI client:
+ * - Prefer TENANT KEY whenever it exists (all paid tiers, tier0 too)
+ * - Use PLATFORM KEY only when:
+ *   - tier0 (always allowed; token-limited elsewhere)
+ *   - tier1/tier2 AND grace remaining (consumeGrace on phase1 only)
+ * - Phase2 must honor the frozen key source from the quote log when present
  */
 async function resolveOpenAiClient(args: {
   tenantId: string;
   consumeGrace: boolean;
   forceKeySource?: KeySource | null;
+  planTier: PlanTier | null;
+  activationGraceCredits: number | null;
+  activationGraceUsed: number | null;
   debug?: DebugFn;
 }): Promise<{ openai: OpenAI; keySource: KeySource }> {
-  const { tenantId, consumeGrace, forceKeySource, debug } = args;
+  const { tenantId, consumeGrace, forceKeySource, planTier, activationGraceCredits, activationGraceUsed, debug } = args;
 
-  debug?.("resolveOpenAiClient.start", { tenantId, consumeGrace, forceKeySource: forceKeySource ?? null });
+  debug?.("resolveOpenAiClient.start", {
+    tenantId,
+    consumeGrace,
+    forceKeySource: forceKeySource ?? null,
+    planTier: planTier ?? null,
+    activationGraceCredits: activationGraceCredits ?? null,
+    activationGraceUsed: activationGraceUsed ?? null,
+  });
 
-  // 1) Tenant key (unless forced platform)
-  if (!forceKeySource || forceKeySource === "tenant") {
-    const secretRow = await db
-      .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
-      .from(tenantSecrets)
-      .where(eq(tenantSecrets.tenantId, tenantId))
-      .limit(1)
-      .then((r) => r[0] ?? null);
+  // 1) Look for tenant key (cheap + deterministic)
+  const secretRow = await db
+    .select({ openaiKeyEnc: tenantSecrets.openaiKeyEnc })
+    .from(tenantSecrets)
+    .where(eq(tenantSecrets.tenantId, tenantId))
+    .limit(1)
+    .then((r) => r[0] ?? null);
 
-    debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret: Boolean(secretRow?.openaiKeyEnc) });
+  // ✅ normalize nullable text column (Drizzle treats it as string|null)
+  const tenantOpenaiKeyEnc = safeTrim(secretRow?.openaiKeyEnc);
+  const hasTenantSecret = tenantOpenaiKeyEnc.length > 0;
 
-    if (secretRow?.openaiKeyEnc) {
-      const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
-      debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
-      return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
-    }
+  debug?.("resolveOpenAiClient.tenantSecret.lookup", { hasTenantSecret });
 
-    if (forceKeySource === "tenant") {
+  // 2) If forced to tenant (phase2 snapshot), enforce strictly.
+  if (forceKeySource === "tenant") {
+    if (!hasTenantSecret) {
       const e: any = new Error("MISSING_OPENAI_KEY");
       e.code = "MISSING_OPENAI_KEY";
       throw e;
     }
+    const openaiKey = decryptSecret(tenantOpenaiKeyEnc);
+    debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
+    return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
   }
 
-  // 2) Platform grace key
+  // 3) If we have a tenant key and we're not forced to platform, always use it.
+  if (hasTenantSecret && forceKeySource !== "platform_grace") {
+    const openaiKey = decryptSecret(tenantOpenaiKeyEnc);
+    debug?.("resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
+    return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
+  }
+
+  // 4) From here on: either tenant key missing OR forced to platform.
+  const platformAllowedByPlan = isPlatformKeyAllowedByPlan({ planTier, activationGraceCredits, activationGraceUsed });
+
+  // If NOT forced platform and platform not allowed, the only valid outcome is "missing tenant key"
+  if (forceKeySource !== "platform_grace" && !platformAllowedByPlan) {
+    const e: any = new Error("MISSING_OPENAI_KEY");
+    e.code = "MISSING_OPENAI_KEY";
+    throw e;
+  }
+
   const platformKey = platformOpenAiKey();
   debug?.("resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
 
@@ -556,12 +572,19 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
-  // Phase 2 finalize: do NOT consume; honor phase1
+  // Phase2 finalize: never consume (honor the frozen phase1 decision)
   if (!consumeGrace) {
     debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
+  // Tier0: always allowed to use platform key, and we do NOT consume grace counters.
+  if (isTier0(planTier)) {
+    debug?.("resolveOpenAiClient.platformGrace.tier0", { keySource: "platform_grace" });
+    return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
+  }
+
+  // Tier1/2: consume grace when using platform key on phase1.
   const updated = await db
     .update(tenantSettings)
     .set({
@@ -588,37 +611,13 @@ async function resolveOpenAiClient(args: {
   });
 
   if (!row) {
-    const cur = await db
-      .select({
-        used: sql`coalesce(${tenantSettings.activationGraceUsed}, 0)`,
-        credits: sql`coalesce(${tenantSettings.activationGraceCredits}, 0)`,
-      })
-      .from(tenantSettings)
-      .where(eq(tenantSettings.tenantId, tenantId))
-      .limit(1);
-
-    const curRow = cur?.[0] ?? null;
-
-    debug?.("resolveOpenAiClient.grace.current", {
-      hasRow: Boolean(curRow),
-      used: curRow?.used ?? null,
-      credits: curRow?.credits ?? null,
-    });
-
-    if (!curRow) {
-      const e: any = new Error("SETTINGS_MISSING");
-      e.code = "SETTINGS_MISSING";
-      e.status = 400;
-      throw e;
-    }
-
-    const used = Number(curRow.used ?? 0);
-    const credits = Number(curRow.credits ?? 0);
-
     const e: any = new Error("TRIAL_EXHAUSTED");
     e.code = "TRIAL_EXHAUSTED";
     e.status = 402;
-    e.meta = { used, credits };
+    e.meta = {
+      used: Number(activationGraceUsed ?? 0),
+      credits: Number(activationGraceCredits ?? 0),
+    };
     throw e;
   }
 
@@ -647,7 +646,7 @@ function buildAiSnapshot(args: {
   const policy = normalizePricingPolicy(pricingPolicy);
 
   return {
-    version: 3,
+    version: 4,
     capturedAt: nowIso(),
     phase,
     tenant: { tenantId, tenantSlug, industryKey },
@@ -709,7 +708,9 @@ async function sendFinalEstimateEmails(args: {
   const cfg = await getTenantEmailConfig(tenant.id);
   const effectiveBusinessName = businessNameFromSettings || cfg.businessName || tenant.name;
 
-  const configured = Boolean(process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail);
+  const configured = Boolean(
+    process.env.RESEND_API_KEY?.trim() && effectiveBusinessName && cfg.leadToEmail && cfg.fromEmail
+  );
 
   const baseUrl = getBaseUrl(req);
   const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(quoteLogId)}` : null;
@@ -876,7 +877,10 @@ async function generateEstimate(args: {
 }) {
   const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
 
-  const qaText = normalizedAnswers?.length ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n") : "";
+  // ✅ YES: we include the Q&A in the final estimator prompt (when present)
+  const qaText = normalizedAnswers?.length
+    ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n")
+    : "";
 
   const userText = [
     `Category: ${category}`,
@@ -923,16 +927,7 @@ async function generateEstimate(args: {
             assumptions: { type: "array", items: { type: "string" } },
             questions: { type: "array", items: { type: "string" } },
           },
-          required: [
-            "confidence",
-            "inspection_required",
-            "estimate_low",
-            "estimate_high",
-            "summary",
-            "visible_scope",
-            "assumptions",
-            "questions",
-          ],
+          required: ["confidence", "inspection_required", "estimate_low", "estimate_high", "summary", "visible_scope", "assumptions", "questions"],
         },
       },
     } as any,
@@ -1053,7 +1048,12 @@ export async function POST(req: Request) {
 
     if (pc?.maintenanceEnabled) {
       return NextResponse.json(
-        { ok: false, error: "MAINTENANCE", message: pc.maintenanceMessage || "Service temporarily unavailable.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MAINTENANCE",
+          message: pc.maintenanceMessage || "Service temporarily unavailable.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 503 }
       );
     }
@@ -1084,9 +1084,10 @@ export async function POST(req: Request) {
       isPhase2,
       quoteLogId: parsed.data.quoteLogId ?? null,
       qaAnswersLen: parsed.data.qaAnswers?.length ?? 0,
+      renderOptInFromReq: typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : null,
     });
 
-    // Settings
+    // Settings (also used for key policy)
     const settings = await db
       .select({
         tenantId: tenantSettings.tenantId,
@@ -1110,9 +1111,9 @@ export async function POST(req: Request) {
       found: Boolean(settings),
       settingsTenantId: settings?.tenantId ?? null,
       industryKey: settings?.industryKey ?? null,
-      planTier: settings?.planTier ?? null,
-      activationGraceCredits: settings?.activationGraceCredits ?? null,
-      activationGraceUsed: settings?.activationGraceUsed ?? null,
+      planTier: (settings as any)?.planTier ?? null,
+      activationGraceCredits: (settings as any)?.activationGraceCredits ?? null,
+      activationGraceUsed: (settings as any)?.activationGraceUsed ?? null,
       emailSendMode: (settings as any)?.emailSendMode ?? null,
       hasResendFromEmail: Boolean(settings?.resendFromEmail),
     });
@@ -1175,6 +1176,7 @@ export async function POST(req: Request) {
         hasPricingPolicy: Boolean(pricingPolicy),
         hasPricingConfig: Boolean(pricingConfigSnap),
         hasPricingRules: Boolean(pricingRulesSnap),
+        renderOptInFromLog: typeof inputAny?.render_opt_in === "boolean" ? inputAny.render_opt_in : null,
       });
     } else {
       industryKeyForQuote = tenantIndustryKey;
@@ -1201,51 +1203,51 @@ export async function POST(req: Request) {
     if (!pricingConfigSnap) pricingConfigSnap = resolvedPricingConfig;
     if (!pricingRulesSnap) pricingRulesSnap = resolvedPricingRules;
 
-    // PCC + industry prompt pack
-    const pccCfg = await loadPlatformLlmConfig();
-    const industryResolved = resolvePromptsForIndustry(pccCfg, industryKeyForQuote);
+    // ---- PROMPT COMPOSITION LAYER ----
+    const platformLlm = await getPlatformLlm();
 
-    const baseEstimator = String(pccCfg?.prompts?.quoteEstimatorSystem ?? "");
-    const baseQa = String(pccCfg?.prompts?.qaQuestionGeneratorSystem ?? "");
-    const resolvedEstimator = String(resolvedBase?.prompts?.quoteEstimatorSystem ?? "");
-    const resolvedQa = String(resolvedBase?.prompts?.qaQuestionGeneratorSystem ?? "");
+    const composedEstimator = composeEstimatorPrompt({
+      platform: platformLlm,
+      tenant: {
+        tenantStyleKey: resolvedBase.tenant.tenantStyleKey,
+        tenantRenderNotes: resolvedBase.tenant.tenantRenderNotes,
+        pricingEnabled: resolvedBase.tenant.pricingEnabled,
+      },
+      industryKey: industryKeyForQuote,
+      pricingPolicy,
+    });
 
-    const isUsingBaseEstimator = resolvedEstimator.trim() === baseEstimator.trim();
-    const isUsingBaseQa = resolvedQa.trim() === baseQa.trim();
-
-    const effectivePrompts = {
-      quoteEstimatorSystem:
-        isUsingBaseEstimator && industryResolved.quoteEstimatorSystem ? industryResolved.quoteEstimatorSystem : resolvedEstimator,
-      qaQuestionGeneratorSystem:
-        isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem ? industryResolved.qaQuestionGeneratorSystem : resolvedQa,
-    };
-
-    // Apply pricing-policy wrapper (defense-in-depth)
-    const estimatorSystemWithPolicy = wrapEstimatorSystemWithPricingPolicy(effectivePrompts.quoteEstimatorSystem, pricingPolicy);
+    const composedQa = composeQaPrompt({
+      platform: platformLlm,
+      tenant: {
+        tenantStyleKey: resolvedBase.tenant.tenantStyleKey,
+        tenantRenderNotes: resolvedBase.tenant.tenantRenderNotes,
+        pricingEnabled: resolvedBase.tenant.pricingEnabled,
+      },
+      industryKey: industryKeyForQuote,
+      pricingPolicy,
+    });
 
     const resolved = {
       ...resolvedBase,
       prompts: {
         ...resolvedBase.prompts,
-        quoteEstimatorSystem: estimatorSystemWithPolicy,
-        qaQuestionGeneratorSystem: effectivePrompts.qaQuestionGeneratorSystem,
+        quoteEstimatorSystem: composedEstimator,
+        qaQuestionGeneratorSystem: composedQa,
       },
       meta: {
         ...(resolvedBase as any)?.meta,
-        industryPromptPackApplied: {
-          industryKey: industryKeyForQuote,
-          estimatorApplied: Boolean(isUsingBaseEstimator && industryResolved.quoteEstimatorSystem),
-          qaApplied: Boolean(isUsingBaseQa && industryResolved.qaQuestionGeneratorSystem),
-        },
+        compositionVersion: 1,
+        industryKeyApplied: industryKeyForQuote,
       },
     };
 
     debug("pcc.resolved", {
       industryKeyForQuote,
-      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? null,
       liveQaEnabled: Boolean(resolved?.tenant?.liveQaEnabled),
       liveQaMaxQuestions: resolved?.tenant?.liveQaMaxQuestions ?? null,
       tenantRenderEnabled: Boolean(resolved?.tenant?.tenantRenderEnabled),
+      renderCustomerOptInRequired: Boolean(resolved?.tenant?.renderCustomerOptInRequired),
       pricingEnabledGate,
       pricingPolicy,
       hasPricingConfigSnap: Boolean(pricingConfigSnap),
@@ -1259,6 +1261,9 @@ export async function POST(req: Request) {
       tenantId: tenant.id,
       consumeGrace: !isPhase2,
       forceKeySource: isPhase2 ? phase2KeySource : null,
+      planTier: (settings as any)?.planTier ?? null,
+      activationGraceCredits: (settings as any)?.activationGraceCredits ?? null,
+      activationGraceUsed: (settings as any)?.activationGraceUsed ?? null,
       debug,
     });
 
@@ -1270,7 +1275,6 @@ export async function POST(req: Request) {
       tenantStyleKey: resolved.tenant.tenantStyleKey ?? undefined,
       tenantRenderNotes: resolved.tenant.tenantRenderNotes ?? undefined,
       industryKey: industryKeyForQuote,
-      industryPromptPackApplied: (resolved as any)?.meta?.industryPromptPackApplied ?? undefined,
       llmKeySource: keySource,
       pricingPolicy,
     };
@@ -1292,7 +1296,10 @@ export async function POST(req: Request) {
       const notes = safeTrim(customer_context.notes) || "";
 
       if (!customer?.name || !customer?.email || !customer?.phone) {
-        return NextResponse.json({ ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, error: "MISSING_CUSTOMER_IN_LOG", ...(debugEnabled ? { debugId } : {}) },
+          { status: 400 }
+        );
       }
 
       const qaStored: any = existing.qa ?? {};
@@ -1337,23 +1344,60 @@ export async function POST(req: Request) {
         const combined = normalizedAnswers.map((x) => `${x.question}\n${x.answer}`).join("\n\n");
         if (containsDenylistedText(combined, denylist)) {
           return NextResponse.json(
-            { ok: false, error: "CONTENT_BLOCKED", message: "Your answers include content we can’t process. Please revise.", ...(debugEnabled ? { debugId } : {}) },
+            {
+              ok: false,
+              error: "CONTENT_BLOCKED",
+              message: "Your answers include content we can’t process. Please revise.",
+              ...(debugEnabled ? { debugId } : {}),
+            },
             { status: 400 }
           );
         }
       }
 
-      const renderOptIn = Boolean(inputAny?.render_opt_in);
-      aiEnvelope.renderOptIn = renderOptIn;
+      // ✅ Phase2 render decision:
+      // - Prefer explicit request value when provided
+      // - Else fall back to stored snapshot (phase1)
+      // - Apply computeRenderOptIn so "opt-in not required" tenants default to TRUE
+      const renderOptInFromReq =
+        typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : undefined;
+      const renderOptInFromLog =
+        typeof inputAny?.render_opt_in === "boolean" ? (inputAny.render_opt_in as boolean) : null;
+
+      const renderOptInEffective = computeRenderOptIn({
+        tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+        renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+        customerOptIn: typeof renderOptInFromReq === "boolean" ? renderOptInFromReq : renderOptInFromLog,
+      });
+
+      aiEnvelope.renderOptIn = renderOptInEffective;
+
+      debug("render.phase2", {
+        tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+        renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+        renderOptInFromReq: typeof renderOptInFromReq === "boolean" ? renderOptInFromReq : null,
+        renderOptInFromLog,
+        renderOptInEffective,
+      });
+
+      // If phase2 request provided render_opt_in, persist it so the log reflects reality.
+      // Also keep quote_logs.renderOptIn column in sync.
+      if (typeof renderOptInFromReq === "boolean") {
+        const updatedInput = { ...(inputAny ?? {}), render_opt_in: renderOptInEffective };
+        await db
+          .update(quoteLogs)
+          .set({ input: updatedInput as any, renderOptIn: renderOptInEffective })
+          .where(eq(quoteLogs.id, quoteLogId));
+      }
 
       const aiSnapshot = buildAiSnapshot({
         phase: "phase2_finalized",
         tenantId: tenant.id,
         tenantSlug,
-        renderOptIn,
+        renderOptIn: renderOptInEffective,
         resolved,
         industryKey: industryKeyForQuote,
-        llmKeySource: (phase2KeySource ?? keySource) as KeySource,
+        llmKeySource: keySource,
         pricingPolicy,
       });
 
@@ -1365,11 +1409,10 @@ export async function POST(req: Request) {
         category,
         service_type,
         notes,
-        normalizedAnswers,
+        normalizedAnswers, // ✅ YES: used by estimator
         debug,
       });
 
-      // ✅ SERVER-SIDE PRICING (deterministic)
       const computed = computeEstimate({
         ai: rawOutput,
         imagesCount: Array.isArray(images) ? images.length : 0,
@@ -1378,7 +1421,6 @@ export async function POST(req: Request) {
         rules: pricingRulesSnap,
       });
 
-      // ✅ enforce mode-based shape
       const shaped = applyAiModeToEstimates(pricingPolicy, {
         estimate_low: computed.estimate_low,
         estimate_high: computed.estimate_high,
@@ -1390,6 +1432,12 @@ export async function POST(req: Request) {
         estimate_low: shaped.estimate_low,
         estimate_high: shaped.estimate_high,
         pricing_basis: computed.basis,
+
+        // ✅ make QA available to downstream consumers (rendering/job/UI)
+        qa_context: {
+          questions: storedQuestions,
+          answers: normalizedAnswers,
+        },
       };
 
       let outputToStore: any = { ...(output ?? {}), ai_snapshot: aiSnapshot };
@@ -1413,7 +1461,7 @@ export async function POST(req: Request) {
           brandLogoUrl,
           brandLogoVariant,
           businessNameFromSettings,
-          renderOptIn,
+          renderOptIn: renderOptInEffective,
         });
 
         outputToStore = { ...(outputToStore ?? {}), email: emailResult };
@@ -1427,7 +1475,13 @@ export async function POST(req: Request) {
         outputToStore = { ...(outputToStore ?? {}), email: { configured: false, error: e?.message ?? String(e) } };
       }
 
-      return NextResponse.json({ ok: true, quoteLogId, output: outputToStore, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
+      return NextResponse.json({
+        ok: true,
+        quoteLogId,
+        output: outputToStore,
+        ai: { ...aiEnvelope, qaAnswersUsed: normalizedAnswers.length > 0 },
+        ...(debugEnabled ? { debugId } : {}),
+      });
     }
 
     // -------------------------
@@ -1438,7 +1492,12 @@ export async function POST(req: Request) {
     const incoming = parsed.data.customer ?? parsed.data.contact;
     if (!incoming) {
       return NextResponse.json(
-        { ok: false, error: "MISSING_CUSTOMER", message: "Customer info is required (name, phone, email).", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MISSING_CUSTOMER",
+          message: "Customer info is required (name, phone, email).",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
@@ -1464,20 +1523,40 @@ export async function POST(req: Request) {
     }
 
     const customer_context = parsed.data.customer_context ?? {};
-
     const category = industryKeyForQuote || "service";
     const service_type = safeTrim(customer_context.service_type) || "upholstery";
     const notes = safeTrim(customer_context.notes) || "";
 
     if (denylist.length && containsDenylistedText(notes, denylist)) {
       return NextResponse.json(
-        { ok: false, error: "CONTENT_BLOCKED", message: "Your request includes content we can’t process. Please revise and try again.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "CONTENT_BLOCKED",
+          message: "Your request includes content we can’t process. Please revise and try again.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
 
-    const renderOptIn = resolved.tenant.tenantRenderEnabled ? Boolean(parsed.data.render_opt_in) : false;
+    // ✅ Phase1 render decision:
+    // - If rendering disabled -> false
+    // - If opt-in required -> honor checkbox (default false if missing)
+    // - If opt-in NOT required -> default true
+    const renderOptIn = computeRenderOptIn({
+      tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+      renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+      customerOptIn: typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : null,
+    });
+
     aiEnvelope.renderOptIn = renderOptIn;
+
+    debug("render.phase1", {
+      tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
+      renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
+      renderOptInFromReq: typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : null,
+      renderOptIn,
+    });
 
     // ✅ Freeze pricing policy + pricing inputs into the quote log so phase2 is immutable
     const policyToStore = applyPricingEnabledGate(pricingPolicy, Boolean(resolved.tenant.pricingEnabled));
@@ -1571,7 +1650,15 @@ export async function POST(req: Request) {
         })
         .where(eq(quoteLogs.id, quoteLogId));
 
-      return NextResponse.json({ ok: true, quoteLogId, needsQa: true, questions, qa, ai: aiEnvelope, ...(debugEnabled ? { debugId } : {}) });
+      return NextResponse.json({
+        ok: true,
+        quoteLogId,
+        needsQa: true,
+        questions,
+        qa,
+        ai: aiEnvelope,
+        ...(debugEnabled ? { debugId } : {}),
+      });
     }
 
     const rawOutput = await generateEstimate({
@@ -1585,7 +1672,6 @@ export async function POST(req: Request) {
       debug,
     });
 
-    // ✅ SERVER-SIDE PRICING (deterministic)
     const computed = computeEstimate({
       ai: rawOutput,
       imagesCount: Array.isArray(images) ? images.length : 0,
@@ -1594,7 +1680,6 @@ export async function POST(req: Request) {
       rules: pricing_rules_snapshot,
     });
 
-    // ✅ enforce mode-based shape
     const shaped = applyAiModeToEstimates(policyToStore, {
       estimate_low: computed.estimate_low,
       estimate_high: computed.estimate_high,
@@ -1674,7 +1759,13 @@ export async function POST(req: Request) {
 
     if (code === "PLAN_LIMIT_REACHED") {
       return NextResponse.json(
-        { ok: false, error: "PLAN_LIMIT_REACHED", message: "Monthly quote limit reached for your plan.", meta: e?.meta ?? undefined, ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "PLAN_LIMIT_REACHED",
+          message: "Monthly quote limit reached for your plan.",
+          meta: e?.meta ?? undefined,
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 402 }
       );
     }
@@ -1706,14 +1797,25 @@ export async function POST(req: Request) {
 
     if (code === "MISSING_OPENAI_KEY") {
       return NextResponse.json(
-        { ok: false, error: "MISSING_OPENAI_KEY", message: "No OpenAI key is configured for this tenant. Add a tenant key in AI Setup.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "MISSING_OPENAI_KEY",
+          message:
+            "No OpenAI key is configured for this tenant (or platform grace is not available for this plan). Add a tenant key in AI Setup.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 400 }
       );
     }
 
     if (code === "SETTINGS_MISSING") {
       return NextResponse.json(
-        { ok: false, error: "SETTINGS_MISSING", message: "Tenant settings could not be loaded. See debugId in logs.", ...(debugEnabled ? { debugId } : {}) },
+        {
+          ok: false,
+          error: "SETTINGS_MISSING",
+          message: "Tenant settings could not be loaded. See debugId in logs.",
+          ...(debugEnabled ? { debugId } : {}),
+        },
         { status: 500 }
       );
     }

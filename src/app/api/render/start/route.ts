@@ -10,6 +10,9 @@ import { tenants } from "@/lib/db/schema";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// this route is quick, but leave room
+export const maxDuration = 30;
+
 const Req = z.object({
   tenantSlug: z.string().min(3),
   quoteLogId: z.string().uuid(),
@@ -21,23 +24,12 @@ function json(data: any, status = 200, debugId?: string) {
   return res;
 }
 
-function safeJsonParse(v: any) {
-  try {
-    if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v === "string") return JSON.parse(v);
-    return v;
-  } catch {
-    return null;
-  }
-}
-
 async function getTenantBySlug(tenantSlug: string) {
   const rows = await db.select().from(tenants).where(eq(tenants.slug, tenantSlug)).limit(1);
   return rows[0] ?? null;
 }
 
-async function findExistingQueuedJob(quoteLogId: string): Promise<{ id: string; status: string } | null> {
+async function findExistingQueuedOrRunningJob(quoteLogId: string): Promise<{ id: string; status: string } | null> {
   try {
     const r = await db.execute(sql`
       select id, status
@@ -71,6 +63,21 @@ async function enqueueRenderJob(args: { tenantId: string; quoteLogId: string; pr
   return jobId;
 }
 
+async function markQuoteQueued(args: { tenantId: string; quoteLogId: string }) {
+  // make the quote log reflect reality immediately so the UI can show "queued"
+  // and we can see if it never transitions.
+  await db.execute(sql`
+    update quote_logs
+    set
+      render_status = 'queued',
+      render_image_url = null,
+      render_error = null,
+      render_prompt = null
+    where id = ${args.quoteLogId}::uuid
+      and tenant_id = ${args.tenantId}::uuid
+  `);
+}
+
 export async function POST(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -88,26 +95,60 @@ export async function POST(req: Request) {
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND" }, 404, debugId);
     const tenantId = (tenant as any).id as string;
 
-    // If already queued/running, no enqueue
-    const existing = await findExistingQueuedJob(quoteLogId);
+    // If already queued/running, don’t enqueue again.
+    const existing = await findExistingQueuedOrRunningJob(quoteLogId);
     if (existing) {
+      // still ensure quote shows queued/running for visibility
+      try {
+        await db.execute(sql`
+          update quote_logs
+          set render_status = ${existing.status}, render_error = null
+          where id = ${quoteLogId}::uuid and tenant_id = ${tenantId}::uuid
+        `);
+      } catch {
+        // ignore
+      }
+
       return json(
-        { ok: true, quoteLogId, status: existing.status, jobId: existing.id, skipped: true, durationMs: Date.now() - startedAt },
+        {
+          ok: true,
+          quoteLogId,
+          status: existing.status,
+          jobId: existing.id,
+          skipped: true,
+          durationMs: Date.now() - startedAt,
+        },
         200,
         debugId
       );
     }
 
-    // We store prompt in job as a *seed*; cron will rebuild final prompt from PCC for canonical behavior
+    // Seed prompt; cron rebuilds final prompt from PCC.
     const prompt = "queued_by_api_render_start";
 
     const jobId = await enqueueRenderJob({ tenantId, quoteLogId, prompt });
 
-    return json(
-      { ok: true, quoteLogId, status: "queued", jobId, durationMs: Date.now() - startedAt },
-      200,
-      debugId
-    );
+    // ✅ update quote immediately so status endpoint + UI reflect queued state
+    try {
+      await markQuoteQueued({ tenantId, quoteLogId });
+    } catch (e: any) {
+      // don’t fail enqueue if quote update fails
+      return json(
+        {
+          ok: true,
+          quoteLogId,
+          status: "queued",
+          jobId,
+          durationMs: Date.now() - startedAt,
+          warn: "JOB_ENQUEUED_BUT_QUOTE_NOT_MARKED",
+          warnMessage: e?.message ?? String(e),
+        },
+        200,
+        debugId
+      );
+    }
+
+    return json({ ok: true, quoteLogId, status: "queued", jobId, durationMs: Date.now() - startedAt }, 200, debugId);
   } catch (e: any) {
     return json({ ok: false, error: "REQUEST_FAILED", message: e?.message ?? String(e) }, 500, debugId);
   }

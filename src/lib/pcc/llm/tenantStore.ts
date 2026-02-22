@@ -21,12 +21,31 @@ export type TenantLlmOverridesRow = {
 };
 
 function asObj(v: unknown): Record<string, any> {
-  if (v && typeof v === "object" && !Array.isArray(v)) return v as any;
+  if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, any>;
   return {};
 }
 
+function pickFirstRow(result: any): any | null {
+  if (!result) return null;
+
+  // common patterns:
+  // - drizzle postgres: { rows: [...] }
+  // - custom wrapper: [...]
+  // - sometimes: { 0: {...} }
+  const r0 = Array.isArray(result) ? result[0] : null;
+  if (r0) return r0;
+
+  const rows0 = Array.isArray(result?.rows) ? result.rows[0] : null;
+  if (rows0) return rows0;
+
+  const idx0 = result?.[0];
+  if (idx0) return idx0;
+
+  return null;
+}
+
 export async function getTenantLlmOverrides(tenantId: string): Promise<TenantLlmOverridesRow | null> {
-  const rows: any = await db.execute(sql`
+  const res: any = await db.execute(sql`
     select
       tenant_id,
       coalesce(models, '{}'::jsonb) as models,
@@ -37,7 +56,7 @@ export async function getTenantLlmOverrides(tenantId: string): Promise<TenantLlm
     limit 1
   `);
 
-  const r = (rows as any)?.[0] ?? (rows as any)?.rows?.[0] ?? null;
+  const r = pickFirstRow(res);
   if (!r) return null;
 
   return {
