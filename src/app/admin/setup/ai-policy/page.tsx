@@ -226,6 +226,9 @@ export default function AiPolicySetupPage() {
   // keep track of what server last confirmed
   const serverPricingModelRef = useRef<PricingModel | null>(null);
 
+  // ✅ NEW: keep track of what server last confirmed for render enabled
+  const serverRenderingEnabledRef = useRef<boolean | null>(null);
+
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>({ ...EMPTY_PRICING_CONFIG });
   const [pricingSuggested, setPricingSuggested] = useState<PricingConfig | null>(null);
 
@@ -320,6 +323,8 @@ export default function AiPolicySetupPage() {
       setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
+      serverRenderingEnabledRef.current = !!data.ai_policy.rendering_enabled;
+
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
@@ -453,6 +458,8 @@ export default function AiPolicySetupPage() {
       setLineItemsJsonText(prettyJson(cfg?.line_items_json ?? null));
 
       setRenderingEnabled(!!data.ai_policy.rendering_enabled);
+      serverRenderingEnabledRef.current = !!data.ai_policy.rendering_enabled;
+
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
       setRenderingNotes(data.ai_policy.rendering_notes ?? "");
       setRenderingMaxPerDay(
@@ -492,6 +499,9 @@ export default function AiPolicySetupPage() {
   const showPricingConfig = !!pricingModel;
 
   const pricingModelDirty = (pricingModel ?? null) !== (serverPricingModelRef.current ?? null);
+
+  const renderingEnabledDirty =
+    serverRenderingEnabledRef.current !== null && renderingEnabled !== Boolean(serverRenderingEnabledRef.current);
 
   return (
     <div className="mx-auto max-w-3xl p-6 bg-gray-50 min-h-screen">
@@ -624,7 +634,9 @@ export default function AiPolicySetupPage() {
                   </select>
 
                   <div className="text-xs text-gray-600">
-                    {pricingModel ? PRICING_MODEL_OPTIONS.find((x) => x.value === pricingModel)?.desc : "Choose a model to unlock the matching inputs below."}
+                    {pricingModel
+                      ? PRICING_MODEL_OPTIONS.find((x) => x.value === pricingModel)?.desc
+                      : "Choose a model to unlock the matching inputs below."}
                   </div>
 
                   {canEdit ? (
@@ -724,7 +736,9 @@ export default function AiPolicySetupPage() {
                           <input
                             type="number"
                             value={pricingConfig.material_markup_percent ?? ""}
-                            onChange={(e) => patchPricingConfig({ material_markup_percent: clampPercent(e.target.value, null) })}
+                            onChange={(e) =>
+                              patchPricingConfig({ material_markup_percent: clampPercent(e.target.value, null) })
+                            }
                             disabled={!canEdit}
                             min={0}
                             max={500}
@@ -828,7 +842,9 @@ export default function AiPolicySetupPage() {
                           <input
                             type="number"
                             value={pricingConfig.assessment_fee_amount ?? ""}
-                            onChange={(e) => patchPricingConfig({ assessment_fee_amount: clampMoney(e.target.value, null) })}
+                            onChange={(e) =>
+                              patchPricingConfig({ assessment_fee_amount: clampMoney(e.target.value, null) })
+                            }
                             disabled={!canEdit}
                             min={0}
                             max={2000000}
@@ -840,7 +856,9 @@ export default function AiPolicySetupPage() {
 
                       <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
                         <div className="text-sm font-semibold text-gray-900">Credit toward job</div>
-                        <div className="mt-1 text-xs text-gray-600">If ON, you intend to credit the fee when work is approved.</div>
+                        <div className="mt-1 text-xs text-gray-600">
+                          If ON, you intend to credit the fee when work is approved.
+                        </div>
                         <div className="mt-3 flex items-center justify-between">
                           <span className="text-sm text-gray-700">Credit fee</span>
                           <button
@@ -868,7 +886,8 @@ export default function AiPolicySetupPage() {
 
                   {pricingModel === "inspection_only" ? (
                     <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
-                      This model means you do not provide price numbers until inspection. No additional pricing inputs required.
+                      This model means you do not provide price numbers until inspection. No additional pricing inputs
+                      required.
                     </div>
                   ) : null}
 
@@ -920,7 +939,8 @@ export default function AiPolicySetupPage() {
 
               {!pricingEnabled ? (
                 <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
-                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price numbers are always suppressed.
+                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price
+                  numbers are always suppressed.
                 </div>
               ) : null}
             </div>
@@ -975,6 +995,21 @@ export default function AiPolicySetupPage() {
                 <div>
                   <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
                   <div className="mt-1 text-xs text-gray-600">Optional “concept render” image of the finished product.</div>
+
+                  {/* ✅ NEW: server-confirmation line */}
+                  {serverRenderingEnabledRef.current !== null ? (
+                    <div className="mt-2 text-xs text-gray-500">
+                      Server confirmed:{" "}
+                      <span className="font-mono">
+                        {serverRenderingEnabledRef.current ? "enabled" : "disabled"}
+                      </span>
+                      {renderingEnabledDirty ? (
+                        <span className="ml-2 rounded-md border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs font-semibold text-yellow-900">
+                          Unsaved
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
 
                 <button
@@ -1046,9 +1081,7 @@ export default function AiPolicySetupPage() {
                         disabled={!canEdit || !renderingEnabled}
                         className={[
                           "rounded-md border px-3 py-2 text-sm font-semibold",
-                          renderingOptInRequired
-                            ? "border-green-300 bg-green-50 text-green-800"
-                            : "border-gray-300 bg-white text-gray-800",
+                          renderingOptInRequired ? "border-green-300 bg-green-50 text-green-800" : "border-gray-300 bg-white text-gray-800",
                           !canEdit || !renderingEnabled ? "opacity-50" : "hover:bg-gray-50",
                         ].join(" ")}
                       >

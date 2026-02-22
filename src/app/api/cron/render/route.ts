@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import { put } from "@vercel/blob";
 
 import { db } from "@/lib/db/client";
@@ -21,6 +21,9 @@ import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// ✅ critical: image generation + blob upload + emails can exceed default serverless time
+export const maxDuration = 300;
 
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
@@ -49,16 +52,19 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+/**
+ * Prefer actual host over VERCEL_URL.
+ */
 function getBaseUrl(req: Request) {
-  const envBase = process.env.NEXT_PUBLIC_APP_URL?.trim() || process.env.APP_URL?.trim() || "";
+  const envBase = safeTrim(process.env.NEXT_PUBLIC_APP_URL) || safeTrim(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
-
-  const vercel = process.env.VERCEL_URL?.trim();
-  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+
+  const vercel = safeTrim(process.env.VERCEL_URL);
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
   return "";
 }
@@ -101,30 +107,25 @@ function buildAuthDebug(req: Request) {
 
   return {
     configured: hasConfigured,
-
     header: {
       present: hasHeader,
       looksBearer: safeTrim(req.headers.get("authorization")).toLowerCase().startsWith("bearer "),
       receivedTokenSha10: hasHeader ? shaPrefix(headerToken) : null,
       matches: matchesHeader,
     },
-
     query: {
       present: hasQuery,
       receivedTokenSha10: hasQuery ? shaPrefix(queryToken) : null,
       matches: matchesQuery,
       paramName: "cron_secret",
     },
-
     configuredSha10: hasConfigured ? shaPrefix(configuredRaw) : null,
-
     env: {
       VERCEL_ENV: safeTrim(process.env.VERCEL_ENV) || null,
       VERCEL_URL: safeTrim(process.env.VERCEL_URL) || null,
       NEXT_PUBLIC_APP_URL: safeTrim(process.env.NEXT_PUBLIC_APP_URL) || null,
       APP_URL: safeTrim(process.env.APP_URL) || null,
     },
-
     request: {
       url: req.url,
       method: (req as any)?.method ?? null,
@@ -136,12 +137,7 @@ function buildAuthDebug(req: Request) {
 }
 
 /**
- * ✅ CRON protection
- * Accepts either:
- *  - Authorization: Bearer <CRON_SECRET>   (preferred)
- *  - ?cron_secret=<CRON_SECRET>            (fallback for cron systems without headers)
- *
- * If CRON_SECRET is unset -> allow (dev convenience).
+ * CRON protection.
  */
 async function requireCronSecret(req: Request) {
   const configured = safeTrim(process.env.CRON_SECRET);
@@ -156,19 +152,27 @@ async function requireCronSecret(req: Request) {
   return { ok: false as const, error: "UNAUTHORIZED" as const };
 }
 
-// Claim jobs safely (SKIP LOCKED prevents double-run across concurrent cron executions)
+/**
+ * Claim jobs safely.
+ * ✅ Also re-claim stale running jobs (prevents “stuck at 92% forever”):
+ * - if status='running' and started_at older than 10 minutes => treat as stale and retry
+ */
 async function claimJob(max: number) {
   const r = await db.execute(sql`
     with picked as (
       select id
       from render_jobs
-      where status = 'queued'
+      where
+        status = 'queued'
+        or (status = 'running' and started_at is not null and started_at < (now() - interval '10 minutes'))
       order by created_at asc
       limit ${max}
       for update skip locked
     )
     update render_jobs j
-    set status = 'running', started_at = now()
+    set
+      status = 'running',
+      started_at = now()
     from picked
     where j.id = picked.id
     returning j.id, j.tenant_id, j.quote_log_id, j.prompt, j.created_at
@@ -205,19 +209,31 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.brand_logo_variant,
       ts.lead_to_email,
 
-      -- legacy + new (we'll reconcile below)
+      ts.plan_tier,
+      ts.activation_grace_credits,
+      ts.activation_grace_used,
+
       ts.rendering_enabled,
       ts.ai_rendering_enabled,
 
       ts.rendering_style,
       ts.rendering_notes,
 
+      -- ✅ keep cron render on-industry
+      ts.industry_key,
+
+      -- ✅ rate limit semantics live here (0 = unlimited)
+      ts.rendering_max_per_day,
+
       sec.openai_key_enc,
 
       q.id as quote_log_id,
       q.input,
       q.output,
-      q.render_opt_in
+      q.render_opt_in,
+      q.render_status,
+      q.render_image_url,
+      q.render_error
     from tenants t
     left join tenant_settings ts on ts.tenant_id = t.id
     left join tenant_secrets sec on sec.tenant_id = t.id
@@ -228,6 +244,17 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
   return row ?? null;
+}
+
+async function markQuoteRunning(args: { tenantId: string; quoteLogId: string }) {
+  await db.execute(sql`
+    update quote_logs
+    set
+      render_status = 'running',
+      render_error = null
+    where id = ${args.quoteLogId}::uuid
+      and tenant_id = ${args.tenantId}::uuid
+  `);
 }
 
 async function updateQuoteRendered(args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
@@ -257,7 +284,6 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
 }
 
 function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: boolean) {
-  // Prefer server resolver (authoritative), but fall back to DB columns if needed.
   if (typeof resolvedTenantRenderEnabled === "boolean") return resolvedTenantRenderEnabled;
 
   const ai = ctx?.ai_rendering_enabled;
@@ -267,6 +293,129 @@ function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: bool
   if (typeof legacy === "boolean") return legacy;
 
   return false;
+}
+
+/**
+ * ✅ Plan policy for renders
+ * - If tenant has its own key => allow on any tier
+ * - If tenant does NOT have a key:
+ *    - allow ONLY when plan tier is tier0 AND grace credits remain AND platform key exists
+ */
+function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedRaw: unknown) {
+  const plan = safeTrim(planTierRaw).toLowerCase();
+  const total = Number(graceTotalRaw ?? 0);
+  const used = Number(graceUsedRaw ?? 0);
+  const t = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0;
+  const u = Number.isFinite(used) ? Math.max(0, Math.trunc(used)) : 0;
+
+  if (plan !== "tier0") return { plan, remaining: null as number | null };
+  return { plan, remaining: Math.max(0, t - u) };
+}
+
+async function bumpGraceUsedIfTier0(tenantId: string) {
+  try {
+    await db.execute(sql`
+      update tenant_settings
+      set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
+          updated_at = now()
+      where tenant_id = ${tenantId}::uuid
+        and lower(coalesce(plan_tier,'')) = 'tier0'
+    `);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * ✅ Rate limit semantics:
+ * - maxPerDay <= 0 => unlimited (rate limit OFF)
+ * - maxPerDay > 0  => enforce
+ */
+function normalizeMaxPerDay(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.trunc(n);
+}
+
+async function isRateLimitedNow(args: { tenantId: string; maxPerDay: number }) {
+  const { tenantId, maxPerDay } = args;
+
+  if (maxPerDay <= 0) {
+    return { limited: false as const, maxPerDay };
+  }
+
+  // Count renders today (UTC), per-tenant
+  const r = await db.execute(sql`
+    select count(*)::int as n
+    from quote_logs
+    where tenant_id = ${tenantId}::uuid
+      and render_status = 'rendered'
+      and rendered_at is not null
+      and rendered_at >= date_trunc('day', now())
+  `);
+
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const n = Number(row?.n ?? 0);
+
+  return { limited: n >= maxPerDay, maxPerDay, usedToday: Number.isFinite(n) ? n : 0 };
+}
+
+function collapseBlankLines(s: string) {
+  return s
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
+    .join("\n")
+    .trim();
+}
+
+function pickFirstImageUrl(images: any[]): string {
+  if (!Array.isArray(images)) return "";
+  // prefer "is_primary" if present
+  const primary = images.find((x) => x && (x.is_primary === true || x.isPrimary === true));
+  const cands = [primary, images[0]].filter(Boolean);
+
+  for (const it of cands) {
+    const url = safeTrim((it as any)?.url || (it as any)?.publicUrl || (it as any)?.blobUrl);
+    if (url) return url;
+  }
+
+  // scan
+  for (const it of images) {
+    const url = safeTrim((it as any)?.url || (it as any)?.publicUrl || (it as any)?.blobUrl);
+    if (url) return url;
+  }
+
+  return "";
+}
+
+async function fetchImageAsFile(url: string) {
+  const u = safeTrim(url);
+  if (!u) return null;
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15_000);
+
+  try {
+    const res = await fetch(u, { cache: "no-store", signal: controller.signal });
+    if (!res.ok) return null;
+
+    const ct = safeTrim(res.headers.get("content-type")) || "application/octet-stream";
+    const ab = await res.arrayBuffer();
+    const buf = Buffer.from(ab);
+
+    // try to infer extension
+    const ext =
+      ct.includes("png") ? "png" : ct.includes("jpeg") || ct.includes("jpg") ? "jpg" : ct.includes("webp") ? "webp" : "bin";
+
+    // OpenAI node supports toFile() which yields a File-like payload
+    const file = await toFile(buf, `input.${ext}`, { type: ct });
+    return { file, contentType: ct, bytes: buf.length };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function handleCron(req: Request) {
@@ -279,11 +428,7 @@ async function handleCron(req: Request) {
   const auth = await requireCronSecret(req);
   if (!auth.ok) {
     return json(
-      {
-        ok: false,
-        error: "UNAUTHORIZED",
-        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
-      },
+      { ok: false, error: "UNAUTHORIZED", ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}) },
       401,
       debugId
     );
@@ -291,7 +436,6 @@ async function handleCron(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  // Claim jobs
   const claimed = await claimJob(max);
   if (!claimed.length) {
     return json(
@@ -311,14 +455,20 @@ async function handleCron(req: Request) {
   const processed: any[] = [];
   const debugEnabled = isRenderDebugEnabled();
 
-  // PCC prompt assets (templates/presets) are platform-level
+  // PCC prompt assets (templates/presets/packs) are platform-level
   const pcc = await loadPlatformLlmConfig();
 
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
-      // Load tenant + quote context
+      // make quote show “running” immediately
+      try {
+        await markQuoteRunning({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
+      } catch {
+        // ignore
+      }
+
       const ctx = await loadRenderContext(job.tenantId, job.quoteLogId);
       if (!ctx) throw new Error("Missing tenant/quote context for job.");
 
@@ -329,9 +479,7 @@ async function handleCron(req: Request) {
       const resolved = await resolveTenantLlm(job.tenantId);
       const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
 
-      const resolvedTenantRenderEnabled = resolved.tenant.tenantRenderEnabled;
-      const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolvedTenantRenderEnabled);
-
+      const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolved.tenant.tenantRenderEnabled);
       if (tenantRenderEnabled === false) {
         await updateQuoteFailed({
           tenantId: job.tenantId,
@@ -344,10 +492,35 @@ async function handleCron(req: Request) {
         continue;
       }
 
+      // ✅ Rate limit enforcement (0 = unlimited)
+      const maxPerDay = normalizeMaxPerDay(ctx.rendering_max_per_day);
+      const rate = await isRateLimitedNow({ tenantId: job.tenantId, maxPerDay });
+
+      if (rate.limited) {
+        const msg = `Renderings are disabled by rate limit (max per day = ${rate.maxPerDay}).`;
+
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: msg,
+        });
+
+        await markJobDone(job.id, "failed", msg);
+        processed.push({
+          jobId: job.id,
+          quoteLogId: job.quoteLogId,
+          ok: false,
+          error: "RATE_LIMITED",
+          maxPerDay: rate.maxPerDay,
+          usedToday: (rate as any).usedToday ?? null,
+        });
+        continue;
+      }
+
       const inputAny: any = safeJsonParse(ctx.input) ?? {};
       const outputAny: any = safeJsonParse(ctx.output) ?? {};
 
-      // Render opt-in should be explicit per quote (server stored)
       const optIn =
         Boolean(ctx.render_opt_in) ||
         Boolean(inputAny?.render_opt_in) ||
@@ -372,67 +545,113 @@ async function handleCron(req: Request) {
         continue;
       }
 
-      // OpenAI key
+      // ✅ Key policy (tenant key OR tier0 grace w/ platform key)
       const enc = ctx.openai_key_enc;
-      if (!enc) throw new Error("Missing tenant OpenAI key (tenant_secrets.openai_key_enc).");
-      const apiKey = decryptSecret(String(enc));
-      if (!apiKey) throw new Error("Unable to decrypt tenant OpenAI key.");
+      const hasTenantKey = Boolean(enc);
+      const platformKey = safeTrim(process.env.OPENAI_API_KEY);
+      const hasPlatformKey = Boolean(platformKey);
+
+      const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
+      const tier0GraceRemaining = grace.plan === "tier0" ? Number(grace.remaining ?? 0) : 0;
+
+      const canUsePlatformForTier0 = grace.plan === "tier0" && tier0GraceRemaining > 0 && hasPlatformKey;
+
+      if (!hasTenantKey && !canUsePlatformForTier0) {
+        const why =
+          grace.plan === "tier0"
+            ? !hasPlatformKey
+              ? "Missing platform OpenAI key (OPENAI_API_KEY)."
+              : "Tier0 grace exhausted for rendering."
+            : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
+
+        await updateQuoteFailed({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          prompt: job.prompt,
+          error: why,
+        });
+
+        await markJobDone(job.id, "failed", why);
+        processed.push({
+          jobId: job.id,
+          quoteLogId: job.quoteLogId,
+          ok: false,
+          error: "KEY_POLICY_BLOCK",
+          planTier: safeTrim(ctx.plan_tier) || null,
+          tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+          hasTenantKey,
+          hasPlatformKey,
+        });
+        continue;
+      }
+
+      const apiKey = hasTenantKey ? decryptSecret(String(enc)) : platformKey;
+      if (!apiKey) throw new Error(hasTenantKey ? "Unable to decrypt tenant OpenAI key." : "Missing platform OpenAI key.");
+
+      // ✅ Industry key (keep render on-topic)
+      const industryKey =
+        safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
+
+      // ✅ Pull industry render guidance from PCC packs (platform-owned)
+      const pack: any = industryKey ? (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] : null;
+
+      const industryAddendum = safeTrim(pack?.renderPromptAddendum) || "";
+      const industryNegative = safeTrim(pack?.renderNegativeGuidance) || "";
 
       // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
       const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
       const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved.tenant.tenantRenderNotes) || "";
 
-      // Build prompt from PCC (platform-level prompt assets)
-      const presets = (pcc?.prompts?.renderStylePresets ?? {}) as any;
+      // Build style from PCC presets
+      const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
       const presetText =
         tenantStyleKey === "clean_oem"
           ? safeTrim(presets.clean_oem)
           : tenantStyleKey === "custom"
-            ? safeTrim(presets.custom)
-            : safeTrim(presets.photoreal);
+          ? safeTrim(presets.custom)
+          : safeTrim(presets.photoreal);
 
-      const styleText =
-        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
-      const renderPromptPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+      // ✅ IMPORTANT: anchor render to YOUR quote job prompt (scope/summary/Q&A) + industry pack + tenant notes.
+      // This prevents “random couch” drift.
+      const basePreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
 
-      const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
-      const serviceType = inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "";
-      const customerNotes = String(inputAny?.customer_context?.notes ?? "").trim();
-
-      const renderPromptTemplate =
-        safeTrim((pcc as any)?.prompts?.renderPromptTemplate) ||
+      const renderPromptPreamble = collapseBlankLines(
         [
-          "{renderPromptPreamble}",
-          "Generate a realistic 'after' concept rendering based on the customer's photos.",
-          "Do NOT add text or watermarks.",
-          "Style: {style}",
-          "{serviceTypeLine}",
-          "{summaryLine}",
-          "{customerNotesLine}",
-          "{tenantRenderNotesLine}",
-        ].join("\n");
+          basePreamble,
+          industryKey ? `Industry key: ${industryKey}` : "",
+          industryAddendum ? `Industry addendum:\n${industryAddendum}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      );
 
-      const prompt = renderPromptTemplate
-        .split("{renderPromptPreamble}")
-        .join(renderPromptPreamble)
-        .split("{style}")
-        .join(styleText)
-        .split("{serviceTypeLine}")
-        .join(serviceType ? `Service type: ${serviceType}` : "")
-        .split("{summaryLine}")
-        .join(summary ? `Estimate summary context: ${summary}` : "")
-        .split("{customerNotesLine}")
-        .join(customerNotes ? `Customer notes: ${customerNotes}` : "")
-        .split("{tenantRenderNotesLine}")
-        .join(tenantRenderNotes ? `Tenant render notes: ${tenantRenderNotes}` : "")
-        .split("\n")
-        .map((l) => l.trimEnd())
-        .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
-        .join("\n")
-        .trim();
+      const negativeBlock = industryNegative
+        ? collapseBlankLines(
+            [
+              "Hard negatives (must avoid):",
+              // allow multi-line negative guidance from PCC UI
+              industryNegative,
+            ].join("\n")
+          )
+        : "";
 
-      // Debug payload (stored ONLY in output.render_debug)
+      const jobContext = safeTrim(job.prompt);
+
+      const finalPrompt = collapseBlankLines(
+        [
+          renderPromptPreamble,
+          `Style: ${styleText}`,
+          tenantRenderNotes ? `Tenant render notes:\n${tenantRenderNotes}` : "",
+          negativeBlock,
+          jobContext ? `Job context (must honor):\n${jobContext}` : "",
+          "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      );
+
       if (debugEnabled) {
         const renderDebug: any = {
           ...buildRenderDebugPayload({
@@ -441,14 +660,32 @@ async function handleCron(req: Request) {
             tenantStyleKey,
             styleText,
             renderPromptPreamble,
-            renderPromptTemplate,
-            finalPrompt: prompt,
-            serviceType,
-            summary,
-            customerNotes,
+            renderPromptTemplate: "(cron) composed prompt (preamble+style+tenant+industry+jobContext)",
+            finalPrompt,
+            serviceType: inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "",
+            summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
+            customerNotes: String(inputAny?.customer_context?.notes ?? "").trim(),
             tenantRenderNotes,
             images,
           }),
+          industry: {
+            industryKey: industryKey || null,
+            hasIndustryPack: Boolean(pack),
+            renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
+            renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
+          },
+          keyPolicy: {
+            used: hasTenantKey ? "tenant" : "platform_grace",
+            planTier: safeTrim(ctx.plan_tier) || null,
+            tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+            hasTenantKey,
+            hasPlatformKey,
+          },
+          rateLimit: {
+            maxPerDay,
+            usedToday: (rate as any).usedToday ?? null,
+            enabled: maxPerDay > 0,
+          },
           env: {
             PCC_RENDER_DEBUG: String(process.env.PCC_RENDER_DEBUG ?? "").trim() || null,
             VERCEL_ENV: String(process.env.VERCEL_ENV ?? "").trim() || null,
@@ -457,43 +694,66 @@ async function handleCron(req: Request) {
         };
 
         try {
-          await setRenderDebug({
-            db: db as any,
-            quoteLogId: job.quoteLogId,
-            tenantId: job.tenantId,
-            debug: renderDebug,
-          });
+          await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
         } catch {
           // ignore
         }
       }
 
-      // Generate image
-      const openai = new OpenAI({ apiKey });
-      const imgResp: any = await openai.images.generate({
-        model: renderModel,
-        prompt,
-        size: "1024x1024",
-      });
+      // ✅ OpenAI image generation
+      // ✅ CRITICAL FIX: anchor to the customer's uploaded photo via image-to-image.
+      // Without this, prompt-only generation can drift (random couch, etc.)
+      const openai = new OpenAI({
+        apiKey,
+        timeout: 90_000,
+        maxRetries: 1,
+      } as any);
 
-      const b64: string | undefined = imgResp?.data?.[0]?.b64_json;
+      const inputUrl = pickFirstImageUrl(images);
+      const inputFile = await fetchImageAsFile(inputUrl);
+
+      let b64: string | undefined;
+
+      if (inputFile?.file) {
+        // Image-to-image (best anchor)
+        const editResp: any = await openai.images.edit({
+          model: renderModel,
+          image: inputFile.file,
+          prompt: finalPrompt,
+          size: "1024x1024",
+        });
+
+        b64 = editResp?.data?.[0]?.b64_json;
+      } else {
+        // Fallback (still works, but can drift more)
+        const genResp: any = await openai.images.generate({
+          model: renderModel,
+          prompt: finalPrompt,
+          size: "1024x1024",
+        });
+
+        b64 = genResp?.data?.[0]?.b64_json;
+      }
+
       if (!b64) throw new Error("Image generation returned no b64_json.");
 
       const bytes = Buffer.from(b64, "base64");
 
-      // Upload to blob
       const key = `renders/${tenantSlug}/${job.quoteLogId}-${Date.now()}.png`;
       const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
 
-      // Update quote log
-      await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt });
+      await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
 
-      // Emails
+      // If we used platform grace (tier0), consume 1 credit on success.
+      if (!hasTenantKey && canUsePlatformForTier0) {
+        await bumpGraceUsedIfTier0(job.tenantId);
+      }
+
+      // Emails (best-effort)
       try {
         const cfg = await getTenantEmailConfig(job.tenantId);
-
         const businessName = (cfg.businessName || ctx.business_name || tenantName || "Your Business").trim();
         const brandLogoUrl = ctx.brand_logo_url ?? null;
 
@@ -508,6 +768,7 @@ async function handleCron(req: Request) {
 
         const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
         const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
+        const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
         const baseUrl = getBaseUrl(req);
         const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
@@ -607,21 +868,25 @@ async function handleCron(req: Request) {
           // ignore
         }
       } catch {
-        // ignore email failures (render is still a success)
+        // ignore
       }
 
       await markJobDone(job.id, "done", null);
-      processed.push({ jobId: job.id, quoteLogId: job.quoteLogId, ok: true, imageUrl, renderModel });
+      processed.push({
+        jobId: job.id,
+        quoteLogId: job.quoteLogId,
+        ok: true,
+        imageUrl,
+        renderModel,
+        industryKey: industryKey || null,
+        usedKey: hasTenantKey ? "tenant" : "platform_grace",
+        anchoredToInputImage: Boolean(inputFile?.file),
+      });
     } catch (e: any) {
       const msg = safeErr(e);
 
       try {
-        await updateQuoteFailed({
-          tenantId: job.tenantId,
-          quoteLogId: job.quoteLogId,
-          prompt: job.prompt,
-          error: msg,
-        });
+        await updateQuoteFailed({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: job.prompt, error: msg });
       } catch {
         // ignore
       }
@@ -645,7 +910,6 @@ async function handleCron(req: Request) {
   );
 }
 
-// ✅ Vercel Cron typically uses GET. Support both.
 export async function GET(req: Request) {
   return handleCron(req);
 }
