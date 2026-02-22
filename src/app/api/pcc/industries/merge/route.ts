@@ -31,7 +31,7 @@ function actorFromReq(req: Request) {
     safeTrim(req.headers.get("x-clerk-user-id")) ||
     safeTrim(req.headers.get("x-user-id")) ||
     safeTrim(req.headers.get("x-forwarded-for")) ||
-    "unknown"
+    "platform"
   );
 }
 
@@ -39,39 +39,23 @@ function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
 }
 
-function jsonbParam(v: any) {
-  if (v === undefined || v === null) return null;
+function jsonbString(v: any) {
+  if (v === undefined || v === null) return "{}";
   if (typeof v === "string") return v;
   try {
     return JSON.stringify(v);
   } catch {
-    return String(v);
+    return "{}";
   }
 }
 
-// ✅ Schema-compatible audit insert (snake_case OR legacy columns)
-async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }) {
-  const payloadJson = jsonbParam(args.payload);
-
-  // Try "new" schema first
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
-      values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
-    `);
-    return;
-  } catch (e: any) {
-    const msg = String(e?.message ?? e);
-    const cause = String((e as any)?.cause?.message ?? "");
-    const combined = `${msg} ${cause}`;
-    // only fallback on "missing column" type failures
-    if (!combined.toLowerCase().includes("does not exist")) throw e;
-  }
-
-  // Fallback: legacy columns (unquoted identifiers => likely "sourcekey"/"targetkey")
+async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; snapshot: any }) {
+  // ✅ Matches DB schema:
+  // action, source_industry_key, target_industry_key, actor, reason, snapshot
+  const snapshotJson = jsonbString(args.snapshot);
   await tx.execute(sql`
-    insert into industry_change_log (action, sourcekey, targetkey, actor, reason, payload)
-    values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
+    insert into industry_change_log (action, source_industry_key, target_industry_key, actor, reason, snapshot)
+    values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${snapshotJson}::jsonb)
   `);
 }
 
@@ -95,7 +79,7 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // ✅ Case-insensitive lookup to resolve canonical stored keys
+    // ✅ Case-insensitive lookup to resolve stored keys
     const srcR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
@@ -120,6 +104,7 @@ export async function POST(req: Request) {
 
     if (sourceKey === targetKey) return { ok: false as const, status: 400, error: "BAD_REQUEST" };
 
+    // Counts before (useful to show user + audit)
     const countsBeforeR = await tx.execute(sql`
       select
         (select count(*)::int from tenant_settings where industry_key = ${sourceKey}) as "tenantSettings",
@@ -129,6 +114,7 @@ export async function POST(req: Request) {
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
+    // 1) Move tenants (authoritative pointer)
     const movedTenantsR = await tx.execute(sql`
       update tenant_settings
       set industry_key = ${targetKey}, updated_at = now()
@@ -137,6 +123,7 @@ export async function POST(req: Request) {
     `);
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
 
+    // 2) Merge tenant_sub_industries
     const insertTenantSubR = await tx.execute(sql`
       insert into tenant_sub_industries (tenant_id, industry_key, key, label, created_at, updated_at)
       select
@@ -164,6 +151,7 @@ export async function POST(req: Request) {
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
+    // 3) Merge industry_sub_industries defaults
     const insertIndustrySubR = await tx.execute(sql`
       insert into industry_sub_industries (id, industry_key, key, label, description, sort_order, is_active, created_at, updated_at)
       select
@@ -193,6 +181,7 @@ export async function POST(req: Request) {
     `);
     const deletedIndustrySub = Number((deletedIndustrySubR as any)?.rowCount ?? 0);
 
+    // 4) Packs (keep your existing behavior)
     const maxVR = await tx.execute(sql`
       select coalesce(max(version), 0)::int as "v"
       from industry_llm_packs
@@ -219,9 +208,9 @@ export async function POST(req: Request) {
     for (const p of srcPacks) {
       nextV += 1;
 
-      const packJson = jsonbParam(p.pack);
-      const modelsJson = jsonbParam(p.models);
-      const promptsJson = jsonbParam(p.prompts);
+      const packJson = jsonbString(p.pack);
+      const modelsJson = jsonbString(p.models);
+      const promptsJson = jsonbString(p.prompts);
 
       await tx.execute(sql`
         insert into industry_llm_packs (id, industry_key, enabled, version, pack, models, prompts, updated_at)
@@ -246,6 +235,7 @@ export async function POST(req: Request) {
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
+    // 5) Hard delete source industry row (optional)
     let deletedIndustry = 0;
     if (deleteSource) {
       const delR = await tx.execute(sql`
@@ -255,7 +245,8 @@ export async function POST(req: Request) {
       deletedIndustry = Number((delR as any)?.rowCount ?? 0);
     }
 
-    const payload = {
+    const snapshot = {
+      mode: "merge",
       source: { key: sourceKey, label: String(srcRow.label ?? "") },
       target: { key: targetKey, label: String(tgtRow.label ?? "") },
       countsBefore,
@@ -268,15 +259,12 @@ export async function POST(req: Request) {
         industryLlmPacksCopied: copiedPacks,
         industryLlmPacksDeleted: deletedPacks,
       },
-      deleted: {
-        industriesRow: deletedIndustry,
-      },
+      deleted: { industriesRow: deletedIndustry },
     };
 
-    // ✅ still fail-loud, but now schema-compatible
-    await auditMerge(tx, { sourceKey, targetKey, actor, reason, payload });
+    await auditMerge(tx, { sourceKey, targetKey, actor, reason, snapshot });
 
-    return { ok: true as const, sourceKey, targetKey, moved: payload.moved, deleted: payload.deleted };
+    return { ok: true as const, sourceKey, targetKey, moved: snapshot.moved, deleted: snapshot.deleted };
   });
 
   if ((result as any)?.ok === false) {

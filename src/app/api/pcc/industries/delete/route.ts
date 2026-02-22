@@ -29,7 +29,7 @@ function actorFromReq(req: Request) {
     safeTrim(req.headers.get("x-clerk-user-id")) ||
     safeTrim(req.headers.get("x-user-id")) ||
     safeTrim(req.headers.get("x-forwarded-for")) ||
-    "unknown"
+    "platform"
   );
 }
 
@@ -38,48 +38,21 @@ function json(data: any, status = 200) {
 }
 
 function jsonbString(v: any) {
-  if (v === undefined || v === null) return null;
+  if (v === undefined || v === null) return "{}";
   if (typeof v === "string") return v;
   try {
     return JSON.stringify(v);
   } catch {
-    return String(v);
+    return "{}";
   }
 }
 
-// ✅ Schema-compatible audit insert (best-effort)
-async function bestEffortAudit(
-  tx: any,
-  args: { action: string; sourceKey: string; targetKey: string | null; actor: string; reason: string | null; payload: any }
-) {
-  const payloadJson = jsonbString(args.payload);
-
-  // Try "new" schema first
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
-      values (${args.action}, ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
-    `);
-    return;
-  } catch (e: any) {
-    const msg = String(e?.message ?? e);
-    const cause = String((e as any)?.cause?.message ?? "");
-    const combined = `${msg} ${cause}`;
-    if (!combined.toLowerCase().includes("does not exist")) {
-      // if it’s some other failure, still best-effort: swallow
-      return;
-    }
-  }
-
-  // Fallback: legacy columns (likely "sourcekey"/"targetkey")
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, sourcekey, targetkey, actor, reason, payload)
-      values (${args.action}, ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
-    `);
-  } catch {
-    // swallow
-  }
+async function auditDelete(tx: any, args: { industryKey: string; actor: string; reason: string | null; snapshot: any }) {
+  const snapshotJson = jsonbString(args.snapshot);
+  await tx.execute(sql`
+    insert into industry_change_log (action, source_industry_key, target_industry_key, actor, reason, snapshot)
+    values ('delete', ${args.industryKey}, null, ${args.actor}, ${args.reason}, ${snapshotJson}::jsonb)
+  `);
 }
 
 export async function POST(req: Request) {
@@ -91,101 +64,80 @@ export async function POST(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  const industryKey = safeLower(parsed.data.industryKey);
+  const industryKeyIn = safeLower(parsed.data.industryKey);
   const reason = safeTrim(parsed.data.reason ?? "") || null;
 
-  if (!industryKey) return json({ ok: false, error: "BAD_REQUEST", message: "industryKey is required" }, 400);
+  if (!industryKeyIn) return json({ ok: false, error: "BAD_REQUEST", message: "industryKey is required" }, 400);
 
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
+    // ✅ Canonical delete requires industries row (but case-insensitive)
     const indR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
-      where lower(key) = ${industryKey}
+      where lower(key) = ${industryKeyIn}
       limit 1
     `);
     const indRow: any = (indR as any)?.rows?.[0] ?? null;
     if (!indRow) return { ok: false as const, status: 404, error: "NOT_FOUND" };
 
-    const canonicalKey = safeLower(indRow.key);
+    const industryKey = safeLower(indRow.key);
 
+    // Block delete if ANY tenants are still assigned
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_settings
-      where lower(industry_key) = ${canonicalKey}
+      where industry_key = ${industryKey}
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
-      return {
-        ok: false as const,
-        status: 409,
-        error: "HAS_TENANTS",
-        message: `Cannot delete: ${nTenants} tenants still assigned.`,
-      };
+      return { ok: false as const, status: 409, error: "HAS_TENANTS", message: `Cannot delete: ${nTenants} tenants still assigned.` };
     }
 
-    const tsiCountR = await tx.execute(sql`
-      select count(*)::int as "n"
-      from tenant_sub_industries
-      where lower(industry_key) = ${canonicalKey}
-    `);
-    const nTsi = Number((tsiCountR as any)?.rows?.[0]?.n ?? 0);
-    if (nTsi > 0) {
-      return {
-        ok: false as const,
-        status: 409,
-        error: "HAS_TENANT_SUB_INDUSTRIES",
-        message: `Cannot delete: ${nTsi} tenant_sub_industries rows still reference this industry.`,
-      };
-    }
-
+    // Counts before
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from industry_sub_industries where lower(industry_key) = ${canonicalKey}) as "industrySubIndustries",
-        (select count(*)::int from industry_llm_packs where lower(industry_key) = ${canonicalKey}) as "industryLlmPacks"
+        (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
+    // Delete dependents (canonical delete = full purge for this key)
+    const delTenantSubR = await tx.execute(sql`
+      delete from tenant_sub_industries
+      where industry_key = ${industryKey}
+    `);
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where lower(industry_key) = ${canonicalKey}
+      where industry_key = ${industryKey}
     `);
-
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where lower(industry_key) = ${canonicalKey}
+      where industry_key = ${industryKey}
     `);
 
     const delIndustryR = await tx.execute(sql`
       delete from industries
-      where lower(key) = ${canonicalKey}
+      where lower(key) = ${industryKey}
     `);
 
-    const payload = {
-      industry: { key: canonicalKey, label: String(indRow.label ?? "") },
+    const snapshot = {
+      mode: "delete_canonical",
+      industry: { key: industryKey, label: String(indRow.label ?? "") },
       countsBefore,
       deleted: {
+        tenantSubIndustries: Number((delTenantSubR as any)?.rowCount ?? 0),
         industrySubIndustries: Number((delIndustrySubR as any)?.rowCount ?? 0),
         industryLlmPacks: Number((delPacksR as any)?.rowCount ?? 0),
         industriesRow: Number((delIndustryR as any)?.rowCount ?? 0),
       },
     };
 
-    await bestEffortAudit(tx, {
-      action: "delete",
-      sourceKey: canonicalKey,
-      targetKey: null,
-      actor,
-      reason,
-      payload,
-    });
+    await auditDelete(tx, { industryKey, actor, reason, snapshot });
 
-    return {
-      ok: true as const,
-      industryKey: canonicalKey,
-      deleted: payload.deleted,
-    };
+    return { ok: true as const, industryKey, deleted: snapshot.deleted };
   });
 
   if ((result as any)?.ok === false) {

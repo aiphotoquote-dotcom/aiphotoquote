@@ -19,69 +19,40 @@ function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
 }
+
 function safeLower(v: unknown) {
   return safeTrim(v).toLowerCase();
 }
+
 function actorFromReq(req: Request) {
   return (
     safeTrim(req.headers.get("x-clerk-user-id")) ||
     safeTrim(req.headers.get("x-user-id")) ||
     safeTrim(req.headers.get("x-forwarded-for")) ||
-    "unknown"
+    "platform"
   );
 }
+
 function json(data: any, status = 200) {
   return NextResponse.json(data, { status });
 }
+
 function jsonbString(v: any) {
-  if (v === undefined || v === null) return null;
+  if (v === undefined || v === null) return "{}";
   if (typeof v === "string") return v;
   try {
     return JSON.stringify(v);
   } catch {
-    return String(v);
+    return "{}";
   }
 }
 
-/**
- * Audit insert that tolerates schema drift:
- * - tries snake_case columns (source_key/target_key)
- * - then tries legacy drizzle-lowercased columns (sourcekey/targetkey)
- * - if both fail, we swallow (delete should still work)
- */
-async function bestEffortAudit(
-  tx: any,
-  args: {
-    action: string;
-    sourceKey: string;
-    targetKey: string | null;
-    actor: string;
-    reason: string | null;
-    payload: any;
-  }
-) {
-  const payloadJson = jsonbString(args.payload);
-
-  // Attempt 1: snake_case
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
-      values (${args.action}, ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
-    `);
-    return;
-  } catch {
-    // fall through
-  }
-
-  // Attempt 2: lowercased “sourcekey/targetkey” (unquoted identifiers)
-  try {
-    await tx.execute(sql`
-      insert into industry_change_log (action, sourcekey, targetkey, actor, reason, payload)
-      values (${args.action}, ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
-    `);
-  } catch {
-    // swallow
-  }
+async function auditDelete(tx: any, args: { industryKey: string; actor: string; reason: string | null; snapshot: any }) {
+  const snapshotJson = jsonbString(args.snapshot);
+  await tx.execute(sql`
+    insert into industry_change_log (action, source_industry_key, target_industry_key, actor, reason, snapshot)
+    values ('delete', ${args.industryKey}, null, ${args.actor}, ${args.reason}, ${snapshotJson}::jsonb)
+  `);
 }
 
 export async function POST(req: Request) {
@@ -100,74 +71,58 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // Ensure it's NOT canonical (derived-only endpoint)
-    const indR = await tx.execute(sql`
-      select 1 as "n"
-      from industries
-      where lower(key) = ${industryKey}
-      limit 1
-    `);
-    const isCanonical = Boolean((indR as any)?.rows?.[0]?.n);
-    if (isCanonical) {
-      return {
-        ok: false as const,
-        status: 409,
-        error: "IS_CANONICAL",
-        message: "This is a canonical industry. Use /api/pcc/industries/delete instead.",
-      };
-    }
-
-    // Block delete if ANY tenants are still assigned
+    // ✅ Still block if tenants are actively assigned to this industry key.
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_settings
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
-      return {
-        ok: false as const,
-        status: 409,
-        error: "HAS_TENANTS",
-        message: `Cannot delete: ${nTenants} tenants still assigned.`,
-      };
+      return { ok: false as const, status: 409, error: "HAS_TENANTS", message: `Cannot delete: ${nTenants} tenants still assigned.` };
     }
 
-    // Delete dependents (cleanup only; no suppression)
+    // Counts before
+    const countsBeforeR = await tx.execute(sql`
+      select
+        (select count(*)::int from tenant_sub_industries where industry_key = ${industryKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks",
+        (select count(*)::int from industries where lower(key) = ${industryKey}) as "industriesRow"
+    `);
+    const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
+
+    // ✅ Derived delete = artifacts-only. We do NOT delete industries row (if it exists, it’s canonical by definition).
+    const delTenantSubR = await tx.execute(sql`
+      delete from tenant_sub_industries
+      where industry_key = ${industryKey}
+    `);
+
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
 
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where lower(industry_key) = ${industryKey}
+      where industry_key = ${industryKey}
     `);
 
-    const payload = {
+    const snapshot = {
+      mode: "delete_derived",
       industryKey,
-      isCanonicalBefore: false,
+      countsBefore,
       deleted: {
+        tenantSubIndustries: Number((delTenantSubR as any)?.rowCount ?? 0),
         industrySubIndustries: Number((delIndustrySubR as any)?.rowCount ?? 0),
         industryLlmPacks: Number((delPacksR as any)?.rowCount ?? 0),
         industriesRow: 0,
       },
     };
 
-    await bestEffortAudit(tx, {
-      action: "delete_derived",
-      sourceKey: industryKey,
-      targetKey: null,
-      actor,
-      reason,
-      payload,
-    });
+    await auditDelete(tx, { industryKey, actor, reason, snapshot });
 
-    return {
-      ok: true as const,
-      industryKey,
-      deleted: payload.deleted,
-    };
+    return { ok: true as const, industryKey, deleted: snapshot.deleted };
   });
 
   if ((result as any)?.ok === false) {
