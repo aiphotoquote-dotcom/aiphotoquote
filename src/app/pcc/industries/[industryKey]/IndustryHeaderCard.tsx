@@ -2,7 +2,10 @@
 
 import React from "react";
 import Link from "next/link";
+
 import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
+import MergeIndustryButton from "./MergeIndustryButton";
+import DeleteIndustryButton from "./DeleteIndustryButton";
 
 type Props = {
   industry: {
@@ -49,9 +52,7 @@ export default function IndustryHeaderCard(props: Props) {
             ) : null}
           </div>
 
-          {industry.description ? (
-            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p>
-          ) : null}
+          {industry.description ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">{industry.description}</p> : null}
 
           <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
             <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
@@ -110,8 +111,7 @@ export default function IndustryHeaderCard(props: Props) {
           </div>
         </div>
 
-        {/* Right side: keep ONLY navigation (no actions; actions live in editor toolbar above) */}
-        <div className="shrink-0 flex flex-col items-end gap-2">
+        <div className="shrink-0 flex flex-col items-end gap-3">
           <div className="flex gap-2">
             <Link
               href="/pcc/industries"
@@ -130,14 +130,24 @@ export default function IndustryHeaderCard(props: Props) {
             </button>
           </div>
 
-          {/* Optional: keep this here if you want quick access in header too.
-              If you prefer ONLY one toolbar total, delete this block. */}
-          <div className="hidden">
+          {/* ✅ Actions belong HERE */}
+          <div className="flex flex-col items-end gap-2">
             <GenerateIndustryPackButton
               industryKey={props.industryKeyLower}
               industryLabel={industry.label}
               industryDescription={industry.description}
             />
+
+            <div className="flex flex-wrap justify-end gap-2">
+              {/* Only allow merge/delete when canonical */}
+              {industry.isCanonical ? <MergeIndustryButton sourceKey={props.industryKeyLower} /> : null}
+              {industry.isCanonical ? <DeleteIndustryButton industryKey={props.industryKeyLower} /> : null}
+            </div>
+
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 text-right max-w-[360px]">
+              <span className="font-semibold">Merge</span> moves tenants, sub-industries, and packs into the target, then hard-deletes the
+              source. <span className="font-semibold">Delete</span> is blocked if any tenants are still assigned.
+            </div>
           </div>
         </div>
       </div>

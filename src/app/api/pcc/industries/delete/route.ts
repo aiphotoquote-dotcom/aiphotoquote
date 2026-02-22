@@ -47,11 +47,7 @@ function jsonbString(v: any) {
   }
 }
 
-async function auditDelete(
-  tx: any,
-  args: { industryKey: string; actor: string; reason: string | null; payload: any }
-) {
-  // ✅ Fail-loud. If audit can't be written, the delete should not proceed.
+async function auditDelete(tx: any, args: { industryKey: string; actor: string; reason: string | null; payload: any }) {
   const payloadJson = jsonbString(args.payload);
   await tx.execute(sql`
     insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
@@ -76,21 +72,23 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // Ensure industry exists
+    // ✅ Case-insensitive lookup (fixes NOT_FOUND when DB has mixed-case keys)
     const indR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
-      where key = ${industryKey}
+      where lower(key) = ${industryKey}
       limit 1
     `);
     const indRow: any = (indR as any)?.rows?.[0] ?? null;
     if (!indRow) return { ok: false as const, status: 404, error: "NOT_FOUND" };
 
+    const canonicalKey = safeLower(indRow.key);
+
     // Block delete if ANY tenants are still assigned
     const tenantCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_settings
-      where industry_key = ${industryKey}
+      where industry_key = ${canonicalKey}
     `);
     const nTenants = Number((tenantCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTenants > 0) {
@@ -106,7 +104,7 @@ export async function POST(req: Request) {
     const tsiCountR = await tx.execute(sql`
       select count(*)::int as "n"
       from tenant_sub_industries
-      where industry_key = ${industryKey}
+      where industry_key = ${canonicalKey}
     `);
     const nTsi = Number((tsiCountR as any)?.rows?.[0]?.n ?? 0);
     if (nTsi > 0) {
@@ -118,33 +116,31 @@ export async function POST(req: Request) {
       };
     }
 
-    // Counts before (for response/audit)
     const countsBeforeR = await tx.execute(sql`
       select
-        (select count(*)::int from industry_sub_industries where industry_key = ${industryKey}) as "industrySubIndustries",
-        (select count(*)::int from industry_llm_packs where industry_key = ${industryKey}) as "industryLlmPacks"
+        (select count(*)::int from tenant_sub_industries where industry_key = ${canonicalKey}) as "tenantSubIndustries",
+        (select count(*)::int from industry_sub_industries where industry_key = ${canonicalKey}) as "industrySubIndustries",
+        (select count(*)::int from industry_llm_packs where industry_key = ${canonicalKey}) as "industryLlmPacks"
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // Delete dependents
     const delIndustrySubR = await tx.execute(sql`
       delete from industry_sub_industries
-      where industry_key = ${industryKey}
+      where industry_key = ${canonicalKey}
     `);
 
     const delPacksR = await tx.execute(sql`
       delete from industry_llm_packs
-      where industry_key = ${industryKey}
+      where industry_key = ${canonicalKey}
     `);
 
-    // Delete the industry row itself
     const delIndustryR = await tx.execute(sql`
       delete from industries
-      where key = ${industryKey}
+      where lower(key) = ${canonicalKey}
     `);
 
     const payload = {
-      industry: { key: industryKey, label: String(indRow.label ?? "") },
+      industry: { key: canonicalKey, label: String(indRow.label ?? "") },
       countsBefore,
       deleted: {
         industrySubIndustries: Number((delIndustrySubR as any)?.rowCount ?? 0),
@@ -153,14 +149,9 @@ export async function POST(req: Request) {
       },
     };
 
-    // ✅ Fail-loud audit
-    await auditDelete(tx, { industryKey, actor, reason, payload });
+    await auditDelete(tx, { industryKey: canonicalKey, actor, reason, payload });
 
-    return {
-      ok: true as const,
-      industryKey,
-      deleted: payload.deleted,
-    };
+    return { ok: true as const, industryKey: canonicalKey, deleted: payload.deleted };
   });
 
   if ((result as any)?.ok === false) {

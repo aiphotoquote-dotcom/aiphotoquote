@@ -3,10 +3,6 @@
 
 import React, { useMemo, useState } from "react";
 
-import GenerateIndustryPackButton from "./GenerateIndustryPackButton";
-import MergeIndustryButton from "./MergeIndustryButton";
-import DeleteIndustryButton from "./DeleteIndustryButton";
-
 type Pack = {
   quoteEstimatorSystem?: string;
   qaQuestionGeneratorSystem?: string;
@@ -25,13 +21,7 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-export default function IndustryPromptPackEditor(props: {
-  industryKey: string;
-  industryLabel: string;
-  industryDescription: string | null;
-  isCanonical: boolean;
-  initialPack: Pack | null;
-}) {
+export default function IndustryPromptPackEditor(props: { industryKey: string; initialPack: Pack | null }) {
   const [pack, setPack] = useState<Pack>(() => props.initialPack ?? {});
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -106,62 +96,39 @@ export default function IndustryPromptPackEditor(props: {
         <div className="min-w-0">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Industry prompt pack (PCC)</div>
           <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            Platform-managed defaults for <span className="font-mono">{props.industryKey}</span>. Used by estimator, QA, and renders (cron).
+            These are platform-managed defaults for <span className="font-mono">{props.industryKey}</span>. Used by estimator, QA, and
+            renders (cron).
           </div>
-
-          {!props.isCanonical ? (
-            <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-              <div className="font-semibold">Derived industry (not in industries table)</div>
-              <div className="mt-1">
-                Merge/Delete are disabled because this key has no canonical row yet. If you want to manage it, first let onboarding create it
-                (or create/approve it in the industries table later).
-              </div>
-            </div>
-          ) : null}
         </div>
 
-        <div className="shrink-0 flex flex-col items-end gap-2">
-          {/* ✅ One toolbar: generate + merge/delete live here (no duplicates elsewhere) */}
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <GenerateIndustryPackButton
-              industryKey={props.industryKey}
-              industryLabel={props.industryLabel}
-              industryDescription={props.industryDescription}
-            />
+        <div className="shrink-0 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onClear}
+            disabled={saving}
+            className={cn(
+              "rounded-xl border px-3 py-2 text-xs font-semibold",
+              "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-950",
+              saving && "opacity-60"
+            )}
+          >
+            Clear
+          </button>
 
-            {props.isCanonical ? <MergeIndustryButton sourceKey={props.industryKey} /> : null}
-            {props.isCanonical ? <DeleteIndustryButton industryKey={props.industryKey} /> : null}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClear}
-              disabled={saving}
-              className={cn(
-                "rounded-xl border px-3 py-2 text-xs font-semibold",
-                "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-950",
-                saving && "opacity-60"
-              )}
-            >
-              Clear
-            </button>
-
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={saving || !dirty}
-              className={cn(
-                "rounded-xl border px-3 py-2 text-xs font-semibold",
-                dirty
-                  ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                  : "border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-black dark:text-gray-500",
-                saving && "opacity-60"
-              )}
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving || !dirty}
+            className={cn(
+              "rounded-xl border px-3 py-2 text-xs font-semibold",
+              dirty
+                ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
+                : "border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-black dark:text-gray-500",
+              saving && "opacity-60"
+            )}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
         </div>
       </div>
 
