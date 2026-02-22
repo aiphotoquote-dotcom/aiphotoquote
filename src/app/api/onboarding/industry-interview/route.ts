@@ -1,11 +1,13 @@
 // src/app/api/onboarding/industry-interview/route.ts
-
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
 import OpenAI from "openai";
 import { db } from "@/lib/db/client";
+
+import { resolveIndustryCandidate, normalizeIndustryKey, titleFromKey } from "@/lib/pcc/industries/resolveIndustryCandidate";
+import { ensureIndustryPack } from "@/lib/onboarding/ensureIndustryPack";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,13 +20,8 @@ function safeTrim(v: unknown) {
 }
 
 function normalizeKey(raw: string) {
-  const s = safeTrim(raw).toLowerCase();
-  if (!s) return "";
-  return s
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 64);
+  // keep local name for compatibility, but delegate to shared normalizer
+  return normalizeIndustryKey(raw);
 }
 
 function firstRow(r: any): any | null {
@@ -72,16 +69,6 @@ async function requireMembership(clerkUserId: string, tenantId: string) {
   if (!row?.ok) throw new Error("FORBIDDEN_TENANT");
 }
 
-function titleFromKey(key: string) {
-  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
-  if (!s) return "Service";
-  return s
-    .split(" ")
-    .filter(Boolean)
-    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 function jsonExtract(s: string): any | null {
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
@@ -117,8 +104,8 @@ type IndustryInterviewA = {
     key: string;
     label: string;
     description?: string | null;
-    exists: boolean;
-    shouldCreate: boolean;
+    exists: boolean; // canonical exists
+    shouldCreate: boolean; // derived candidate
   } | null;
 
   candidates: Candidate[];
@@ -181,19 +168,6 @@ async function writeAiAnalysis(tenantId: string, ai: any) {
   `);
 }
 
-async function industryExistsByKey(key: string): Promise<boolean> {
-  const k = normalizeKey(key);
-  if (!k) return false;
-  const r = await db.execute(sql`
-    select 1 as ok
-    from industries
-    where key = ${k}
-    limit 1
-  `);
-  const row = firstRow(r);
-  return Boolean(row?.ok);
-}
-
 async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
   const keys = Array.from(
     new Set(
@@ -210,28 +184,11 @@ async function markCandidatesExist(cands: Candidate[]): Promise<Candidate[]> {
   const r = await db.execute(sql`
     select key::text as key
     from industries
-    where key in (${inList})
+    where lower(key) in (${inList})
   `);
 
-  const found = new Set(rowsOf(r).map((x: any) => String(x.key)));
+  const found = new Set(rowsOf(r).map((x: any) => String(x.key).toLowerCase()));
   return cands.map((c) => ({ ...c, exists: found.has(normalizeKey(c.key)) }));
-}
-
-async function ensureIndustryExists(args: { key: string; label?: string; description?: string | null }) {
-  const key = normalizeKey(args.key);
-  if (!key) return "";
-
-  const label = safeTrim(args.label) || titleFromKey(key);
-  const description = args.description == null ? null : String(args.description);
-
-  await db.execute(sql`
-    insert into industries (id, key, label, description)
-    values (gen_random_uuid(), ${key}, ${label}, ${description})
-    on conflict (key) do update
-      set label = excluded.label
-  `);
-
-  return key;
 }
 
 /* -------------------- inference state -------------------- */
@@ -287,7 +244,6 @@ function buildTranscript(st: IndustryInterviewA) {
 
 /**
  * ✅ Progressive fallback: returns the first unasked question (by question text).
- * This prevents the "same question again" loop when the model doesn't provide nextQuestion.
  */
 function fallbackNextQuestion(st: IndustryInterviewA) {
   const asked = new Set(st.answers.map((a) => safeTrim(a.question).toLowerCase()).filter(Boolean));
@@ -534,6 +490,7 @@ export async function POST(req: Request) {
 
       ai.industryInterview = st;
       ai.suggestedIndustryKey = null;
+      ai.suggestedIndustryLabel = null;
       ai.confidenceScore = 0;
       ai.needsConfirmation = true;
 
@@ -548,17 +505,20 @@ export async function POST(req: Request) {
 
         let proposed: IndustryInterviewA["proposedIndustry"] = null;
         if (out.proposedIndustry?.key) {
-          const exists = await industryExistsByKey(out.proposedIndustry.key);
+          const resolved = await resolveIndustryCandidate({
+            proposedKey: out.proposedIndustry.key,
+            proposedLabel: out.proposedIndustry.label,
+          });
+
           proposed = {
-            key: out.proposedIndustry.key,
-            label: out.proposedIndustry.label,
+            key: resolved.key,
+            label: resolved.label || titleFromKey(resolved.key),
             description: out.proposedIndustry.description ?? null,
-            exists,
-            shouldCreate: Boolean(out.proposedIndustry.shouldCreate ?? false),
+            exists: resolved.isCanonical,
+            shouldCreate: !resolved.isCanonical,
           };
         }
 
-        // ✅ if model didn't provide a valid next question, use progressive fallback
         const nextQ = out.nextQuestion ?? fallbackNextQuestion(st);
 
         st = {
@@ -579,6 +539,7 @@ export async function POST(req: Request) {
 
         ai.industryInterview = st;
         if (proposed?.key) ai.suggestedIndustryKey = proposed.key;
+        if (proposed?.label) ai.suggestedIndustryLabel = proposed.label;
         ai.confidenceScore = st.confidenceScore;
         ai.needsConfirmation = true;
 
@@ -661,32 +622,22 @@ export async function POST(req: Request) {
 
       let proposed: IndustryInterviewA["proposedIndustry"] = null;
       if (out.proposedIndustry?.key) {
-        const exists = await industryExistsByKey(out.proposedIndustry.key);
+        const resolved = await resolveIndustryCandidate({
+          proposedKey: out.proposedIndustry.key,
+          proposedLabel: out.proposedIndustry.label,
+        });
+
         proposed = {
-          key: out.proposedIndustry.key,
-          label: out.proposedIndustry.label,
+          key: resolved.key,
+          label: resolved.label || titleFromKey(resolved.key),
           description: out.proposedIndustry.description ?? null,
-          exists,
-          shouldCreate: Boolean(out.proposedIndustry.shouldCreate ?? false),
+          exists: resolved.isCanonical,
+          shouldCreate: !resolved.isCanonical,
         };
       }
 
       const reached = out.confidenceScore >= CONF_TARGET && out.fitScore >= FIT_TARGET;
       const status: IndustryInterviewA["status"] = reached ? "locked" : "collecting";
-
-      // ✅ AUTO-CREATE ON LOCK
-      if (status === "locked" && proposed?.key) {
-        const existsNow = await industryExistsByKey(proposed.key);
-        if (!existsNow) {
-          await ensureIndustryExists({
-            key: proposed.key,
-            label: proposed.label,
-            description: proposed.description ?? null,
-          });
-        }
-        proposed.exists = true;
-        proposed.shouldCreate = proposed.shouldCreate || !existsNow;
-      }
 
       // ✅ if collecting, force a non-repeating next question
       let nextQ = status === "collecting" ? out.nextQuestion : null;
@@ -699,7 +650,6 @@ export async function POST(req: Request) {
           nextQ = fallbackNextQuestion(st);
         }
 
-        // absolute guard: never return the same question id back-to-back
         if (nextQ?.id && st.nextQuestion?.id && safeTrim(nextQ.id) === safeTrim(st.nextQuestion.id)) {
           const forced = fallbackNextQuestion(st);
           if (safeTrim(forced.id) !== safeTrim(nextQ.id)) nextQ = forced;
@@ -723,10 +673,22 @@ export async function POST(req: Request) {
 
       ai.industryInterview = st;
       if (proposed?.key) ai.suggestedIndustryKey = proposed.key;
+      if (proposed?.label) ai.suggestedIndustryLabel = proposed.label;
       ai.confidenceScore = st.confidenceScore;
       ai.needsConfirmation = true;
 
       await writeAiAnalysis(tenantId, ai);
+
+      // ✅ Ensure pack exists ONLY when the interview locks an industry
+      if (status === "locked" && proposed?.key) {
+        await ensureIndustryPack({
+          tenantId,
+          industryKey: proposed.key,
+          industryLabel: proposed.label || titleFromKey(proposed.key),
+          industryDescription: proposed.description ?? null,
+        });
+      }
+
       return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
     } catch (e: any) {
       st = {

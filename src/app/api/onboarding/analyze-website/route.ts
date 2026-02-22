@@ -7,6 +7,8 @@ import { z } from "zod";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { resolveIndustryCandidate, titleFromKey } from "@/lib/pcc/industries/resolveIndustryCandidate";
+import { ensureIndustryPack } from "@/lib/onboarding/ensureIndustryPack";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -149,11 +151,7 @@ Return ONLY valid JSON.
 /* --------------------- model pick --------------------- */
 
 function pickOnboardingModel(cfg: any) {
-  return (
-    safeTrim(cfg?.models?.onboardingModel) ||
-    safeTrim(cfg?.models?.estimatorModel) ||
-    "gpt-4.1"
-  );
+  return safeTrim(cfg?.models?.onboardingModel) || safeTrim(cfg?.models?.estimatorModel) || "gpt-4.1";
 }
 
 /* --------------------- handler --------------------- */
@@ -252,7 +250,6 @@ export async function POST(req: Request) {
     if (!parsed || !parsed.success) {
       const preserved = {
         ...(typeof prior === "object" && prior ? prior : {}),
-        // If there was no prior analysis at all, we still need a safe starter.
         ...(typeof prior === "object" && prior
           ? {}
           : {
@@ -261,6 +258,7 @@ export async function POST(req: Request) {
               fit: "maybe" as const,
               fitReason: "Website intelligence was available, but structured parsing failed.",
               suggestedIndustryKey: "service",
+              suggestedIndustryLabel: "Service",
               detectedServices: [],
               billingSignals: [],
             }),
@@ -268,7 +266,6 @@ export async function POST(req: Request) {
         analyzedAt: new Date().toISOString(),
         source: "web_tools_two_pass_parse_fail_preserved_prior",
         modelUsed: model,
-        // Always provide helpful questions for correction, without nuking prior suggestedIndustryKey.
         questions: [
           "In one sentence, what do you do?",
           "What do you primarily work on (boats/cars/homes/commercial/etc.)?",
@@ -276,7 +273,7 @@ export async function POST(req: Request) {
           "Do customers usually send photos before you quote?",
         ].slice(0, 6),
         needsConfirmation: true,
-        confidenceScore: Math.min(0.5, Math.max(0, Number(prior?.confidenceScore ?? 0) || 0)),
+        confidenceScore: Math.min(0.5, Math.max(0, Number((prior as any)?.confidenceScore ?? 0) || 0)),
         rawWebIntelPreview: clamp(rawIntel, 1200),
         rawModelJsonPreview: clamp(jsonText, 1200),
         meta: mergeMeta(prior, {
@@ -293,8 +290,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
+    // ✅ Resolve to canonical (when it exists) instead of inventing variants
+    const resolved = await resolveIndustryCandidate({
+      proposedKey: parsed.data.suggestedIndustryKey,
+      proposedLabel: null,
+    });
+
     const analysis = {
       ...parsed.data,
+      suggestedIndustryKey: resolved.key,
+      suggestedIndustryLabel: resolved.label || titleFromKey(resolved.key),
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
@@ -303,7 +308,9 @@ export async function POST(req: Request) {
       meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,
-        lastAction: "AI analysis complete.",
+        lastAction: resolved.isCanonical
+          ? `AI analysis complete (matched canonical by ${resolved.matchedBy}).`
+          : "AI analysis complete.",
         error: null,
         finishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -311,6 +318,17 @@ export async function POST(req: Request) {
     };
 
     await upsertAnalysis(tenantId, website, analysis, 2);
+
+    // ✅ Ensure pack exists ONLY when we are confident enough to not need confirmation.
+    if (analysis.needsConfirmation === false) {
+      await ensureIndustryPack({
+        tenantId,
+        industryKey: analysis.suggestedIndustryKey,
+        industryLabel: analysis.suggestedIndustryLabel || titleFromKey(analysis.suggestedIndustryKey),
+        industryDescription: null,
+      });
+    }
+
     return NextResponse.json({ ok: true, tenantId, aiAnalysis: analysis }, { status: 200 });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
@@ -333,7 +351,7 @@ export async function POST(req: Request) {
 
         const errored = {
           ...(typeof prior === "object" && prior ? prior : {}),
-          website: website || (typeof prior === "object" && prior ? prior.website : null),
+          website: website || (typeof prior === "object" && prior ? (prior as any).website : null),
           meta: {
             ...priorMeta,
             status: "error",
