@@ -31,6 +31,15 @@ function titleFromKey(key: string) {
     .join(" ");
 }
 
+// Optional: normalize keys consistently (spaces/hyphens -> _)
+function normalizeKey(v: unknown) {
+  const s0 = safeLower(v);
+  if (!s0) return "";
+  const s1 = s0.replace(/[\s\-]+/g, "_");
+  const s2 = s1.replace(/_+/g, "_");
+  return s2.replace(/^_+|_+$/g, "");
+}
+
 export async function GET(req: Request) {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support", "platform_billing"]);
 
@@ -44,9 +53,12 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, { status: 400 });
   }
 
-  const q = safeTrim(parsed.data.q ?? "");
+  const qRaw = safeTrim(parsed.data.q ?? "");
+  const q = qRaw.toLowerCase();
+  const hasQ = Boolean(q);
+  const like = hasQ ? `%${q}%` : "%"; // ✅ always TEXT, never NULL
+
   const limit = Math.max(10, Math.min(500, Number(parsed.data.limit ?? 200)));
-  const like = q ? `%${q.toLowerCase()}%` : null;
 
   const r = await db.execute(sql`
     with
@@ -62,7 +74,7 @@ export async function GET(req: Request) {
           i.label::text as "label",
           true as "isCanonical"
         from industries i
-        where ${like} is null
+        where ${hasQ} = false
            or lower(i.key) like ${like}
            or lower(coalesce(i.label,'')) like ${like}
 
@@ -71,25 +83,25 @@ export async function GET(req: Request) {
         -- derived keys observed anywhere
         select distinct lower(ts.industry_key)::text as "key", null::text as "label", false as "isCanonical"
         from tenant_settings ts
-        where ${like} is null or lower(ts.industry_key) like ${like}
+        where ${hasQ} = false or lower(ts.industry_key) like ${like}
 
         union
 
         select distinct lower(p.industry_key)::text as "key", null::text as "label", false as "isCanonical"
         from industry_llm_packs p
-        where ${like} is null or lower(p.industry_key) like ${like}
+        where ${hasQ} = false or lower(p.industry_key) like ${like}
 
         union
 
         select distinct lower(s.industry_key)::text as "key", null::text as "label", false as "isCanonical"
         from industry_sub_industries s
-        where ${like} is null or lower(s.industry_key) like ${like}
+        where ${hasQ} = false or lower(s.industry_key) like ${like}
 
         union
 
         select distinct lower(tsi.industry_key)::text as "key", null::text as "label", false as "isCanonical"
         from tenant_sub_industries tsi
-        where ${like} is null or lower(tsi.industry_key) like ${like}
+        where ${hasQ} = false or lower(tsi.industry_key) like ${like}
       )
     select
       c."key"::text as "key",
@@ -110,7 +122,7 @@ export async function GET(req: Request) {
 
   const options = rows
     .map((x: any) => {
-      const key = safeLower(x.key);
+      const key = normalizeKey(x.key);
       if (!key) return null;
 
       const label = safeTrim(x.label) || titleFromKey(key);
