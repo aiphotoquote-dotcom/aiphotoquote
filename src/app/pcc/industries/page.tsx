@@ -92,7 +92,9 @@ export default async function PccIndustriesPage(props: {
     q: q || undefined,
   };
 
+  // -----------------------------
   // Canonical industries
+  // -----------------------------
   const canonicalR = await db.execute(sql`
     select
       key::text as "key",
@@ -103,13 +105,20 @@ export default async function PccIndustriesPage(props: {
     limit 500
   `);
 
-  const canonical = rows(canonicalR).map((r: any) => ({
-    key: String(r.key ?? ""),
-    label: String(r.label ?? ""),
-    description: r.description ? String(r.description) : null,
-  }));
+  const canonical = rows(canonicalR)
+    .map((r: any) => ({
+      key: String(r.key ?? "").trim(),
+      label: String(r.label ?? "").trim(),
+      description: r.description ? String(r.description) : null,
+    }))
+    .filter((x: any) => x.key);
 
-  // Counts by confirmed industry
+  const canonicalMap = new Map<string, { key: string; label: string; description: string | null }>();
+  for (const c of canonical) canonicalMap.set(c.key, c);
+
+  // -----------------------------
+  // Confirmed counts (tenant_settings.industry_key)
+  // -----------------------------
   const confirmedCountsR = await db.execute(sql`
     select
       ts.industry_key::text as "key",
@@ -120,11 +129,14 @@ export default async function PccIndustriesPage(props: {
 
   const confirmedCounts = new Map<string, number>();
   for (const r of rows(confirmedCountsR)) {
-    confirmedCounts.set(String(r.key), Number(r.confirmedCount || 0));
+    const k = String(r.key ?? "").trim();
+    if (!k) continue;
+    confirmedCounts.set(k, Number(r.confirmedCount || 0));
   }
 
-  // Counts by AI suggested industry + needsConfirmation
-  // Excludes tenants that have rejected that industry (ai_analysis.rejectedIndustryKeys contains key)
+  // -----------------------------
+  // AI suggested counts + needsConfirmation
+  // -----------------------------
   const aiCountsR = await db.execute(sql`
     select
       (ob.ai_analysis->>'suggestedIndustryKey')::text as "key",
@@ -146,13 +158,15 @@ export default async function PccIndustriesPage(props: {
   const aiSuggestedCounts = new Map<string, number>();
   const needsConfirmCounts = new Map<string, number>();
   for (const r of rows(aiCountsR)) {
-    const k = String(r.key ?? "");
+    const k = String(r.key ?? "").trim();
+    if (!k) continue;
     aiSuggestedCounts.set(k, Number(r.aiSuggestedCount || 0));
     needsConfirmCounts.set(k, Number(r.needsConfirmCount || 0));
   }
 
-  // Counts by rejected industry key (any tenant where rejectedIndustryKeys contains key)
-  // NOTE: jsonb_array_elements_text is safe and indexable later with GIN if you want.
+  // -----------------------------
+  // Rejected counts (jsonb array)
+  // -----------------------------
   const rejectedCountsR = await db.execute(sql`
     select
       x.key::text as "key",
@@ -168,37 +182,46 @@ export default async function PccIndustriesPage(props: {
 
   const rejectedCounts = new Map<string, number>();
   for (const r of rows(rejectedCountsR)) {
-    rejectedCounts.set(String(r.key ?? ""), Number(r.rejectedCount || 0));
+    const k = String(r.key ?? "").trim();
+    if (!k) continue;
+    rejectedCounts.set(k, Number(r.rejectedCount || 0));
   }
 
-  // Fallback list if industries table is empty
-  let list: Array<{ key: string; label: string; description: string | null }> = canonical;
+  // -----------------------------
+  // ✅ Union: canonical + discovered keys
+  // -----------------------------
+  const allKeys = new Set<string>();
+  for (const k of canonicalMap.keys()) allKeys.add(k);
+  for (const k of confirmedCounts.keys()) allKeys.add(k);
+  for (const k of aiSuggestedCounts.keys()) allKeys.add(k);
+  for (const k of rejectedCounts.keys()) allKeys.add(k);
 
-  if (!list.length) {
-    const discoveredKeys = new Set<string>();
-    for (const k of confirmedCounts.keys()) discoveredKeys.add(k);
-    for (const k of aiSuggestedCounts.keys()) discoveredKeys.add(k);
-    for (const k of rejectedCounts.keys()) discoveredKeys.add(k);
+  const list = Array.from(allKeys)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))
+    .map((k) => {
+      const canon = canonicalMap.get(k);
+      return {
+        key: k,
+        label: canon?.label || titleFromKey(k) || k,
+        description: canon?.description ?? null,
+        isCanonical: Boolean(canon),
+      };
+    });
 
-    list = Array.from(discoveredKeys)
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b))
-      .map((k) => ({ key: k, label: titleFromKey(k) || k, description: null }));
-  }
-
+  // -----------------------------
   // Augment rows for sorting/filter/search
+  // -----------------------------
   const augmented = list.map((it) => {
     const confirmed = confirmedCounts.get(it.key) ?? 0;
     const aiSuggested = aiSuggestedCounts.get(it.key) ?? 0;
     const needsConfirm = needsConfirmCounts.get(it.key) ?? 0;
     const rejected = rejectedCounts.get(it.key) ?? 0;
 
-    const label = it.label || titleFromKey(it.key) || it.key;
-    const hay = `${label} ${it.key}`.toLowerCase();
+    const hay = `${it.label} ${it.key}`.toLowerCase();
 
     return {
       ...it,
-      label,
       confirmed,
       aiSuggested,
       needsConfirm,
@@ -237,15 +260,8 @@ export default async function PccIndustriesPage(props: {
           <div className="min-w-0">
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Industries</h1>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Canonical industry list + onboarding AI signals (suggested industry + confirmation state + rejections).
-              {!canonical.length ? (
-                <>
-                  {" "}
-                  <span className="font-semibold">
-                    (Fallback: derived from tenant settings + onboarding because industries table is empty.)
-                  </span>
-                </>
-              ) : null}
+              Canonical industry list <span className="font-semibold">plus</span> onboarding AI signals (suggested industry + confirmation
+              state + rejections) and confirmed tenant assignments.
             </p>
 
             {/* Controls */}
@@ -347,62 +363,73 @@ export default async function PccIndustriesPage(props: {
 
             <tbody>
               {filtered.length ? (
-                filtered.map((it) => {
-                  return (
-                    <tr key={it.key} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
-                      <td className="py-3 px-4">
-                        <Link
-                          href={`/pcc/industries/${encodeURIComponent(it.key)}`}
-                          className="font-semibold text-gray-900 underline dark:text-gray-100"
-                        >
-                          {it.label}
-                        </Link>
-                        {it.description ? (
-                          <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{it.description}</div>
-                        ) : null}
-                      </td>
+                filtered.map((it) => (
+                  <tr key={it.key} className="border-b border-gray-100 last:border-b-0 dark:border-gray-900">
+                    <td className="py-3 px-4">
+                      <Link
+                        href={`/pcc/industries/${encodeURIComponent(it.key)}`}
+                        className="font-semibold text-gray-900 underline dark:text-gray-100"
+                      >
+                        {it.label}
+                      </Link>
 
-                      <td className="py-3 px-4 font-mono text-xs text-gray-700 dark:text-gray-200">{it.key}</td>
-
-                      <td className="py-3 px-4">
-                        <div className="flex flex-wrap gap-2 text-[11px]">
-                          <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
-                            AI suggested: {it.aiSuggested}
+                      <div className="mt-1 flex flex-wrap gap-2 text-[11px]">
+                        {it.isCanonical ? (
+                          <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                            canonical
                           </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                            derived
+                          </span>
+                        )}
 
-                          {it.aiSuggested === 0 ? (
-                            <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-                              no AI data
-                            </span>
-                          ) : it.needsConfirm > 0 ? (
-                            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                              needs confirm: {it.needsConfirm}
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
-                              clean
-                            </span>
-                          )}
+                        {it.description ? (
+                          <span className="text-xs text-gray-500 dark:text-gray-400">{it.description}</span>
+                        ) : null}
+                      </div>
+                    </td>
 
-                          {it._isAiOnly ? (
-                            <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 font-semibold text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
-                              AI-only
-                            </span>
-                          ) : null}
+                    <td className="py-3 px-4 font-mono text-xs text-gray-700 dark:text-gray-200">{it.key}</td>
 
-                          {it.rejected > 0 ? (
-                            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                              rejected: {it.rejected}
-                            </span>
-                          ) : null}
-                        </div>
-                      </td>
+                    <td className="py-3 px-4">
+                      <div className="flex flex-wrap gap-2 text-[11px]">
+                        <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-900 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+                          AI suggested: {it.aiSuggested}
+                        </span>
 
-                      <td className="py-3 px-4 text-right font-semibold text-gray-900 dark:text-gray-100">{it.rejected}</td>
-                      <td className="py-3 px-4 text-right font-semibold text-gray-900 dark:text-gray-100">{it.confirmed}</td>
-                    </tr>
-                  );
-                })
+                        {it.aiSuggested === 0 ? (
+                          <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+                            no AI data
+                          </span>
+                        ) : it.needsConfirm > 0 ? (
+                          <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                            needs confirm: {it.needsConfirm}
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/30 dark:text-emerald-100">
+                            clean
+                          </span>
+                        )}
+
+                        {it._isAiOnly ? (
+                          <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 font-semibold text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
+                            AI-only
+                          </span>
+                        ) : null}
+
+                        {it.rejected > 0 ? (
+                          <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
+                            rejected: {it.rejected}
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+
+                    <td className="py-3 px-4 text-right font-semibold text-gray-900 dark:text-gray-100">{it.rejected}</td>
+                    <td className="py-3 px-4 text-right font-semibold text-gray-900 dark:text-gray-100">{it.confirmed}</td>
+                  </tr>
+                ))
               ) : (
                 <tr>
                   <td colSpan={5} className="py-10 text-center text-sm text-gray-600 dark:text-gray-300">
@@ -414,13 +441,6 @@ export default async function PccIndustriesPage(props: {
           </table>
         </div>
       </div>
-
-      {!canonical.length ? (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-          Heads up: your <span className="font-mono">industries</span> table is empty, so PCC is showing a derived list.
-          This is fine for now; later we’ll seed canonical labels/descriptions.
-        </div>
-      ) : null}
     </div>
   );
 }
