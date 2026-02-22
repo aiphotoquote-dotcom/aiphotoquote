@@ -56,6 +56,27 @@ function pill(active: boolean) {
     : "border-gray-200 bg-white text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-950";
 }
 
+// Postgres-side normalizer (same intent as purge route):
+// - lowercase
+// - non-alphanumerics -> underscore
+// - collapse underscores
+// - trim underscores
+function normSql(expr: any) {
+  return sql`lower(
+    regexp_replace(
+      regexp_replace(
+        regexp_replace(coalesce(${expr}::text,''), '[^a-zA-Z0-9]+', '_', 'g'),
+        '_+',
+        '_',
+        'g'
+      ),
+      '^_|_$',
+      '',
+      'g'
+    )
+  )`;
+}
+
 export default async function PccIndustriesPage(props: {
   searchParams?: { [key: string]: string | string[] | undefined };
 }) {
@@ -93,14 +114,15 @@ export default async function PccIndustriesPage(props: {
   };
 
   // -----------------------------
-  // Canonical industries
+  // Canonical industries (normalize keys)
   // -----------------------------
   const canonicalR = await db.execute(sql`
     select
-      key::text as "key",
+      ${normSql(sql`key`)}::text as "key",
       label::text as "label",
       description::text as "description"
     from industries
+    where ${normSql(sql`key`)} <> ''
     order by label asc
     limit 500
   `);
@@ -117,14 +139,15 @@ export default async function PccIndustriesPage(props: {
   for (const c of canonical) canonicalMap.set(c.key, c);
 
   // -----------------------------
-  // Confirmed counts (tenant_settings.industry_key)
+  // Confirmed counts (normalize)
   // -----------------------------
   const confirmedCountsR = await db.execute(sql`
     select
-      ts.industry_key::text as "key",
+      ${normSql(sql`ts.industry_key`)}::text as "key",
       count(*)::int as "confirmedCount"
     from tenant_settings ts
-    group by ts.industry_key
+    where ${normSql(sql`ts.industry_key`)} <> ''
+    group by ${normSql(sql`ts.industry_key`)}
   `);
 
   const confirmedCounts = new Map<string, number>();
@@ -135,11 +158,11 @@ export default async function PccIndustriesPage(props: {
   }
 
   // -----------------------------
-  // AI suggested counts + needsConfirmation
+  // AI suggested counts + needsConfirmation (normalize + normalized reject filter)
   // -----------------------------
   const aiCountsR = await db.execute(sql`
     select
-      (ob.ai_analysis->>'suggestedIndustryKey')::text as "key",
+      ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)}::text as "key",
       count(*)::int as "aiSuggestedCount",
       sum(
         case
@@ -149,10 +172,13 @@ export default async function PccIndustriesPage(props: {
         end
       )::int as "needsConfirmCount"
     from tenant_onboarding ob
-    where (ob.ai_analysis->>'suggestedIndustryKey') is not null
-      and (ob.ai_analysis->>'suggestedIndustryKey') <> ''
-      and not (coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb) ? (ob.ai_analysis->>'suggestedIndustryKey'))
-    group by (ob.ai_analysis->>'suggestedIndustryKey')
+    where ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)} <> ''
+      and not exists (
+        select 1
+        from jsonb_array_elements_text(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) v(value)
+        where ${normSql(sql`v.value`)} = ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)}
+      )
+    group by ${normSql(sql`ob.ai_analysis->>'suggestedIndustryKey'`)}
   `);
 
   const aiSuggestedCounts = new Map<string, number>();
@@ -165,19 +191,19 @@ export default async function PccIndustriesPage(props: {
   }
 
   // -----------------------------
-  // Rejected counts (jsonb array)
+  // Rejected counts (normalize)
   // -----------------------------
   const rejectedCountsR = await db.execute(sql`
     select
-      x.key::text as "key",
+      ${normSql(sql`x.key`)}::text as "key",
       count(*)::int as "rejectedCount"
     from (
       select
         jsonb_array_elements_text(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)) as key
       from tenant_onboarding ob
     ) x
-    where x.key is not null and x.key <> ''
-    group by x.key
+    where ${normSql(sql`x.key`)} <> ''
+    group by ${normSql(sql`x.key`)}
   `);
 
   const rejectedCounts = new Map<string, number>();
@@ -188,7 +214,7 @@ export default async function PccIndustriesPage(props: {
   }
 
   // -----------------------------
-  // ✅ Union: canonical + discovered keys
+  // Union: canonical + discovered keys
   // -----------------------------
   const allKeys = new Set<string>();
   for (const k of canonicalMap.keys()) allKeys.add(k);
@@ -264,7 +290,6 @@ export default async function PccIndustriesPage(props: {
               state + rejections) and confirmed tenant assignments.
             </p>
 
-            {/* Controls */}
             <div className="mt-4 grid gap-3 lg:grid-cols-3">
               <div className="lg:col-span-1">
                 <IndustriesSearchBar />
