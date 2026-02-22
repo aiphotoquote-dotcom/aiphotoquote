@@ -49,10 +49,28 @@ function jsonbParam(v: any) {
   }
 }
 
+// ✅ Schema-compatible audit insert (snake_case OR legacy columns)
 async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; payload: any }) {
   const payloadJson = jsonbParam(args.payload);
+
+  // Try "new" schema first
+  try {
+    await tx.execute(sql`
+      insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
+      values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
+    `);
+    return;
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    const cause = String((e as any)?.cause?.message ?? "");
+    const combined = `${msg} ${cause}`;
+    // only fallback on "missing column" type failures
+    if (!combined.toLowerCase().includes("does not exist")) throw e;
+  }
+
+  // Fallback: legacy columns (unquoted identifiers => likely "sourcekey"/"targetkey")
   await tx.execute(sql`
-    insert into industry_change_log (action, source_key, target_key, actor, reason, payload)
+    insert into industry_change_log (action, sourcekey, targetkey, actor, reason, payload)
     values ('merge', ${args.sourceKey}, ${args.targetKey}, ${args.actor}, ${args.reason}, ${payloadJson}::jsonb)
   `);
 }
@@ -77,9 +95,7 @@ export async function POST(req: Request) {
   const actor = actorFromReq(req);
 
   const result = await db.transaction(async (tx) => {
-    // Canonical lookups are best-effort:
-    // - if a key exists in industries, we use its stored key+label
-    // - otherwise, we allow derived keys (no industries row)
+    // ✅ Case-insensitive lookup to resolve canonical stored keys
     const srcR = await tx.execute(sql`
       select key::text as "key", label::text as "label"
       from industries
@@ -96,28 +112,14 @@ export async function POST(req: Request) {
     const srcRow: any = (srcR as any)?.rows?.[0] ?? null;
     const tgtRow: any = (tgtR as any)?.rows?.[0] ?? null;
 
-    const sourceKey = srcRow?.key ? safeLower(srcRow.key) : sourceKeyIn;
-    const targetKey = tgtRow?.key ? safeLower(tgtRow.key) : targetKeyIn;
+    if (!srcRow) return { ok: false as const, status: 404, error: "SOURCE_NOT_FOUND" };
+    if (!tgtRow) return { ok: false as const, status: 404, error: "TARGET_NOT_FOUND" };
+
+    const sourceKey = safeLower(srcRow.key);
+    const targetKey = safeLower(tgtRow.key);
 
     if (sourceKey === targetKey) return { ok: false as const, status: 400, error: "BAD_REQUEST" };
 
-    // If target doesn't exist canonically, we still allow merge INTO it,
-    // but ONLY if it already has some footprint (or you’d be “merging into nothing”).
-    if (!tgtRow) {
-      const footprintR = await tx.execute(sql`
-        select
-          (select count(*)::int from tenant_settings where industry_key = ${targetKey}) as "tenants",
-          (select count(*)::int from industry_llm_packs where industry_key = ${targetKey}) as "packs",
-          (select count(*)::int from industry_sub_industries where industry_key = ${targetKey}) as "subs"
-      `);
-      const fp: any = (footprintR as any)?.rows?.[0] ?? {};
-      const n = Number(fp.tenants ?? 0) + Number(fp.packs ?? 0) + Number(fp.subs ?? 0);
-      if (n <= 0) {
-        return { ok: false as const, status: 404, error: "TARGET_NOT_FOUND" };
-      }
-    }
-
-    // Counts before (useful to show user + audit)
     const countsBeforeR = await tx.execute(sql`
       select
         (select count(*)::int from tenant_settings where industry_key = ${sourceKey}) as "tenantSettings",
@@ -127,7 +129,6 @@ export async function POST(req: Request) {
     `);
     const countsBefore: any = (countsBeforeR as any)?.rows?.[0] ?? {};
 
-    // 1) Move tenants
     const movedTenantsR = await tx.execute(sql`
       update tenant_settings
       set industry_key = ${targetKey}, updated_at = now()
@@ -136,7 +137,6 @@ export async function POST(req: Request) {
     `);
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
 
-    // 2) Merge tenant_sub_industries
     const insertTenantSubR = await tx.execute(sql`
       insert into tenant_sub_industries (tenant_id, industry_key, key, label, created_at, updated_at)
       select
@@ -164,7 +164,6 @@ export async function POST(req: Request) {
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
-    // 3) Merge industry_sub_industries defaults
     const insertIndustrySubR = await tx.execute(sql`
       insert into industry_sub_industries (id, industry_key, key, label, description, sort_order, is_active, created_at, updated_at)
       select
@@ -194,7 +193,6 @@ export async function POST(req: Request) {
     `);
     const deletedIndustrySub = Number((deletedIndustrySubR as any)?.rowCount ?? 0);
 
-    // 4) Copy packs into target as NEW versions, then delete source packs
     const maxVR = await tx.execute(sql`
       select coalesce(max(version), 0)::int as "v"
       from industry_llm_packs
@@ -248,7 +246,6 @@ export async function POST(req: Request) {
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
-    // 5) Hard delete source industry row if it exists and requested
     let deletedIndustry = 0;
     if (deleteSource) {
       const delR = await tx.execute(sql`
@@ -259,8 +256,8 @@ export async function POST(req: Request) {
     }
 
     const payload = {
-      source: { key: sourceKey, label: String(srcRow?.label ?? "") },
-      target: { key: targetKey, label: String(tgtRow?.label ?? "") },
+      source: { key: sourceKey, label: String(srcRow.label ?? "") },
+      target: { key: targetKey, label: String(tgtRow.label ?? "") },
       countsBefore,
       moved: {
         tenantSettings: movedTenants,
@@ -276,6 +273,7 @@ export async function POST(req: Request) {
       },
     };
 
+    // ✅ still fail-loud, but now schema-compatible
     await auditMerge(tx, { sourceKey, targetKey, actor, reason, payload });
 
     return { ok: true as const, sourceKey, targetKey, moved: payload.moved, deleted: payload.deleted };
