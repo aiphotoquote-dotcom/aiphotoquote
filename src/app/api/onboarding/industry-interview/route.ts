@@ -6,7 +6,11 @@ import { z } from "zod";
 import OpenAI from "openai";
 import { db } from "@/lib/db/client";
 
-import { resolveIndustryCandidate, normalizeIndustryKey, titleFromKey } from "@/lib/pcc/industries/resolveIndustryCandidate";
+import {
+  resolveIndustryCandidate,
+  normalizeIndustryKey,
+  titleFromKey,
+} from "@/lib/pcc/industries/resolveIndustryCandidate";
 import { ensureIndustryPack } from "@/lib/onboarding/ensureIndustryPack";
 
 export const runtime = "nodejs";
@@ -390,7 +394,9 @@ async function runLLM_ModeA(args: {
         key,
         label,
         description:
-          (parsed as any).proposedIndustry.description == null ? null : String((parsed as any).proposedIndustry.description),
+          (parsed as any).proposedIndustry.description == null
+            ? null
+            : String((parsed as any).proposedIndustry.description),
         shouldCreate: Boolean((parsed as any).proposedIndustry.shouldCreate ?? false),
       };
     }
@@ -593,6 +599,8 @@ export async function POST(req: Request) {
       );
     }
 
+    const priorStatus = st.status;
+
     const last = Array.isArray(st.answers) && st.answers.length ? st.answers[st.answers.length - 1] : null;
     const lastSame =
       last &&
@@ -679,14 +687,27 @@ export async function POST(req: Request) {
 
       await writeAiAnalysis(tenantId, ai);
 
-      // ✅ Ensure pack exists ONLY when the interview locks an industry
-      if (status === "locked" && proposed?.key) {
-        await ensureIndustryPack({
-          tenantId,
-          industryKey: proposed.key,
-          industryLabel: proposed.label || titleFromKey(proposed.key),
-          industryDescription: proposed.description ?? null,
-        });
+      // ✅ Ensure pack exists ONLY on transition into "locked", and NEVER block the response if it fails.
+      if (priorStatus !== "locked" && status === "locked" && proposed?.key) {
+        try {
+          const website = safeTrim((ai0 as any)?.website) || safeTrim((ai as any)?.website) || null;
+
+          // Keep the summary short-ish: last few answers usually contain the strongest signal
+          const summary = answers.length
+            ? buildTranscript({ ...st, answers: answers.slice(Math.max(0, answers.length - 5)) })
+            : null;
+
+          await ensureIndustryPack({
+            tenantId,
+            industryKey: proposed.key,
+            industryLabel: proposed.label || titleFromKey(proposed.key),
+            industryDescription: proposed.description ?? null,
+            website,
+            summary,
+          });
+        } catch {
+          // swallow on purpose
+        }
       }
 
       return noCacheJson({ ok: true, tenantId, industryInterview: st }, 200);
