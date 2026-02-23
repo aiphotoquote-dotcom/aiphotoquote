@@ -195,6 +195,19 @@ function diffExists(a: string, b: string) {
   return safeStr(a) !== safeStr(b);
 }
 
+/**
+ * Safe "first non-empty string" picker.
+ * This is ONLY for defensive reading; it never changes persisted schema.
+ */
+function pickFirstString(obj: any, keys: string[]) {
+  if (!obj || typeof obj !== "object") return "";
+  for (const k of keys) {
+    const v = (obj as any)[k];
+    if (typeof v === "string" && safeStr(v)) return safeStr(v);
+  }
+  return "";
+}
+
 function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   if (!anyResp || anyResp.ok !== true) return anyResp as KeyPolicyStatus;
 
@@ -225,7 +238,11 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
     kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow
   ) as any;
 
-  if (effectiveKeySourceNow !== "tenant" && effectiveKeySourceNow !== "platform_grace" && effectiveKeySourceNow !== "none") {
+  if (
+    effectiveKeySourceNow !== "tenant" &&
+    effectiveKeySourceNow !== "platform_grace" &&
+    effectiveKeySourceNow !== "none"
+  ) {
     effectiveKeySourceNow = "none";
   }
 
@@ -693,25 +710,52 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const platformRenderPreamble = safeStr(platform?.prompts?.renderPromptPreamble, "");
   const platformRenderTemplate = safeStr(platform?.prompts?.renderPromptTemplate, "");
 
-  // Industry values (match what industry editor collects)
+  /**
+   * ✅ Industry values:
+   * Prefer the API-provided effective rendering layer (renderEffective.*),
+   * because the server is already doing schema-tolerant normalization.
+   *
+   * Fallback to industry.prompts only for back-compat / partial deployments.
+   */
   const industryRenderAddendum =
-    safeStr((industry as any)?.prompts?.renderSystemAddendum, "") ||
-    safeStr((industry as any)?.prompts?.render_prompt_addendum, "") ||
-    // back-compat if someone stored it as a template:
-    safeStr((industry as any)?.prompts?.renderPromptTemplate, "");
+    safeStr(renderEffective?.industryAddendum, "") ||
+    pickFirstString((industry as any)?.prompts, [
+      "renderSystemAddendum",
+      "renderSystemAddon",
+      "renderSystemAddOn",
+      "renderAddendum",
+      "renderAddon",
+      "renderAddOn",
+      "renderPromptAddendum",
+      "renderPromptAddon",
+      "render_system_addendum",
+      "render_system_addon",
+      "render_addendum",
+      "render_addon",
+      "render_prompt_addendum",
+      // last-resort legacy
+      "renderPromptTemplate",
+    ]);
 
   const industryRenderNegative =
-    safeStr((industry as any)?.prompts?.renderNegativeGuidance, "") ||
-    safeStr((industry as any)?.prompts?.render_negative_guidance, "");
+    safeStr(renderEffective?.industryNegativeGuidance, "") ||
+    pickFirstString((industry as any)?.prompts, [
+      "renderNegativeGuidance",
+      "renderNegative",
+      "renderNegatives",
+      "render_negative_guidance",
+      "render_negative",
+      "render_negatives",
+      "rendering_negative_guidance",
+      "renderingNegativeGuidance",
+    ]);
 
   // Tenant (ai-policy) values (from API convenience object or renderEffective)
   const tenantRenderAddendum =
-    safeStr(renderEffective?.tenantAddendum, "") ||
-    safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
+    safeStr(renderEffective?.tenantAddendum, "") || safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
 
   const tenantRenderNegativeGuidance =
-    safeStr(renderEffective?.tenantNegativeGuidance, "") ||
-    safeStr((tenant as any)?.renderingPolicy?.negativeGuidance, "");
+    safeStr(renderEffective?.tenantNegativeGuidance, "") || safeStr((tenant as any)?.renderingPolicy?.negativeGuidance, "");
 
   const compiledFallback = joinNonEmpty(
     [
@@ -946,7 +990,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                   min={1}
                   max={10}
                 />
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Tenant can only tighten. Platform cap still applies.</div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Tenant can only tighten. Platform cap still applies.
+                </div>
               </div>
             </div>
           </div>
@@ -954,7 +1000,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Guardrails (locked)</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">These are platform-owned and cannot be changed per tenant.</p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            These are platform-owned and cannot be changed per tenant.
+          </p>
 
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
@@ -967,7 +1015,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">{(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}</span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">
+                {(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Max output tokens</span>
