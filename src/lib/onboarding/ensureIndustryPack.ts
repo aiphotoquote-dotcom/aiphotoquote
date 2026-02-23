@@ -36,6 +36,29 @@ function jsonbString(v: any) {
   }
 }
 
+function firstRow(r: any): any | null {
+  try {
+    if (!r) return null;
+    if (Array.isArray(r)) return r[0] ?? null;
+    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
+    if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function readLatestPackRow(industryKey: string) {
+  const r = await db.execute(sql`
+    select id::text as "id", version::int as "version", enabled as "enabled"
+    from industry_llm_packs
+    where lower(industry_key) = ${industryKey}
+    order by version desc, updated_at desc
+    limit 1
+  `);
+  return firstRow(r);
+}
+
 /**
  * Ensure that an industry has at least one industry_llm_packs row.
  * This is used by onboarding so a tenant is "truly set up" once industry is known.
@@ -46,7 +69,7 @@ export async function ensureIndustryPack(args: {
   industryDescription?: string | null;
 
   // Optional context from onboarding (helps pack quality, but not required)
-  tenantId?: string | null;
+  tenantId?: string | null; // kept for compatibility; not required by generator
   website?: string | null;
   summary?: string | null;
 
@@ -63,15 +86,7 @@ export async function ensureIndustryPack(args: {
   const industryDescription = safeTrim(args.industryDescription) || null;
 
   // 1) If a pack already exists for this industry, we’re done.
-  const existsR = await db.execute(sql`
-    select id::text as "id", version::int as "version", enabled as "enabled"
-    from industry_llm_packs
-    where lower(industry_key) = ${industryKey}
-    order by version desc, updated_at desc
-    limit 1
-  `);
-
-  const existing = (existsR as any)?.rows?.[0] ?? null;
+  const existing = await readLatestPackRow(industryKey);
   if (existing?.id) {
     return {
       ok: true as const,
@@ -89,10 +104,10 @@ export async function ensureIndustryPack(args: {
     from industry_llm_packs
     where lower(industry_key) = ${industryKey}
   `);
-  const maxVRow: any = (maxVR as any)?.rows?.[0] ?? null;
+  const maxVRow: any = firstRow(maxVR);
   const nextV = Number(maxVRow?.v ?? 0) + 1;
 
-  // 3) Generate pack (PURE generator, requires mode)
+  // 3) Generate pack (PURE generator)
   const mode: IndustryPackGenerationMode = (args.mode ?? "create") as IndustryPackGenerationMode;
 
   const exampleTenants =
@@ -115,8 +130,17 @@ export async function ensureIndustryPack(args: {
     model: safeTrim(args.model) || undefined,
   });
 
-  // 4) Persist row
-  const packJson = jsonbString(gen.pack);
+  /**
+   * Store generator meta alongside the pack WITHOUT impacting your runtime merge.
+   * (Unknown keys should be ignored by your config loader / merge logic.)
+   */
+  const packWithMeta = {
+    ...(gen.pack as any),
+    _apqMeta: gen.meta,
+  };
+
+  // 4) Persist row (idempotent attempt)
+  const packJson = jsonbString(packWithMeta);
   const promptsJson = jsonbString((gen.pack as any)?.prompts ?? {});
   const modelsJson = jsonbString((gen.pack as any)?.models ?? {});
 
@@ -132,17 +156,41 @@ export async function ensureIndustryPack(args: {
       ${promptsJson}::jsonb,
       now()
     )
+    on conflict do nothing
     returning id::text as "id", version::int as "version"
   `);
 
-  const inserted = (insR as any)?.rows?.[0] ?? null;
+  const inserted = firstRow(insR);
+
+  // If insert did nothing (race), re-read and return the winner
+  if (!inserted?.id) {
+    const winner = await readLatestPackRow(industryKey);
+    if (winner?.id) {
+      return {
+        ok: true as const,
+        industryKey,
+        existed: true as const,
+        raced: true as const,
+        id: String(winner.id),
+        version: Number(winner.version ?? nextV),
+        enabled: Boolean(winner.enabled),
+      };
+    }
+
+    // Extremely unlikely: insert didn't happen AND still no row
+    return {
+      ok: false as const,
+      industryKey,
+      error: "PACK_INSERT_FAILED",
+    };
+  }
 
   return {
     ok: true as const,
     industryKey,
     existed: false as const,
-    id: safeTrim(inserted?.id) || null,
-    version: Number(inserted?.version ?? nextV),
+    id: safeTrim(inserted.id) || null,
+    version: Number(inserted.version ?? nextV),
     meta: gen.meta,
   };
 }
