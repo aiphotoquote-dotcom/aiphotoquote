@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { db } from "@/lib/db/client";
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { ensureIndustryPack } from "@/lib/onboarding/ensureIndustryPack";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -240,6 +241,19 @@ export async function POST(req: Request) {
             set industry_key = excluded.industry_key,
                 updated_at = now()
         `);
+
+        // 3) BEST-EFFORT: ensure an industry prompt pack exists for this industry_key
+        //    IMPORTANT: never block onboarding if pack generation fails.
+        try {
+          await ensureIndustryPack({
+            industryKey: keyToLock,
+            tenantId,
+            website: website || null,
+            summary: safeTrim(priorAnalysis?.businessGuess) || null,
+          });
+        } catch {
+          // swallow on purpose
+        }
       }
 
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: updated }, { status: 200 });
