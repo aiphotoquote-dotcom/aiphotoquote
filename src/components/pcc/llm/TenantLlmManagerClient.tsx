@@ -59,7 +59,7 @@ type EffectiveRenderShape = {
   platformPreamble?: string;
   platformTemplate?: string;
 
-  // industry pack should match PCC industry UX
+  // industry pack (what the industry editor collects)
   industryAddendum?: string;
   industryNegativeGuidance?: string;
 
@@ -67,10 +67,10 @@ type EffectiveRenderShape = {
   tenantAddendum?: string;
   tenantNegativeGuidance?: string;
 
-  // compiled prompt (API preferred; fallback otherwise)
+  // final compiled prompt
   compiledPrompt?: string;
 
-  // optional metadata
+  // metadata
   platformVersion?: number;
   industryVersion?: number;
 };
@@ -90,7 +90,6 @@ type EffectiveShape = {
     maxOutputTokens: number;
   };
 
-  // ✅ effective render visibility (advanced page only)
   rendering?: EffectiveRenderShape;
 };
 
@@ -208,7 +207,9 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   const activationGraceCreditsRaw = kp ? kp.activationGraceCredits : anyResp.activationGraceCredits;
   const activationGraceUsedRaw = kp ? kp.activationGraceUsed : anyResp.activationGraceUsed;
 
-  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw)) ? Number(activationGraceCreditsRaw) : 0;
+  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw))
+    ? Number(activationGraceCreditsRaw)
+    : 0;
   const activationGraceUsed = Number.isFinite(Number(activationGraceUsedRaw)) ? Number(activationGraceUsedRaw) : 0;
 
   const hasTenantOpenAiKey = Boolean(
@@ -220,8 +221,9 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   const platformAllowed = Boolean(kp ? kp.platformAllowed : anyResp.platformAllowed);
   const graceRemaining = Boolean(kp ? kp.graceRemaining : anyResp.graceRemaining);
 
-  let effectiveKeySourceNow: "tenant" | "platform_grace" | "none" =
-    safeStr(kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow) as any;
+  let effectiveKeySourceNow: "tenant" | "platform_grace" | "none" = safeStr(
+    kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow
+  ) as any;
 
   if (effectiveKeySourceNow !== "tenant" && effectiveKeySourceNow !== "platform_grace" && effectiveKeySourceNow !== "none") {
     effectiveKeySourceNow = "none";
@@ -691,19 +693,23 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const platformRenderPreamble = safeStr(platform?.prompts?.renderPromptPreamble, "");
   const platformRenderTemplate = safeStr(platform?.prompts?.renderPromptTemplate, "");
 
-  // Industry should match what the industry UI manages:
-  // - renderSystemAddendum
-  // - renderNegativeGuidance
-  // Back-compat: if older pack uses renderPromptTemplate, show it as addendum
-  const industryRenderAddendum = safeStr(
-    (industry as any)?.prompts?.renderSystemAddendum ?? (industry as any)?.prompts?.renderPromptTemplate,
-    ""
-  );
-  const industryRenderNegative = safeStr((industry as any)?.prompts?.renderNegativeGuidance, "");
+  // Industry values (match what industry editor collects)
+  const industryRenderAddendum =
+    safeStr((industry as any)?.prompts?.renderSystemAddendum, "") ||
+    safeStr((industry as any)?.prompts?.render_prompt_addendum, "") ||
+    // back-compat if someone stored it as a template:
+    safeStr((industry as any)?.prompts?.renderPromptTemplate, "");
 
+  const industryRenderNegative =
+    safeStr((industry as any)?.prompts?.renderNegativeGuidance, "") ||
+    safeStr((industry as any)?.prompts?.render_negative_guidance, "");
+
+  // Tenant (ai-policy) values (from API convenience object or renderEffective)
   const tenantRenderAddendum =
-    safeStr(renderEffective?.tenantAddendum, "") || safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
-  const tenantNegativeGuidance =
+    safeStr(renderEffective?.tenantAddendum, "") ||
+    safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
+
+  const tenantRenderNegativeGuidance =
     safeStr(renderEffective?.tenantNegativeGuidance, "") ||
     safeStr((tenant as any)?.renderingPolicy?.negativeGuidance, "");
 
@@ -714,7 +720,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       industryRenderAddendum && `# Industry render addendum\n${industryRenderAddendum}`,
       industryRenderNegative && `# Industry render negative guidance\n${industryRenderNegative}`,
       tenantRenderAddendum && `# Tenant add-on\n${tenantRenderAddendum}`,
-      tenantNegativeGuidance && `# Tenant negative guidance\n${tenantNegativeGuidance}`,
+      tenantRenderNegativeGuidance && `# Avoid / negative guidance\n${tenantRenderNegativeGuidance}`,
     ],
     "\n\n"
   );
@@ -731,8 +737,8 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant LLM settings</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Prompts are layered: <span className="font-mono">platform → industry → tenant</span>. Tenant entries are optional and
-              only apply on top of the baseline. Guardrails are platform-locked.
+              Prompts are layered: <span className="font-mono">platform → industry → tenant</span>. Tenant entries are optional and only apply on top of the baseline.
+              Guardrails are platform-locked.
             </div>
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Tenant: <span className="font-mono">{tenantId}</span>
@@ -961,9 +967,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">
-                {(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}
-              </span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">{(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}</span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Max output tokens</span>
@@ -1073,7 +1077,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
       <Collapsible
         title="Rendering prompt (effective)"
-        subtitle="Advanced visibility only. Shows platform + industry render pack layers and tenant add-ons from ai-policy."
+        subtitle="Advanced visibility only. Shows platform baseline + industry render guidance + tenant add-ons from ai-policy."
         defaultOpen={false}
       >
         <div className="mt-4 space-y-4">
@@ -1126,7 +1130,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                 <div>
                   <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Tenant negative guidance (ai-policy)</div>
                   <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-                    {tenantNegativeGuidance || "(none) — set on AI & Pricing Policy page"}
+                    {tenantRenderNegativeGuidance || "(none) — set on AI & Pricing Policy page"}
                   </pre>
                 </div>
               </div>
@@ -1141,9 +1145,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
               </div>
 
               {!compiledRenderPrompt ? (
-                <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${chipClass("info")}`}>
-                  Not available.
-                </div>
+                <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${chipClass("info")}`}>Not available.</div>
               ) : (
                 <pre className="mt-3 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
                   {compiledRenderPrompt}

@@ -126,20 +126,17 @@ function keysOf(obj: any): string[] {
 /**
  * ✅ Normalize industry packs into the "industry layer" shape that buildEffectiveLlmConfig expects.
  *
- * Your DB pack currently returns:
- *   industry.prompts.industryPromptPacks[industryKey].quoteEstimatorSystem / qaQuestionGeneratorSystem / etc
+ * Your DB pack returns nested:
+ *   industry.prompts.industryPromptPacks[industryKey].<fields>
  *
- * But effective builder expects:
+ * The effective builder expects flattened:
  *   industry.prompts.quoteEstimatorSystem / qaQuestionGeneratorSystem / extraSystemPreamble
  *
- * So we flatten the selected pack entry into top-level prompts.
+ * Additionally, the industry UI collects render fields as:
+ *   - renderSystemAddendum
+ *   - renderNegativeGuidance
  *
- * NOTE:
- * - For rendering, the industry editor UI is collecting:
- *     - renderSystemAddendum
- *     - renderNegativeGuidance
- * - We flatten those too for the advanced tenant LLM manager visibility.
- * - We keep back-compat for renderPromptTemplate/renderPromptPreamble if older packs exist.
+ * We flatten those too so tenant LLM page can display them.
  */
 function normalizeIndustryLayer(args: {
   resolvedIndustryKey: string | null;
@@ -148,7 +145,6 @@ function normalizeIndustryLayer(args: {
   const pack = args.pack && typeof args.pack === "object" ? args.pack : null;
   const industry: any = pack ? { ...pack } : { models: {}, prompts: {}, guardrails: {} };
 
-  // Ensure objects exist
   if (!industry.models || typeof industry.models !== "object") industry.models = {};
   if (!industry.prompts || typeof industry.prompts !== "object") industry.prompts = {};
   if (!industry.guardrails || typeof industry.guardrails !== "object") industry.guardrails = {};
@@ -156,7 +152,6 @@ function normalizeIndustryLayer(args: {
   const resolvedKey = safeLower(args.resolvedIndustryKey);
   const promptPacks = (industry.prompts as any)?.industryPromptPacks;
 
-  // If no nested packs, nothing to do.
   if (!promptPacks || typeof promptPacks !== "object") {
     return {
       industry,
@@ -166,12 +161,11 @@ function normalizeIndustryLayer(args: {
     };
   }
 
-  // Pick the correct pack entry.
   const entry = resolvedKey ? (promptPacks as any)[resolvedKey] : null;
   const selectedPackEntry = entry && typeof entry === "object" ? entry : null;
 
   if (selectedPackEntry) {
-    // Flatten text prompt fields to what the effective builder expects.
+    // Text prompt fields
     if (typeof selectedPackEntry.quoteEstimatorSystem === "string" && safeTrim(selectedPackEntry.quoteEstimatorSystem)) {
       industry.prompts.quoteEstimatorSystem = String(selectedPackEntry.quoteEstimatorSystem);
     }
@@ -185,7 +179,7 @@ function normalizeIndustryLayer(args: {
       industry.prompts.extraSystemPreamble = String(selectedPackEntry.extraSystemPreamble);
     }
 
-    // ✅ Rendering (industry UI vocabulary)
+    // Render fields — preferred names (match industry editor)
     if (typeof selectedPackEntry.renderSystemAddendum === "string" && safeTrim(selectedPackEntry.renderSystemAddendum)) {
       industry.prompts.renderSystemAddendum = String(selectedPackEntry.renderSystemAddendum);
     }
@@ -196,7 +190,19 @@ function normalizeIndustryLayer(args: {
       industry.prompts.renderNegativeGuidance = String(selectedPackEntry.renderNegativeGuidance);
     }
 
-    // 🧱 Back-compat render fields (older packs)
+    // Back-compat aliases (older packs / experiments)
+    if (typeof selectedPackEntry.render_prompt_addendum === "string" && safeTrim(selectedPackEntry.render_prompt_addendum)) {
+      industry.prompts.renderSystemAddendum = industry.prompts.renderSystemAddendum ?? String(selectedPackEntry.render_prompt_addendum);
+    }
+    if (
+      typeof selectedPackEntry.render_negative_guidance === "string" &&
+      safeTrim(selectedPackEntry.render_negative_guidance)
+    ) {
+      industry.prompts.renderNegativeGuidance =
+        industry.prompts.renderNegativeGuidance ?? String(selectedPackEntry.render_negative_guidance);
+    }
+
+    // If you previously stored “template/preamble” in industry packs, preserve it too.
     if (typeof selectedPackEntry.renderPromptPreamble === "string" && safeTrim(selectedPackEntry.renderPromptPreamble)) {
       industry.prompts.renderPromptPreamble = String(selectedPackEntry.renderPromptPreamble);
     }
@@ -251,18 +257,25 @@ function buildEffectiveRendering(args: {
   const renderModel =
     safeTrim(effective?.models?.renderModel) || safeTrim(platformCfg?.models?.renderModel) || "gpt-image-1";
 
-  // Platform baseline render prompts
+  // Platform-owned render baseline (preamble + template)
   const platformPreamble = safeTrim(platformCfg?.prompts?.renderPromptPreamble);
   const platformTemplate = safeTrim(platformCfg?.prompts?.renderPromptTemplate);
 
-  // Industry layer (match industry UI: addendum + negative guidance)
-  // Back-compat: if older packs only have renderPromptTemplate, treat as addendum for display
+  // Industry-owned render guidance (addendum + negative guidance)
+  // Preferred keys:
   const industryAddendum =
-    safeTrim(industry?.prompts?.renderSystemAddendum) || safeTrim(industry?.prompts?.renderPromptTemplate);
+    safeTrim(industry?.prompts?.renderSystemAddendum) ||
+    // Back-compat:
+    safeTrim(industry?.prompts?.render_prompt_addendum) ||
+    // If someone (older) stored it as a template:
+    safeTrim(industry?.prompts?.renderPromptTemplate);
 
-  const industryNegativeGuidance = safeTrim(industry?.prompts?.renderNegativeGuidance);
+  const industryNegativeGuidance =
+    safeTrim(industry?.prompts?.renderNegativeGuidance) ||
+    // Back-compat:
+    safeTrim(industry?.prompts?.render_negative_guidance);
 
-  // Tenant add-ons come from ai-policy (tenant_settings) if present.
+  // Tenant add-ons come from ai-policy (tenant_settings).
   // Fallback to legacy rendering_notes so the UI never looks blank.
   const tenantAddendum = safeTrim(ts?.rendering_prompt_addendum) || safeTrim(ts?.rendering_notes);
   const tenantNegativeGuidance = safeTrim(ts?.rendering_negative_guidance);
@@ -276,7 +289,7 @@ function buildEffectiveRendering(args: {
       industryAddendum && `# Industry render addendum\n${industryAddendum}`,
       industryNegativeGuidance && `# Industry render negative guidance\n${industryNegativeGuidance}`,
       tenantAddendum && `# Tenant add-on\n${tenantAddendum}`,
-      tenantNegativeGuidance && `# Tenant negative guidance\n${tenantNegativeGuidance}`,
+      tenantNegativeGuidance && `# Avoid / negative guidance\n${tenantNegativeGuidance}`,
     ],
     "\n\n"
   );
@@ -316,7 +329,6 @@ export async function GET(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  // do not trust caller tenantId; must match active tenant context
   if (parsed.data.tenantId !== gate.tenantId) {
     return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
   }
@@ -331,8 +343,6 @@ export async function GET(req: Request) {
     });
 
     const rawPack = await getIndustryLlmPack(resolvedIndustryKey);
-
-    // ✅ flatten nested pack shape into effective-builder shape
     const normalized = normalizeIndustryLayer({ resolvedIndustryKey, pack: rawPack });
     const industry = normalized.industry;
 
@@ -359,10 +369,8 @@ export async function GET(req: Request) {
       tenant: null,
     });
 
-    // ✅ read tenant_settings once (tolerant select *)
     const tenantSettingsRow = await getTenantSettingsAnyRow(gate.tenantId);
 
-    // ✅ build render effective view (platform + industry + tenant add-ons)
     const effectiveRendering = buildEffectiveRendering({
       platformCfg,
       industry,
@@ -370,7 +378,6 @@ export async function GET(req: Request) {
       tenantSettingsRow,
     });
 
-    // attach a small read-only “renderingPolicy” object for UI convenience
     const renderingPolicy = {
       enabled: Boolean(tenantSettingsRow?.ai_rendering_enabled ?? tenantSettingsRow?.rendering_enabled ?? false),
       style: safeTrim(tenantSettingsRow?.rendering_style) || undefined,
@@ -402,10 +409,8 @@ export async function GET(req: Request) {
           tenantSettingsKeys: tenantSettingsRow ? keysOf(tenantSettingsRow).slice(0, 50) : [],
           hasPlatformRenderPreamble: Boolean(safeTrim(platformCfg?.prompts?.renderPromptPreamble)),
           hasPlatformRenderTemplate: Boolean(safeTrim(platformCfg?.prompts?.renderPromptTemplate)),
-          hasIndustryRenderAddendum: Boolean(
-            safeTrim(industry?.prompts?.renderSystemAddendum) || safeTrim(industry?.prompts?.renderPromptTemplate)
-          ),
-          hasIndustryRenderNegative: Boolean(safeTrim(industry?.prompts?.renderNegativeGuidance)),
+          hasIndustryAddendum: Boolean(safeTrim(industry?.prompts?.renderSystemAddendum) || safeTrim(industry?.prompts?.renderPromptTemplate)),
+          hasIndustryNegative: Boolean(safeTrim(industry?.prompts?.renderNegativeGuidance)),
           hasTenantAddendum: Boolean(renderingPolicy.promptAddendum),
           hasTenantNegative: Boolean(renderingPolicy.negativeGuidance),
           compiledFrom: safeTrim((bundle.effective as any)?.rendering?.compiledPrompt) ? "api" : "fallback",
@@ -491,7 +496,6 @@ export async function POST(req: Request) {
       tenant: null,
     });
 
-    // ✅ same render effective view on POST response (so UI refreshes without extra round trip)
     const tenantSettingsRow = await getTenantSettingsAnyRow(gate.tenantId);
 
     const effectiveRendering = buildEffectiveRendering({
