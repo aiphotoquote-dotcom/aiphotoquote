@@ -14,6 +14,8 @@ type PlatformLlmConfig = {
     quoteEstimatorSystem: string;
     qaQuestionGeneratorSystem: string;
     extraSystemPreamble?: string;
+
+    // render pipeline (platform-owned baseline)
     renderPromptPreamble?: string;
     renderPromptTemplate?: string;
     renderStylePresets?: Record<string, string>;
@@ -37,6 +39,38 @@ type TenantOverrides = {
     extraSystemPreamble?: string;
   };
   maxQaQuestions?: number;
+
+  /**
+   * Optional: we will *read* these if API provides them.
+   * (Saved from ai-policy page; tenant “render prompt layer”.)
+   */
+  renderingPolicy?: {
+    promptAddendum?: string;
+    negativeGuidance?: string;
+    style?: string;
+    enabled?: boolean;
+  };
+};
+
+type EffectiveRenderShape = {
+  model: string;
+
+  // resolved layers (optional, depending on API)
+  platformPreamble?: string;
+  industryPreamble?: string;
+  tenantAddendum?: string;
+
+  platformTemplate?: string;
+  industryTemplate?: string;
+
+  negativeGuidance?: string;
+
+  // final compiled prompt (best UX; API should provide)
+  compiledPrompt?: string;
+
+  // optional metadata
+  platformVersion?: number;
+  industryVersion?: number;
 };
 
 type EffectiveShape = {
@@ -53,13 +87,16 @@ type EffectiveShape = {
     maxQaQuestions: number;
     maxOutputTokens: number;
   };
+
+  // ✅ NEW: effective render visibility (advanced page only)
+  rendering?: EffectiveRenderShape;
 };
 
 type ApiGetResp =
   | {
       ok: true;
       platform: PlatformLlmConfig;
-      industry: Partial<PlatformLlmConfig>;
+      industry: Partial<PlatformLlmConfig> & { version?: number };
       tenant: TenantOverrides | null;
       effective: EffectiveShape;
       effectiveBase: EffectiveShape;
@@ -273,7 +310,9 @@ function ModelSelect(props: {
       {showEffectiveLine ? (
         <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
           Effective:{" "}
-          <span className="font-mono text-gray-900 dark:text-gray-100">{safeStr(value) ? safeStr(value) : safeStr(effectiveValue)}</span>
+          <span className="font-mono text-gray-900 dark:text-gray-100">
+            {safeStr(value) ? safeStr(value) : safeStr(effectiveValue)}
+          </span>
         </div>
       ) : null}
     </div>
@@ -298,6 +337,19 @@ function Collapsible(props: { title: string; subtitle?: string; defaultOpen?: bo
         <div className="mt-0.5 text-xs font-semibold text-gray-600 dark:text-gray-300">{open ? "Hide" : "Show"}</div>
       </button>
       {open ? <div className="px-6 pb-6">{children}</div> : null}
+    </div>
+  );
+}
+
+function joinNonEmpty(parts: Array<string | null | undefined>, sep = "\n\n") {
+  return parts.map((p) => safeStr(p)).filter(Boolean).join(sep);
+}
+
+function renderLayerLine(label: string, value: string) {
+  return (
+    <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 text-xs dark:border-gray-800">
+      <span className="text-gray-600 dark:text-gray-300">{label}</span>
+      <span className="font-mono text-gray-900 dark:text-gray-100">{value}</span>
     </div>
   );
 }
@@ -586,7 +638,8 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const okData = data && (data as any).ok ? (data as any) : null;
   const effective: EffectiveShape | null = okData?.effective ?? null;
   const effectiveBase: EffectiveShape | null = okData?.effectiveBase ?? null;
-  const platform = okData?.platform ?? null;
+  const platform: PlatformLlmConfig | null = okData?.platform ?? null;
+  const industry: any = okData?.industry ?? null;
 
   const baselineEstimator = safeStr(effectiveBase?.models?.estimatorModel, "gpt-4o-mini");
   const baselineQa = safeStr(effectiveBase?.models?.qaModel, "gpt-4o-mini");
@@ -620,6 +673,40 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       maxQaQuestions !== q0
     );
   }, [tenant, estimatorModel, qaModel, renderModel, extraSystemPreamble, quoteEstimatorSystem, qaQuestionGeneratorSystem, maxQaQuestions]);
+
+  // ---- Rendering effective view (read-only) ----
+  const renderEffective: EffectiveRenderShape | null = (effective as any)?.rendering ?? null;
+
+  const platformRenderPreamble = safeStr(platform?.prompts?.renderPromptPreamble, "");
+  const platformRenderTemplate = safeStr(platform?.prompts?.renderPromptTemplate, "");
+  const industryRenderPreamble = safeStr((industry as any)?.prompts?.renderPromptPreamble, "");
+  const industryRenderTemplate = safeStr((industry as any)?.prompts?.renderPromptTemplate, "");
+
+  const tenantRenderAddendum =
+    safeStr(renderEffective?.tenantAddendum, "") ||
+    safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
+  const tenantNegativeGuidance =
+    safeStr(renderEffective?.negativeGuidance, "") ||
+    safeStr((tenant as any)?.renderingPolicy?.negativeGuidance, "");
+
+  const compiledFallback = joinNonEmpty(
+    [
+      platformRenderPreamble && `# Platform render preamble\n${platformRenderPreamble}`,
+      industryRenderPreamble && `# Industry render preamble\n${industryRenderPreamble}`,
+      platformRenderTemplate && `# Platform render template\n${platformRenderTemplate}`,
+      industryRenderTemplate && `# Industry render template\n${industryRenderTemplate}`,
+      tenantRenderAddendum && `# Tenant add-on\n${tenantRenderAddendum}`,
+      tenantNegativeGuidance && `# Avoid / negative guidance\n${tenantNegativeGuidance}`,
+    ],
+    "\n\n"
+  );
+
+  const compiledRenderPrompt =
+    safeStr(renderEffective?.compiledPrompt, "") ||
+    (compiledFallback ? compiledFallback : "");
+
+  const renderPlatformVersion = Number.isFinite(Number(platform?.version)) ? Number(platform?.version) : null;
+  const renderIndustryVersion = Number.isFinite(Number((industry as any)?.version)) ? Number((industry as any)?.version) : null;
 
   return (
     <div className="space-y-6">
@@ -905,7 +992,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
         </div>
 
-        {/* ✅ PREVIEW: now includes Extra system preamble */}
+        {/* PREVIEW */}
         <div className="mt-6 grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-neutral-900/40">
             <div className="flex items-center justify-between gap-3">
@@ -961,6 +1048,89 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                   {effective?.prompts?.qaQuestionGeneratorSystem ?? ""}
                 </pre>
               </div>
+            </div>
+          </div>
+        </div>
+      </Collapsible>
+
+      <Collapsible
+        title="Rendering prompt (effective)"
+        subtitle="Advanced visibility only. Shows platform + industry render pack layers and tenant add-ons from ai-policy."
+        defaultOpen={false}
+      >
+        <div className="mt-4 space-y-4">
+          <div className="grid gap-3 lg:grid-cols-3">
+            {renderLayerLine("Render model (effective)", safeStr(renderEffective?.model, effectiveRender))}
+            {renderLayerLine("Platform version", renderPlatformVersion !== null ? `v${renderPlatformVersion}` : "(unknown)")}
+            {renderLayerLine("Industry version", renderIndustryVersion !== null ? `v${renderIndustryVersion}` : "(unknown)")}
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-neutral-900/40">
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Layers (read-only)</div>
+
+              <div className="mt-3 space-y-3">
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Platform render preamble</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {platformRenderPreamble || "(none)"}
+                  </pre>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Industry render preamble</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {industryRenderPreamble || "(none)"}
+                  </pre>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Platform render template</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {platformRenderTemplate || "(none)"}
+                  </pre>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Industry render template</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {industryRenderTemplate || "(none)"}
+                  </pre>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Tenant add-on (ai-policy)</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {tenantRenderAddendum || "(none) — set on AI & Pricing Policy page"}
+                  </pre>
+                </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Avoid / negative guidance (ai-policy)</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {tenantNegativeGuidance || "(none) — set on AI & Pricing Policy page"}
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-neutral-900/40">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective compiled render prompt</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  {safeStr(renderEffective?.compiledPrompt) ? "From API" : "Fallback view"}
+                </div>
+              </div>
+
+              {!compiledRenderPrompt ? (
+                <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${chipClass("info")}`}>
+                  Not available yet. Next step: update <span className="font-mono">/api/tenant/llm</span> to return render pack layers + compiled prompt.
+                </div>
+              ) : (
+                <pre className="mt-3 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                  {compiledRenderPrompt}
+                </pre>
+              )}
             </div>
           </div>
         </div>
