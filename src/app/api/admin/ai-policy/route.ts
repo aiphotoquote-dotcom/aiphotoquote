@@ -59,7 +59,19 @@ const PostBody = z.object({
    */
   rendering_enabled: z.boolean(),
   rendering_style: RenderingStyle,
+
+  /**
+   * Legacy single text box (kept for back-compat).
+   * We will mirror rendering_prompt_addendum -> rendering_notes.
+   */
   rendering_notes: z.string().max(2000),
+
+  /**
+   * ✅ NEW: tenant render prompt layer (additive, not override)
+   */
+  rendering_prompt_addendum: z.string().max(4000).optional().default(""),
+  rendering_negative_guidance: z.string().max(4000).optional().default(""),
+
   rendering_max_per_day: z.number().int().min(0).max(1000),
   rendering_customer_opt_in_required: z.boolean(),
 
@@ -134,6 +146,11 @@ async function getTenantSettingsRow(tenantId: string) {
 
       rendering_style,
       rendering_notes,
+
+      -- ✅ NEW tenant render prompt layer
+      rendering_prompt_addendum,
+      rendering_negative_guidance,
+
       rendering_max_per_day,
       rendering_customer_opt_in_required,
 
@@ -266,6 +283,9 @@ function normalizeRow(row: any, analysis: any | null) {
       : "photoreal";
 
   const rendering_notes = String(row?.rendering_notes ?? "");
+  const rendering_prompt_addendum = String(row?.rendering_prompt_addendum ?? "");
+  const rendering_negative_guidance = String(row?.rendering_negative_guidance ?? "");
+
   const rendering_max_per_day = clampInt(row?.rendering_max_per_day, 20, 0, 1000);
   const rendering_customer_opt_in_required = Boolean(row?.rendering_customer_opt_in_required ?? true);
 
@@ -287,7 +307,14 @@ function normalizeRow(row: any, analysis: any | null) {
 
     rendering_enabled,
     rendering_style,
+
+    // legacy (keep returning it)
     rendering_notes,
+
+    // ✅ new additive tenant render prompt layer
+    rendering_prompt_addendum,
+    rendering_negative_guidance,
+
     rendering_max_per_day,
     rendering_customer_opt_in_required,
 
@@ -349,7 +376,19 @@ export async function POST(req: Request) {
 
     const renderingEnabled = Boolean(incoming.rendering_enabled);
 
-    // ✅ IMPORTANT: write BOTH columns so they never drift again
+    // ✅ additive tenant render prompt layer
+    const renderingPromptAddendum = safeTrim(incoming.rendering_prompt_addendum ?? "");
+    const renderingNegativeGuidance = safeTrim(incoming.rendering_negative_guidance ?? "");
+
+    /**
+     * ✅ Back-compat decision:
+     * - We mirror "prompt addendum" into legacy rendering_notes so existing render prompt builder
+     *   continues to incorporate tenant notes without further plumbing.
+     * - Negative guidance is stored separately (new column) for your render builder to consume next.
+     */
+    const legacyRenderingNotes = renderingPromptAddendum;
+
+    // ✅ IMPORTANT: write BOTH render-enabled columns so they never drift again
     const upd = await db.execute(sql`
       update tenant_settings
       set
@@ -370,7 +409,14 @@ export async function POST(req: Request) {
         rendering_enabled = ${renderingEnabled},
 
         rendering_style = ${incoming.rendering_style},
-        rendering_notes = ${incoming.rendering_notes ?? ""},
+
+        -- ✅ legacy
+        rendering_notes = ${legacyRenderingNotes},
+
+        -- ✅ new additive layer
+        rendering_prompt_addendum = ${renderingPromptAddendum},
+        rendering_negative_guidance = ${renderingNegativeGuidance},
+
         rendering_max_per_day = ${clampInt(incoming.rendering_max_per_day, 20, 0, 1000)},
         rendering_customer_opt_in_required = ${incoming.rendering_customer_opt_in_required},
 
