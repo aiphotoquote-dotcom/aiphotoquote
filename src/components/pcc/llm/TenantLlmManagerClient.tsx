@@ -1,5 +1,4 @@
 // src/components/pcc/llm/TenantLlmManagerClient.tsx
-
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -63,7 +62,7 @@ type ApiGetResp =
       industry: Partial<PlatformLlmConfig>;
       tenant: TenantOverrides | null;
       effective: EffectiveShape;
-      effectiveBase: EffectiveShape; // ✅ baseline (platform + industry only)
+      effectiveBase: EffectiveShape; // baseline (platform + industry only)
       permissions: any;
     }
   | { ok: false; error: string; message?: string };
@@ -72,9 +71,6 @@ type ApiPostResp =
   | { ok: true; tenant: TenantOverrides | null; effective: any; effectiveBase: any }
   | { ok: false; error: string; message?: string; issues?: any };
 
-/**
- * Key policy status (read-only)
- */
 type KeyPolicyStatus =
   | {
       ok: true;
@@ -105,10 +101,6 @@ async function safeJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-/**
- * ✅ Non-throwing JSON helper (for optional endpoints like key-policy probes).
- * - If not JSON (e.g., 404 HTML), returns ok:false cleanly.
- */
 async function safeJsonOptional<T>(
   res: Response
 ): Promise<{ ok: true; data: T } | { ok: false; status: number; ct: string }> {
@@ -164,25 +156,10 @@ function diffExists(a: string, b: string) {
   return safeStr(a) !== safeStr(b);
 }
 
-/**
- * ✅ Normalize key policy payloads across versions.
- *
- * Supports:
- * - New shape (flat):
- *   { ok:true, tenantId, planTier, hasPlatformKey, hasTenantOpenAiKey, ... }
- *
- * - Legacy shape:
- *   { ok:true, tenantId, keyPolicy: { planTier, platformKeyPresent, hasTenantKey, ... } }
- *
- * And it self-heals inconsistent combos (e.g., effectiveKeySourceNow says platform_grace
- * but hasPlatformKey is missing/false due to shape mismatch).
- */
 function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   if (!anyResp || anyResp.ok !== true) return anyResp as KeyPolicyStatus;
 
   const tenantId = safeStr(anyResp.tenantId, "");
-
-  // Legacy nesting
   const kp = anyResp.keyPolicy && typeof anyResp.keyPolicy === "object" ? anyResp.keyPolicy : null;
 
   const planTierRaw = kp ? kp.planTier : anyResp.planTier;
@@ -191,22 +168,18 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   const activationGraceCreditsRaw = kp ? kp.activationGraceCredits : anyResp.activationGraceCredits;
   const activationGraceUsedRaw = kp ? kp.activationGraceUsed : anyResp.activationGraceUsed;
 
-  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw))
-    ? Number(activationGraceCreditsRaw)
-    : 0;
+  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw)) ? Number(activationGraceCreditsRaw) : 0;
   const activationGraceUsed = Number.isFinite(Number(activationGraceUsedRaw)) ? Number(activationGraceUsedRaw) : 0;
 
   const hasTenantOpenAiKey = Boolean(
     kp ? kp.hasTenantKey ?? kp.hasTenantOpenAiKey : anyResp.hasTenantOpenAiKey ?? anyResp.hasTenantKey
   );
 
-  // "platformKeyPresent" (legacy) vs "hasPlatformKey" (new)
   const hasPlatformKey = Boolean(kp ? kp.platformKeyPresent ?? kp.hasPlatformKey : anyResp.hasPlatformKey);
 
   const platformAllowed = Boolean(kp ? kp.platformAllowed : anyResp.platformAllowed);
   const graceRemaining = Boolean(kp ? kp.graceRemaining : anyResp.graceRemaining);
 
-  // New fields may not exist in legacy, so compute if missing.
   let effectiveKeySourceNow: "tenant" | "platform_grace" | "none" =
     safeStr(kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow) as any;
 
@@ -214,7 +187,6 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
     effectiveKeySourceNow = "none";
   }
 
-  // Self-heal source based on actual booleans.
   const computedSource: "tenant" | "platform_grace" | "none" = hasTenantOpenAiKey
     ? "tenant"
     : platformAllowed && hasPlatformKey
@@ -223,9 +195,7 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
 
   if (effectiveKeySourceNow !== computedSource) effectiveKeySourceNow = computedSource;
 
-  const wouldConsumeGraceOnNewQuoteRaw = kp ? kp.wouldConsumeGraceOnNewQuote : anyResp.wouldConsumeGraceOnNewQuote;
-  const wouldConsumeGraceOnNewQuote = Boolean(wouldConsumeGraceOnNewQuoteRaw);
-
+  const wouldConsumeGraceOnNewQuote = Boolean(kp ? kp.wouldConsumeGraceOnNewQuote : anyResp.wouldConsumeGraceOnNewQuote);
   const reason = (kp ? kp.reason : anyResp.reason) ?? null;
 
   return {
@@ -244,21 +214,15 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   };
 }
 
-/**
- * Model select behavior:
- * - stored override value is either "" (inherit) OR a concrete model id (including custom text)
- * - UI shows a first row: "Inherited — <baseline> (default)" with value ""
- * - if selected value isn't in options and isn't empty -> treat as custom
- */
 function ModelSelect(props: {
   label: string;
   help?: string;
   options: Array<{ value: string; label: string }>;
-  value: string; // stored override value ("" means inherit)
+  value: string;
   onChange: (next: string) => void;
 
-  baselineValue: string; // ✅ resolved without tenant overrides (platform + industry)
-  effectiveValue: string; // resolved including tenant overrides
+  baselineValue: string;
+  effectiveValue: string;
   showEffectiveLine?: boolean;
 }) {
   const { label, help, options, value, onChange, baselineValue, effectiveValue, showEffectiveLine } = props;
@@ -269,7 +233,7 @@ function ModelSelect(props: {
 
   const selectValue = valueIsEmpty ? "" : valueIsKnown ? value : "__custom__";
 
-  const inheritedLabel = `Inherited — ${prettyModelLabel(baselineValue, options)} (default)`;
+  const inheritedLabel = `Inherited — ${prettyModelLabel(baselineValue, options)} (baseline)`;
 
   return (
     <div>
@@ -280,7 +244,7 @@ function ModelSelect(props: {
         onChange={(e) => {
           const v = e.target.value;
           if (v === "") {
-            onChange(""); // inherit
+            onChange("");
             return;
           }
           if (v === "__custom__") {
@@ -318,9 +282,7 @@ function ModelSelect(props: {
       {showEffectiveLine ? (
         <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
           Effective:{" "}
-          <span className="font-mono text-gray-900 dark:text-gray-100">
-            {safeStr(value) ? safeStr(value) : safeStr(effectiveValue)}
-          </span>
+          <span className="font-mono text-gray-900 dark:text-gray-100">{safeStr(value) ? safeStr(value) : safeStr(effectiveValue)}</span>
         </div>
       ) : null}
     </div>
@@ -360,7 +322,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
   const [data, setData] = useState<ApiGetResp | null>(null);
   const [keyStatus, setKeyStatus] = useState<KeyPolicyStatus | null>(null);
 
-  // Tenant key management UI
   const [openaiKeyInput, setOpenaiKeyInput] = useState("");
   const [keySaving, setKeySaving] = useState(false);
   const [keyMsg, setKeyMsg] = useState<{ kind: "ok" | "warn" | "err" | "info"; text: string } | null>(null);
@@ -404,9 +365,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
     return safeJson<ApiPostResp>(res);
   }
 
-  /**
-   * ✅ Key-policy probe (optional route).
-   */
   const KEY_POLICY_ENDPOINT = "/api/tenant/key-policy";
 
   async function apiGetKeyPolicyStatus(): Promise<KeyPolicyStatus> {
@@ -423,11 +381,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       return { ok: false, error: "UNAVAILABLE", message: hint };
     }
 
-    // ✅ Normalize legacy vs new shapes so tier/platform-key/grace display stays correct.
     return normalizeKeyPolicyStatus(parsed.data);
   }
 
-  // Tenant OpenAI key management endpoint (new)
   const OPENAI_KEY_ENDPOINT = "/api/tenant/openai-key";
 
   async function apiSetTenantOpenAiKey(key: string) {
@@ -498,7 +454,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
       await refreshKeyStatusOnly();
 
-      setMsg({ kind: "ok", text: "Loaded tenant LLM settings." });
+      setMsg({ kind: "ok", text: "Loaded LLM settings." });
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
@@ -539,7 +495,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       }
 
       await refresh();
-      setMsg({ kind: "ok", text: "Saved tenant overrides." });
+      setMsg({ kind: "ok", text: "Saved tenant layer." });
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
@@ -572,7 +528,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       }
 
       await refresh();
-      setMsg({ kind: "ok", text: "Cleared tenant overrides (inheriting baseline)." });
+      setMsg({ kind: "ok", text: "Cleared tenant layer (back to baseline)." });
     } catch (e: any) {
       setMsg({ kind: "err", text: e?.message ?? String(e) });
     } finally {
@@ -677,16 +633,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       diffExists(qaQuestionGeneratorSystem, p0.qaQuestionGeneratorSystem) ||
       maxQaQuestions !== q0
     );
-  }, [
-    tenant,
-    estimatorModel,
-    qaModel,
-    renderModel,
-    extraSystemPreamble,
-    quoteEstimatorSystem,
-    qaQuestionGeneratorSystem,
-    maxQaQuestions,
-  ]);
+  }, [tenant, estimatorModel, qaModel, renderModel, extraSystemPreamble, quoteEstimatorSystem, qaQuestionGeneratorSystem, maxQaQuestions]);
 
   return (
     <div className="space-y-6">
@@ -695,7 +642,8 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Tenant LLM settings</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              Tenant overrides apply on top of <span className="font-mono">platform → industry → tenant</span>. Guardrails are platform-locked.
+              Prompts are layered: <span className="font-mono">platform → industry → tenant</span>. Tenant entries are optional and only apply on top of the baseline.
+              Guardrails are platform-locked.
             </div>
             <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Tenant: <span className="font-mono">{tenantId}</span>
@@ -854,12 +802,14 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Overrides</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Leave blank to inherit the baseline.</p>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Tenant layer</h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            Leave blank to add nothing and inherit the baseline (platform + industry).
+          </p>
 
           <div className="mt-4 space-y-4">
             <ModelSelect
-              label="Estimator model override"
+              label="Estimator model (tenant layer)"
               options={TEXT_MODEL_OPTIONS}
               value={estimatorModel}
               onChange={setEstimatorModel}
@@ -870,7 +820,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             />
 
             <ModelSelect
-              label="Q&A model override"
+              label="Q&A model (tenant layer)"
               options={TEXT_MODEL_OPTIONS}
               value={qaModel}
               onChange={setQaModel}
@@ -881,7 +831,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             />
 
             <ModelSelect
-              label="Render image model override"
+              label="Render image model (tenant layer)"
               options={IMAGE_MODEL_OPTIONS}
               value={renderModel}
               onChange={setRenderModel}
@@ -934,38 +884,38 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       </div>
 
       <Collapsible
-        title="Prompt overrides"
-        subtitle="Leave blank to inherit. Preview shows effective prompts from platform + industry + tenant."
+        title="Tenant prompt inputs"
+        subtitle="Leave blank to add nothing. Preview shows the baseline (platform + industry) and the effective result (includes tenant)."
         defaultOpen
       >
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble (tenant layer)</label>
             <textarea
               value={extraSystemPreamble}
               onChange={(e) => setExtraSystemPreamble(e.target.value)}
               className="mt-1 h-64 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              placeholder="(inherit)"
+              placeholder="(none)"
             />
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote estimator system (tenant layer)</label>
             <textarea
               value={quoteEstimatorSystem}
               onChange={(e) => setQuoteEstimatorSystem(e.target.value)}
               className="mt-1 h-64 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              placeholder="(inherit)"
+              placeholder="(none)"
             />
           </div>
 
           <div>
-            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A generator system override</label>
+            <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Q&A generator system (tenant layer)</label>
             <textarea
               value={qaQuestionGeneratorSystem}
               onChange={(e) => setQaQuestionGeneratorSystem(e.target.value)}
               className="mt-1 h-64 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-              placeholder="(inherit)"
+              placeholder="(none)"
             />
           </div>
         </div>

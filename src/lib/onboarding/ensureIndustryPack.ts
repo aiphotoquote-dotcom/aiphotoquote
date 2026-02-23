@@ -10,7 +10,7 @@ function safeTrim(v: unknown) {
 }
 
 /**
- * Keep consistent with your platform-wide normalization style:
+ * Keep consistent with platform-wide normalization:
  * - lowercase
  * - collapse non-alnum to "_"
  * - trim underscores
@@ -36,18 +36,6 @@ function jsonbString(v: any) {
   }
 }
 
-function firstRow(r: any): any | null {
-  try {
-    if (!r) return null;
-    if (Array.isArray(r)) return r[0] ?? null;
-    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
-    if (Array.isArray((r as any)?.rows)) return (r as any).rows[0] ?? null;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 async function readLatestPackRow(industryKey: string) {
   const r = await db.execute(sql`
     select id::text as "id", version::int as "version", enabled as "enabled"
@@ -56,20 +44,56 @@ async function readLatestPackRow(industryKey: string) {
     order by version desc, updated_at desc
     limit 1
   `);
-  return firstRow(r);
+  return (r as any)?.rows?.[0] ?? null;
+}
+
+/**
+ * Canonical resolver:
+ * industry_canonical_map:
+ * - source_industry_key (not null)
+ * - target_industry_key (nullable; null can mean "deleted/absorbed", treat as no-op for now)
+ *
+ * We follow mapping chains (A->B->C) up to a safe limit.
+ */
+async function resolveCanonicalIndustryKey(inputKey: string) {
+  let cur = normalizeIndustryKey(inputKey);
+  if (!cur) return "";
+
+  const seen = new Set<string>();
+  for (let i = 0; i < 6; i++) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+
+    const r = await db.execute(sql`
+      select target_industry_key::text as "target"
+      from industry_canonical_map
+      where source_industry_key = ${cur}
+      limit 1
+    `);
+
+    const targetRaw = safeTrim((r as any)?.rows?.[0]?.target ?? "");
+    const target = normalizeIndustryKey(targetRaw);
+
+    // If no mapping, or target is null/empty, stop.
+    if (!target) break;
+
+    cur = target;
+  }
+
+  return cur;
 }
 
 /**
  * Ensure that an industry has at least one industry_llm_packs row.
- * This is used by onboarding so a tenant is "truly set up" once industry is known.
+ * Used by onboarding so a tenant is "truly set up" once industry is known.
  */
 export async function ensureIndustryPack(args: {
   industryKey: string;
   industryLabel?: string | null;
   industryDescription?: string | null;
 
-  // Optional context from onboarding (helps pack quality, but not required)
-  tenantId?: string | null; // kept for compatibility; not required by generator
+  // Optional onboarding context (helps pack quality)
+  tenantId?: string | null;
   website?: string | null;
   summary?: string | null;
 
@@ -77,20 +101,26 @@ export async function ensureIndustryPack(args: {
   mode?: IndustryPackGenerationMode; // default: "create"
   model?: string | null; // optional override to packGenerator
 }) {
-  const industryKey = normalizeIndustryKey(args.industryKey);
-  if (!industryKey) {
+  const inputKeyNorm = normalizeIndustryKey(args.industryKey);
+  if (!inputKeyNorm) {
     return { ok: false as const, error: "INDUSTRY_KEY_REQUIRED" };
   }
+
+  // ✅ Canonicalize BEFORE looking for/creating packs
+  const canonicalKey = await resolveCanonicalIndustryKey(inputKeyNorm);
+  const industryKey = canonicalKey || inputKeyNorm;
 
   const industryLabel = safeTrim(args.industryLabel) || null;
   const industryDescription = safeTrim(args.industryDescription) || null;
 
-  // 1) If a pack already exists for this industry, we’re done.
+  // 1) If a pack already exists, we’re done.
   const existing = await readLatestPackRow(industryKey);
   if (existing?.id) {
     return {
       ok: true as const,
       industryKey,
+      canonicalApplied: industryKey !== inputKeyNorm,
+      inputIndustryKey: inputKeyNorm,
       existed: true as const,
       id: String(existing.id),
       version: Number(existing.version ?? 0),
@@ -98,16 +128,16 @@ export async function ensureIndustryPack(args: {
     };
   }
 
-  // 2) Compute next version (usually 1 since none exist, but safe anyway)
+  // 2) Compute next version (usually 1 since none exist)
   const maxVR = await db.execute(sql`
     select coalesce(max(version), 0)::int as "v"
     from industry_llm_packs
     where lower(industry_key) = ${industryKey}
   `);
-  const maxVRow: any = firstRow(maxVR);
+  const maxVRow: any = (maxVR as any)?.rows?.[0] ?? null;
   const nextV = Number(maxVRow?.v ?? 0) + 1;
 
-  // 3) Generate pack (PURE generator)
+  // 3) Generate pack
   const mode: IndustryPackGenerationMode = (args.mode ?? "create") as IndustryPackGenerationMode;
 
   const exampleTenants =
@@ -130,17 +160,8 @@ export async function ensureIndustryPack(args: {
     model: safeTrim(args.model) || undefined,
   });
 
-  /**
-   * Store generator meta alongside the pack WITHOUT impacting your runtime merge.
-   * (Unknown keys should be ignored by your config loader / merge logic.)
-   */
-  const packWithMeta = {
-    ...(gen.pack as any),
-    _apqMeta: gen.meta,
-  };
-
-  // 4) Persist row (idempotent attempt)
-  const packJson = jsonbString(packWithMeta);
+  // 4) Persist
+  const packJson = jsonbString(gen.pack);
   const promptsJson = jsonbString((gen.pack as any)?.prompts ?? {});
   const modelsJson = jsonbString((gen.pack as any)?.models ?? {});
 
@@ -156,41 +177,22 @@ export async function ensureIndustryPack(args: {
       ${promptsJson}::jsonb,
       now()
     )
-    on conflict do nothing
     returning id::text as "id", version::int as "version"
   `);
 
-  const inserted = firstRow(insR);
+  const inserted = (insR as any)?.rows?.[0] ?? null;
 
-  // If insert did nothing (race), re-read and return the winner
-  if (!inserted?.id) {
-    const winner = await readLatestPackRow(industryKey);
-    if (winner?.id) {
-      return {
-        ok: true as const,
-        industryKey,
-        existed: true as const,
-        raced: true as const,
-        id: String(winner.id),
-        version: Number(winner.version ?? nextV),
-        enabled: Boolean(winner.enabled),
-      };
-    }
-
-    // Extremely unlikely: insert didn't happen AND still no row
-    return {
-      ok: false as const,
-      industryKey,
-      error: "PACK_INSERT_FAILED",
-    };
-  }
+  // 5) Re-read winner (defensive, and keeps behavior stable if insert triggers/etc)
+  const winner = await readLatestPackRow(industryKey);
 
   return {
     ok: true as const,
     industryKey,
+    canonicalApplied: industryKey !== inputKeyNorm,
+    inputIndustryKey: inputKeyNorm,
     existed: false as const,
-    id: safeTrim(inserted.id) || null,
-    version: Number(inserted.version ?? nextV),
+    id: safeTrim(winner?.id || inserted?.id) || null,
+    version: Number(winner?.version ?? inserted?.version ?? nextV),
     meta: gen.meta,
   };
 }

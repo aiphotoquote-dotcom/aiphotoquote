@@ -9,6 +9,7 @@ import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/t
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
 import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+import { getIndustryLlmPack } from "@/lib/pcc/llm/industryStore";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,6 +55,26 @@ function normalizePlatformCfg(platformAny: any) {
   }
 
   return cfg as any;
+}
+
+/**
+ * Merge industry defaults + DB-backed industry pack (if any).
+ *
+ * IMPORTANT:
+ * - "industry" is a PARTIAL layer (it should not need version/updatedAt).
+ * - We merge shallowly at the known nested objects so packs can override/extend defaults.
+ */
+function mergeIndustryLayers(a: any, b: any) {
+  const A = a && typeof a === "object" ? a : {};
+  const B = b && typeof b === "object" ? b : {};
+
+  return {
+    ...A,
+    ...B,
+    models: { ...(A.models ?? {}), ...(B.models ?? {}) },
+    prompts: { ...(A.prompts ?? {}), ...(B.prompts ?? {}) },
+    guardrails: { ...(A.guardrails ?? {}), ...(B.guardrails ?? {}) },
+  };
 }
 
 const GetQuery = z.object({
@@ -109,16 +130,18 @@ export async function GET(req: Request) {
     const platformAny: any = await getPlatformLlm();
     const platformCfg = normalizePlatformCfg(platformAny);
 
-    // Industry layer (stubbed to {} until DB-backed packs land)
     const industryKey = safeTrim(parsed.data.industryKey) || null;
-    const industry = getIndustryDefaults(industryKey);
 
-    // Tenant overrides row (jsonb)
+    // ✅ Industry layer = defaults + latest DB pack (if present)
+    const defaults = getIndustryDefaults(industryKey);
+    const pack = await getIndustryLlmPack(industryKey);
+    const industry = mergeIndustryLayers(defaults, pack ?? {});
+
+    // Tenant layer (jsonb)
     const row = await getTenantLlmOverrides(gate.tenantId);
 
     // IMPORTANT:
     // TenantLlmOverridesRow currently doesn't type maxQaQuestions, but older/newer schemas may store it.
-    // So we read it safely from (row as any) to avoid TypeScript build breaks.
     const tenantOverrides: TenantLlmOverrides | null = row
       ? normalizeTenantOverrides({
           models: (row as any).models ?? {},
@@ -184,9 +207,13 @@ export async function POST(req: Request) {
     const platformCfg = normalizePlatformCfg(platformAny);
 
     const industryKey = safeTrim(parsed.data.industryKey) || null;
-    const industry = getIndustryDefaults(industryKey);
 
-    // Normalize incoming overrides
+    // ✅ Industry layer = defaults + latest DB pack (if present)
+    const defaults = getIndustryDefaults(industryKey);
+    const pack = await getIndustryLlmPack(industryKey);
+    const industry = mergeIndustryLayers(defaults, pack ?? {});
+
+    // Normalize incoming tenant layer
     const incoming = parsed.data.overrides ?? ({} as any);
 
     const normalized: TenantLlmOverrides = normalizeTenantOverrides({
@@ -196,8 +223,6 @@ export async function POST(req: Request) {
       maxQaQuestions: incoming.maxQaQuestions ?? undefined,
     } as any);
 
-    // ✅ FIX: upsertTenantLlmOverrides expects ONE argument (object form).
-    // Tenant store owns its schema; we pass tenantId + payload as a single object.
     await upsertTenantLlmOverrides({
       tenantId: gate.tenantId,
       models: normalized.models ?? {},
