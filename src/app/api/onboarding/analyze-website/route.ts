@@ -42,6 +42,17 @@ function firstRow(r: any): any | null {
   }
 }
 
+function rowsOf(r: any): any[] {
+  try {
+    if (!r) return [];
+    if (Array.isArray(r)) return r;
+    if (Array.isArray((r as any)?.rows)) return (r as any).rows;
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -68,19 +79,6 @@ function safeJsonParseObject(txt: string): any | null {
     if (!v || typeof v !== "object") return null;
     return v;
   } catch {
-    // Try a minimal "extract the first JSON object" fallback (still same logic: PASS 2 must produce JSON)
-    const start = s.indexOf("{");
-    const end = s.lastIndexOf("}");
-    if (start >= 0 && end > start) {
-      const chunk = s.slice(start, end + 1);
-      try {
-        const v = JSON.parse(chunk);
-        if (!v || typeof v !== "object") return null;
-        return v;
-      } catch {
-        return null;
-      }
-    }
     return null;
   }
 }
@@ -102,7 +100,9 @@ async function upsertAnalysis(tenantId: string, website: string | null, analysis
   `);
 }
 
-function normalizeIndustryKey(raw: string) {
+/* --------------------- canonical matching --------------------- */
+
+function normalizeKey(raw: string) {
   const s = safeTrim(raw).toLowerCase();
   if (!s) return "";
   return s
@@ -112,49 +112,126 @@ function normalizeIndustryKey(raw: string) {
     .slice(0, 64);
 }
 
-/* --------------------- schema (coercive, same fields) --------------------- */
+function titleFromKey(key: string) {
+  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
+  if (!s) return "";
+  return s
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
-const FitSchema = z.preprocess((v) => safeTrim(v).toLowerCase(), z.enum(["good", "maybe", "poor"]));
+function tokenize(s: string): string[] {
+  const t = safeTrim(s).toLowerCase();
+  if (!t) return [];
+  return t
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .slice(0, 32);
+}
 
-const StringArraySchema = z.preprocess((v) => {
-  if (Array.isArray(v)) return v;
-  const s = safeTrim(v);
-  if (!s) return [];
-  // allow single string or newline/bullet/comma separated
-  const parts = s
-    .split(/\r?\n|•|- |\u2022|,|;|\|/g)
-    .map((x) => safeTrim(x))
-    .filter(Boolean);
-  return parts.length ? parts : [s];
-}, z.array(z.string()));
+function jaccard(a: string[], b: string[]) {
+  const A = new Set(a);
+  const B = new Set(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  const union = A.size + B.size - inter;
+  return union ? inter / union : 0;
+}
 
-const BoolSchema = z.preprocess((v) => {
-  if (typeof v === "boolean") return v;
-  const s = safeTrim(v).toLowerCase();
-  if (s === "true") return true;
-  if (s === "false") return false;
-  return v;
-}, z.boolean().optional());
+async function resolveCanonicalIndustry(suggestedKeyRaw: string, suggestedLabelRaw: string) {
+  const suggestedKey = normalizeKey(suggestedKeyRaw);
+  const suggestedLabel = safeTrim(suggestedLabelRaw);
 
-const Num01Schema = z.preprocess((v) => {
-  if (typeof v === "number") return v;
-  const n = Number(String(v ?? "").trim());
-  return Number.isFinite(n) ? n : v;
-}, z.number().min(0).max(1));
+  if (!suggestedKey && !suggestedLabel) return null;
+
+  // Pull canonical industries (small table). If this grows huge later, we can optimize.
+  const r = await db.execute(sql`
+    select key::text as key, label::text as label
+    from industries
+    order by key asc
+  `);
+
+  const inds = rowsOf(r)
+    .map((x: any) => ({
+      key: normalizeKey(x?.key ?? ""),
+      label: safeTrim(x?.label ?? ""),
+    }))
+    .filter((x: any) => Boolean(x.key));
+
+  if (!inds.length) return null;
+
+  // 1) Exact key match
+  if (suggestedKey) {
+    const hit = inds.find((i) => i.key === suggestedKey);
+    if (hit) return { key: hit.key, label: hit.label || titleFromKey(hit.key), method: "exact_key", score: 1.0 };
+  }
+
+  // 2) Label->key normalization match (e.g., "Wholesale Distribution" => wholesale_distribution)
+  if (suggestedLabel) {
+    const labelAsKey = normalizeKey(suggestedLabel);
+    if (labelAsKey) {
+      const hit = inds.find((i) => i.key === labelAsKey);
+      if (hit) return { key: hit.key, label: hit.label || titleFromKey(hit.key), method: "label_to_key", score: 0.98 };
+    }
+
+    const labelLower = suggestedLabel.toLowerCase();
+    const exactLabel = inds.find((i) => safeTrim(i.label).toLowerCase() === labelLower);
+    if (exactLabel) {
+      return {
+        key: exactLabel.key,
+        label: exactLabel.label || titleFromKey(exactLabel.key),
+        method: "exact_label",
+        score: 0.97,
+      };
+    }
+  }
+
+  // 3) Fuzzy token overlap (cheap + deterministic)
+  const qTokens = tokenize(`${suggestedLabel} ${suggestedKey}`);
+  if (!qTokens.length) return null;
+
+  let best: { key: string; label: string; score: number; method: string } | null = null;
+
+  for (const i of inds) {
+    const iTokens = tokenize(`${i.label} ${i.key}`);
+    const score = jaccard(qTokens, iTokens);
+
+    // Small bias if one is a prefix of the other (common for variants)
+    const prefixBoost =
+      suggestedKey && (i.key.startsWith(suggestedKey) || suggestedKey.startsWith(i.key)) ? 0.08 : 0;
+
+    const total = Math.min(1, score + prefixBoost);
+
+    if (!best || total > best.score) {
+      best = { key: i.key, label: i.label || titleFromKey(i.key), score: total, method: "token_overlap" };
+    }
+  }
+
+  // Threshold: tune to avoid bad merges.
+  // 0.72 works well for "wholesale distribution" variants (e.g., wholesale_dist, wholesale_distributor, etc.)
+  if (best && best.score >= 0.72) return best;
+
+  return null;
+}
+
+/* --------------------- schema --------------------- */
 
 const AnalysisSchema = z.object({
-  businessGuess: z.preprocess((v) => safeTrim(v), z.string().min(1)),
-  fit: FitSchema,
-  fitReason: z.preprocess((v) => safeTrim(v), z.string().min(1)),
-  suggestedIndustryKey: z.preprocess((v) => safeTrim(v), z.string().min(1)),
-questions: z.preprocess(
-  (v) => (Array.isArray(v) ? v.map((x) => safeTrim(x)).filter(Boolean) : []),
-  z.array(z.string()).min(1).max(6)
-),
-  confidenceScore: Num01Schema,
-  needsConfirmation: BoolSchema,
-  detectedServices: StringArraySchema.default([]),
-  billingSignals: StringArraySchema.default([]),
+  businessGuess: z.string().min(1),
+  fit: z.enum(["good", "maybe", "poor"]),
+  fitReason: z.string().min(1),
+  suggestedIndustryKey: z.string().min(1),
+  questions: z.array(z.string()).min(1).max(6),
+  confidenceScore: z.number().min(0).max(1),
+  needsConfirmation: z.boolean(),
+  detectedServices: z.array(z.string()).default([]),
+  billingSignals: z.array(z.string()).default([]),
 });
 
 /* --------------------- prompts --------------------- */
@@ -189,7 +266,7 @@ Return JSON with:
 - businessGuess (2–5 sentences)
 - fit: good | maybe | poor (photo-based quoting)
 - fitReason
-- suggestedIndustryKey (snake_case if possible)
+- suggestedIndustryKey
 - questions (3–6)
 - detectedServices
 - billingSignals
@@ -270,7 +347,7 @@ export async function POST(req: Request) {
       input: websiteIntelPrompt(website),
     });
 
-    const rawIntel = safeTrim((intelResp as any)?.output_text ?? "");
+    const rawIntel = safeTrim(intelResp.output_text ?? "");
     if (!rawIntel) throw new Error("EMPTY_WEB_RESULT");
 
     const mid = {
@@ -294,7 +371,7 @@ export async function POST(req: Request) {
       input: normalizePrompt(rawIntel),
     });
 
-    const jsonText = safeTrim((normalizedResp as any)?.output_text ?? "");
+    const jsonText = safeTrim(normalizedResp.output_text ?? "");
     const obj = safeJsonParseObject(jsonText);
     const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
 
@@ -341,23 +418,24 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
-    // Keep same shape, just normalize key + ensure needsConfirmation consistent
-    const suggestedKeyNorm = normalizeIndustryKey(parsed.data.suggestedIndustryKey) || "service";
-    const needsConfirmation =
-      typeof parsed.data.needsConfirmation === "boolean"
-        ? parsed.data.needsConfirmation
-        : parsed.data.confidenceScore < 0.8;
+    // ✅ Canonicalize suggested industry (tighten matching to existing industries)
+    const suggestedKeyRaw = safeTrim(parsed.data.suggestedIndustryKey);
+    const suggestedLabelRaw = titleFromKey(suggestedKeyRaw); // model doesn't send label; derive a stable one
+
+    const canonical = await resolveCanonicalIndustry(suggestedKeyRaw, suggestedLabelRaw);
+
+    const suggestedIndustryKey = canonical?.key ? canonical.key : normalizeKey(suggestedKeyRaw) || suggestedKeyRaw;
+    const suggestedIndustryLabel = canonical?.label ? canonical.label : suggestedLabelRaw;
 
     const analysis = {
       ...parsed.data,
-      suggestedIndustryKey: suggestedKeyNorm,
-      needsConfirmation,
+      suggestedIndustryKey,
+      suggestedIndustryLabel,
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
       modelUsed: model,
       rawWebIntelPreview: clamp(rawIntel, 1200),
-      rawModelJsonPreview: clamp(jsonText, 1200),
       meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,
@@ -365,6 +443,9 @@ export async function POST(req: Request) {
         error: null,
         finishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        canonicalMatch: canonical
+          ? { method: canonical.method, score: canonical.score, key: canonical.key }
+          : { method: "none" },
       }),
     };
 
