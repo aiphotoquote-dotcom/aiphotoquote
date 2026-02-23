@@ -129,34 +129,66 @@ function normalizeKey(raw: string) {
     .slice(0, 64);
 }
 
-/**
- * IMPORTANT: UI-only categorization.
- * - PARSE_FAIL means: we DID read the site, but failed to convert into structured JSON.
- * - read failures mean: we could not fetch/interpret the site at all (blocked/timeout/fetch/etc).
- *
- * This is intentionally conservative: only treat explicit "parse fail" as PARSE_FAIL.
- */
-function isWebsiteParseFail(err: string) {
+function isParseFail(err: string) {
   const e = safeTrim(err).toLowerCase();
-  return e.includes("parse_fail") || (e.includes("parse") && e.includes("fail"));
+  return (
+    e.includes("parse_fail") ||
+    e.includes("parse fail") ||
+    (e.includes("parse") && e.includes("fail")) ||
+    e.includes("fetch_fail") ||
+    e.includes("fetch fail") ||
+    e.includes("blocked") ||
+    e.includes("timeout")
+  );
 }
 
-function isWebsiteReadFail(err: string) {
-  const e = safeTrim(err).toLowerCase();
-  if (!e) return false;
-  if (isWebsiteParseFail(e)) return false;
+function joinBullets(label: string, items: any, limit = 12) {
+  const xs = Array.isArray(items) ? items.map((x) => safeTrim(x)).filter(Boolean) : [];
+  if (!xs.length) return "";
+  return `${label}:\n- ${xs.slice(0, limit).join("\n- ")}`;
+}
 
-  // Treat these as "couldn't read site"
-  return (
-    e.includes("fetch_fail") ||
-    (e.includes("fetch") && e.includes("fail")) ||
-    e.includes("blocked") ||
-    e.includes("timeout") ||
-    e.includes("empty_web_result") ||
-    e.includes("empty web result") ||
-    e.includes("no_website") ||
-    e.includes("no website")
-  );
+function buildVerboseDetails(ai: any) {
+  const lines: string[] = [];
+
+  const businessGuess = safeTrim(pick(ai, ["businessGuess", "business_guess"]));
+  const fitReason = safeTrim(pick(ai, ["fitReason", "fit_reason"]));
+  const detectedServices = pick(ai, ["detectedServices", "detected_services"]);
+  const billingSignals = pick(ai, ["billingSignals", "billing_signals"]);
+  const rawIntel = safeTrim(pick(ai, ["rawWebIntelPreview", "raw_web_intel_preview"]));
+
+  if (businessGuess) {
+    lines.push("Business summary:");
+    lines.push(businessGuess);
+    lines.push("");
+  }
+
+  if (fitReason) {
+    lines.push("Why this fit score:");
+    lines.push(fitReason);
+    lines.push("");
+  }
+
+  const svc = joinBullets("Detected services/products", detectedServices, 12);
+  if (svc) {
+    lines.push(svc);
+    lines.push("");
+  }
+
+  const bill = joinBullets("Billing/pricing signals", billingSignals, 12);
+  if (bill) {
+    lines.push(bill);
+    lines.push("");
+  }
+
+  if (rawIntel) {
+    lines.push("Website intel excerpt:");
+    lines.push(rawIntel);
+    lines.push("");
+  }
+
+  const out = lines.join("\n").trim();
+  return out || "No additional details were provided by the analyzer.";
 }
 
 export function Step2(props: {
@@ -206,24 +238,14 @@ export function Step2(props: {
 
   const suggestedKeyNorm = useMemo(() => normalizeKey(suggestedKey), [suggestedKey]);
 
-  // raw long summary often lives here (we keep it in details only)
-  const rawSummary =
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.meta.debug.reason"])) ||
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.description"])) ||
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
-    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
-    safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
-    safeTrim(pick(props.aiAnalysis, ["business_guess"])) ||
-    "";
-
   const confidenceScore =
     pick(props.aiAnalysis, ["confidenceScore", "confidence_score"]) ??
     pick(props.aiAnalysis, ["industryInterview.confidenceScore"]) ??
     null;
 
+  // ✅ Prefer numeric fitScore; fall back to legacy fitScore on interview; ignore string "fit" enums for % display
   const fitScore =
     pick(props.aiAnalysis, ["fitScore", "fit_score"]) ??
-    pick(props.aiAnalysis, ["fit"]) ??
     pick(props.aiAnalysis, ["industryInterview.fitScore"]) ??
     null;
 
@@ -283,12 +305,9 @@ export function Step2(props: {
   const displayIndustryName = useMemo(() => {
     if (canonicalIndustryLabel) return canonicalIndustryLabel;
 
-    const s = safeTrim(rawSummary);
-    if (s && s.length <= 42) return s;
-
     if (suggestedKeyNorm) return suggestedKeyNorm.replace(/_/g, " ");
     return "your industry";
-  }, [canonicalIndustryLabel, rawSummary, suggestedKeyNorm]);
+  }, [canonicalIndustryLabel, suggestedKeyNorm]);
 
   const reasoningLine = useMemo(() => {
     if (!hasWebsite) return "";
@@ -297,19 +316,14 @@ export function Step2(props: {
     return "We matched your website content against known industry patterns.";
   }, [hasWebsite, conf]);
 
-  // Distinguish "read failure" vs "parse failure"
-  const parseFail = hasWebsite && Boolean(aiErr) && isWebsiteParseFail(aiErr);
-  const readFail = hasWebsite && Boolean(aiErr) && isWebsiteReadFail(aiErr);
+  // ✅ Treat PARSE_FAIL (and similar) as "analysis not usable"
+  const parseFail = hasWebsite && Boolean(aiErr) && isParseFail(aiErr);
 
-  // Any error that is not PARSE_FAIL is treated as a hard error for "analysis usable"
-  const hardErr = Boolean(aiErr) && !parseFail;
-
-  // ✅ Only show the green “recommended industry” card when we have a real key AND no hard error.
-  // Note: PARSE_FAIL is not "couldn't read"; it's "couldn't structure" — still not usable for auto-advance.
+  // ✅ Only show the green “recommended industry” card when we have a real key AND no parse failure.
   const analysisUsable = Boolean(
     hasWebsite &&
-      !hardErr &&
-      !parseFail && // keep existing behavior: parse fail is not "usable"
+      !parseFail &&
+      !aiErr &&
       hasAnalysisRaw &&
       safeTrim(suggestedKeyNorm) &&
       (conf === null ? true : conf > 0)
@@ -389,10 +403,7 @@ export function Step2(props: {
 
     setShowInterview(false);
 
-    // If the site couldn't be read, don't keep trying automatically.
-    if (readFail) return;
-
-    // If parsing failed, don't keep trying automatically either (encourage interview).
+    // If parse failed, don't keep trying automatically.
     if (parseFail) return;
 
     if (hasAnalysis) return;
@@ -403,7 +414,7 @@ export function Step2(props: {
       runAnalysisSafely("auto").catch(() => null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasWebsite, hasAnalysis, isRunning, tid, readFail, parseFail]);
+  }, [hasWebsite, hasAnalysis, isRunning, tid, parseFail]);
 
   /* -------------------- Interview mode -------------------- */
 
@@ -580,7 +591,6 @@ export function Step2(props: {
       if (analysisUsable && suggestedKeyNorm) {
         await acceptIndustryAndAdvance(suggestedKeyNorm);
       } else {
-        // If analysis isn't usable, send them to interview instead of advancing into a broken state.
         setShowInterview(true);
       }
     } catch (e: any) {
@@ -617,6 +627,8 @@ export function Step2(props: {
   }
 
   const showBusy = (isRunning || autoStarting) && !hasAnalysis;
+
+  const verboseDetails = useMemo(() => buildVerboseDetails(props.aiAnalysis), [props.aiAnalysis]);
 
   return (
     <div>
@@ -665,8 +677,8 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* ✅ READ FAIL: truly couldn't read/fetch site */}
-            {readFail && !showBusy ? (
+            {/* ✅ Parse fail / fetch fail path */}
+            {parseFail && !showBusy ? (
               <div className="mt-4">
                 <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
                   <div className="font-semibold">We couldn’t read your website.</div>
@@ -707,51 +719,8 @@ export function Step2(props: {
               </div>
             ) : null}
 
-            {/* ✅ PARSE FAIL: read succeeded, structuring failed */}
-            {parseFail && !showBusy ? (
-              <div className="mt-4">
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
-                  <div className="font-semibold">We read your website, but need a quick clarification.</div>
-                  <div className="mt-1 text-xs opacity-90">
-                    We pulled website details successfully, but couldn’t convert them into structured onboarding data.
-                    The interview will lock this in fast.
-                  </div>
-                  {debugOn ? <div className="mt-2 text-[11px] font-mono opacity-80">Error: {aiErr}</div> : null}
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    className="rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
-                    onClick={() => runAnalysisSafely("manual").catch(() => null)}
-                    disabled={working || !tid}
-                  >
-                    Try again
-                  </button>
-
-                  <button
-                    type="button"
-                    className="rounded-2xl bg-black py-3 text-sm font-semibold text-white disabled:opacity-50 dark:bg-white dark:text-black"
-                    onClick={() => setShowInterview(true)}
-                    disabled={working}
-                  >
-                    Run interview →
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  className="mt-3 w-full rounded-2xl border border-gray-200 bg-white py-3 text-sm font-semibold text-gray-900 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100 dark:hover:bg-gray-900"
-                  onClick={props.onBack}
-                  disabled={working}
-                >
-                  Back
-                </button>
-              </div>
-            ) : null}
-
-            {/* Not analyzed / needs input (non-read-fail, non-parse-fail) */}
-            {!hasAnalysis && !showBusy && !readFail && !parseFail ? (
+            {/* Not analyzed / needs input (non-parse-fail) */}
+            {!hasAnalysis && !showBusy && !parseFail ? (
               <div className="mt-4">
                 {aiErr ? (
                   <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
@@ -808,10 +777,10 @@ export function Step2(props: {
 
                   {detailsOpen ? (
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
-                      <div className="text-xs font-semibold opacity-80">Why we think this</div>
+                      <div className="text-xs font-semibold opacity-80">Full analysis</div>
 
-                      <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
-                        {rawSummary ? rawSummary : "No additional details were provided by the analyzer."}
+                      <div className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
+                        {verboseDetails}
                       </div>
 
                       {debugOn && suggestedKeyNorm ? (

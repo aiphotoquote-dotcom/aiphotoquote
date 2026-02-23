@@ -42,17 +42,6 @@ function firstRow(r: any): any | null {
   }
 }
 
-function rowsOf(r: any): any[] {
-  try {
-    if (!r) return [];
-    if (Array.isArray(r)) return r;
-    if (Array.isArray((r as any)?.rows)) return (r as any).rows;
-    return [];
-  } catch {
-    return [];
-  }
-}
-
 async function requireAuthed(): Promise<{ clerkUserId: string }> {
   const { userId } = await auth();
   if (!userId) throw new Error("UNAUTHENTICATED");
@@ -100,124 +89,11 @@ async function upsertAnalysis(tenantId: string, website: string | null, analysis
   `);
 }
 
-/* --------------------- canonical matching --------------------- */
-
-function normalizeKey(raw: string) {
-  const s = safeTrim(raw).toLowerCase();
-  if (!s) return "";
-  return s
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 64);
-}
-
-function titleFromKey(key: string) {
-  const s = safeTrim(key).replace(/[-_]+/g, " ").trim();
-  if (!s) return "";
-  return s
-    .split(" ")
-    .filter(Boolean)
-    .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-function tokenize(s: string): string[] {
-  const t = safeTrim(s).toLowerCase();
-  if (!t) return [];
-  return t
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .split(" ")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .slice(0, 32);
-}
-
-function jaccard(a: string[], b: string[]) {
-  const A = new Set(a);
-  const B = new Set(b);
-  if (!A.size || !B.size) return 0;
-  let inter = 0;
-  for (const x of A) if (B.has(x)) inter++;
-  const union = A.size + B.size - inter;
-  return union ? inter / union : 0;
-}
-
-async function resolveCanonicalIndustry(suggestedKeyRaw: string, suggestedLabelRaw: string) {
-  const suggestedKey = normalizeKey(suggestedKeyRaw);
-  const suggestedLabel = safeTrim(suggestedLabelRaw);
-
-  if (!suggestedKey && !suggestedLabel) return null;
-
-  // Pull canonical industries (small table). If this grows huge later, we can optimize.
-  const r = await db.execute(sql`
-    select key::text as key, label::text as label
-    from industries
-    order by key asc
-  `);
-
-  const inds = rowsOf(r)
-    .map((x: any) => ({
-      key: normalizeKey(x?.key ?? ""),
-      label: safeTrim(x?.label ?? ""),
-    }))
-    .filter((x: any) => Boolean(x.key));
-
-  if (!inds.length) return null;
-
-  // 1) Exact key match
-  if (suggestedKey) {
-    const hit = inds.find((i) => i.key === suggestedKey);
-    if (hit) return { key: hit.key, label: hit.label || titleFromKey(hit.key), method: "exact_key", score: 1.0 };
-  }
-
-  // 2) Label->key normalization match (e.g., "Wholesale Distribution" => wholesale_distribution)
-  if (suggestedLabel) {
-    const labelAsKey = normalizeKey(suggestedLabel);
-    if (labelAsKey) {
-      const hit = inds.find((i) => i.key === labelAsKey);
-      if (hit) return { key: hit.key, label: hit.label || titleFromKey(hit.key), method: "label_to_key", score: 0.98 };
-    }
-
-    const labelLower = suggestedLabel.toLowerCase();
-    const exactLabel = inds.find((i) => safeTrim(i.label).toLowerCase() === labelLower);
-    if (exactLabel) {
-      return {
-        key: exactLabel.key,
-        label: exactLabel.label || titleFromKey(exactLabel.key),
-        method: "exact_label",
-        score: 0.97,
-      };
-    }
-  }
-
-  // 3) Fuzzy token overlap (cheap + deterministic)
-  const qTokens = tokenize(`${suggestedLabel} ${suggestedKey}`);
-  if (!qTokens.length) return null;
-
-  let best: { key: string; label: string; score: number; method: string } | null = null;
-
-  for (const i of inds) {
-    const iTokens = tokenize(`${i.label} ${i.key}`);
-    const score = jaccard(qTokens, iTokens);
-
-    // Small bias if one is a prefix of the other (common for variants)
-    const prefixBoost =
-      suggestedKey && (i.key.startsWith(suggestedKey) || suggestedKey.startsWith(i.key)) ? 0.08 : 0;
-
-    const total = Math.min(1, score + prefixBoost);
-
-    if (!best || total > best.score) {
-      best = { key: i.key, label: i.label || titleFromKey(i.key), score: total, method: "token_overlap" };
-    }
-  }
-
-  // Threshold: tune to avoid bad merges.
-  // 0.72 works well for "wholesale distribution" variants (e.g., wholesale_dist, wholesale_distributor, etc.)
-  if (best && best.score >= 0.72) return best;
-
-  return null;
+function fitToScore(fit: "good" | "maybe" | "poor") {
+  // Keep stable + simple for UI; can be replaced later with true numeric scoring.
+  if (fit === "good") return 0.85;
+  if (fit === "maybe") return 0.6;
+  return 0.25;
 }
 
 /* --------------------- schema --------------------- */
@@ -232,22 +108,29 @@ const AnalysisSchema = z.object({
   needsConfirmation: z.boolean(),
   detectedServices: z.array(z.string()).default([]),
   billingSignals: z.array(z.string()).default([]),
+
+  // optional (we’ll backfill if missing)
+  fitScore: z.number().min(0).max(1).optional(),
 });
 
 /* --------------------- prompts --------------------- */
 
 function websiteIntelPrompt(url: string) {
   return `
-Visit the website below and summarize the business factually.
+Visit the website below and extract business facts as accurately as possible.
 
 Website:
 ${url}
 
-Return a clear paragraph describing:
-- What the business does
-- What they service (boats, cars, homes, etc.)
-- Core services offered
-- Any constraints (size limits, location, specialty)
+Return a detailed plain-text report (NOT JSON) with these sections and as much specificity as you can:
+
+1) What they do (core business)
+2) Who they serve (residential/commercial/wholesale/retail; ideal customer)
+3) What they sell or service (products + services)
+4) Service area / locations (if mentioned)
+5) How customers engage (phone, online quote, appointment, pickup/delivery, etc.)
+6) “Signals” (keywords that indicate trade/industry; brands; job types; equipment; materials)
+7) Anything unclear or uncertain (be explicit)
 
 Do NOT return JSON.
 `.trim();
@@ -257,23 +140,23 @@ function normalizePrompt(rawText: string) {
   return `
 You are onboarding intelligence for AIPhotoQuote.
 
-Convert the following website intelligence into structured JSON.
+Convert the following WEBSITE_INTELLIGENCE into structured JSON.
 
 WEBSITE_INTELLIGENCE:
 ${rawText}
 
-Return JSON with:
-- businessGuess (2–5 sentences)
-- fit: good | maybe | poor (photo-based quoting)
-- fitReason
-- suggestedIndustryKey
-- questions (3–6)
-- detectedServices
-- billingSignals
-- confidenceScore (0–1)
-- needsConfirmation (true if confidenceScore < 0.8)
+Return ONLY valid JSON with:
+- businessGuess: 5–10 sentences, concrete and specific, describing what they do and who they serve.
+- fit: "good" | "maybe" | "poor" (photo-based quoting suitability)
+- fitReason: 4–8 sentences explaining why the fit is what it is; mention any constraints (wholesale, e-comm, regulated pricing, etc.)
+- suggestedIndustryKey: a snake_case key that best matches the business (example: "wholesale_distribution", "garage_door_services").
+- questions: 3–6 short clarifying questions we would ask if confidence is not perfect.
+- detectedServices: list 3–12 short service/product phrases
+- billingSignals: list 2–12 short phrases that hint pricing model (wholesale, per-unit, install, service call, etc.)
+- confidenceScore: 0..1
+- needsConfirmation: true if confidenceScore < 0.8
 
-Return ONLY valid JSON.
+Return ONLY JSON. No markdown.
 `.trim();
 }
 
@@ -352,7 +235,7 @@ export async function POST(req: Request) {
 
     const mid = {
       ...running,
-      rawWebIntelPreview: clamp(rawIntel, 1200),
+      rawWebIntelPreview: clamp(rawIntel, 2500),
       meta: mergeMeta(prior, {
         status: "running",
         round: nextRound,
@@ -375,7 +258,7 @@ export async function POST(req: Request) {
     const obj = safeJsonParseObject(jsonText);
     const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
 
-    // ✅ CRITICAL: if parsing fails, DO NOT overwrite the last-good industry with "service".
+    // ✅ If parsing fails, preserve prior instead of nuking.
     if (!parsed || !parsed.success) {
       const preserved = {
         ...(typeof prior === "object" && prior ? prior : {}),
@@ -389,6 +272,9 @@ export async function POST(req: Request) {
               suggestedIndustryKey: "service",
               detectedServices: [],
               billingSignals: [],
+              questions: [],
+              confidenceScore: 0.35,
+              needsConfirmation: true,
             }),
         website,
         analyzedAt: new Date().toISOString(),
@@ -396,14 +282,14 @@ export async function POST(req: Request) {
         modelUsed: model,
         questions: [
           "In one sentence, what do you do?",
-          "What do you primarily work on (boats/cars/homes/commercial/etc.)?",
-          "What are your top 3 services?",
+          "Who is your primary customer (residential/commercial/wholesale)?",
+          "What are your top 3 services or products?",
           "Do customers usually send photos before you quote?",
         ].slice(0, 6),
         needsConfirmation: true,
-        confidenceScore: Math.min(0.5, Math.max(0, Number((prior as any)?.confidenceScore ?? 0) || 0)),
-        rawWebIntelPreview: clamp(rawIntel, 1200),
-        rawModelJsonPreview: clamp(jsonText, 1200),
+        confidenceScore: Math.min(0.5, Math.max(0, Number(prior?.confidenceScore ?? 0) || 0.35)),
+        rawWebIntelPreview: clamp(rawIntel, 2500),
+        rawModelJsonPreview: clamp(jsonText, 2500),
         meta: mergeMeta(prior, {
           status: "complete",
           round: nextRound,
@@ -418,24 +304,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
-    // ✅ Canonicalize suggested industry (tighten matching to existing industries)
-    const suggestedKeyRaw = safeTrim(parsed.data.suggestedIndustryKey);
-    const suggestedLabelRaw = titleFromKey(suggestedKeyRaw); // model doesn't send label; derive a stable one
-
-    const canonical = await resolveCanonicalIndustry(suggestedKeyRaw, suggestedLabelRaw);
-
-    const suggestedIndustryKey = canonical?.key ? canonical.key : normalizeKey(suggestedKeyRaw) || suggestedKeyRaw;
-    const suggestedIndustryLabel = canonical?.label ? canonical.label : suggestedLabelRaw;
+    // ✅ Backfill numeric fitScore for UI parity with prod
+    const fitScore = Number.isFinite(Number(parsed.data.fitScore))
+      ? Math.max(0, Math.min(1, Number(parsed.data.fitScore)))
+      : fitToScore(parsed.data.fit);
 
     const analysis = {
       ...parsed.data,
-      suggestedIndustryKey,
-      suggestedIndustryLabel,
+      fitScore,
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
       modelUsed: model,
-      rawWebIntelPreview: clamp(rawIntel, 1200),
+      rawWebIntelPreview: clamp(rawIntel, 2500),
+      rawModelJsonPreview: clamp(jsonText, 2500),
       meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,
@@ -443,9 +325,6 @@ export async function POST(req: Request) {
         error: null,
         finishedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        canonicalMatch: canonical
-          ? { method: canonical.method, score: canonical.score, key: canonical.key }
-          : { method: "none" },
       }),
     };
 
@@ -472,7 +351,7 @@ export async function POST(req: Request) {
 
         const errored = {
           ...(typeof prior === "object" && prior ? prior : {}),
-          website: website || (typeof prior === "object" && prior ? (prior as any).website : null),
+          website: website || (typeof prior === "object" && prior ? prior.website : null),
           meta: {
             ...priorMeta,
             status: "error",
