@@ -23,6 +23,11 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function keysOf(obj: any) {
+  if (!obj || typeof obj !== "object") return [];
+  return Object.keys(obj).sort();
+}
+
 /**
  * Minimal runtime guard for the platform cfg shape expected by buildEffectiveLlmConfig.
  * getPlatformLlm() may return { cfg, models, prompts, guardrails } or a raw cfg depending on branch.
@@ -59,10 +64,6 @@ function normalizePlatformCfg(platformAny: any) {
 
 /**
  * Merge industry defaults + DB-backed industry pack (if any).
- *
- * IMPORTANT:
- * - "industry" is a PARTIAL layer (it should not need version/updatedAt).
- * - We merge shallowly at the known nested objects so packs can override/extend defaults.
  */
 function mergeIndustryLayers(a: any, b: any) {
   const A = a && typeof a === "object" ? a : {};
@@ -121,7 +122,6 @@ export async function GET(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  // NOTE: we intentionally do not trust caller tenantId; must match active tenant context
   if (parsed.data.tenantId !== gate.tenantId) {
     return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
   }
@@ -132,16 +132,12 @@ export async function GET(req: Request) {
 
     const industryKey = safeTrim(parsed.data.industryKey) || null;
 
-    // ✅ Industry layer = defaults + latest DB pack (if present)
     const defaults = getIndustryDefaults(industryKey);
     const pack = await getIndustryLlmPack(industryKey);
     const industry = mergeIndustryLayers(defaults, pack ?? {});
 
-    // Tenant layer (jsonb)
     const row = await getTenantLlmOverrides(gate.tenantId);
 
-    // IMPORTANT:
-    // TenantLlmOverridesRow currently doesn't type maxQaQuestions, but older/newer schemas may store it.
     const tenantOverrides: TenantLlmOverrides | null = row
       ? normalizeTenantOverrides({
           models: (row as any).models ?? {},
@@ -157,7 +153,6 @@ export async function GET(req: Request) {
       tenant: tenantOverrides,
     });
 
-    // baseline = platform + industry only (no tenant)
     const baselineBundle = buildEffectiveLlmConfig({
       platform: platformCfg,
       industry,
@@ -174,6 +169,14 @@ export async function GET(req: Request) {
       permissions: {
         role: gate.role,
         canEdit: gate.role === "owner" || gate.role === "admin",
+      },
+      debug: {
+        resolvedIndustryKey: industryKey,
+        packFound: Boolean(pack && typeof pack === "object" && (Object.keys(pack).length > 0 || Object.keys((pack as any)?.prompts ?? {}).length > 0)),
+        packTopKeys: keysOf(pack),
+        packPromptKeys: keysOf((pack as any)?.prompts),
+        defaultsPromptKeys: keysOf((defaults as any)?.prompts),
+        mergedPromptKeys: keysOf((industry as any)?.prompts),
       },
     });
   } catch (e: any) {
@@ -208,12 +211,10 @@ export async function POST(req: Request) {
 
     const industryKey = safeTrim(parsed.data.industryKey) || null;
 
-    // ✅ Industry layer = defaults + latest DB pack (if present)
     const defaults = getIndustryDefaults(industryKey);
     const pack = await getIndustryLlmPack(industryKey);
     const industry = mergeIndustryLayers(defaults, pack ?? {});
 
-    // Normalize incoming tenant layer
     const incoming = parsed.data.overrides ?? ({} as any);
 
     const normalized: TenantLlmOverrides = normalizeTenantOverrides({

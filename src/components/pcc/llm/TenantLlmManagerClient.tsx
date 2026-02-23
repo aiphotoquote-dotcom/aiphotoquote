@@ -62,8 +62,9 @@ type ApiGetResp =
       industry: Partial<PlatformLlmConfig>;
       tenant: TenantOverrides | null;
       effective: EffectiveShape;
-      effectiveBase: EffectiveShape; // baseline (platform + industry only)
+      effectiveBase: EffectiveShape;
       permissions: any;
+      debug?: any;
     }
   | { ok: false; error: string; message?: string };
 
@@ -220,7 +221,6 @@ function ModelSelect(props: {
   options: Array<{ value: string; label: string }>;
   value: string;
   onChange: (next: string) => void;
-
   baselineValue: string;
   effectiveValue: string;
   showEffectiveLine?: boolean;
@@ -232,7 +232,6 @@ function ModelSelect(props: {
   const valueIsCustom = !valueIsEmpty && !valueIsKnown;
 
   const selectValue = valueIsEmpty ? "" : valueIsKnown ? value : "__custom__";
-
   const inheritedLabel = `Inherited — ${prettyModelLabel(baselineValue, options)} (baseline)`;
 
   return (
@@ -243,20 +242,13 @@ function ModelSelect(props: {
         value={selectValue}
         onChange={(e) => {
           const v = e.target.value;
-          if (v === "") {
-            onChange("");
-            return;
-          }
-          if (v === "__custom__") {
-            onChange(valueIsCustom ? value : "");
-            return;
-          }
+          if (v === "") return onChange("");
+          if (v === "__custom__") return onChange(valueIsCustom ? value : "");
           onChange(v);
         }}
         className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100"
       >
         <option value="">{inheritedLabel}</option>
-
         {options
           .filter((o) => o.value !== "custom")
           .map((o) => (
@@ -264,7 +256,6 @@ function ModelSelect(props: {
               {o.label}
             </option>
           ))}
-
         <option value="__custom__">Custom…</option>
       </select>
 
@@ -306,7 +297,6 @@ function Collapsible(props: { title: string; subtitle?: string; defaultOpen?: bo
         </div>
         <div className="mt-0.5 text-xs font-semibold text-gray-600 dark:text-gray-300">{open ? "Hide" : "Show"}</div>
       </button>
-
       {open ? <div className="px-6 pb-6">{children}</div> : null}
     </div>
   );
@@ -553,9 +543,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           r = await apiSetTenantOpenAiKey(k);
         }
       }
-      if (!r?.ok) {
-        throw new Error(r?.message || r?.error || "Failed to save key.");
-      }
+      if (!r?.ok) throw new Error(r?.message || r?.error || "Failed to save key.");
 
       setOpenaiKeyInput("");
       setKeyMsg({ kind: "ok", text: "Saved tenant OpenAI key." });
@@ -578,9 +566,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           r = await apiClearTenantOpenAiKey();
         }
       }
-      if (!r?.ok) {
-        throw new Error(r?.message || r?.error || "Failed to clear key.");
-      }
+      if (!r?.ok) throw new Error(r?.message || r?.error || "Failed to clear key.");
 
       setOpenaiKeyInput("");
       setKeyMsg({ kind: "ok", text: "Cleared tenant OpenAI key." });
@@ -685,7 +671,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         {msg ? <div className={`mt-4 rounded-xl border px-3 py-2 text-sm ${chipClass(msg.kind)}`}>{msg.text}</div> : null}
 
-        {/* Key policy status block */}
+        {/* (Key UI unchanged below) */}
         <div className="mt-4 space-y-4">
           {!keyStatus ? (
             <div className={`rounded-xl border px-3 py-2 text-sm ${chipClass("info")}`}>Loading key policy…</div>
@@ -746,7 +732,6 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             })()
           )}
 
-          {/* Tenant key manager */}
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -885,7 +870,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
       <Collapsible
         title="Tenant prompt inputs"
-        subtitle="Leave blank to add nothing. Preview shows the baseline (platform + industry) and the effective result (includes tenant)."
+        subtitle="Leave blank to add nothing. Preview shows baseline (platform + industry) vs effective (includes tenant)."
         defaultOpen
       >
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
@@ -920,6 +905,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
           </div>
         </div>
 
+        {/* ✅ PREVIEW: now includes Extra system preamble */}
         <div className="mt-6 grid gap-6 lg:grid-cols-2">
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-neutral-900/40">
             <div className="flex items-center justify-between gap-3">
@@ -928,6 +914,13 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
 
             <div className="mt-3 space-y-3">
+              <div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Extra system preamble</div>
+                <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                  {effectiveBase?.prompts?.extraSystemPreamble ?? ""}
+                </pre>
+              </div>
+
               <div>
                 <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Estimator</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
@@ -948,6 +941,13 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Effective (includes tenant)</div>
 
             <div className="mt-3 space-y-3">
+              <div>
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Extra system preamble</div>
+                <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                  {effective?.prompts?.extraSystemPreamble ?? ""}
+                </pre>
+              </div>
+
               <div>
                 <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Estimator</div>
                 <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
