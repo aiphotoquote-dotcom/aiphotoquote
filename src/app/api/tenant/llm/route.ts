@@ -1,6 +1,7 @@
 // src/app/api/tenant/llm/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
@@ -8,8 +9,11 @@ import { getPlatformLlm } from "@/lib/pcc/llm/apply";
 import { getTenantLlmOverrides, upsertTenantLlmOverrides } from "@/lib/pcc/llm/tenantStore";
 import { normalizeTenantOverrides, type TenantLlmOverrides } from "@/lib/pcc/llm/tenantTypes";
 
-import { getIndustryDefaults, buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
+import { buildEffectiveLlmConfig } from "@/lib/pcc/llm/effective";
 import { getIndustryLlmPack } from "@/lib/pcc/llm/industryStore";
+
+import { db } from "@/lib/db/client";
+import { tenantSettings } from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,9 +27,8 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-function keysOf(obj: any) {
-  if (!obj || typeof obj !== "object") return [];
-  return Object.keys(obj).sort();
+function safeLower(v: unknown) {
+  return safeTrim(v).toLowerCase();
 }
 
 /**
@@ -62,22 +65,6 @@ function normalizePlatformCfg(platformAny: any) {
   return cfg as any;
 }
 
-/**
- * Merge industry defaults + DB-backed industry pack (if any).
- */
-function mergeIndustryLayers(a: any, b: any) {
-  const A = a && typeof a === "object" ? a : {};
-  const B = b && typeof b === "object" ? b : {};
-
-  return {
-    ...A,
-    ...B,
-    models: { ...(A.models ?? {}), ...(B.models ?? {}) },
-    prompts: { ...(A.prompts ?? {}), ...(B.prompts ?? {}) },
-    guardrails: { ...(A.guardrails ?? {}), ...(B.guardrails ?? {}) },
-  };
-}
-
 const GetQuery = z.object({
   tenantId: z.string().uuid(),
   industryKey: z.string().optional().nullable(),
@@ -108,6 +95,36 @@ const PostBody = z.object({
   overrides: OverridesSchema,
 });
 
+/**
+ * ✅ Source of truth for industry key:
+ * - Prefer explicit query param (when present)
+ * - Otherwise resolve from tenant_settings for the ACTIVE tenant
+ *
+ * This eliminates client drift and fixes "resolvedIndustryKey: null" issues.
+ */
+async function resolveIndustryKeyForTenant(args: {
+  tenantId: string;
+  industryKeyFromCaller: string | null;
+}): Promise<string | null> {
+  const fromCaller = safeLower(args.industryKeyFromCaller);
+  if (fromCaller) return fromCaller;
+
+  const row = await db
+    .select({ industryKey: tenantSettings.industryKey })
+    .from(tenantSettings)
+    .where(eq(tenantSettings.tenantId, args.tenantId as any))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  const fromDb = safeLower(row?.industryKey ?? "");
+  return fromDb || null;
+}
+
+function keysOf(obj: any): string[] {
+  if (!obj || typeof obj !== "object") return [];
+  return Object.keys(obj);
+}
+
 export async function GET(req: Request) {
   const gate = await requireTenantRole(["owner", "admin", "member"]);
   if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
@@ -122,6 +139,7 @@ export async function GET(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
+  // NOTE: do not trust caller tenantId; must match active tenant context
   if (parsed.data.tenantId !== gate.tenantId) {
     return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
   }
@@ -130,12 +148,17 @@ export async function GET(req: Request) {
     const platformAny: any = await getPlatformLlm();
     const platformCfg = normalizePlatformCfg(platformAny);
 
-    const industryKey = safeTrim(parsed.data.industryKey) || null;
+    // ✅ Resolve industry key safely (caller → DB)
+    const resolvedIndustryKey = await resolveIndustryKeyForTenant({
+      tenantId: gate.tenantId,
+      industryKeyFromCaller: safeTrim(parsed.data.industryKey) || null,
+    });
 
-    const defaults = getIndustryDefaults(industryKey);
-    const pack = await getIndustryLlmPack(industryKey);
-    const industry = mergeIndustryLayers(defaults, pack ?? {});
+    // ✅ Pull DB-backed industry pack (latest enabled) when possible
+    const pack = await getIndustryLlmPack(resolvedIndustryKey);
+    const industry = (pack ?? {}) as any;
 
+    // Tenant overrides row (jsonb)
     const row = await getTenantLlmOverrides(gate.tenantId);
 
     const tenantOverrides: TenantLlmOverrides | null = row
@@ -159,6 +182,9 @@ export async function GET(req: Request) {
       tenant: null,
     });
 
+    const packPromptKeys = keysOf((industry as any)?.prompts ?? {});
+    const mergedPromptKeys = keysOf((bundle.effective as any)?.prompts ?? {});
+
     return json({
       ok: true,
       platform: platformCfg,
@@ -171,12 +197,10 @@ export async function GET(req: Request) {
         canEdit: gate.role === "owner" || gate.role === "admin",
       },
       debug: {
-        resolvedIndustryKey: industryKey,
-        packFound: Boolean(pack && typeof pack === "object" && (Object.keys(pack).length > 0 || Object.keys((pack as any)?.prompts ?? {}).length > 0)),
-        packTopKeys: keysOf(pack),
-        packPromptKeys: keysOf((pack as any)?.prompts),
-        defaultsPromptKeys: keysOf((defaults as any)?.prompts),
-        mergedPromptKeys: keysOf((industry as any)?.prompts),
+        resolvedIndustryKey: resolvedIndustryKey,
+        packFound: Boolean(pack),
+        packPromptKeys,
+        mergedPromptKeys,
       },
     });
   } catch (e: any) {
@@ -209,12 +233,16 @@ export async function POST(req: Request) {
     const platformAny: any = await getPlatformLlm();
     const platformCfg = normalizePlatformCfg(platformAny);
 
-    const industryKey = safeTrim(parsed.data.industryKey) || null;
+    // ✅ Resolve industry key safely (caller → DB)
+    const resolvedIndustryKey = await resolveIndustryKeyForTenant({
+      tenantId: gate.tenantId,
+      industryKeyFromCaller: safeTrim(parsed.data.industryKey) || null,
+    });
 
-    const defaults = getIndustryDefaults(industryKey);
-    const pack = await getIndustryLlmPack(industryKey);
-    const industry = mergeIndustryLayers(defaults, pack ?? {});
+    const pack = await getIndustryLlmPack(resolvedIndustryKey);
+    const industry = (pack ?? {}) as any;
 
+    // Normalize incoming overrides
     const incoming = parsed.data.overrides ?? ({} as any);
 
     const normalized: TenantLlmOverrides = normalizeTenantOverrides({
@@ -260,6 +288,11 @@ export async function POST(req: Request) {
       tenant: tenantOverrides,
       effective: bundle.effective,
       effectiveBase: baselineBundle.effective,
+      debug: {
+        resolvedIndustryKey: resolvedIndustryKey,
+        packFound: Boolean(pack),
+        packPromptKeys: keysOf((industry as any)?.prompts ?? {}),
+      },
     });
   } catch (e: any) {
     return json(
