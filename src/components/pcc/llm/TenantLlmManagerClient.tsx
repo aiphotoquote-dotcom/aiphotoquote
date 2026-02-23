@@ -19,6 +19,10 @@ type PlatformLlmConfig = {
     renderPromptPreamble?: string;
     renderPromptTemplate?: string;
     renderStylePresets?: Record<string, string>;
+
+    // (optional future)
+    renderSystemAddendum?: string;
+    renderNegativeGuidance?: string;
   };
   guardrails: {
     mode?: GuardrailsMode;
@@ -60,8 +64,13 @@ type EffectiveRenderShape = {
   industryPreamble?: string;
   tenantAddendum?: string;
 
+  // legacy fields (kept for compatibility with older API branches)
   platformTemplate?: string;
   industryTemplate?: string;
+
+  // preferred fields
+  industryAddendum?: string;
+  industryNegativeGuidance?: string;
 
   negativeGuidance?: string;
 
@@ -206,7 +215,9 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   const activationGraceCreditsRaw = kp ? kp.activationGraceCredits : anyResp.activationGraceCredits;
   const activationGraceUsedRaw = kp ? kp.activationGraceUsed : anyResp.activationGraceUsed;
 
-  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw)) ? Number(activationGraceCreditsRaw) : 0;
+  const activationGraceCredits = Number.isFinite(Number(activationGraceCreditsRaw))
+    ? Number(activationGraceCreditsRaw)
+    : 0;
   const activationGraceUsed = Number.isFinite(Number(activationGraceUsedRaw)) ? Number(activationGraceUsedRaw) : 0;
 
   const hasTenantOpenAiKey = Boolean(
@@ -218,8 +229,9 @@ function normalizeKeyPolicyStatus(anyResp: any): KeyPolicyStatus {
   const platformAllowed = Boolean(kp ? kp.platformAllowed : anyResp.platformAllowed);
   const graceRemaining = Boolean(kp ? kp.graceRemaining : anyResp.graceRemaining);
 
-  let effectiveKeySourceNow: "tenant" | "platform_grace" | "none" =
-    safeStr(kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow) as any;
+  let effectiveKeySourceNow: "tenant" | "platform_grace" | "none" = safeStr(
+    kp ? kp.effectiveKeySourceNow : anyResp.effectiveKeySourceNow
+  ) as any;
 
   if (effectiveKeySourceNow !== "tenant" && effectiveKeySourceNow !== "platform_grace" && effectiveKeySourceNow !== "none") {
     effectiveKeySourceNow = "none";
@@ -672,38 +684,64 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
       diffExists(qaQuestionGeneratorSystem, p0.qaQuestionGeneratorSystem) ||
       maxQaQuestions !== q0
     );
-  }, [tenant, estimatorModel, qaModel, renderModel, extraSystemPreamble, quoteEstimatorSystem, qaQuestionGeneratorSystem, maxQaQuestions]);
+  }, [
+    tenant,
+    estimatorModel,
+    qaModel,
+    renderModel,
+    extraSystemPreamble,
+    quoteEstimatorSystem,
+    qaQuestionGeneratorSystem,
+    maxQaQuestions,
+  ]);
 
   // ---- Rendering effective view (read-only) ----
   const renderEffective: EffectiveRenderShape | null = (effective as any)?.rendering ?? null;
 
   const platformRenderPreamble = safeStr(platform?.prompts?.renderPromptPreamble, "");
   const platformRenderTemplate = safeStr(platform?.prompts?.renderPromptTemplate, "");
+
   const industryRenderPreamble = safeStr((industry as any)?.prompts?.renderPromptPreamble, "");
-  const industryRenderTemplate = safeStr((industry as any)?.prompts?.renderPromptTemplate, "");
+
+  // ✅ preferred “industry pack” render fields
+  const industryRenderAddendum =
+    safeStr((industry as any)?.prompts?.renderSystemAddendum, "") ||
+    safeStr((industry as any)?.prompts?.renderAddendum, "");
+
+  const industryRenderNegativeGuidance =
+    safeStr((industry as any)?.prompts?.renderNegativeGuidance, "") ||
+    safeStr((industry as any)?.prompts?.negativeGuidance, "");
+
+  // ✅ legacy fallback (older branches might have put render text here)
+  const industryRenderTemplateLegacy = safeStr((industry as any)?.prompts?.renderPromptTemplate, "");
 
   const tenantRenderAddendum =
-    safeStr(renderEffective?.tenantAddendum, "") ||
-    safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
+    safeStr(renderEffective?.tenantAddendum, "") || safeStr((tenant as any)?.renderingPolicy?.promptAddendum, "");
   const tenantNegativeGuidance =
-    safeStr(renderEffective?.negativeGuidance, "") ||
-    safeStr((tenant as any)?.renderingPolicy?.negativeGuidance, "");
+    safeStr(renderEffective?.negativeGuidance, "") || safeStr((tenant as any)?.renderingPolicy?.negativeGuidance, "");
 
   const compiledFallback = joinNonEmpty(
     [
       platformRenderPreamble && `# Platform render preamble\n${platformRenderPreamble}`,
       industryRenderPreamble && `# Industry render preamble\n${industryRenderPreamble}`,
       platformRenderTemplate && `# Platform render template\n${platformRenderTemplate}`,
-      industryRenderTemplate && `# Industry render template\n${industryRenderTemplate}`,
-      tenantRenderAddendum && `# Tenant add-on\n${tenantRenderAddendum}`,
-      tenantNegativeGuidance && `# Avoid / negative guidance\n${tenantNegativeGuidance}`,
+
+      industryRenderAddendum && `# Industry render addendum (industry pack)\n${industryRenderAddendum}`,
+      industryRenderNegativeGuidance &&
+        `# Industry render negative guidance (industry pack)\n${industryRenderNegativeGuidance}`,
+
+      // fallback only if new fields are absent
+      !industryRenderAddendum && !industryRenderNegativeGuidance && industryRenderTemplateLegacy
+        ? `# Industry render (legacy)\n${industryRenderTemplateLegacy}`
+        : "",
+
+      tenantRenderAddendum && `# Tenant add-on (ai-policy)\n${tenantRenderAddendum}`,
+      tenantNegativeGuidance && `# Avoid / negative guidance (ai-policy)\n${tenantNegativeGuidance}`,
     ],
     "\n\n"
   );
 
-  const compiledRenderPrompt =
-    safeStr(renderEffective?.compiledPrompt, "") ||
-    (compiledFallback ? compiledFallback : "");
+  const compiledRenderPrompt = safeStr(renderEffective?.compiledPrompt, "") || (compiledFallback ? compiledFallback : "");
 
   const renderPlatformVersion = Number.isFinite(Number(platform?.version)) ? Number(platform?.version) : null;
   const renderIndustryVersion = Number.isFinite(Number((industry as any)?.version)) ? Number((industry as any)?.version) : null;
@@ -924,7 +962,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                   min={1}
                   max={10}
                 />
-                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Tenant can only tighten. Platform cap still applies.</div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Tenant can only tighten. Platform cap still applies.
+                </div>
               </div>
             </div>
           </div>
@@ -932,7 +972,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Guardrails (locked)</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">These are platform-owned and cannot be changed per tenant.</p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            These are platform-owned and cannot be changed per tenant.
+          </p>
 
           <div className="mt-4 space-y-3 text-sm">
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
@@ -945,7 +987,9 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Blocked topics</span>
-              <span className="font-mono text-gray-900 dark:text-gray-100">{(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}</span>
+              <span className="font-mono text-gray-900 dark:text-gray-100">
+                {(platform?.guardrails?.blockedTopics?.length ?? 0).toString()}
+              </span>
             </div>
             <div className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2 dark:border-gray-800">
               <span className="text-gray-600 dark:text-gray-300">Max output tokens</span>
@@ -960,6 +1004,7 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
         subtitle="Leave blank to add nothing. Preview shows baseline (platform + industry) vs effective (includes tenant)."
         defaultOpen
       >
+        {/* unchanged from your current file below… */}
         <div className="mt-4 grid gap-6 lg:grid-cols-3">
           <div>
             <label className="text-sm font-semibold text-gray-900 dark:text-gray-100">Extra system preamble (tenant layer)</label>
@@ -1092,11 +1137,27 @@ export function TenantLlmManagerClient(props: { tenantId: string; industryKey: s
                 </div>
 
                 <div>
-                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Industry render template</div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Industry render addendum (industry pack)</div>
                   <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
-                    {industryRenderTemplate || "(none)"}
+                    {industryRenderAddendum || "(none)"}
                   </pre>
                 </div>
+
+                <div>
+                  <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Industry render negative guidance (industry pack)</div>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                    {industryRenderNegativeGuidance || "(none)"}
+                  </pre>
+                </div>
+
+                {!industryRenderAddendum && !industryRenderNegativeGuidance && industryRenderTemplateLegacy ? (
+                  <div>
+                    <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Industry render (legacy)</div>
+                    <pre className="mt-2 whitespace-pre-wrap rounded-xl border border-gray-200 bg-white p-3 text-xs text-gray-900 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-100">
+                      {industryRenderTemplateLegacy}
+                    </pre>
+                  </div>
+                ) : null}
 
                 <div>
                   <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Tenant add-on (ai-policy)</div>
