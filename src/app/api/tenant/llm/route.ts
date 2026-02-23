@@ -99,8 +99,6 @@ const PostBody = z.object({
  * ✅ Source of truth for industry key:
  * - Prefer explicit query param (when present)
  * - Otherwise resolve from tenant_settings for the ACTIVE tenant
- *
- * This eliminates client drift and fixes "resolvedIndustryKey: null" issues.
  */
 async function resolveIndustryKeyForTenant(args: {
   tenantId: string;
@@ -125,6 +123,73 @@ function keysOf(obj: any): string[] {
   return Object.keys(obj);
 }
 
+/**
+ * ✅ Normalize industry packs into the "industry layer" shape that buildEffectiveLlmConfig expects.
+ *
+ * Your DB pack currently returns:
+ *   industry.prompts.industryPromptPacks[industryKey].quoteEstimatorSystem / qaQuestionGeneratorSystem / etc
+ *
+ * But effective builder expects:
+ *   industry.prompts.quoteEstimatorSystem / qaQuestionGeneratorSystem / extraSystemPreamble
+ *
+ * So we flatten the selected pack entry into top-level prompts.
+ */
+function normalizeIndustryLayer(args: {
+  resolvedIndustryKey: string | null;
+  pack: any | null;
+}): { industry: any; selectedPackEntry: any | null; packTopKeys: string[]; packPromptKeys: string[] } {
+  const pack = args.pack && typeof args.pack === "object" ? args.pack : null;
+  const industry: any = pack ? { ...pack } : { models: {}, prompts: {}, guardrails: {} };
+
+  // Ensure objects exist
+  if (!industry.models || typeof industry.models !== "object") industry.models = {};
+  if (!industry.prompts || typeof industry.prompts !== "object") industry.prompts = {};
+  if (!industry.guardrails || typeof industry.guardrails !== "object") industry.guardrails = {};
+
+  const resolvedKey = safeLower(args.resolvedIndustryKey);
+  const promptPacks = (industry.prompts as any)?.industryPromptPacks;
+
+  // If no nested packs, nothing to do.
+  if (!promptPacks || typeof promptPacks !== "object") {
+    return {
+      industry,
+      selectedPackEntry: null,
+      packTopKeys: keysOf(industry),
+      packPromptKeys: keysOf(industry.prompts),
+    };
+  }
+
+  // Pick the correct pack entry.
+  const entry = resolvedKey ? (promptPacks as any)[resolvedKey] : null;
+  const selectedPackEntry = entry && typeof entry === "object" ? entry : null;
+
+  if (selectedPackEntry) {
+    // Flatten the relevant prompt fields to what the effective builder expects.
+    if (typeof selectedPackEntry.quoteEstimatorSystem === "string" && safeTrim(selectedPackEntry.quoteEstimatorSystem)) {
+      industry.prompts.quoteEstimatorSystem = String(selectedPackEntry.quoteEstimatorSystem);
+    }
+    if (
+      typeof selectedPackEntry.qaQuestionGeneratorSystem === "string" &&
+      safeTrim(selectedPackEntry.qaQuestionGeneratorSystem)
+    ) {
+      industry.prompts.qaQuestionGeneratorSystem = String(selectedPackEntry.qaQuestionGeneratorSystem);
+    }
+    if (typeof selectedPackEntry.extraSystemPreamble === "string" && safeTrim(selectedPackEntry.extraSystemPreamble)) {
+      industry.prompts.extraSystemPreamble = String(selectedPackEntry.extraSystemPreamble);
+    }
+
+    // (Optional) If later you decide to surface render addendums in the effective UI,
+    // you can flatten those too — but we do NOT change effective shape here.
+  }
+
+  return {
+    industry,
+    selectedPackEntry,
+    packTopKeys: keysOf(industry),
+    packPromptKeys: keysOf(industry.prompts),
+  };
+}
+
 export async function GET(req: Request) {
   const gate = await requireTenantRole(["owner", "admin", "member"]);
   if (!gate.ok) return json({ ok: false, error: gate.error, message: gate.message }, gate.status);
@@ -139,7 +204,7 @@ export async function GET(req: Request) {
     return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
   }
 
-  // NOTE: do not trust caller tenantId; must match active tenant context
+  // do not trust caller tenantId; must match active tenant context
   if (parsed.data.tenantId !== gate.tenantId) {
     return json({ ok: false, error: "FORBIDDEN", message: "Tenant mismatch." }, 403);
   }
@@ -148,17 +213,17 @@ export async function GET(req: Request) {
     const platformAny: any = await getPlatformLlm();
     const platformCfg = normalizePlatformCfg(platformAny);
 
-    // ✅ Resolve industry key safely (caller → DB)
     const resolvedIndustryKey = await resolveIndustryKeyForTenant({
       tenantId: gate.tenantId,
       industryKeyFromCaller: safeTrim(parsed.data.industryKey) || null,
     });
 
-    // ✅ Pull DB-backed industry pack (latest enabled) when possible
-    const pack = await getIndustryLlmPack(resolvedIndustryKey);
-    const industry = (pack ?? {}) as any;
+    const rawPack = await getIndustryLlmPack(resolvedIndustryKey);
 
-    // Tenant overrides row (jsonb)
+    // ✅ flatten nested pack shape into effective-builder shape
+    const normalized = normalizeIndustryLayer({ resolvedIndustryKey, pack: rawPack });
+    const industry = normalized.industry;
+
     const row = await getTenantLlmOverrides(gate.tenantId);
 
     const tenantOverrides: TenantLlmOverrides | null = row
@@ -182,9 +247,6 @@ export async function GET(req: Request) {
       tenant: null,
     });
 
-    const packPromptKeys = keysOf((industry as any)?.prompts ?? {});
-    const mergedPromptKeys = keysOf((bundle.effective as any)?.prompts ?? {});
-
     return json({
       ok: true,
       platform: platformCfg,
@@ -197,10 +259,12 @@ export async function GET(req: Request) {
         canEdit: gate.role === "owner" || gate.role === "admin",
       },
       debug: {
-        resolvedIndustryKey: resolvedIndustryKey,
-        packFound: Boolean(pack),
-        packPromptKeys,
-        mergedPromptKeys,
+        resolvedIndustryKey,
+        packFound: Boolean(rawPack),
+        packTopKeys: normalized.packTopKeys,
+        packPromptKeys: normalized.packPromptKeys,
+        selectedPackKeys: normalized.selectedPackEntry ? keysOf(normalized.selectedPackEntry) : [],
+        mergedPromptKeys: keysOf((bundle.effective as any)?.prompts ?? {}),
       },
     });
   } catch (e: any) {
@@ -233,19 +297,18 @@ export async function POST(req: Request) {
     const platformAny: any = await getPlatformLlm();
     const platformCfg = normalizePlatformCfg(platformAny);
 
-    // ✅ Resolve industry key safely (caller → DB)
     const resolvedIndustryKey = await resolveIndustryKeyForTenant({
       tenantId: gate.tenantId,
       industryKeyFromCaller: safeTrim(parsed.data.industryKey) || null,
     });
 
-    const pack = await getIndustryLlmPack(resolvedIndustryKey);
-    const industry = (pack ?? {}) as any;
+    const rawPack = await getIndustryLlmPack(resolvedIndustryKey);
+    const normalized = normalizeIndustryLayer({ resolvedIndustryKey, pack: rawPack });
+    const industry = normalized.industry;
 
-    // Normalize incoming overrides
     const incoming = parsed.data.overrides ?? ({} as any);
 
-    const normalized: TenantLlmOverrides = normalizeTenantOverrides({
+    const normalizedOverrides: TenantLlmOverrides = normalizeTenantOverrides({
       models: incoming.models ?? {},
       prompts: incoming.prompts ?? {},
       updatedAt: incoming.updatedAt ?? undefined,
@@ -254,10 +317,10 @@ export async function POST(req: Request) {
 
     await upsertTenantLlmOverrides({
       tenantId: gate.tenantId,
-      models: normalized.models ?? {},
-      prompts: normalized.prompts ?? {},
-      updatedAt: normalized.updatedAt ?? undefined,
-      maxQaQuestions: normalized.maxQaQuestions ?? undefined,
+      models: normalizedOverrides.models ?? {},
+      prompts: normalizedOverrides.prompts ?? {},
+      updatedAt: normalizedOverrides.updatedAt ?? undefined,
+      maxQaQuestions: normalizedOverrides.maxQaQuestions ?? undefined,
     } as any);
 
     const row = await getTenantLlmOverrides(gate.tenantId);
@@ -289,9 +352,11 @@ export async function POST(req: Request) {
       effective: bundle.effective,
       effectiveBase: baselineBundle.effective,
       debug: {
-        resolvedIndustryKey: resolvedIndustryKey,
-        packFound: Boolean(pack),
-        packPromptKeys: keysOf((industry as any)?.prompts ?? {}),
+        resolvedIndustryKey,
+        packFound: Boolean(rawPack),
+        packPromptKeys: normalized.packPromptKeys,
+        selectedPackKeys: normalized.selectedPackEntry ? keysOf(normalized.selectedPackEntry) : [],
+        mergedPromptKeys: keysOf((bundle.effective as any)?.prompts ?? {}),
       },
     });
   } catch (e: any) {
