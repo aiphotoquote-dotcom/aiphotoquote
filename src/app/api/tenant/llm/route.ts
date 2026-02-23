@@ -1,7 +1,7 @@
 // src/app/api/tenant/llm/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import { requireTenantRole } from "@/lib/auth/tenant";
 import { getPlatformLlm } from "@/lib/pcc/llm/apply";
@@ -133,6 +133,9 @@ function keysOf(obj: any): string[] {
  *   industry.prompts.quoteEstimatorSystem / qaQuestionGeneratorSystem / extraSystemPreamble
  *
  * So we flatten the selected pack entry into top-level prompts.
+ *
+ * NOTE: We ALSO flatten render prompt fields if present (optional):
+ *   renderPromptPreamble / renderPromptTemplate
  */
 function normalizeIndustryLayer(args: {
   resolvedIndustryKey: string | null;
@@ -178,8 +181,13 @@ function normalizeIndustryLayer(args: {
       industry.prompts.extraSystemPreamble = String(selectedPackEntry.extraSystemPreamble);
     }
 
-    // (Optional) If later you decide to surface render addendums in the effective UI,
-    // you can flatten those too — but we do NOT change effective shape here.
+    // Optional render prompt fields (won't affect text effective builder, but used by this route for render pack visibility)
+    if (typeof selectedPackEntry.renderPromptPreamble === "string" && safeTrim(selectedPackEntry.renderPromptPreamble)) {
+      industry.prompts.renderPromptPreamble = String(selectedPackEntry.renderPromptPreamble);
+    }
+    if (typeof selectedPackEntry.renderPromptTemplate === "string" && safeTrim(selectedPackEntry.renderPromptTemplate)) {
+      industry.prompts.renderPromptTemplate = String(selectedPackEntry.renderPromptTemplate);
+    }
   }
 
   return {
@@ -187,6 +195,89 @@ function normalizeIndustryLayer(args: {
     selectedPackEntry,
     packTopKeys: keysOf(industry),
     packPromptKeys: keysOf(industry.prompts),
+  };
+}
+
+/**
+ * Read tenant_settings row without guessing columns (select *).
+ * This is intentionally tolerant: older DBs won’t break if new columns aren’t migrated yet.
+ */
+async function getTenantSettingsAnyRow(tenantId: string): Promise<any | null> {
+  try {
+    const r = await db.execute(sql`
+      select *
+      from tenant_settings
+      where tenant_id = ${tenantId}::uuid
+      limit 1
+    `);
+
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    return row ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function joinNonEmpty(parts: Array<string | null | undefined>, sep = "\n\n") {
+  return parts.map((p) => safeTrim(p)).filter(Boolean).join(sep);
+}
+
+function buildEffectiveRendering(args: {
+  platformCfg: any;
+  industry: any;
+  effective: any;
+  tenantSettingsRow: any | null;
+}) {
+  const platformCfg = args.platformCfg ?? {};
+  const industry = args.industry ?? {};
+  const effective = args.effective ?? {};
+  const ts = args.tenantSettingsRow ?? null;
+
+  const renderModel = safeTrim(effective?.models?.renderModel) || safeTrim(platformCfg?.models?.renderModel) || "gpt-image-1";
+
+  const platformPreamble = safeTrim(platformCfg?.prompts?.renderPromptPreamble);
+  const platformTemplate = safeTrim(platformCfg?.prompts?.renderPromptTemplate);
+
+  const industryPreamble = safeTrim(industry?.prompts?.renderPromptPreamble);
+  const industryTemplate = safeTrim(industry?.prompts?.renderPromptTemplate);
+
+  // Tenant add-ons come from ai-policy (tenant_settings) if present.
+  // Fallback to legacy rendering_notes so the UI never looks blank.
+  const tenantAddendum = safeTrim(ts?.rendering_prompt_addendum) || safeTrim(ts?.rendering_notes);
+  const negativeGuidance = safeTrim(ts?.rendering_negative_guidance);
+
+  const compiledPromptFromApi = safeTrim((effective as any)?.rendering?.compiledPrompt);
+
+  const compiledFallback = joinNonEmpty(
+    [
+      platformPreamble && `# Platform render preamble\n${platformPreamble}`,
+      industryPreamble && `# Industry render preamble\n${industryPreamble}`,
+      platformTemplate && `# Platform render template\n${platformTemplate}`,
+      industryTemplate && `# Industry render template\n${industryTemplate}`,
+      tenantAddendum && `# Tenant add-on\n${tenantAddendum}`,
+      negativeGuidance && `# Avoid / negative guidance\n${negativeGuidance}`,
+    ],
+    "\n\n"
+  );
+
+  const compiledPrompt = compiledPromptFromApi || compiledFallback || "";
+
+  return {
+    model: renderModel,
+
+    platformPreamble: platformPreamble || undefined,
+    industryPreamble: industryPreamble || undefined,
+    tenantAddendum: tenantAddendum || undefined,
+
+    platformTemplate: platformTemplate || undefined,
+    industryTemplate: industryTemplate || undefined,
+
+    negativeGuidance: negativeGuidance || undefined,
+
+    compiledPrompt: compiledPrompt || undefined,
+
+    platformVersion: typeof platformCfg?.version === "number" ? platformCfg.version : undefined,
+    industryVersion: typeof industry?.version === "number" ? industry.version : undefined,
   };
 }
 
@@ -247,12 +338,31 @@ export async function GET(req: Request) {
       tenant: null,
     });
 
+    // ✅ read tenant_settings once (tolerant select *)
+    const tenantSettingsRow = await getTenantSettingsAnyRow(gate.tenantId);
+
+    // ✅ build render effective view (platform + industry + tenant add-ons)
+    const effectiveRendering = buildEffectiveRendering({
+      platformCfg,
+      industry,
+      effective: bundle.effective,
+      tenantSettingsRow,
+    });
+
+    // attach a small read-only “renderingPolicy” object for UI convenience
+    const renderingPolicy = {
+      enabled: Boolean(tenantSettingsRow?.ai_rendering_enabled ?? tenantSettingsRow?.rendering_enabled ?? false),
+      style: safeTrim(tenantSettingsRow?.rendering_style) || undefined,
+      promptAddendum: safeTrim(tenantSettingsRow?.rendering_prompt_addendum) || safeTrim(tenantSettingsRow?.rendering_notes) || undefined,
+      negativeGuidance: safeTrim(tenantSettingsRow?.rendering_negative_guidance) || undefined,
+    };
+
     return json({
       ok: true,
       platform: platformCfg,
       industry,
-      tenant: tenantOverrides,
-      effective: bundle.effective,
+      tenant: tenantOverrides ? ({ ...tenantOverrides, renderingPolicy } as any) : ({ renderingPolicy } as any),
+      effective: { ...(bundle.effective as any), rendering: effectiveRendering },
       effectiveBase: baselineBundle.effective,
       permissions: {
         role: gate.role,
@@ -265,6 +375,17 @@ export async function GET(req: Request) {
         packPromptKeys: normalized.packPromptKeys,
         selectedPackKeys: normalized.selectedPackEntry ? keysOf(normalized.selectedPackEntry) : [],
         mergedPromptKeys: keysOf((bundle.effective as any)?.prompts ?? {}),
+        render: {
+          hasTenantSettingsRow: Boolean(tenantSettingsRow),
+          tenantSettingsKeys: tenantSettingsRow ? keysOf(tenantSettingsRow).slice(0, 50) : [],
+          hasPlatformRenderPreamble: Boolean(safeTrim(platformCfg?.prompts?.renderPromptPreamble)),
+          hasPlatformRenderTemplate: Boolean(safeTrim(platformCfg?.prompts?.renderPromptTemplate)),
+          hasIndustryRenderPreamble: Boolean(safeTrim(industry?.prompts?.renderPromptPreamble)),
+          hasIndustryRenderTemplate: Boolean(safeTrim(industry?.prompts?.renderPromptTemplate)),
+          hasTenantAddendum: Boolean(renderingPolicy.promptAddendum),
+          hasTenantNegative: Boolean(renderingPolicy.negativeGuidance),
+          compiledFrom: safeTrim((bundle.effective as any)?.rendering?.compiledPrompt) ? "api" : "fallback",
+        },
       },
     });
   } catch (e: any) {
@@ -346,10 +467,27 @@ export async function POST(req: Request) {
       tenant: null,
     });
 
+    // ✅ same render effective view on POST response (so UI refreshes without extra round trip)
+    const tenantSettingsRow = await getTenantSettingsAnyRow(gate.tenantId);
+
+    const effectiveRendering = buildEffectiveRendering({
+      platformCfg,
+      industry,
+      effective: bundle.effective,
+      tenantSettingsRow,
+    });
+
+    const renderingPolicy = {
+      enabled: Boolean(tenantSettingsRow?.ai_rendering_enabled ?? tenantSettingsRow?.rendering_enabled ?? false),
+      style: safeTrim(tenantSettingsRow?.rendering_style) || undefined,
+      promptAddendum: safeTrim(tenantSettingsRow?.rendering_prompt_addendum) || safeTrim(tenantSettingsRow?.rendering_notes) || undefined,
+      negativeGuidance: safeTrim(tenantSettingsRow?.rendering_negative_guidance) || undefined,
+    };
+
     return json({
       ok: true,
-      tenant: tenantOverrides,
-      effective: bundle.effective,
+      tenant: tenantOverrides ? ({ ...tenantOverrides, renderingPolicy } as any) : ({ renderingPolicy } as any),
+      effective: { ...(bundle.effective as any), rendering: effectiveRendering },
       effectiveBase: baselineBundle.effective,
       debug: {
         resolvedIndustryKey,
@@ -357,6 +495,10 @@ export async function POST(req: Request) {
         packPromptKeys: normalized.packPromptKeys,
         selectedPackKeys: normalized.selectedPackEntry ? keysOf(normalized.selectedPackEntry) : [],
         mergedPromptKeys: keysOf((bundle.effective as any)?.prompts ?? {}),
+        render: {
+          hasTenantSettingsRow: Boolean(tenantSettingsRow),
+          compiledFrom: safeTrim((bundle.effective as any)?.rendering?.compiledPrompt) ? "api" : "fallback",
+        },
       },
     });
   } catch (e: any) {
