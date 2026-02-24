@@ -15,6 +15,7 @@ import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderC
 
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
+import { getIndustryLlmPackWithMeta } from "@/lib/pcc/llm/industryStore";
 
 import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
 import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
@@ -219,6 +220,10 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.rendering_style,
       ts.rendering_notes,
 
+      -- ✅ Tenant rendering layers (new)
+      ts.rendering_prompt_addendum,
+      ts.rendering_negative_guidance,
+
       -- ✅ keep cron render on-industry
       ts.industry_key,
 
@@ -418,6 +423,58 @@ async function fetchImageAsFile(url: string) {
   }
 }
 
+function renderTemplate(template: string, vars: Record<string, string>) {
+  const t = String(template ?? "");
+  if (!t.trim()) return "";
+  // Replace {key} tokens. Unknown tokens are left as-is (useful during iteration).
+  return t.replace(/\{([a-zA-Z0-9_]+)\}/g, (m, key) => {
+    if (Object.prototype.hasOwnProperty.call(vars, key)) return String(vars[key] ?? "");
+    return m;
+  });
+}
+
+function safeLine(label: string, value: string) {
+  const v = safeTrim(value);
+  return v ? `${label}: ${v}` : "";
+}
+
+function extractIndustryRenderFields(packAny: any): { addendum: string; negative: string } {
+  if (!packAny) return { addendum: "", negative: "" };
+
+  // Prefer known generator keys (packGenerator.ts)
+  const addendum =
+    safeTrim(packAny?.prompts?.renderPromptAddendum) ||
+    safeTrim(packAny?.renderPromptAddendum) ||
+    // UI/editor back-compat
+    safeTrim(packAny?.prompts?.renderSystemAddendum) ||
+    safeTrim(packAny?.prompts?.render_prompt_addendum) ||
+    // last-resort: someone stored as template
+    safeTrim(packAny?.prompts?.renderPromptTemplate) ||
+    safeTrim(packAny?.renderPromptTemplate) ||
+    "";
+
+  const negative =
+    safeTrim(packAny?.prompts?.renderNegativeGuidance) ||
+    safeTrim(packAny?.renderNegativeGuidance) ||
+    safeTrim(packAny?.prompts?.render_negative_guidance) ||
+    "";
+
+  return { addendum, negative };
+}
+
+function extractTenantRenderFields(ctx: any, resolved: any) {
+  const tenantStyleKey = safeTrim(ctx?.rendering_style) || safeTrim(resolved?.tenant?.tenantStyleKey) || "photoreal";
+
+  // Keep "notes" as a separate knob (what you already had)
+  const tenantRenderNotes = safeTrim(ctx?.rendering_notes) || safeTrim(resolved?.tenant?.tenantRenderNotes) || "";
+
+  // New explicit addendum/negative fields (tenant layer)
+  const tenantAddendum = safeTrim(ctx?.rendering_prompt_addendum) || "";
+  const tenantNegative = safeTrim(ctx?.rendering_negative_guidance) || "";
+
+  return { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative };
+}
+
 async function handleCron(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -455,8 +512,11 @@ async function handleCron(req: Request) {
   const processed: any[] = [];
   const debugEnabled = isRenderDebugEnabled();
 
-  // PCC prompt assets (templates/presets/packs) are platform-level
+  // Platform PCC config (templates/presets/etc.)
   const pcc = await loadPlatformLlmConfig();
+
+  const platformRenderPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+  const platformRenderTemplate = safeTrim((pcc as any)?.prompts?.renderPromptTemplate) || "";
 
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
@@ -475,7 +535,7 @@ async function handleCron(req: Request) {
       const tenantSlug = String(ctx.tenant_slug ?? "");
       const tenantName = String(ctx.tenant_name ?? "Your Business");
 
-      // ✅ Resolve tenant + PCC AI settings (authoritative)
+      // ✅ Resolve tenant + AI settings (authoritative)
       const resolved = await resolveTenantLlm(job.tenantId);
       const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
 
@@ -588,21 +648,52 @@ async function handleCron(req: Request) {
       const apiKey = hasTenantKey ? decryptSecret(String(enc)) : platformKey;
       if (!apiKey) throw new Error(hasTenantKey ? "Unable to decrypt tenant OpenAI key." : "Missing platform OpenAI key.");
 
-      // ✅ Industry key (keep render on-topic)
+      // ---- Resolve industry key (keep render on-topic) ----
       const industryKey =
         safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
 
-      // ✅ Pull industry render guidance from PCC packs (platform-owned)
-      const pack: any = industryKey ? (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] : null;
+      // ---- INDUSTRY PACK: DB is source-of-truth; fallback to platform config packs ----
+      let industrySource: "db" | "platform_fallback" | "none" = "none";
+      let industryVersion: number | null = null;
 
-      const industryAddendum = safeTrim(pack?.renderPromptAddendum) || "";
-      const industryNegative = safeTrim(pack?.renderNegativeGuidance) || "";
+      let industryAddendum = "";
+      let industryNegative = "";
 
-      // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
-      const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
-      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved.tenant.tenantRenderNotes) || "";
+      if (industryKey) {
+        try {
+          const got = await getIndustryLlmPackWithMeta(industryKey);
+          const fields = extractIndustryRenderFields(got?.pack);
+          industryAddendum = fields.addendum;
+          industryNegative = fields.negative;
 
-      // Build style from PCC presets
+          if (industryAddendum || industryNegative) {
+            industrySource = "db";
+            industryVersion = typeof got?.meta?.version === "number" ? got.meta.version : null;
+          } else {
+            // If DB pack exists but doesn't have render fields, still allow platform fallback.
+            const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
+            const fb = extractIndustryRenderFields(fallbackPack);
+            if (fb.addendum || fb.negative) {
+              industryAddendum = fb.addendum;
+              industryNegative = fb.negative;
+              industrySource = "platform_fallback";
+            }
+          }
+        } catch {
+          const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
+          const fb = extractIndustryRenderFields(fallbackPack);
+          if (fb.addendum || fb.negative) {
+            industryAddendum = fb.addendum;
+            industryNegative = fb.negative;
+            industrySource = "platform_fallback";
+          }
+        }
+      }
+
+      // ---- TENANT RENDER FIELDS ----
+      const { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative } = extractTenantRenderFields(ctx, resolved);
+
+      // ---- STYLE PRESETS ----
       const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
       const presetText =
         tenantStyleKey === "clean_oem"
@@ -613,37 +704,73 @@ async function handleCron(req: Request) {
 
       const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
-      // ✅ IMPORTANT: anchor render to YOUR quote job prompt (scope/summary/Q&A) + industry pack + tenant notes.
-      // This prevents “random couch” drift.
-      const basePreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+      // ---- Build template lines (for platform template variables) ----
+      const serviceTypeLine = safeLine(
+        "Service type",
+        safeTrim(inputAny?.customer_context?.service_type) || safeTrim(inputAny?.customer_context?.category) || ""
+      );
+      const summaryLine = safeLine("Estimate summary", typeof outputAny?.summary === "string" ? outputAny.summary : "");
+      const customerNotesLine = safeLine("Customer notes", String(inputAny?.customer_context?.notes ?? "").trim());
+      const tenantRenderNotesLine = safeLine("Tenant render notes", tenantRenderNotes);
 
+      // ---- Compose renderPromptPreamble (platform + industry + tenant addendum) ----
       const renderPromptPreamble = collapseBlankLines(
         [
-          basePreamble,
+          platformRenderPreamble,
           industryKey ? `Industry key: ${industryKey}` : "",
           industryAddendum ? `Industry addendum:\n${industryAddendum}` : "",
+          tenantAddendum ? `Tenant addendum:\n${tenantAddendum}` : "",
         ]
           .filter(Boolean)
           .join("\n\n")
       );
 
-      const negativeBlock = industryNegative
-        ? collapseBlankLines(
-            [
-              "Hard negatives (must avoid):",
-              // allow multi-line negative guidance from PCC UI
-              industryNegative,
-            ].join("\n")
-          )
+      // ---- Negatives (industry + tenant) ----
+      const negativeParts: string[] = [];
+      if (industryNegative) negativeParts.push(`Industry negatives:\n${industryNegative}`);
+      if (tenantNegative) negativeParts.push(`Tenant negatives:\n${tenantNegative}`);
+
+      const negativeBlock = negativeParts.length
+        ? collapseBlankLines(["Hard negatives (must avoid):", ...negativeParts].join("\n\n"))
         : "";
 
+      // ---- Job context from render_jobs.prompt (scope/summary/Q&A already compiled upstream) ----
       const jobContext = safeTrim(job.prompt);
 
-      const finalPrompt = collapseBlankLines(
+      // ---- Use platform template if present; fallback to composed body ----
+      const templateVars = {
+        renderPromptPreamble,
+        style: styleText,
+        serviceTypeLine,
+        summaryLine,
+        customerNotesLine,
+        tenantRenderNotesLine,
+      };
+
+      const templatedBodyRaw = platformRenderTemplate
+        ? renderTemplate(platformRenderTemplate, templateVars)
+        : "";
+
+      const templatedBody = collapseBlankLines(templatedBodyRaw);
+
+      const fallbackBody = collapseBlankLines(
         [
           renderPromptPreamble,
           `Style: ${styleText}`,
-          tenantRenderNotes ? `Tenant render notes:\n${tenantRenderNotes}` : "",
+          serviceTypeLine,
+          summaryLine,
+          customerNotesLine,
+          tenantRenderNotesLine,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+
+      const coreBody = templatedBody || fallbackBody;
+
+      const finalPrompt = collapseBlankLines(
+        [
+          coreBody,
           negativeBlock,
           jobContext ? `Job context (must honor):\n${jobContext}` : "",
           "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
@@ -660,19 +787,34 @@ async function handleCron(req: Request) {
             tenantStyleKey,
             styleText,
             renderPromptPreamble,
-            renderPromptTemplate: "(cron) composed prompt (preamble+style+tenant+industry+jobContext)",
+            renderPromptTemplate: platformRenderTemplate
+              ? "(platform) renderPromptTemplate applied"
+              : "(fallback) no renderPromptTemplate configured",
             finalPrompt,
-            serviceType: inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "",
+            serviceType: safeTrim(inputAny?.customer_context?.service_type) || safeTrim(inputAny?.customer_context?.category) || "",
             summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
             customerNotes: String(inputAny?.customer_context?.notes ?? "").trim(),
             tenantRenderNotes,
             images,
           }),
-          industry: {
-            industryKey: industryKey || null,
-            hasIndustryPack: Boolean(pack),
-            renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
-            renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
+          layers: {
+            platform: {
+              hasPreamble: Boolean(platformRenderPreamble),
+              hasTemplate: Boolean(platformRenderTemplate),
+              templateApplied: Boolean(templatedBody),
+            },
+            industry: {
+              industryKey: industryKey || null,
+              source: industrySource,
+              version: industryVersion,
+              renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
+              renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
+            },
+            tenant: {
+              renderNotesLen: tenantRenderNotes ? tenantRenderNotes.length : 0,
+              promptAddendumLen: tenantAddendum ? tenantAddendum.length : 0,
+              negativeGuidanceLen: tenantNegative ? tenantNegative.length : 0,
+            },
           },
           keyPolicy: {
             used: hasTenantKey ? "tenant" : "platform_grace",
@@ -879,6 +1021,7 @@ async function handleCron(req: Request) {
         imageUrl,
         renderModel,
         industryKey: industryKey || null,
+        industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
       });
