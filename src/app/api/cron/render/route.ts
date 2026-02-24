@@ -304,7 +304,7 @@ function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: bool
  * ✅ Plan policy for renders
  * - If tenant has its own key => allow on any tier
  * - If tenant does NOT have a key:
- *    - allow ONLY when plan tier is tier0 AND grace credits remain AND platform key exists
+ *    - allow ONLY when plan tier is tier0/tier1/tier2 AND grace credits remain AND platform key exists
  */
 function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedRaw: unknown) {
   const plan = safeTrim(planTierRaw).toLowerCase();
@@ -313,18 +313,21 @@ function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedR
   const t = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0;
   const u = Number.isFinite(used) ? Math.max(0, Math.trunc(used)) : 0;
 
-  if (plan !== "tier0") return { plan, remaining: null as number | null };
-  return { plan, remaining: Math.max(0, t - u) };
+  const eligibleTier = plan === "tier0" || plan === "tier1" || plan === "tier2";
+  if (!eligibleTier) return { plan, eligibleTier, remaining: null as number | null, inGrace: false };
+
+  const remaining = Math.max(0, t - u);
+  return { plan, eligibleTier, remaining, inGrace: remaining > 0 };
 }
 
-async function bumpGraceUsedIfTier0(tenantId: string) {
+async function bumpGraceUsedIfGraceTier(tenantId: string) {
   try {
     await db.execute(sql`
       update tenant_settings
       set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
           updated_at = now()
       where tenant_id = ${tenantId}::uuid
-        and lower(coalesce(plan_tier,'')) = 'tier0'
+        and lower(coalesce(plan_tier,'')) in ('tier0','tier1','tier2')
     `);
   } catch {
     // ignore
@@ -605,23 +608,25 @@ async function handleCron(req: Request) {
         continue;
       }
 
-      // ✅ Key policy (tenant key OR tier0 grace w/ platform key)
+      // ✅ Key policy:
+      // - Tenant key ALWAYS wins
+      // - Platform key ONLY allowed when tenant key missing AND in grace (tier0/1/2 with remaining credits) AND platform key exists
       const enc = ctx.openai_key_enc;
       const hasTenantKey = Boolean(enc);
       const platformKey = safeTrim(process.env.OPENAI_API_KEY);
       const hasPlatformKey = Boolean(platformKey);
 
       const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
-      const tier0GraceRemaining = grace.plan === "tier0" ? Number(grace.remaining ?? 0) : 0;
+      const graceRemainingCount = grace.eligibleTier ? Number(grace.remaining ?? 0) : 0;
 
-      const canUsePlatformForTier0 = grace.plan === "tier0" && tier0GraceRemaining > 0 && hasPlatformKey;
+      const canUsePlatformGrace = !hasTenantKey && grace.inGrace && hasPlatformKey;
 
-      if (!hasTenantKey && !canUsePlatformForTier0) {
+      if (!hasTenantKey && !canUsePlatformGrace) {
         const why =
-          grace.plan === "tier0"
-            ? !hasPlatformKey
-              ? "Missing platform OpenAI key (OPENAI_API_KEY)."
-              : "Tier0 grace exhausted for rendering."
+          !hasPlatformKey
+            ? "Missing platform OpenAI key (OPENAI_API_KEY)."
+            : grace.eligibleTier
+            ? "Grace exhausted for rendering."
             : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
 
         await updateQuoteFailed({
@@ -638,7 +643,8 @@ async function handleCron(req: Request) {
           ok: false,
           error: "KEY_POLICY_BLOCK",
           planTier: safeTrim(ctx.plan_tier) || null,
-          tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+          graceEligibleTier: grace.eligibleTier,
+          graceRemaining: grace.eligibleTier ? graceRemainingCount : null,
           hasTenantKey,
           hasPlatformKey,
         });
@@ -747,9 +753,7 @@ async function handleCron(req: Request) {
         tenantRenderNotesLine,
       };
 
-      const templatedBodyRaw = platformRenderTemplate
-        ? renderTemplate(platformRenderTemplate, templateVars)
-        : "";
+      const templatedBodyRaw = platformRenderTemplate ? renderTemplate(platformRenderTemplate, templateVars) : "";
 
       const templatedBody = collapseBlankLines(templatedBodyRaw);
 
@@ -791,7 +795,8 @@ async function handleCron(req: Request) {
               ? "(platform) renderPromptTemplate applied"
               : "(fallback) no renderPromptTemplate configured",
             finalPrompt,
-            serviceType: safeTrim(inputAny?.customer_context?.service_type) || safeTrim(inputAny?.customer_context?.category) || "",
+            serviceType:
+              safeTrim(inputAny?.customer_context?.service_type) || safeTrim(inputAny?.customer_context?.category) || "",
             summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
             customerNotes: String(inputAny?.customer_context?.notes ?? "").trim(),
             tenantRenderNotes,
@@ -819,7 +824,9 @@ async function handleCron(req: Request) {
           keyPolicy: {
             used: hasTenantKey ? "tenant" : "platform_grace",
             planTier: safeTrim(ctx.plan_tier) || null,
-            tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+            graceEligibleTier: grace.eligibleTier,
+            graceRemaining: grace.eligibleTier ? graceRemainingCount : null,
+            inGrace: grace.inGrace,
             hasTenantKey,
             hasPlatformKey,
           },
@@ -888,9 +895,9 @@ async function handleCron(req: Request) {
 
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
 
-      // If we used platform grace (tier0), consume 1 credit on success.
-      if (!hasTenantKey && canUsePlatformForTier0) {
-        await bumpGraceUsedIfTier0(job.tenantId);
+      // If we used platform grace (tier0/1/2), consume 1 credit on success.
+      if (!hasTenantKey && canUsePlatformGrace) {
+        await bumpGraceUsedIfGraceTier(job.tenantId);
       }
 
       // Emails (best-effort)
