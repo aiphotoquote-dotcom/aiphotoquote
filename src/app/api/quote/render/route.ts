@@ -73,6 +73,31 @@ function pickJsonRow(r: any) {
   return (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
 }
 
+function toInt(v: unknown, fallback = 0) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.trunc(n);
+}
+
+function computeGrace(planTierRaw: unknown, creditsRaw: unknown, usedRaw: unknown) {
+  const planTier = safeLower(planTierRaw) || null;
+  const credits = Math.max(0, toInt(creditsRaw, 0));
+  const used = Math.max(0, toInt(usedRaw, 0));
+  const remaining = Math.max(0, credits - used);
+
+  const eligibleTier = planTier === "tier0" || planTier === "tier1" || planTier === "tier2";
+  const inGrace = eligibleTier && remaining > 0;
+
+  return {
+    planTier,
+    credits,
+    used,
+    remaining,
+    eligibleTier,
+    inGrace,
+  };
+}
+
 async function getTenantBySlug(tenantSlug: string) {
   // Keep schema select for id/slug (typed)…
   const rows = await db
@@ -85,24 +110,31 @@ async function getTenantBySlug(tenantSlug: string) {
   if (!t) return null;
 
   /**
-   * ✅ FIX:
-   * plan_tier lives on tenant_settings, NOT tenants.
-   * Pull via SQL to avoid any schema drift / typing surprises.
+   * ✅ plan_tier + grace live on tenant_settings, NOT tenants.
+   * Pull via SQL to avoid schema drift / typing surprises.
    */
   const r = await db.execute(sql`
-    select ts.plan_tier
+    select
+      ts.plan_tier,
+      ts.activation_grace_credits,
+      ts.activation_grace_used
     from tenant_settings ts
     where ts.tenant_id = ${t.id}::uuid
     limit 1
   `);
   const row: any = pickJsonRow(r);
 
-  const planTier = safeLower(row?.plan_tier) || null;
+  const grace = computeGrace(row?.plan_tier, row?.activation_grace_credits, row?.activation_grace_used);
 
   return {
     id: t.id,
     slug: t.slug,
-    planTier,
+    planTier: grace.planTier,
+    activationGraceCredits: grace.credits,
+    activationGraceUsed: grace.used,
+    activationGraceRemaining: grace.remaining,
+    activationGraceEligibleTier: grace.eligibleTier,
+    activationGraceInGrace: grace.inGrace,
   };
 }
 
@@ -329,7 +361,7 @@ export async function POST(req: Request) {
 
     const { tenantSlug, quoteLogId } = parsed.data;
 
-    // 1) Resolve tenant (and plan tier for tier0 key policy)
+    // 1) Resolve tenant (plan tier + grace)
     const tenant = await getTenantBySlug(tenantSlug);
     if (!tenant) return json({ ok: false, error: "TENANT_NOT_FOUND", message: "Invalid tenant link." }, 404, debugId);
 
@@ -372,7 +404,10 @@ export async function POST(req: Request) {
 
     // Self-heal: if input says opted-in but column is false, update column.
     if (optInFromInput && !optInFromColumn) {
-      await db.update(quoteLogs).set({ renderOptIn: true }).where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+      await db
+        .update(quoteLogs)
+        .set({ renderOptIn: true })
+        .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
     }
 
     // --- Render policy gating (don’t enqueue if disabled) ---
@@ -438,30 +473,46 @@ export async function POST(req: Request) {
       );
     }
 
-    // --- Key policy (tier0 platform fallback) ---
+    // --- Key policy (tenant key always wins; platform key only during grace when tenant key missing) ---
     const hasTenantKey = await getTenantKeyPresence(tenant.id);
     const hasPlatformKey = Boolean(safeTrim(process.env.OPENAI_API_KEY));
 
-    const planTier = tenant.planTier; // already normalized lowercase (or null)
-    const isTier0 = planTier === "tier0";
-    const platformAllowed = isTier0; // extend later if you want tier grace rules
+    const graceEligibleTier = Boolean(tenant.activationGraceEligibleTier);
+    const graceRemaining = Math.max(0, Number(tenant.activationGraceRemaining ?? 0));
+    const inGrace = Boolean(tenant.activationGraceInGrace) && graceEligibleTier && graceRemaining > 0;
 
-    const canRenderWithKey = hasTenantKey || (platformAllowed && hasPlatformKey);
+    // Platform key can be used ONLY if tenant key is missing AND tenant is currently in grace AND platform key exists
+    const platformAllowed = !hasTenantKey && inGrace && hasPlatformKey;
+
+    const canRenderWithKey = hasTenantKey || platformAllowed;
 
     const keyPolicy = {
-      planTier: planTier ?? "unknown",
+      planTier: tenant.planTier ?? "unknown",
       hasTenantKey,
       hasPlatformKey,
+      grace: {
+        eligibleTier: graceEligibleTier,
+        credits: Number(tenant.activationGraceCredits ?? 0),
+        used: Number(tenant.activationGraceUsed ?? 0),
+        remaining: graceRemaining,
+        inGrace,
+      },
       platformAllowed,
-      effectiveKeySourceNow: hasTenantKey ? "tenant" : platformAllowed && hasPlatformKey ? "platform_grace" : "none",
+      effectiveKeySourceNow: hasTenantKey ? "tenant" : platformAllowed ? "platform_grace" : "none",
     };
 
     if (!canRenderWithKey) {
+      const why = !hasPlatformKey
+        ? "Missing platform OpenAI key (OPENAI_API_KEY)."
+        : inGrace
+        ? "Grace is active but platform key usage is not allowed (unexpected)."
+        : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc) and not eligible for platform grace.";
+
       await db
         .update(quoteLogs)
         .set({
           renderStatus: "failed",
-          renderError: hasPlatformKey ? "Missing tenant OpenAI key (tenant_secrets.openai_key_enc)." : "Missing platform OpenAI key (OPENAI_API_KEY).",
+          renderError: why,
         })
         .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
@@ -517,7 +568,10 @@ export async function POST(req: Request) {
     const jobId = await enqueueRenderJob({ tenantId: tenant.id, quoteLogId, prompt });
 
     // 6) Reflect queued status on quote log for UI/admin visibility
-    await db.update(quoteLogs).set({ renderStatus: "queued", renderError: null }).where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
+    await db
+      .update(quoteLogs)
+      .set({ renderStatus: "queued", renderError: null })
+      .where(and(eq(quoteLogs.id, quoteLogId), eq(quoteLogs.tenantId, tenant.id)));
 
     const kick = await tryKickCronNow(req);
 
@@ -536,6 +590,6 @@ export async function POST(req: Request) {
       debugId
     );
   } catch (e) {
-    return json({ ok: false, error: "REQUEST_FAILED", message: safeErr(e) }, 500, debugId);
+    return json({ ok: false, error: "REQUEST_FAILED", message: safeErr(e) }, 500);
   }
 }
