@@ -54,6 +54,9 @@ async function readLatestPackRow(industryKey: string) {
  * - target_industry_key (nullable; null can mean "deleted/absorbed", treat as no-op for now)
  *
  * We follow mapping chains (A->B->C) up to a safe limit.
+ *
+ * IMPORTANT: onboarding must NEVER hard-fail if this table isn't deployed yet.
+ * If the table is missing (or any lookup fails), we fail-open and keep the input key.
  */
 async function resolveCanonicalIndustryKey(inputKey: string) {
   let cur = normalizeIndustryKey(inputKey);
@@ -64,14 +67,23 @@ async function resolveCanonicalIndustryKey(inputKey: string) {
     if (seen.has(cur)) break;
     seen.add(cur);
 
-    const r = await db.execute(sql`
-      select target_industry_key::text as "target"
-      from industry_canonical_map
-      where source_industry_key = ${cur}
-      limit 1
-    `);
+    let targetRaw = "";
+    try {
+      const r = await db.execute(sql`
+        select target_industry_key::text as "target"
+        from industry_canonical_map
+        where source_industry_key = ${cur}
+        limit 1
+      `);
 
-    const targetRaw = safeTrim((r as any)?.rows?.[0]?.target ?? "");
+      targetRaw = safeTrim((r as any)?.rows?.[0]?.target ?? "");
+    } catch (e: any) {
+      // Postgres undefined_table is 42P01; treat as "no mapping"
+      const code = safeTrim(e?.code);
+      if (code === "42P01") return cur;
+      return cur;
+    }
+
     const target = normalizeIndustryKey(targetRaw);
 
     // If no mapping, or target is null/empty, stop.
@@ -106,7 +118,7 @@ export async function ensureIndustryPack(args: {
     return { ok: false as const, error: "INDUSTRY_KEY_REQUIRED" };
   }
 
-  // ✅ Canonicalize BEFORE looking for/creating packs
+  // ✅ Canonicalize BEFORE looking for/creating packs (fail-open if mapping table isn't present)
   const canonicalKey = await resolveCanonicalIndustryKey(inputKeyNorm);
   const industryKey = canonicalKey || inputKeyNorm;
 
