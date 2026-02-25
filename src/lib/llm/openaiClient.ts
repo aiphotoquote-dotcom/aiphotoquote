@@ -13,6 +13,19 @@ function platformOpenAiKey(): string | null {
   return k ? k : null;
 }
 
+function asNonEmptyString(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
+}
+
+function err(code: string, message?: string, status?: number, meta?: any) {
+  const e: any = new Error(message || code);
+  e.code = code;
+  if (status) e.status = status;
+  if (meta !== undefined) e.meta = meta;
+  return e;
+}
+
 /**
  * Resolve OpenAI client (tenant key OR platform grace)
  * - Phase1: consumeGrace=true (counts against activationGraceCredits if tenant key missing)
@@ -45,16 +58,25 @@ export async function resolveOpenAiClient(args: {
       hasTenantSecret: Boolean(secretRow?.openaiKeyEnc),
     });
 
-    if (secretRow?.openaiKeyEnc) {
-      const openaiKey = decryptSecret(secretRow.openaiKeyEnc);
+    const enc = asNonEmptyString(secretRow?.openaiKeyEnc);
+
+    if (enc) {
+      const decrypted = decryptSecret(enc);
+      const openaiKey = asNonEmptyString(decrypted);
+
+      if (!openaiKey) {
+        debug?.("llm.resolveOpenAiClient.tenantSecret.decryptFailed", {
+          hasTenantSecret: true,
+        });
+        throw err("TENANT_KEY_DECRYPT_FAILED", "Unable to decrypt tenant OpenAI key.", 500);
+      }
+
       debug?.("llm.resolveOpenAiClient.tenantSecret.use", { keySource: "tenant" });
       return { openai: new OpenAI({ apiKey: openaiKey }), keySource: "tenant" };
     }
 
     if (forceKeySource === "tenant") {
-      const e: any = new Error("MISSING_OPENAI_KEY");
-      e.code = "MISSING_OPENAI_KEY";
-      throw e;
+      throw err("MISSING_OPENAI_KEY", "Missing tenant OpenAI key.", 402);
     }
   }
 
@@ -63,12 +85,10 @@ export async function resolveOpenAiClient(args: {
   debug?.("llm.resolveOpenAiClient.platformKey.present", { hasPlatformKey: Boolean(platformKey) });
 
   if (!platformKey) {
-    const e: any = new Error("MISSING_PLATFORM_OPENAI_KEY");
-    e.code = "MISSING_PLATFORM_OPENAI_KEY";
-    throw e;
+    throw err("MISSING_PLATFORM_OPENAI_KEY", "Missing platform OpenAI key (OPENAI_API_KEY).", 500);
   }
 
-  // Phase 2 finalize: do NOT consume; honor phase1
+  // Phase 2 finalize: do NOT consume; honor phase1 snapshot decision
   if (!consumeGrace) {
     debug?.("llm.resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
@@ -118,20 +138,13 @@ export async function resolveOpenAiClient(args: {
     });
 
     if (!curRow) {
-      const e: any = new Error("SETTINGS_MISSING");
-      e.code = "SETTINGS_MISSING";
-      e.status = 400;
-      throw e;
+      throw err("SETTINGS_MISSING", "Tenant settings missing.", 400);
     }
 
     const used = Number(curRow.used ?? 0);
     const credits = Number(curRow.credits ?? 0);
 
-    const e: any = new Error("TRIAL_EXHAUSTED");
-    e.code = "TRIAL_EXHAUSTED";
-    e.status = 402;
-    e.meta = { used, credits };
-    throw e;
+    throw err("TRIAL_EXHAUSTED", "Activation grace exhausted.", 402, { used, credits });
   }
 
   debug?.("llm.resolveOpenAiClient.platformGrace.consumeOk", { keySource: "platform_grace" });

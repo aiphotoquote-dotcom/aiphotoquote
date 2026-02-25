@@ -48,7 +48,14 @@ type PolicyResp =
 
         rendering_enabled: boolean;
         rendering_style: RenderingStyle;
-        rendering_notes: string;
+
+        // legacy
+        rendering_notes?: string;
+
+        // ✅ NEW (render-policy add-ons)
+        rendering_prompt_addendum?: string;
+        rendering_negative_guidance?: string;
+
         rendering_max_per_day: number;
         rendering_customer_opt_in_required: boolean;
 
@@ -226,7 +233,7 @@ export default function AiPolicySetupPage() {
   // keep track of what server last confirmed
   const serverPricingModelRef = useRef<PricingModel | null>(null);
 
-  // ✅ NEW: keep track of what server last confirmed for render enabled
+  // ✅ keep track of what server last confirmed for render enabled
   const serverRenderingEnabledRef = useRef<boolean | null>(null);
 
   const [pricingConfig, setPricingConfig] = useState<PricingConfig>({ ...EMPTY_PRICING_CONFIG });
@@ -238,7 +245,14 @@ export default function AiPolicySetupPage() {
 
   const [renderingEnabled, setRenderingEnabled] = useState(false);
   const [renderingStyle, setRenderingStyle] = useState<RenderingStyle>("photoreal");
-  const [renderingNotes, setRenderingNotes] = useState("");
+
+  // legacy (kept for compat; we’ll still send it as fallback)
+  const [renderingNotesLegacy, setRenderingNotesLegacy] = useState("");
+
+  // ✅ NEW render-policy add-ons
+  const [renderingPromptAddendum, setRenderingPromptAddendum] = useState("");
+  const [renderingNegativeGuidance, setRenderingNegativeGuidance] = useState("");
+
   const [renderingMaxPerDay, setRenderingMaxPerDay] = useState<number>(20);
   const [renderingOptInRequired, setRenderingOptInRequired] = useState(true);
 
@@ -326,7 +340,26 @@ export default function AiPolicySetupPage() {
       serverRenderingEnabledRef.current = !!data.ai_policy.rendering_enabled;
 
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
-      setRenderingNotes(data.ai_policy.rendering_notes ?? "");
+
+      // ✅ NEW fields with fallback to legacy rendering_notes
+      const legacy = data.ai_policy.rendering_notes ?? "";
+      const addendumRaw = data.ai_policy.rendering_prompt_addendum;
+      const negative = data.ai_policy.rendering_negative_guidance ?? "";
+
+      // keep legacy around so save() can still send it for compatibility
+      setRenderingNotesLegacy(legacy);
+
+      /**
+       * Important subtlety:
+       * - If addendumRaw is undefined, backend doesn't have the new field yet => seed from legacy so UI isn't blank.
+       * - If addendumRaw is "", backend DOES have the new field and user saved it blank => keep it blank.
+       */
+      const addendum =
+        addendumRaw === undefined ? legacy : String(addendumRaw ?? "");
+
+      setRenderingPromptAddendum(addendum);
+      setRenderingNegativeGuidance(negative);
+
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
       );
@@ -397,6 +430,10 @@ export default function AiPolicySetupPage() {
         throw new Error("Fix Line Items JSON before saving.");
       }
 
+      // keep config consistent with textareas
+      const package_json = pkgParsed.value ?? null;
+      const line_items_json = liParsed.value ?? null;
+
       const payload = {
         ai_mode: enforced.aiMode,
         pricing_enabled: enforced.pricingEnabled,
@@ -407,15 +444,22 @@ export default function AiPolicySetupPage() {
           material_markup_percent: clampPercent(pricingConfig.material_markup_percent, null),
           per_unit_rate: clampMoney(pricingConfig.per_unit_rate, null),
           per_unit_label: safeTrim(pricingConfig.per_unit_label) || null,
-          package_json: pkgParsed.value ?? null,
-          line_items_json: liParsed.value ?? null,
+          package_json,
+          line_items_json,
           assessment_fee_amount: clampMoney(pricingConfig.assessment_fee_amount, null),
           assessment_fee_credit_toward_job: Boolean(pricingConfig.assessment_fee_credit_toward_job),
         } as PricingConfig,
 
         rendering_enabled: renderingEnabled,
         rendering_style: renderingStyle,
-        rendering_notes: renderingNotes,
+
+        // ✅ NEW: policy add-ons (preferred)
+        rendering_prompt_addendum: renderingPromptAddendum,
+        rendering_negative_guidance: renderingNegativeGuidance,
+
+        // ✅ compat: keep old field populated so older backend still works
+        rendering_notes: safeTrim(renderingPromptAddendum) || renderingNotesLegacy || "",
+
         rendering_max_per_day: Math.max(0, Math.min(1000, Number(renderingMaxPerDay) || 0)),
         rendering_customer_opt_in_required: renderingOptInRequired,
 
@@ -461,7 +505,20 @@ export default function AiPolicySetupPage() {
       serverRenderingEnabledRef.current = !!data.ai_policy.rendering_enabled;
 
       setRenderingStyle((data.ai_policy.rendering_style ?? "photoreal") as RenderingStyle);
-      setRenderingNotes(data.ai_policy.rendering_notes ?? "");
+
+      // refresh both new + legacy
+      const legacy = data.ai_policy.rendering_notes ?? "";
+      const addendumRaw = data.ai_policy.rendering_prompt_addendum;
+      const negative = data.ai_policy.rendering_negative_guidance ?? "";
+
+      setRenderingNotesLegacy(legacy);
+
+      const addendum =
+        addendumRaw === undefined ? legacy : String(addendumRaw ?? "");
+
+      setRenderingPromptAddendum(addendum);
+      setRenderingNegativeGuidance(negative);
+
       setRenderingMaxPerDay(
         Number.isFinite(data.ai_policy.rendering_max_per_day) ? data.ai_policy.rendering_max_per_day : 20
       );
@@ -886,8 +943,7 @@ export default function AiPolicySetupPage() {
 
                   {pricingModel === "inspection_only" ? (
                     <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800">
-                      This model means you do not provide price numbers until inspection. No additional pricing inputs
-                      required.
+                      This model means you do not provide price numbers until inspection. No additional pricing inputs required.
                     </div>
                   ) : null}
 
@@ -939,8 +995,7 @@ export default function AiPolicySetupPage() {
 
               {!pricingEnabled ? (
                 <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-900">
-                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price
-                  numbers are always suppressed.
+                  Pricing is OFF, so AI Mode is forced to <span className="font-mono">assessment_only</span> and price numbers are always suppressed.
                 </div>
               ) : null}
             </div>
@@ -996,13 +1051,10 @@ export default function AiPolicySetupPage() {
                   <div className="text-sm font-semibold text-gray-900">AI Renderings</div>
                   <div className="mt-1 text-xs text-gray-600">Optional “concept render” image of the finished product.</div>
 
-                  {/* ✅ NEW: server-confirmation line */}
                   {serverRenderingEnabledRef.current !== null ? (
                     <div className="mt-2 text-xs text-gray-500">
                       Server confirmed:{" "}
-                      <span className="font-mono">
-                        {serverRenderingEnabledRef.current ? "enabled" : "disabled"}
-                      </span>
+                      <span className="font-mono">{serverRenderingEnabledRef.current ? "enabled" : "disabled"}</span>
                       {renderingEnabledDirty ? (
                         <span className="ml-2 rounded-md border border-yellow-200 bg-yellow-50 px-2 py-0.5 text-xs font-semibold text-yellow-900">
                           Unsaved
@@ -1040,15 +1092,34 @@ export default function AiPolicySetupPage() {
                   </select>
                 </div>
 
+                {/* ✅ NEW fields */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-800">House style notes (optional)</label>
+                  <label className="block text-sm font-medium text-gray-800">Render guidance (add-on)</label>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Added to the baseline render prompt (platform + industry). Use this to describe your “house look”.
+                  </p>
                   <textarea
-                    value={renderingNotes}
-                    onChange={(e) => setRenderingNotes(e.target.value)}
+                    value={renderingPromptAddendum}
+                    onChange={(e) => setRenderingPromptAddendum(e.target.value)}
                     disabled={!canEdit || !renderingEnabled}
                     rows={4}
-                    placeholder="Example: Keep original stitching pattern; show clean restored bolsters…"
-                    className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                    placeholder="Example: Keep original stitching pattern; show clean restored bolsters; avoid changing foam contours…"
+                    className="mt-2 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-800">Avoid / negative guidance (add-on)</label>
+                  <p className="mt-1 text-xs text-gray-500">
+                    Added to the prompt as “do not do” constraints (in addition to platform safety rules).
+                  </p>
+                  <textarea
+                    value={renderingNegativeGuidance}
+                    onChange={(e) => setRenderingNegativeGuidance(e.target.value)}
+                    disabled={!canEdit || !renderingEnabled}
+                    rows={4}
+                    placeholder="Example: Do not add logos/text/watermarks; do not change the camera angle; do not add people or sewing machines…"
+                    className="mt-2 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100"
                   />
                 </div>
 
@@ -1090,6 +1161,13 @@ export default function AiPolicySetupPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Legacy hint (optional) */}
+                {safeTrim(renderingNotesLegacy) && !safeTrim(renderingPromptAddendum) ? (
+                  <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-xs text-yellow-900">
+                    This tenant had legacy “rendering notes” saved previously. We’ll migrate it into “Render guidance” once the backend columns exist.
+                  </div>
+                ) : null}
               </div>
             </div>
 

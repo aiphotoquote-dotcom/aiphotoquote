@@ -15,6 +15,7 @@ import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderC
 
 import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
 import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
+import { getIndustryLlmPackWithMeta } from "@/lib/pcc/llm/industryStore";
 
 import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
 import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
@@ -219,6 +220,10 @@ async function loadRenderContext(tenantId: string, quoteLogId: string) {
       ts.rendering_style,
       ts.rendering_notes,
 
+      -- ✅ Tenant rendering layers (new)
+      ts.rendering_prompt_addendum,
+      ts.rendering_negative_guidance,
+
       -- ✅ keep cron render on-industry
       ts.industry_key,
 
@@ -299,7 +304,7 @@ function coalesceTenantRenderEnabled(ctx: any, resolvedTenantRenderEnabled: bool
  * ✅ Plan policy for renders
  * - If tenant has its own key => allow on any tier
  * - If tenant does NOT have a key:
- *    - allow ONLY when plan tier is tier0 AND grace credits remain AND platform key exists
+ *    - allow ONLY when plan tier is tier0/tier1/tier2 AND grace credits remain AND platform key exists
  */
 function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedRaw: unknown) {
   const plan = safeTrim(planTierRaw).toLowerCase();
@@ -308,18 +313,21 @@ function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedR
   const t = Number.isFinite(total) ? Math.max(0, Math.trunc(total)) : 0;
   const u = Number.isFinite(used) ? Math.max(0, Math.trunc(used)) : 0;
 
-  if (plan !== "tier0") return { plan, remaining: null as number | null };
-  return { plan, remaining: Math.max(0, t - u) };
+  const eligibleTier = plan === "tier0" || plan === "tier1" || plan === "tier2";
+  if (!eligibleTier) return { plan, eligibleTier, remaining: null as number | null, inGrace: false };
+
+  const remaining = Math.max(0, t - u);
+  return { plan, eligibleTier, remaining, inGrace: remaining > 0 };
 }
 
-async function bumpGraceUsedIfTier0(tenantId: string) {
+async function bumpGraceUsedIfGraceTier(tenantId: string) {
   try {
     await db.execute(sql`
       update tenant_settings
       set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
           updated_at = now()
       where tenant_id = ${tenantId}::uuid
-        and lower(coalesce(plan_tier,'')) = 'tier0'
+        and lower(coalesce(plan_tier,'')) in ('tier0','tier1','tier2')
     `);
   } catch {
     // ignore
@@ -418,6 +426,58 @@ async function fetchImageAsFile(url: string) {
   }
 }
 
+function renderTemplate(template: string, vars: Record<string, string>) {
+  const t = String(template ?? "");
+  if (!t.trim()) return "";
+  // Replace {key} tokens. Unknown tokens are left as-is (useful during iteration).
+  return t.replace(/\{([a-zA-Z0-9_]+)\}/g, (m, key) => {
+    if (Object.prototype.hasOwnProperty.call(vars, key)) return String(vars[key] ?? "");
+    return m;
+  });
+}
+
+function safeLine(label: string, value: string) {
+  const v = safeTrim(value);
+  return v ? `${label}: ${v}` : "";
+}
+
+function extractIndustryRenderFields(packAny: any): { addendum: string; negative: string } {
+  if (!packAny) return { addendum: "", negative: "" };
+
+  // Prefer known generator keys (packGenerator.ts)
+  const addendum =
+    safeTrim(packAny?.prompts?.renderPromptAddendum) ||
+    safeTrim(packAny?.renderPromptAddendum) ||
+    // UI/editor back-compat
+    safeTrim(packAny?.prompts?.renderSystemAddendum) ||
+    safeTrim(packAny?.prompts?.render_prompt_addendum) ||
+    // last-resort: someone stored as template
+    safeTrim(packAny?.prompts?.renderPromptTemplate) ||
+    safeTrim(packAny?.renderPromptTemplate) ||
+    "";
+
+  const negative =
+    safeTrim(packAny?.prompts?.renderNegativeGuidance) ||
+    safeTrim(packAny?.renderNegativeGuidance) ||
+    safeTrim(packAny?.prompts?.render_negative_guidance) ||
+    "";
+
+  return { addendum, negative };
+}
+
+function extractTenantRenderFields(ctx: any, resolved: any) {
+  const tenantStyleKey = safeTrim(ctx?.rendering_style) || safeTrim(resolved?.tenant?.tenantStyleKey) || "photoreal";
+
+  // Keep "notes" as a separate knob (what you already had)
+  const tenantRenderNotes = safeTrim(ctx?.rendering_notes) || safeTrim(resolved?.tenant?.tenantRenderNotes) || "";
+
+  // New explicit addendum/negative fields (tenant layer)
+  const tenantAddendum = safeTrim(ctx?.rendering_prompt_addendum) || "";
+  const tenantNegative = safeTrim(ctx?.rendering_negative_guidance) || "";
+
+  return { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative };
+}
+
 async function handleCron(req: Request) {
   const debugId = crypto.randomBytes(6).toString("hex");
   const startedAt = Date.now();
@@ -455,8 +515,11 @@ async function handleCron(req: Request) {
   const processed: any[] = [];
   const debugEnabled = isRenderDebugEnabled();
 
-  // PCC prompt assets (templates/presets/packs) are platform-level
+  // Platform PCC config (templates/presets/etc.)
   const pcc = await loadPlatformLlmConfig();
+
+  const platformRenderPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+  const platformRenderTemplate = safeTrim((pcc as any)?.prompts?.renderPromptTemplate) || "";
 
   for (const job of claimed) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
@@ -475,7 +538,7 @@ async function handleCron(req: Request) {
       const tenantSlug = String(ctx.tenant_slug ?? "");
       const tenantName = String(ctx.tenant_name ?? "Your Business");
 
-      // ✅ Resolve tenant + PCC AI settings (authoritative)
+      // ✅ Resolve tenant + AI settings (authoritative)
       const resolved = await resolveTenantLlm(job.tenantId);
       const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
 
@@ -545,23 +608,25 @@ async function handleCron(req: Request) {
         continue;
       }
 
-      // ✅ Key policy (tenant key OR tier0 grace w/ platform key)
+      // ✅ Key policy:
+      // - Tenant key ALWAYS wins
+      // - Platform key ONLY allowed when tenant key missing AND in grace (tier0/1/2 with remaining credits) AND platform key exists
       const enc = ctx.openai_key_enc;
       const hasTenantKey = Boolean(enc);
       const platformKey = safeTrim(process.env.OPENAI_API_KEY);
       const hasPlatformKey = Boolean(platformKey);
 
       const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
-      const tier0GraceRemaining = grace.plan === "tier0" ? Number(grace.remaining ?? 0) : 0;
+      const graceRemainingCount = grace.eligibleTier ? Number(grace.remaining ?? 0) : 0;
 
-      const canUsePlatformForTier0 = grace.plan === "tier0" && tier0GraceRemaining > 0 && hasPlatformKey;
+      const canUsePlatformGrace = !hasTenantKey && grace.inGrace && hasPlatformKey;
 
-      if (!hasTenantKey && !canUsePlatformForTier0) {
+      if (!hasTenantKey && !canUsePlatformGrace) {
         const why =
-          grace.plan === "tier0"
-            ? !hasPlatformKey
-              ? "Missing platform OpenAI key (OPENAI_API_KEY)."
-              : "Tier0 grace exhausted for rendering."
+          !hasPlatformKey
+            ? "Missing platform OpenAI key (OPENAI_API_KEY)."
+            : grace.eligibleTier
+            ? "Grace exhausted for rendering."
             : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
 
         await updateQuoteFailed({
@@ -578,7 +643,8 @@ async function handleCron(req: Request) {
           ok: false,
           error: "KEY_POLICY_BLOCK",
           planTier: safeTrim(ctx.plan_tier) || null,
-          tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+          graceEligibleTier: grace.eligibleTier,
+          graceRemaining: grace.eligibleTier ? graceRemainingCount : null,
           hasTenantKey,
           hasPlatformKey,
         });
@@ -588,21 +654,52 @@ async function handleCron(req: Request) {
       const apiKey = hasTenantKey ? decryptSecret(String(enc)) : platformKey;
       if (!apiKey) throw new Error(hasTenantKey ? "Unable to decrypt tenant OpenAI key." : "Missing platform OpenAI key.");
 
-      // ✅ Industry key (keep render on-topic)
+      // ---- Resolve industry key (keep render on-topic) ----
       const industryKey =
         safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
 
-      // ✅ Pull industry render guidance from PCC packs (platform-owned)
-      const pack: any = industryKey ? (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] : null;
+      // ---- INDUSTRY PACK: DB is source-of-truth; fallback to platform config packs ----
+      let industrySource: "db" | "platform_fallback" | "none" = "none";
+      let industryVersion: number | null = null;
 
-      const industryAddendum = safeTrim(pack?.renderPromptAddendum) || "";
-      const industryNegative = safeTrim(pack?.renderNegativeGuidance) || "";
+      let industryAddendum = "";
+      let industryNegative = "";
 
-      // ✅ Tenant style/notes: prefer tenant_settings columns, fallback to resolver
-      const tenantStyleKey = safeTrim(ctx.rendering_style) || safeTrim(resolved.tenant.tenantStyleKey) || "photoreal";
-      const tenantRenderNotes = safeTrim(ctx.rendering_notes) || safeTrim(resolved.tenant.tenantRenderNotes) || "";
+      if (industryKey) {
+        try {
+          const got = await getIndustryLlmPackWithMeta(industryKey);
+          const fields = extractIndustryRenderFields(got?.pack);
+          industryAddendum = fields.addendum;
+          industryNegative = fields.negative;
 
-      // Build style from PCC presets
+          if (industryAddendum || industryNegative) {
+            industrySource = "db";
+            industryVersion = typeof got?.meta?.version === "number" ? got.meta.version : null;
+          } else {
+            // If DB pack exists but doesn't have render fields, still allow platform fallback.
+            const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
+            const fb = extractIndustryRenderFields(fallbackPack);
+            if (fb.addendum || fb.negative) {
+              industryAddendum = fb.addendum;
+              industryNegative = fb.negative;
+              industrySource = "platform_fallback";
+            }
+          }
+        } catch {
+          const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
+          const fb = extractIndustryRenderFields(fallbackPack);
+          if (fb.addendum || fb.negative) {
+            industryAddendum = fb.addendum;
+            industryNegative = fb.negative;
+            industrySource = "platform_fallback";
+          }
+        }
+      }
+
+      // ---- TENANT RENDER FIELDS ----
+      const { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative } = extractTenantRenderFields(ctx, resolved);
+
+      // ---- STYLE PRESETS ----
       const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
       const presetText =
         tenantStyleKey === "clean_oem"
@@ -613,37 +710,71 @@ async function handleCron(req: Request) {
 
       const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
-      // ✅ IMPORTANT: anchor render to YOUR quote job prompt (scope/summary/Q&A) + industry pack + tenant notes.
-      // This prevents “random couch” drift.
-      const basePreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+      // ---- Build template lines (for platform template variables) ----
+      const serviceTypeLine = safeLine(
+        "Service type",
+        safeTrim(inputAny?.customer_context?.service_type) || safeTrim(inputAny?.customer_context?.category) || ""
+      );
+      const summaryLine = safeLine("Estimate summary", typeof outputAny?.summary === "string" ? outputAny.summary : "");
+      const customerNotesLine = safeLine("Customer notes", String(inputAny?.customer_context?.notes ?? "").trim());
+      const tenantRenderNotesLine = safeLine("Tenant render notes", tenantRenderNotes);
 
+      // ---- Compose renderPromptPreamble (platform + industry + tenant addendum) ----
       const renderPromptPreamble = collapseBlankLines(
         [
-          basePreamble,
+          platformRenderPreamble,
           industryKey ? `Industry key: ${industryKey}` : "",
           industryAddendum ? `Industry addendum:\n${industryAddendum}` : "",
+          tenantAddendum ? `Tenant addendum:\n${tenantAddendum}` : "",
         ]
           .filter(Boolean)
           .join("\n\n")
       );
 
-      const negativeBlock = industryNegative
-        ? collapseBlankLines(
-            [
-              "Hard negatives (must avoid):",
-              // allow multi-line negative guidance from PCC UI
-              industryNegative,
-            ].join("\n")
-          )
+      // ---- Negatives (industry + tenant) ----
+      const negativeParts: string[] = [];
+      if (industryNegative) negativeParts.push(`Industry negatives:\n${industryNegative}`);
+      if (tenantNegative) negativeParts.push(`Tenant negatives:\n${tenantNegative}`);
+
+      const negativeBlock = negativeParts.length
+        ? collapseBlankLines(["Hard negatives (must avoid):", ...negativeParts].join("\n\n"))
         : "";
 
+      // ---- Job context from render_jobs.prompt (scope/summary/Q&A already compiled upstream) ----
       const jobContext = safeTrim(job.prompt);
 
-      const finalPrompt = collapseBlankLines(
+      // ---- Use platform template if present; fallback to composed body ----
+      const templateVars = {
+        renderPromptPreamble,
+        style: styleText,
+        serviceTypeLine,
+        summaryLine,
+        customerNotesLine,
+        tenantRenderNotesLine,
+      };
+
+      const templatedBodyRaw = platformRenderTemplate ? renderTemplate(platformRenderTemplate, templateVars) : "";
+
+      const templatedBody = collapseBlankLines(templatedBodyRaw);
+
+      const fallbackBody = collapseBlankLines(
         [
           renderPromptPreamble,
           `Style: ${styleText}`,
-          tenantRenderNotes ? `Tenant render notes:\n${tenantRenderNotes}` : "",
+          serviceTypeLine,
+          summaryLine,
+          customerNotesLine,
+          tenantRenderNotesLine,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+
+      const coreBody = templatedBody || fallbackBody;
+
+      const finalPrompt = collapseBlankLines(
+        [
+          coreBody,
           negativeBlock,
           jobContext ? `Job context (must honor):\n${jobContext}` : "",
           "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
@@ -660,24 +791,42 @@ async function handleCron(req: Request) {
             tenantStyleKey,
             styleText,
             renderPromptPreamble,
-            renderPromptTemplate: "(cron) composed prompt (preamble+style+tenant+industry+jobContext)",
+            renderPromptTemplate: platformRenderTemplate
+              ? "(platform) renderPromptTemplate applied"
+              : "(fallback) no renderPromptTemplate configured",
             finalPrompt,
-            serviceType: inputAny?.customer_context?.service_type || inputAny?.customer_context?.category || "",
+            serviceType:
+              safeTrim(inputAny?.customer_context?.service_type) || safeTrim(inputAny?.customer_context?.category) || "",
             summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
             customerNotes: String(inputAny?.customer_context?.notes ?? "").trim(),
             tenantRenderNotes,
             images,
           }),
-          industry: {
-            industryKey: industryKey || null,
-            hasIndustryPack: Boolean(pack),
-            renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
-            renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
+          layers: {
+            platform: {
+              hasPreamble: Boolean(platformRenderPreamble),
+              hasTemplate: Boolean(platformRenderTemplate),
+              templateApplied: Boolean(templatedBody),
+            },
+            industry: {
+              industryKey: industryKey || null,
+              source: industrySource,
+              version: industryVersion,
+              renderPromptAddendumLen: industryAddendum ? industryAddendum.length : 0,
+              renderNegativeGuidanceLen: industryNegative ? industryNegative.length : 0,
+            },
+            tenant: {
+              renderNotesLen: tenantRenderNotes ? tenantRenderNotes.length : 0,
+              promptAddendumLen: tenantAddendum ? tenantAddendum.length : 0,
+              negativeGuidanceLen: tenantNegative ? tenantNegative.length : 0,
+            },
           },
           keyPolicy: {
             used: hasTenantKey ? "tenant" : "platform_grace",
             planTier: safeTrim(ctx.plan_tier) || null,
-            tier0GraceRemaining: grace.plan === "tier0" ? tier0GraceRemaining : null,
+            graceEligibleTier: grace.eligibleTier,
+            graceRemaining: grace.eligibleTier ? graceRemainingCount : null,
+            inGrace: grace.inGrace,
             hasTenantKey,
             hasPlatformKey,
           },
@@ -746,9 +895,9 @@ async function handleCron(req: Request) {
 
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
 
-      // If we used platform grace (tier0), consume 1 credit on success.
-      if (!hasTenantKey && canUsePlatformForTier0) {
-        await bumpGraceUsedIfTier0(job.tenantId);
+      // If we used platform grace (tier0/1/2), consume 1 credit on success.
+      if (!hasTenantKey && canUsePlatformGrace) {
+        await bumpGraceUsedIfGraceTier(job.tenantId);
       }
 
       // Emails (best-effort)
@@ -879,6 +1028,7 @@ async function handleCron(req: Request) {
         imageUrl,
         renderModel,
         industryKey: industryKey || null,
+        industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
       });

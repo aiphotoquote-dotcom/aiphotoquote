@@ -57,7 +57,10 @@ function jsonbString(v: any) {
   }
 }
 
-async function auditMerge(tx: any, args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; snapshot: any }) {
+async function auditMerge(
+  tx: any,
+  args: { sourceKey: string; targetKey: string; actor: string; reason: string | null; snapshot: any }
+) {
   const snapshotJson = jsonbString(args.snapshot);
   await tx.execute(sql`
     insert into industry_change_log (action, source_industry_key, target_industry_key, actor, reason, snapshot)
@@ -127,7 +130,15 @@ export async function POST(req: Request) {
     const movedTenants = ((movedTenantsR as any)?.rows ?? []).length;
 
     // 2) Merge tenant_sub_industries
-    // ✅ IMPORTANT: your real DB table does NOT have created_at, so we insert only existing cols.
+    // ✅ IMPORTANT:
+    // The correct schema is scoped uniqueness: (tenant_id, industry_key, key)
+    // BUT prod currently also has a legacy unique index: (tenant_id, key).
+    //
+    // We must be safe under both states:
+    // - Use ON CONFLICT DO NOTHING (works for whichever unique constraint exists)
+    // - Then delete source rows so the merge completes.
+    //
+    // NOTE: Best fix is DB-side: DROP INDEX tenant_sub_industries_tenant_key_uidx;
     const insertTenantSubR = await tx.execute(sql`
       insert into tenant_sub_industries (tenant_id, industry_key, key, label)
       select
@@ -137,13 +148,7 @@ export async function POST(req: Request) {
         s.label
       from tenant_sub_industries s
       where lower(s.industry_key) = ${sourceKey}
-        and not exists (
-          select 1
-          from tenant_sub_industries t
-          where lower(t.industry_key) = ${targetKey}
-            and t.tenant_id = s.tenant_id
-            and t.key = s.key
-        )
+      on conflict do nothing
     `);
     const insertedTenantSub = Number((insertTenantSubR as any)?.rowCount ?? 0);
 
@@ -153,7 +158,7 @@ export async function POST(req: Request) {
     `);
     const deletedTenantSub = Number((deletedTenantSubR as any)?.rowCount ?? 0);
 
-    // 3) Merge industry_sub_industries defaults (this table DOES have created_at/updated_at in your schema)
+    // 3) Merge industry_sub_industries defaults
     const insertIndustrySubR = await tx.execute(sql`
       insert into industry_sub_industries (id, industry_key, key, label, description, sort_order, is_active, created_at, updated_at)
       select
@@ -231,7 +236,7 @@ export async function POST(req: Request) {
     `);
     const deletedPacks = Number((deletedPacksR as any)?.rowCount ?? 0);
 
-    // 5) Move onboarding AI signals (so derived counts collapse into target)
+    // 5) Move onboarding AI signals
     const movedSuggestedR = await tx.execute(sql`
       update tenant_onboarding
       set ai_analysis = jsonb_set(
@@ -269,7 +274,7 @@ export async function POST(req: Request) {
     `);
     const movedRejected = Number((movedRejectedR as any)?.rowCount ?? 0);
 
-    // 6) Optional: delete source industries row (if it exists)
+    // 6) Optional: delete source industries row
     let deletedIndustry = 0;
     if (deleteSource) {
       const delR = await tx.execute(sql`

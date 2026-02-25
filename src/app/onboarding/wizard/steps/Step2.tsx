@@ -134,12 +134,61 @@ function isParseFail(err: string) {
   return (
     e.includes("parse_fail") ||
     e.includes("parse fail") ||
-    e.includes("parse") && e.includes("fail") ||
+    (e.includes("parse") && e.includes("fail")) ||
     e.includes("fetch_fail") ||
     e.includes("fetch fail") ||
     e.includes("blocked") ||
     e.includes("timeout")
   );
+}
+
+function joinBullets(label: string, items: any, limit = 12) {
+  const xs = Array.isArray(items) ? items.map((x) => safeTrim(x)).filter(Boolean) : [];
+  if (!xs.length) return "";
+  return `${label}:\n- ${xs.slice(0, limit).join("\n- ")}`;
+}
+
+function buildVerboseDetails(ai: any) {
+  const lines: string[] = [];
+
+  const businessGuess = safeTrim(pick(ai, ["businessGuess", "business_guess"]));
+  const fitReason = safeTrim(pick(ai, ["fitReason", "fit_reason"]));
+  const detectedServices = pick(ai, ["detectedServices", "detected_services"]);
+  const billingSignals = pick(ai, ["billingSignals", "billing_signals"]);
+  const rawIntel = safeTrim(pick(ai, ["rawWebIntelPreview", "raw_web_intel_preview"]));
+
+  if (businessGuess) {
+    lines.push("Business summary:");
+    lines.push(businessGuess);
+    lines.push("");
+  }
+
+  if (fitReason) {
+    lines.push("Why this fit score:");
+    lines.push(fitReason);
+    lines.push("");
+  }
+
+  const svc = joinBullets("Detected services/products", detectedServices, 12);
+  if (svc) {
+    lines.push(svc);
+    lines.push("");
+  }
+
+  const bill = joinBullets("Billing/pricing signals", billingSignals, 12);
+  if (bill) {
+    lines.push(bill);
+    lines.push("");
+  }
+
+  if (rawIntel) {
+    lines.push("Website intel excerpt:");
+    lines.push(rawIntel);
+    lines.push("");
+  }
+
+  const out = lines.join("\n").trim();
+  return out || "No additional details were provided by the analyzer.";
 }
 
 export function Step2(props: {
@@ -189,24 +238,14 @@ export function Step2(props: {
 
   const suggestedKeyNorm = useMemo(() => normalizeKey(suggestedKey), [suggestedKey]);
 
-  // raw long summary often lives here (we keep it in details only)
-  const rawSummary =
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.meta.debug.reason"])) ||
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.description"])) ||
-    safeTrim(pick(props.aiAnalysis, ["industryInterview.proposedIndustry.label"])) ||
-    safeTrim(pick(props.aiAnalysis, ["suggestedIndustryLabel", "suggestedIndustry.label"])) ||
-    safeTrim(pick(props.aiAnalysis, ["businessGuess"])) ||
-    safeTrim(pick(props.aiAnalysis, ["business_guess"])) ||
-    "";
-
   const confidenceScore =
     pick(props.aiAnalysis, ["confidenceScore", "confidence_score"]) ??
     pick(props.aiAnalysis, ["industryInterview.confidenceScore"]) ??
     null;
 
+  // ✅ Prefer numeric fitScore; fall back to legacy fitScore on interview; ignore string "fit" enums for % display
   const fitScore =
     pick(props.aiAnalysis, ["fitScore", "fit_score"]) ??
-    pick(props.aiAnalysis, ["fit"]) ??
     pick(props.aiAnalysis, ["industryInterview.fitScore"]) ??
     null;
 
@@ -266,12 +305,9 @@ export function Step2(props: {
   const displayIndustryName = useMemo(() => {
     if (canonicalIndustryLabel) return canonicalIndustryLabel;
 
-    const s = safeTrim(rawSummary);
-    if (s && s.length <= 42) return s;
-
     if (suggestedKeyNorm) return suggestedKeyNorm.replace(/_/g, " ");
     return "your industry";
-  }, [canonicalIndustryLabel, rawSummary, suggestedKeyNorm]);
+  }, [canonicalIndustryLabel, suggestedKeyNorm]);
 
   const reasoningLine = useMemo(() => {
     if (!hasWebsite) return "";
@@ -555,7 +591,6 @@ export function Step2(props: {
       if (analysisUsable && suggestedKeyNorm) {
         await acceptIndustryAndAdvance(suggestedKeyNorm);
       } else {
-        // If analysis isn't usable, send them to interview instead of advancing into a broken state.
         setShowInterview(true);
       }
     } catch (e: any) {
@@ -592,6 +627,8 @@ export function Step2(props: {
   }
 
   const showBusy = (isRunning || autoStarting) && !hasAnalysis;
+
+  const verboseDetails = useMemo(() => buildVerboseDetails(props.aiAnalysis), [props.aiAnalysis]);
 
   return (
     <div>
@@ -740,10 +777,10 @@ export function Step2(props: {
 
                   {detailsOpen ? (
                     <div className="mt-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm text-emerald-950 dark:border-emerald-900/40 dark:bg-black dark:text-emerald-100">
-                      <div className="text-xs font-semibold opacity-80">Why we think this</div>
+                      <div className="text-xs font-semibold opacity-80">Full analysis</div>
 
-                      <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
-                        {rawSummary ? rawSummary : "No additional details were provided by the analyzer."}
+                      <div className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/90 dark:text-emerald-100/90">
+                        {verboseDetails}
                       </div>
 
                       {debugOn && suggestedKeyNorm ? (

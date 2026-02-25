@@ -89,6 +89,13 @@ async function upsertAnalysis(tenantId: string, website: string | null, analysis
   `);
 }
 
+function fitToScore(fit: "good" | "maybe" | "poor") {
+  // Keep stable + simple for UI; can be replaced later with true numeric scoring.
+  if (fit === "good") return 0.85;
+  if (fit === "maybe") return 0.6;
+  return 0.25;
+}
+
 /* --------------------- schema --------------------- */
 
 const AnalysisSchema = z.object({
@@ -101,22 +108,29 @@ const AnalysisSchema = z.object({
   needsConfirmation: z.boolean(),
   detectedServices: z.array(z.string()).default([]),
   billingSignals: z.array(z.string()).default([]),
+
+  // optional (we’ll backfill if missing)
+  fitScore: z.number().min(0).max(1).optional(),
 });
 
 /* --------------------- prompts --------------------- */
 
 function websiteIntelPrompt(url: string) {
   return `
-Visit the website below and summarize the business factually.
+Visit the website below and extract business facts as accurately as possible.
 
 Website:
 ${url}
 
-Return a clear paragraph describing:
-- What the business does
-- What they service (boats, cars, homes, etc.)
-- Core services offered
-- Any constraints (size limits, location, specialty)
+Return a detailed plain-text report (NOT JSON) with these sections and as much specificity as you can:
+
+1) What they do (core business)
+2) Who they serve (residential/commercial/wholesale/retail; ideal customer)
+3) What they sell or service (products + services)
+4) Service area / locations (if mentioned)
+5) How customers engage (phone, online quote, appointment, pickup/delivery, etc.)
+6) “Signals” (keywords that indicate trade/industry; brands; job types; equipment; materials)
+7) Anything unclear or uncertain (be explicit)
 
 Do NOT return JSON.
 `.trim();
@@ -126,34 +140,30 @@ function normalizePrompt(rawText: string) {
   return `
 You are onboarding intelligence for AIPhotoQuote.
 
-Convert the following website intelligence into structured JSON.
+Convert the following WEBSITE_INTELLIGENCE into structured JSON.
 
 WEBSITE_INTELLIGENCE:
 ${rawText}
 
-Return JSON with:
-- businessGuess (2–5 sentences)
-- fit: good | maybe | poor (photo-based quoting)
-- fitReason
-- suggestedIndustryKey
-- questions (3–6)
-- detectedServices
-- billingSignals
-- confidenceScore (0–1)
-- needsConfirmation (true if confidenceScore < 0.8)
+Return ONLY valid JSON with:
+- businessGuess: 5–10 sentences, concrete and specific, describing what they do and who they serve.
+- fit: "good" | "maybe" | "poor" (photo-based quoting suitability)
+- fitReason: 4–8 sentences explaining why the fit is what it is; mention any constraints (wholesale, e-comm, regulated pricing, etc.)
+- suggestedIndustryKey: a snake_case key that best matches the business (example: "wholesale_distribution", "garage_door_services").
+- questions: 3–6 short clarifying questions we would ask if confidence is not perfect.
+- detectedServices: list 3–12 short service/product phrases
+- billingSignals: list 2–12 short phrases that hint pricing model (wholesale, per-unit, install, service call, etc.)
+- confidenceScore: 0..1
+- needsConfirmation: true if confidenceScore < 0.8
 
-Return ONLY valid JSON.
+Return ONLY JSON. No markdown.
 `.trim();
 }
 
 /* --------------------- model pick --------------------- */
 
 function pickOnboardingModel(cfg: any) {
-  return (
-    safeTrim(cfg?.models?.onboardingModel) ||
-    safeTrim(cfg?.models?.estimatorModel) ||
-    "gpt-4.1"
-  );
+  return safeTrim(cfg?.models?.onboardingModel) || safeTrim(cfg?.models?.estimatorModel) || "gpt-4.1";
 }
 
 /* --------------------- handler --------------------- */
@@ -225,7 +235,7 @@ export async function POST(req: Request) {
 
     const mid = {
       ...running,
-      rawWebIntelPreview: clamp(rawIntel, 1200),
+      rawWebIntelPreview: clamp(rawIntel, 2500),
       meta: mergeMeta(prior, {
         status: "running",
         round: nextRound,
@@ -248,11 +258,10 @@ export async function POST(req: Request) {
     const obj = safeJsonParseObject(jsonText);
     const parsed = obj ? AnalysisSchema.safeParse(obj) : null;
 
-    // ✅ CRITICAL: if parsing fails, DO NOT overwrite the last-good industry with "service".
+    // ✅ If parsing fails, preserve prior instead of nuking.
     if (!parsed || !parsed.success) {
       const preserved = {
         ...(typeof prior === "object" && prior ? prior : {}),
-        // If there was no prior analysis at all, we still need a safe starter.
         ...(typeof prior === "object" && prior
           ? {}
           : {
@@ -263,22 +272,24 @@ export async function POST(req: Request) {
               suggestedIndustryKey: "service",
               detectedServices: [],
               billingSignals: [],
+              questions: [],
+              confidenceScore: 0.35,
+              needsConfirmation: true,
             }),
         website,
         analyzedAt: new Date().toISOString(),
         source: "web_tools_two_pass_parse_fail_preserved_prior",
         modelUsed: model,
-        // Always provide helpful questions for correction, without nuking prior suggestedIndustryKey.
         questions: [
           "In one sentence, what do you do?",
-          "What do you primarily work on (boats/cars/homes/commercial/etc.)?",
-          "What are your top 3 services?",
+          "Who is your primary customer (residential/commercial/wholesale)?",
+          "What are your top 3 services or products?",
           "Do customers usually send photos before you quote?",
         ].slice(0, 6),
         needsConfirmation: true,
-        confidenceScore: Math.min(0.5, Math.max(0, Number(prior?.confidenceScore ?? 0) || 0)),
-        rawWebIntelPreview: clamp(rawIntel, 1200),
-        rawModelJsonPreview: clamp(jsonText, 1200),
+        confidenceScore: Math.min(0.5, Math.max(0, Number(prior?.confidenceScore ?? 0) || 0.35)),
+        rawWebIntelPreview: clamp(rawIntel, 2500),
+        rawModelJsonPreview: clamp(jsonText, 2500),
         meta: mergeMeta(prior, {
           status: "complete",
           round: nextRound,
@@ -293,13 +304,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, tenantId, aiAnalysis: preserved }, { status: 200 });
     }
 
+    // ✅ Backfill numeric fitScore for UI parity with prod
+    const fitScore = Number.isFinite(Number(parsed.data.fitScore))
+      ? Math.max(0, Math.min(1, Number(parsed.data.fitScore)))
+      : fitToScore(parsed.data.fit);
+
     const analysis = {
       ...parsed.data,
+      fitScore,
       website,
       analyzedAt: new Date().toISOString(),
       source: "web_tools_two_pass",
       modelUsed: model,
-      rawWebIntelPreview: clamp(rawIntel, 1200),
+      rawWebIntelPreview: clamp(rawIntel, 2500),
+      rawModelJsonPreview: clamp(jsonText, 2500),
       meta: mergeMeta(prior, {
         status: "complete",
         round: nextRound,

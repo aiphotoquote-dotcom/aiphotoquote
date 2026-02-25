@@ -251,7 +251,18 @@ export const tenantSettings = pgTable("tenant_settings", {
   // legacy + new (keep both for back-compat)
   renderingEnabled: boolean("rendering_enabled"),
   renderingStyle: text("rendering_style"),
+
+  /**
+   * Legacy single-field “house notes”.
+   * We keep it for back-compat; UI will now write the new additive fields,
+   * and we can optionally mirror them into this string for old pipelines.
+   */
   renderingNotes: text("rendering_notes"),
+
+  // ✅ NEW: tenant render prompt layer (additive)
+  renderingPromptAddendum: text("rendering_prompt_addendum").notNull().default(""),
+  renderingNegativeGuidance: text("rendering_negative_guidance").notNull().default(""),
+
   renderingMaxPerDay: integer("rendering_max_per_day"),
   renderingCustomerOptInRequired: boolean("rendering_customer_opt_in_required"),
   aiRenderingEnabled: boolean("ai_rendering_enabled"),

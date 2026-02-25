@@ -218,7 +218,7 @@ export function ResultsSection({
 
       {/* Secondary details */}
       {scope.length || assumptions.length || questions.length ? (
-        <div className="grid gap-3 lg:grid-cols-3">
+        <div className="grid gap-3 grid-cols-1">
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Visible scope</div>
             <div className="mt-2 space-y-2 text-sm text-gray-700 dark:text-gray-200">

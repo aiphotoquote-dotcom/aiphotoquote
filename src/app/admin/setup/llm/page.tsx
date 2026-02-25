@@ -96,16 +96,12 @@ export default function AdminSetupLlmPage() {
       <div>
         <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">LLM Settings</h1>
         <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-          Tenant overrides layered on top of industry + platform defaults. Guardrails are platform-locked.
+          Prompts are layered <span className="font-mono">platform → industry → tenant</span>. Tenant inputs are treated as{" "}
+          <span className="font-semibold">additions</span> to the baseline (not a separate “mode”). Guardrails remain platform-locked.
         </p>
       </div>
 
-      {/* Key forces a clean remount whenever tenantId/industryKey changes */}
-      <TenantLlmManagerClient
-        key={`${tenantId}:${industryKey ?? ""}`}
-        tenantId={tenantId}
-        industryKey={industryKey}
-      />
+      <TenantLlmManagerClient key={`${tenantId}:${industryKey ?? ""}`} tenantId={tenantId} industryKey={industryKey} />
     </div>
   );
 }
