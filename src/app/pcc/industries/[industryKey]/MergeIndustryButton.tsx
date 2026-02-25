@@ -106,9 +106,13 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
       const data = await r.json().catch(() => null);
       if (!r.ok) throw new Error(data?.error || data?.message || `HTTP_${r.status}`);
 
+      // ✅ After merge, the source page can be deleted/stale.
+      // Navigate away FIRST, then refresh to ensure list is current.
       setOpen(false);
       setSelectedKey("");
       setQ("");
+
+      router.push("/pcc/industries");
       router.refresh();
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -192,16 +196,12 @@ export default function MergeIndustryButton(props: { sourceKey: string }) {
                             onClick={() => setSelectedKey(o.key)}
                             className={cn(
                               "w-full px-3 py-2 text-left",
-                              active
-                                ? "bg-gray-100 dark:bg-gray-900/60"
-                                : "hover:bg-gray-50 dark:hover:bg-gray-900/30"
+                              active ? "bg-gray-100 dark:bg-gray-900/60" : "hover:bg-gray-50 dark:hover:bg-gray-900/30"
                             )}
                           >
                             <div className="flex items-center justify-between gap-3">
                               <div className="min-w-0">
-                                <div className="text-xs font-semibold text-gray-900 dark:text-gray-100 truncate">
-                                  {o.label}
-                                </div>
+                                <div className="text-xs font-semibold text-gray-900 dark:text-gray-100 truncate">{o.label}</div>
                                 <div className="mt-0.5 text-[11px] text-gray-600 dark:text-gray-300 truncate">
                                   <span className="font-mono">{o.key}</span>
                                 </div>
