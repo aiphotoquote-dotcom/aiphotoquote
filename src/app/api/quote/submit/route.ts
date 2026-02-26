@@ -682,6 +682,76 @@ function buildAiSnapshot(args: {
   };
 }
 
+/**
+ * ✅ Create/Update Quote Version v1 (system) once quote is finalized.
+ * This is additive and does NOT replace quote_logs.
+ */
+async function upsertSystemVersionV1(args: {
+  tenantId: string;
+  quoteLogId: string;
+  policy: PricingPolicySnapshot;
+  output: any;
+  meta?: any;
+  debug?: DebugFn;
+}) {
+  const { tenantId, quoteLogId, policy, output, meta, debug } = args;
+
+  const p = normalizePricingPolicy(policy);
+
+  const versionOutput = {
+    // keep it “result-shaped” so UI can render it like a quote output
+    confidence: output?.confidence ?? null,
+    inspection_required: output?.inspection_required ?? null,
+    estimate_low: output?.estimate_low ?? 0,
+    estimate_high: output?.estimate_high ?? 0,
+    currency: output?.currency ?? "USD",
+    summary: output?.summary ?? "",
+    visible_scope: Array.isArray(output?.visible_scope) ? output.visible_scope : [],
+    assumptions: Array.isArray(output?.assumptions) ? output.assumptions : [],
+    questions: Array.isArray(output?.questions) ? output.questions : [],
+    pricing_basis: output?.pricing_basis ?? null,
+    qa_context: output?.qa_context ?? null,
+  };
+
+  const metaSafe = meta && typeof meta === "object" ? meta : null;
+
+  debug?.("quoteVersions.v1.upsert.start", { tenantId, quoteLogId, aiMode: p.ai_mode });
+
+  await db.execute(sql`
+    insert into quote_versions (
+      tenant_id,
+      quote_log_id,
+      version,
+      ai_mode,
+      source,
+      output,
+      meta,
+      created_at,
+      updated_at
+    )
+    values (
+      ${tenantId}::uuid,
+      ${quoteLogId}::uuid,
+      1,
+      ${p.ai_mode},
+      'system',
+      ${JSON.stringify(versionOutput)}::jsonb,
+      ${metaSafe ? JSON.stringify(metaSafe) : null}::jsonb,
+      now(),
+      now()
+    )
+    on conflict (quote_log_id, version)
+    do update set
+      ai_mode = excluded.ai_mode,
+      source = excluded.source,
+      output = excluded.output,
+      meta = coalesce(excluded.meta, quote_versions.meta),
+      updated_at = now()
+  `);
+
+  debug?.("quoteVersions.v1.upsert.ok", { quoteLogId });
+}
+
 // ---------------- email helpers ----------------
 async function sendFinalEstimateEmails(args: {
   req: Request;
@@ -1363,9 +1433,6 @@ export async function POST(req: Request) {
       }
 
       // ✅ Phase2 render decision:
-      // - Prefer explicit request value when provided
-      // - Else fall back to stored snapshot (phase1)
-      // - Apply computeRenderOptIn so "opt-in not required" tenants default to TRUE
       const renderOptInFromReq =
         typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : undefined;
       const renderOptInFromLog =
@@ -1387,8 +1454,6 @@ export async function POST(req: Request) {
         renderOptInEffective,
       });
 
-      // If phase2 request provided render_opt_in, persist it so the log reflects reality.
-      // Also keep quote_logs.renderOptIn column in sync.
       if (typeof renderOptInFromReq === "boolean") {
         const updatedInput = { ...(inputAny ?? {}), render_opt_in: renderOptInEffective };
         await db
@@ -1416,7 +1481,7 @@ export async function POST(req: Request) {
         category,
         service_type,
         notes,
-        normalizedAnswers, // ✅ YES: used by estimator
+        normalizedAnswers,
         debug,
       });
 
@@ -1439,8 +1504,6 @@ export async function POST(req: Request) {
         estimate_low: shaped.estimate_low,
         estimate_high: shaped.estimate_high,
         pricing_basis: computed.basis,
-
-        // ✅ make QA available to downstream consumers (rendering/job/UI)
         qa_context: {
           questions: storedQuestions,
           answers: normalizedAnswers,
@@ -1455,26 +1518,15 @@ export async function POST(req: Request) {
         where id = ${quoteLogId}::uuid
       `);
 
-      // ✅ Seed Quote Version v1 (for QA flows where estimate is finalized in phase2)
-      try {
-        await db
-          .insert(quoteVersions)
-          .values({
-            tenantId: tenant.id,
-            quoteLogId,
-            version: 1,
-            aiMode: pricingPolicy.ai_mode,
-            source: "system",
-            output: outputToStore,
-            meta: {
-              seededFrom: "quote.submit.phase2",
-              seededAt: nowIso(),
-            },
-          })
-          .onConflictDoNothing({ target: [quoteVersions.quoteLogId, quoteVersions.version] });
-      } catch (e: any) {
-        debug("quoteVersions.seed_v1.phase2.failed", { quoteLogId, message: e?.message ?? String(e) });
-      }
+      // ✅ NEW: Upsert system v1 version now that quote is finalized
+      await upsertSystemVersionV1({
+        tenantId: tenant.id,
+        quoteLogId,
+        policy: pricingPolicy,
+        output,
+        meta: { createdFrom: "quote_submit.phase2", ai_snapshot: aiSnapshot },
+        debug,
+      });
 
       try {
         const emailResult = await sendFinalEstimateEmails({
@@ -1568,9 +1620,6 @@ export async function POST(req: Request) {
     }
 
     // ✅ Phase1 render decision:
-    // - If rendering disabled -> false
-    // - If opt-in required -> honor checkbox (default false if missing)
-    // - If opt-in NOT required -> default true
     const renderOptIn = computeRenderOptIn({
       tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
       renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
@@ -1740,26 +1789,15 @@ export async function POST(req: Request) {
       where id = ${quoteLogId}::uuid
     `);
 
-    // ✅ Seed Quote Version v1 (initial AI result snapshot)
-    try {
-      await db
-        .insert(quoteVersions)
-        .values({
-          tenantId: tenant.id,
-          quoteLogId,
-          version: 1,
-          aiMode: policyToStore.ai_mode,
-          source: "system",
-          output: outputToStore,
-          meta: {
-            seededFrom: "quote.submit.phase1",
-            seededAt: nowIso(),
-          },
-        })
-        .onConflictDoNothing({ target: [quoteVersions.quoteLogId, quoteVersions.version] });
-    } catch (e: any) {
-      debug("quoteVersions.seed_v1.failed", { quoteLogId, message: e?.message ?? String(e) });
-    }
+    // ✅ NEW: Upsert system v1 version now that quote is finalized (no QA path)
+    await upsertSystemVersionV1({
+      tenantId: tenant.id,
+      quoteLogId,
+      policy: policyToStore,
+      output,
+      meta: { createdFrom: "quote_submit.phase1", ai_snapshot: aiSnapshotEstimated },
+      debug,
+    });
 
     try {
       const emailResult = await sendFinalEstimateEmails({
