@@ -383,6 +383,134 @@ export const quoteLogs = pgTable("quote_logs", {
 });
 
 /**
+ * Quote versions — human-initiated lifecycle (additive; does NOT replace quote_logs)
+ */
+export const quoteVersions = pgTable(
+  "quote_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    // Anchor to the original customer submission
+    quoteLogId: uuid("quote_log_id")
+      .notNull()
+      .references(() => quoteLogs.id, { onDelete: "cascade" }),
+
+    // Version number per quote_log_id (1..n)
+    version: integer("version").notNull().default(1),
+
+    // assessment_only | range | fixed (aligns to tenant_settings.ai_mode semantics)
+    aiMode: text("ai_mode").notNull().default("assessment_only"),
+
+    // tenant_edit | ai_conversion | system
+    source: text("source").notNull().default("tenant_edit"),
+
+    // Editable “result-like” snapshot for this version (same general shape as quote_logs.output)
+    output: jsonb("output").$type<any>().notNull().default({}),
+
+    // Optional metadata (diff hints, audit breadcrumbs, etc.)
+    meta: jsonb("meta").$type<any>(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantIdx: index("quote_versions_tenant_id_idx").on(t.tenantId),
+    quoteLogIdx: index("quote_versions_quote_log_id_idx").on(t.quoteLogId),
+    quoteLogVersionIdx: index("quote_versions_quote_log_id_version_idx").on(t.quoteLogId, t.version),
+    createdIdx: index("quote_versions_created_at_idx").on(t.createdAt),
+  })
+);
+
+/**
+ * Quote notes — tenant-authored notes (internal for now; can add visibility flags later)
+ */
+export const quoteNotes = pgTable(
+  "quote_notes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    quoteLogId: uuid("quote_log_id")
+      .notNull()
+      .references(() => quoteLogs.id, { onDelete: "cascade" }),
+
+    // Optional: attach to a specific version (recommended)
+    quoteVersionId: uuid("quote_version_id").references(() => quoteVersions.id, { onDelete: "cascade" }),
+
+    // Clerk user id or email (portable enough for now)
+    actor: text("actor"),
+
+    body: text("body").notNull(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    tenantIdx: index("quote_notes_tenant_id_idx").on(t.tenantId),
+    quoteLogIdx: index("quote_notes_quote_log_id_idx").on(t.quoteLogId),
+    quoteVersionIdx: index("quote_notes_quote_version_id_idx").on(t.quoteVersionId),
+    createdIdx: index("quote_notes_created_at_idx").on(t.createdAt),
+  })
+);
+
+/**
+ * Quote renders — manual render attempts per quote version (stored history)
+ */
+export const quoteRenders = pgTable(
+  "quote_renders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    quoteLogId: uuid("quote_log_id")
+      .notNull()
+      .references(() => quoteLogs.id, { onDelete: "cascade" }),
+
+    quoteVersionId: uuid("quote_version_id")
+      .notNull()
+      .references(() => quoteVersions.id, { onDelete: "cascade" }),
+
+    // Attempt number per version (1..n)
+    attempt: integer("attempt").notNull().default(1),
+
+    // queued | running | rendered | failed
+    status: text("status").notNull().default("queued"),
+
+    // What we asked the renderer to do
+    prompt: text("prompt"),
+    shopNotes: text("shop_notes"),
+
+    // Output
+    imageUrl: text("image_url"),
+    error: text("error"),
+
+    // Which one is selected to show/send for the version
+    isSelected: boolean("is_selected").notNull().default(false),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => ({
+    tenantIdx: index("quote_renders_tenant_id_idx").on(t.tenantId),
+    quoteLogIdx: index("quote_renders_quote_log_id_idx").on(t.quoteLogId),
+    quoteVersionIdx: index("quote_renders_quote_version_id_idx").on(t.quoteVersionId),
+    statusIdx: index("quote_renders_status_idx").on(t.status),
+    createdIdx: index("quote_renders_created_at_idx").on(t.createdAt),
+    versionAttemptUq: uniqueIndex("quote_renders_quote_version_attempt_uq").on(t.quoteVersionId, t.attempt),
+  })
+);
+
+/**
  * Industries (✅ aligned to your Neon table shape)
  */
 export const industries = pgTable(

@@ -6,7 +6,14 @@ import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
+import {
+  tenants,
+  tenantSecrets,
+  tenantSettings,
+  quoteLogs,
+  platformConfig,
+  quoteVersions,
+} from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 import { sendEmail } from "@/lib/email";
@@ -1448,6 +1455,27 @@ export async function POST(req: Request) {
         where id = ${quoteLogId}::uuid
       `);
 
+      // ✅ Seed Quote Version v1 (for QA flows where estimate is finalized in phase2)
+      try {
+        await db
+          .insert(quoteVersions)
+          .values({
+            tenantId: tenant.id,
+            quoteLogId,
+            version: 1,
+            aiMode: pricingPolicy.ai_mode,
+            source: "system",
+            output: outputToStore,
+            meta: {
+              seededFrom: "quote.submit.phase2",
+              seededAt: nowIso(),
+            },
+          })
+          .onConflictDoNothing({ target: [quoteVersions.quoteLogId, quoteVersions.version] });
+      } catch (e: any) {
+        debug("quoteVersions.seed_v1.phase2.failed", { quoteLogId, message: e?.message ?? String(e) });
+      }
+
       try {
         const emailResult = await sendFinalEstimateEmails({
           req,
@@ -1711,6 +1739,27 @@ export async function POST(req: Request) {
       set output = ${JSON.stringify(outputToStore)}::jsonb
       where id = ${quoteLogId}::uuid
     `);
+
+    // ✅ Seed Quote Version v1 (initial AI result snapshot)
+    try {
+      await db
+        .insert(quoteVersions)
+        .values({
+          tenantId: tenant.id,
+          quoteLogId,
+          version: 1,
+          aiMode: policyToStore.ai_mode,
+          source: "system",
+          output: outputToStore,
+          meta: {
+            seededFrom: "quote.submit.phase1",
+            seededAt: nowIso(),
+          },
+        })
+        .onConflictDoNothing({ target: [quoteVersions.quoteLogId, quoteVersions.version] });
+    } catch (e: any) {
+      debug("quoteVersions.seed_v1.failed", { quoteLogId, message: e?.message ?? String(e) });
+    }
 
     try {
       const emailResult = await sendFinalEstimateEmails({

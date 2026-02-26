@@ -214,10 +214,6 @@ function titleizeKey(k: string) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 }
 
-function fmtBool(v: any) {
-  return v === true ? "true" : v === false ? "false" : "—";
-}
-
 function fmtNum(v: any) {
   const n = Number(v);
   if (!Number.isFinite(n)) return "—";
@@ -302,6 +298,41 @@ function formatEstimateForPolicy(args: {
   if (low != null) return { text: formatUSD(low), tone: "green", label: "Range estimate" };
   if (high != null) return { text: formatUSD(high), tone: "green", label: "Range estimate" };
   return { text: null, tone: "green", label: "Range estimate" };
+}
+
+/* -------------------- quote lifecycle (new tables) helpers -------------------- */
+function tryJson(v: any): any {
+  if (v == null) return null;
+  if (typeof v === "object") return v;
+  if (typeof v !== "string") return null;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return null;
+  }
+}
+
+function pickAiAssessmentFromAny(outAny: any) {
+  const o = outAny ?? null;
+  return o?.assessment ?? o?.output?.assessment ?? o?.output ?? o ?? null;
+}
+
+function extractEstimate(outAny: any): { low: number | null; high: number | null } {
+  const a = pickAiAssessmentFromAny(outAny);
+  const low = safeMoney(a?.estimate_low ?? a?.estimateLow ?? a?.estimate?.low ?? a?.estimate?.estimate_low);
+  const high = safeMoney(a?.estimate_high ?? a?.estimateHigh ?? a?.estimate?.high ?? a?.estimate?.estimate_high);
+  return { low, high };
+}
+
+function humanWhen(v: any) {
+  try {
+    if (!v) return "—";
+    const d = v instanceof Date ? v : new Date(String(v));
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString();
+  } catch {
+    return "—";
+  }
 }
 
 type PageProps = {
@@ -418,9 +449,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           <div className="mt-2">
             The quote either belongs to a different tenant (and you’re not a member), or it no longer exists.
           </div>
-          <div className="mt-3 font-mono text-xs opacity-80">
-            quoteId={id} · activeTenantId={tenantId}
-          </div>
+          <div className="mt-3 font-mono text-xs opacity-80">quoteId={id} · activeTenantId={tenantId}</div>
           <div className="mt-4">
             <Link
               href="/admin/quotes"
@@ -450,19 +479,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
-  const stageLabel =
-    stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+  const stageLabel = stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
   // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
 
   // "aiAssessment" is the bucket we render from; with the deterministic engine we store fields at top level.
-  const aiAssessment =
-    outAny?.assessment ??
-    outAny?.output?.assessment ??
-    outAny?.output ??
-    outAny ??
-    null;
+  const aiAssessment = pickAiAssessmentFromAny(outAny);
 
   // Prefer new deterministic fields first
   const estLow = safeMoney(
@@ -489,22 +512,14 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions)
-    ? aiAssessment.questions.map((x: any) => String(x))
-    : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
-    ? aiAssessment.assumptions.map((x: any) => String(x))
-    : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
   const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
   // Deterministic pricing basis (new)
-  const pricingBasis: any =
-    aiAssessment?.pricing_basis ??
-    outAny?.pricing_basis ??
-    outAny?.output?.pricing_basis ??
-    null;
+  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   // Frozen snapshots (new)
   const inputAny: any = row.input ?? {};
@@ -523,35 +538,154 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
+  // -------------------- NEW: lifecycle tables (read-only for now) --------------------
+  type QuoteVersionRow = {
+    id: string;
+    version: number;
+    created_at: any;
+    created_by: string | null;
+    source: string | null;
+    reason: string | null;
+    ai_mode: string | null;
+    output: any;
+    meta: any;
+  };
+
+  type QuoteNoteRow = {
+    id: string;
+    created_at: any;
+    created_by: string | null;
+    body: string;
+    quote_version_id: string | null;
+  };
+
+  type QuoteRenderRow = {
+    id: string;
+    attempt: number;
+    status: string;
+    created_at: any;
+    updated_at: any;
+    created_by: string | null;
+    image_url: string | null;
+    prompt: string | null;
+    shop_notes: string | null;
+    error: string | null;
+    quote_version_id: string | null;
+  };
+
+  let versionRows: QuoteVersionRow[] = [];
+  let noteRows: QuoteNoteRow[] = [];
+  let renderRows: QuoteRenderRow[] = [];
+  let lifecycleReadError: string | null = null;
+
+  try {
+    const vr = await db.execute(sql`
+      select
+        id::text as "id",
+        version::int as "version",
+        created_at as "created_at",
+        created_by::text as "created_by",
+        source::text as "source",
+        reason::text as "reason",
+        ai_mode::text as "ai_mode",
+        output as "output",
+        meta as "meta"
+      from quote_versions
+      where quote_log_id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+      order by version asc, created_at asc
+    `);
+    versionRows = ((vr as any)?.rows ?? []) as QuoteVersionRow[];
+  } catch (e: any) {
+    // Keep page working even if tables are not present yet (or permission mismatch)
+    lifecycleReadError = safeTrim(e?.message) || "Failed to read quote_versions";
+  }
+
+  try {
+    const nr = await db.execute(sql`
+      select
+        id::text as "id",
+        created_at as "created_at",
+        created_by::text as "created_by",
+        body::text as "body",
+        quote_version_id::text as "quote_version_id"
+      from quote_notes
+      where quote_log_id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+      order by created_at desc
+      limit 200
+    `);
+    noteRows = ((nr as any)?.rows ?? []) as QuoteNoteRow[];
+  } catch (e: any) {
+    lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_notes");
+  }
+
+  try {
+    const rr = await db.execute(sql`
+      select
+        id::text as "id",
+        attempt::int as "attempt",
+        status::text as "status",
+        created_at as "created_at",
+        updated_at as "updated_at",
+        created_by::text as "created_by",
+        image_url::text as "image_url",
+        prompt::text as "prompt",
+        shop_notes::text as "shop_notes",
+        error::text as "error",
+        quote_version_id::text as "quote_version_id"
+      from quote_renders
+      where quote_log_id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+      order by created_at desc
+      limit 200
+    `);
+    renderRows = ((rr as any)?.rows ?? []) as QuoteRenderRow[];
+  } catch (e: any) {
+    lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_renders");
+  }
+
+  function renderStatusTone(s: string): "gray" | "blue" | "green" | "red" | "yellow" {
+    const v = String(s ?? "").toLowerCase().trim();
+    if (v === "rendered") return "green";
+    if (v === "failed") return "red";
+    if (v === "running" || v === "queued") return "blue";
+    return "gray";
+  }
+
+  function versionChip(v: number) {
+    return chip(`v${v}`, "blue");
+  }
+
+  function miniKeyValue(label: string, value: any) {
+    return (
+      <div className="text-xs text-gray-700 dark:text-gray-300">
+        <span className="font-semibold text-gray-900 dark:text-gray-100">{label}:</span>{" "}
+        <span className="font-mono">{safeTrim(value) || "—"}</span>
+      </div>
+    );
+  }
+
   async function setStage(formData: FormData) {
     "use server";
     const next = String(formData.get("stage") ?? "").trim().toLowerCase();
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db
-      .update(quoteLogs)
-      .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -687,14 +821,219 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
       <QuotePhotoGallery photos={photos} />
 
+      {/* NEW: Quote lifecycle (read-only) */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-lg font-semibold">Quote lifecycle</h3>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Versions, internal notes, and render attempts. (Read-only for now.)
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {versionRows.length ? chip(`${versionRows.length} version${versionRows.length === 1 ? "" : "s"}`, "blue") : chip("No versions yet", "gray")}
+            {noteRows.length ? chip(`${noteRows.length} note${noteRows.length === 1 ? "" : "s"}`, "gray") : null}
+            {renderRows.length ? chip(`${renderRows.length} render${renderRows.length === 1 ? "" : "s"}`, "gray") : null}
+          </div>
+        </div>
+
+        {lifecycleReadError ? (
+          <div className="mt-4 rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
+            <div className="font-semibold">Lifecycle tables not available yet</div>
+            <div className="mt-1 font-mono text-xs break-words">{lifecycleReadError}</div>
+          </div>
+        ) : null}
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-3">
+          {/* Versions */}
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-semibold">Versions</div>
+              {versionRows.length ? chip("History", "blue") : chip("Empty", "gray")}
+            </div>
+
+            <div className="mt-3 space-y-3">
+              {versionRows.length ? (
+                versionRows.slice(0, 30).map((v) => {
+                  const out = tryJson(v.output) ?? v.output;
+                  const est = extractEstimate(out);
+                  const conf = safeTrim(pickAiAssessmentFromAny(out)?.confidence ?? "");
+                  const summ = safeTrim(pickAiAssessmentFromAny(out)?.summary ?? "");
+
+                  const policyMode = safeTrim(v.ai_mode) || null;
+
+                  const estText =
+                    est.low != null && est.high != null
+                      ? `${formatUSD(est.low)} – ${formatUSD(est.high)}`
+                      : est.low != null
+                        ? formatUSD(est.low)
+                        : est.high != null
+                          ? formatUSD(est.high)
+                          : null;
+
+                  return (
+                    <div key={v.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {versionChip(Number(v.version ?? 0))}
+                          {policyMode ? chip(`mode: ${policyMode}`, "gray") : null}
+                          {safeTrim(v.source) ? chip(String(v.source), "gray") : null}
+                          {safeTrim(v.created_by) ? chip(String(v.created_by), "gray") : null}
+                        </div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(v.created_at)}</div>
+                      </div>
+
+                      {v.reason ? (
+                        <div className="mt-2 text-xs text-gray-700 dark:text-gray-200">
+                          <span className="font-semibold">Reason:</span> {String(v.reason)}
+                        </div>
+                      ) : null}
+
+                      <div className="mt-2 space-y-1">
+                        {estText ? miniKeyValue("Estimate", estText) : miniKeyValue("Estimate", "—")}
+                        {conf ? miniKeyValue("Confidence", conf) : null}
+                      </div>
+
+                      {summ ? (
+                        <div className="mt-2 text-xs text-gray-700 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
+                          {summ}
+                        </div>
+                      ) : null}
+
+                      <details className="mt-3">
+                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Raw version output (debug)
+                        </summary>
+                        <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-3 text-[11px] text-white dark:border-gray-800">
+{JSON.stringify(out ?? {}, null, 2)}
+                        </pre>
+                      </details>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-sm text-gray-600 dark:text-gray-300 italic">
+                  No versions yet. Once you seed v1 from the initial quote, you’ll see it here.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Notes */}
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-semibold">Internal notes</div>
+              {noteRows.length ? chip("Log", "gray") : chip("Empty", "gray")}
+            </div>
+
+            <div className="mt-3 space-y-3">
+              {noteRows.length ? (
+                noteRows.slice(0, 100).map((n) => (
+                  <div key={n.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {safeTrim(n.created_by) ? chip(String(n.created_by), "gray") : chip("tenant", "gray")}
+                        {n.quote_version_id ? chip("linked to version", "blue") : chip("general", "gray")}
+                      </div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.created_at)}</div>
+                    </div>
+                    <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
+                      {safeTrim(n.body) || <span className="italic text-gray-500">Empty note.</span>}
+                    </div>
+                    {n.quote_version_id ? (
+                      <div className="mt-2 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
+                        versionId: {n.quote_version_id}
+                      </div>
+                    ) : null}
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-600 dark:text-gray-300 italic">No notes yet.</div>
+              )}
+            </div>
+          </div>
+
+          {/* Renders */}
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-semibold">Render attempts</div>
+              {renderRows.length ? chip("History", "gray") : chip("Empty", "gray")}
+            </div>
+
+            <div className="mt-3 space-y-3">
+              {renderRows.length ? (
+                renderRows.slice(0, 60).map((r) => (
+                  <div key={r.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {chip(`Attempt ${Number(r.attempt ?? 1)}`, "gray")}
+                        {chip(String(r.status ?? "unknown"), renderStatusTone(String(r.status ?? "")))}
+                        {safeTrim(r.created_by) ? chip(String(r.created_by), "gray") : null}
+                        {r.quote_version_id ? chip("from version", "blue") : null}
+                      </div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(r.created_at)}</div>
+                    </div>
+
+                    {r.image_url ? (
+                      <a href={r.image_url} target="_blank" rel="noreferrer" className="mt-3 block">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={r.image_url}
+                          alt="Render attempt"
+                          className="w-full rounded-xl border border-gray-200 bg-white object-contain dark:border-gray-800"
+                        />
+                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
+                      </a>
+                    ) : (
+                      <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">
+                        No image_url for this attempt.
+                      </div>
+                    )}
+
+                    {r.error ? (
+                      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
+                        {r.error}
+                      </div>
+                    ) : null}
+
+                    {r.shop_notes ? (
+                      <details className="mt-3">
+                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Shop notes
+                        </summary>
+                        <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
+                          {String(r.shop_notes)}
+                        </div>
+                      </details>
+                    ) : null}
+
+                    {r.prompt ? (
+                      <details className="mt-3">
+                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Render prompt (debug)
+                        </summary>
+                        <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-3 text-[11px] text-white dark:border-gray-800">
+{String(r.prompt)}
+                        </pre>
+                      </details>
+                    ) : null}
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-600 dark:text-gray-300 italic">No render attempts yet.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Details */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Details</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              AI describes scope. Server computes dollars (deterministic).
-            </p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI describes scope. Server computes dollars (deterministic).</p>
           </div>
           {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
         </div>
@@ -722,7 +1061,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   {pricingBasis?.model ? chip(`Model: ${String(pricingBasis.model)}`, "gray") : null}
                   {pricingPolicySnap?.ai_mode ? chip(`AI mode: ${String(pricingPolicySnap.ai_mode)}`, "gray") : null}
                   {typeof pricingPolicySnap?.pricing_enabled === "boolean"
-                    ? chip(`Pricing enabled: ${pricingPolicySnap.pricing_enabled ? "true" : "false"}`, pricingPolicySnap.pricing_enabled ? "green" : "yellow")
+                    ? chip(
+                        `Pricing enabled: ${pricingPolicySnap.pricing_enabled ? "true" : "false"}`,
+                        pricingPolicySnap.pricing_enabled ? "green" : "yellow"
+                      )
                     : null}
                 </div>
               </div>
@@ -738,8 +1080,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">llmKeySource:</span> {llmKeySource ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">pricing_model (policy):</span>{" "}
-                      {pricingPolicySnap?.pricing_model ?? "—"}
+                      <span className="font-semibold">pricing_model (policy):</span> {pricingPolicySnap?.pricing_model ?? "—"}
                     </div>
                   </div>
                 </div>
@@ -757,12 +1098,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">minJobApplied:</span> {pricingBasis?.minJobApplied ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">maxWithoutInspectionApplied:</span>{" "}
-                      {pricingBasis?.maxWithoutInspectionApplied ?? "—"}
+                      <span className="font-semibold">maxWithoutInspectionApplied:</span> {pricingBasis?.maxWithoutInspectionApplied ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">forcedInspection:</span>{" "}
-                      {pricingBasis?.forcedInspection ? "true" : "false"}
+                      <span className="font-semibold">forcedInspection:</span> {pricingBasis?.forcedInspection ? "true" : "false"}
                     </div>
                   </div>
                 </div>
@@ -772,14 +1111,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   <div className="mt-2 space-y-1 text-gray-700 dark:text-gray-300">
                     {pricingBasis?.hours ? (
                       <div>
-                        <span className="font-semibold">hours:</span>{" "}
-                        {fmtNum(pricingBasis.hours?.low)} – {fmtNum(pricingBasis.hours?.high)}
+                        <span className="font-semibold">hours:</span> {fmtNum(pricingBasis.hours?.low)} – {fmtNum(pricingBasis.hours?.high)}
                       </div>
                     ) : null}
                     {pricingBasis?.units ? (
                       <div>
-                        <span className="font-semibold">units:</span>{" "}
-                        {fmtNum(pricingBasis.units?.low)} – {fmtNum(pricingBasis.units?.high)}
+                        <span className="font-semibold">units:</span> {fmtNum(pricingBasis.units?.low)} – {fmtNum(pricingBasis.units?.high)}
                       </div>
                     ) : null}
                     {pricingBasis?.hourly ? (
@@ -874,27 +1211,23 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                 ) : null}
 
                 {!aiAssessment ? (
-                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">
-                    No AI output found yet (quoteLogs.output is empty).
-                  </div>
+                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">No AI output found yet (quoteLogs.output is empty).</div>
                 ) : null}
               </div>
             </div>
 
             <details className="mt-4">
-              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                Raw AI JSON (debug)
-              </summary>
+              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Raw AI JSON (debug)</summary>
               <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {JSON.stringify(row.output ?? {}, null, 2)}
               </pre>
             </details>
           </div>
 
-          {/* Rendering */}
+          {/* Rendering (legacy single-render fields on quote_logs; keep for back-compat) */}
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="text-sm font-semibold">Rendering</div>
+              <div className="text-sm font-semibold">Rendering (legacy)</div>
               <div className="flex flex-wrap items-center gap-2">
                 {renderChip(row.renderStatus)}
                 {row.renderedAt ? chip(new Date(row.renderedAt).toLocaleString(), "gray") : null}
@@ -924,9 +1257,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
               {row.renderPrompt ? (
                 <details className="mt-4">
-                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                    Render prompt (debug)
-                  </summary>
+                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Render prompt (debug)</summary>
                   <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {String(row.renderPrompt)}
                   </pre>
