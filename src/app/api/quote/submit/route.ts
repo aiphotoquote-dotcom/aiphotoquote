@@ -685,6 +685,7 @@ function buildAiSnapshot(args: {
 /**
  * ✅ Create/Update Quote Version v1 (system) once quote is finalized.
  * This is additive and does NOT replace quote_logs.
+ */
 async function upsertSystemVersionV1(args: {
   tenantId: string;
   quoteLogId: string;
@@ -697,11 +698,13 @@ async function upsertSystemVersionV1(args: {
 
   const p = normalizePricingPolicy(policy);
 
-  // ✅ IMPORTANT: inline ai_mode literal (enum-safe)
-  // Only allow known values to prevent SQL injection.
+  // strictly enforce allowed values
   const aiMode: "assessment_only" | "range" | "fixed" =
-    p.ai_mode === "assessment_only" || p.ai_mode === "range" || p.ai_mode === "fixed" ? p.ai_mode : "assessment_only";
-  const aiModeLiteral = sql.raw(`'${aiMode}'`);
+    p.ai_mode === "assessment_only" ||
+    p.ai_mode === "range" ||
+    p.ai_mode === "fixed"
+      ? p.ai_mode
+      : "assessment_only";
 
   const versionOutput = {
     confidence: output?.confidence ?? null,
@@ -719,7 +722,11 @@ async function upsertSystemVersionV1(args: {
 
   const metaSafe = meta && typeof meta === "object" ? meta : null;
 
-  debug?.("quoteVersions.v1.upsert.start", { tenantId, quoteLogId, aiMode });
+  debug?.("quoteVersions.v1.upsert.start", {
+    tenantId,
+    quoteLogId,
+    aiMode,
+  });
 
   await db.execute(sql`
     insert into quote_versions (
@@ -737,7 +744,7 @@ async function upsertSystemVersionV1(args: {
       ${tenantId}::uuid,
       ${quoteLogId}::uuid,
       1,
-      ${aiModeLiteral},
+      ${aiMode},
       'system',
       ${JSON.stringify(versionOutput)}::jsonb,
       ${metaSafe ? JSON.stringify(metaSafe) : null}::jsonb,
