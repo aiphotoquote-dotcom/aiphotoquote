@@ -20,7 +20,7 @@ export type QuoteVersionRow = {
 export type QuoteNoteRow = {
   id: string;
   createdAt: any;
-  actor: string | null;
+  createdBy: string | null;
   body: string;
   quoteVersionId: string | null;
 };
@@ -70,7 +70,7 @@ export async function getQuoteLifecycle(args: { id: string; tenantId: string }) 
       .select({
         id: quoteNotes.id,
         createdAt: quoteNotes.createdAt,
-        actor: quoteNotes.actor,
+        createdBy: quoteNotes.createdBy,
         body: quoteNotes.body,
         quoteVersionId: quoteNotes.quoteVersionId,
       })
