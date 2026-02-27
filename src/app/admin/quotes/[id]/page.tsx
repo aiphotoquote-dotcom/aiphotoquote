@@ -25,12 +25,6 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-function isUuid(v: unknown) {
-  const s = String(v ?? "").trim();
-  // good-enough UUID v4-ish shape check (keeps DB from throwing on ::uuid casts)
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
-}
-
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
     jar.get("activeTenantId")?.value,
@@ -43,8 +37,7 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
     jar.get("__Host-active_tenant_id")?.value,
   ].filter(Boolean) as string[];
 
-  const first = candidates[0] || null;
-  return first && isUuid(first) ? first : null;
+  return candidates[0] || null;
 }
 
 function digitsOnly(s: string) {
@@ -357,15 +350,13 @@ function normalizeAiMode(v: any): AiMode {
 }
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
-  const { userId } = await auth();
+  const session = await auth();
+  const userId = session.userId;
   if (!userId) redirect("/sign-in");
 
   const p = await params;
   const id = String((p as any)?.id ?? "").trim();
   if (!id) redirect("/admin/quotes");
-
-  // Keep redirects safe: if someone hits /admin/quotes/foo, don't explode on UUID comparisons
-  if (!isUuid(id)) redirect("/admin/quotes");
 
   const sp = searchParams ? await searchParams : {};
   const skipAutoRead =
@@ -383,8 +374,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         and(
           eq(tenantMembers.tenantId, tenantIdMaybe),
           eq(tenantMembers.clerkUserId, userId),
-          eq(tenantMembers.status, "active"),
-        ),
+          eq(tenantMembers.status, "active")
+        )
       )
       .limit(1)
       .then((r) => r[0] ?? null);
@@ -405,7 +396,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   }
 
   if (!tenantIdMaybe) redirect("/admin/quotes");
-  const tenantId = tenantIdMaybe;
+  const tenantId: string = tenantIdMaybe;
 
   // 1) Strict tenant-scoped lookup
   let row = await db
@@ -440,7 +431,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const quoteTenantId = q?.tenantId ? String(q.tenantId) : null;
 
-    if (quoteTenantId && isUuid(quoteTenantId)) {
+    if (quoteTenantId) {
       const membership = await db
         .select({ ok: sql<number>`1` })
         .from(tenantMembers)
@@ -448,8 +439,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           and(
             eq(tenantMembers.tenantId, quoteTenantId),
             eq(tenantMembers.clerkUserId, userId),
-            eq(tenantMembers.status, "active"),
-          ),
+            eq(tenantMembers.status, "active")
+          )
         )
         .limit(1)
         .then((r) => r[0] ?? null);
@@ -457,7 +448,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       if (membership?.ok) {
         const next = `/admin/quotes/${encodeURIComponent(id)}`;
         redirect(
-          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`,
+          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`
         );
       }
     }
@@ -516,13 +507,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     aiAssessment?.estimate_low ??
       aiAssessment?.estimateLow ??
       aiAssessment?.estimate?.low ??
-      aiAssessment?.estimate?.estimate_low,
+      aiAssessment?.estimate?.estimate_low
   );
   const estHigh = safeMoney(
     aiAssessment?.estimate_high ??
       aiAssessment?.estimateHigh ??
       aiAssessment?.estimate?.high ??
-      aiAssessment?.estimate?.estimate_high,
+      aiAssessment?.estimate?.estimate_high
   );
 
   const confidence = aiAssessment?.confidence ?? null;
@@ -570,8 +561,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     id: string;
     version: number;
     createdAt: any;
-    createdBy: string | null;
-    source: string | null;
+    createdBy: string;
+    source: string;
     reason: string | null;
     aiMode: string | null;
     output: any;
@@ -684,6 +675,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   async function setStage(formData: FormData) {
     "use server";
+
+    const session = await auth();
+    if (!session.userId) redirect("/sign-in");
+
     const next = String(formData.get("stage") ?? "").trim().toLowerCase();
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
@@ -698,6 +693,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   async function markUnread() {
     "use server";
+
+    const session = await auth();
+    if (!session.userId) redirect("/sign-in");
+
     await db
       .update(quoteLogs)
       .set({ isRead: false } as any)
@@ -707,6 +706,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   async function markRead() {
     "use server";
+
+    const session = await auth();
+    if (!session.userId) redirect("/sign-in");
+
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
@@ -716,6 +719,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   async function createNewVersion(formData: FormData) {
     "use server";
+
+    const session = await auth();
+    const actorUserId = session.userId;
+    if (!actorUserId) redirect("/sign-in");
 
     const engine = normalizeEngine(formData.get("engine"));
     const aiMode = normalizeAiMode(formData.get("ai_mode"));
@@ -729,12 +736,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       })
       .from(quoteVersions)
       .where(and(eq(quoteVersions.quoteLogId, id), eq(quoteVersions.tenantId, tenantId)))
+      .limit(1)
       .then((r) => r[0]?.v ?? 0);
 
     const nextVersion = Number(vmax ?? 0) + 1;
 
-    // freeze current output snapshot so UI shows something immediately
-    const frozenOutput = (row?.output ?? {}) as any;
+    // Freeze current output snapshot (use the currently-loaded row snapshot)
+    const frozenOutput = (row.output ?? {}) as any;
 
     const meta = {
       engine,
@@ -751,15 +759,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const inserted = await db
       .insert(quoteVersions)
       .values({
-        tenantId,
-        quoteLogId: id,
+        tenantId, // ✅ string
+        quoteLogId: id, // ✅ string(uuid)
         version: nextVersion,
-        aiMode,
+        aiMode, // ✅ nullable column, but we always pass a valid AiMode anyway
         source: "tenant_edit",
-        createdBy: userId, // clerk user id (portable enough for now)
-        reason: reason || null,
-        output: frozenOutput ?? {},
-        meta: meta ?? {},
+        createdBy: actorUserId, // ✅ NOT NULL (don’t pass null)
+        reason: reason ? reason : null, // ✅ nullable column
+        output: frozenOutput || {}, // ✅ NOT NULL
+        meta: meta || {}, // ✅ NOT NULL
       })
       .returning({ id: quoteVersions.id })
       .then((r) => r[0] ?? null);
@@ -770,15 +778,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       await db.insert(quoteNotes).values({
         tenantId,
         quoteLogId: id,
-        quoteVersionId: newVersionId,
-        actor: userId,
+        quoteVersionId: newVersionId ?? null,
+        actor: actorUserId,
         body: noteBody,
       });
     }
-
-    // NOTE: The "right way" to run reassessment is to queue a job and have a worker
-    // write updated output back into quote_versions.output (+ meta).
-    // For now we only mark meta.needs_ai_reassessment=true and store notes.
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
@@ -788,7 +792,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
+          <Link
+            href="/admin/quotes"
+            className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300"
+          >
             ← Back to quotes
           </Link>
           <h1 className="mt-2 text-2xl font-semibold">Quote review</h1>
@@ -920,14 +927,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Quote lifecycle</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Versions, internal notes, and render attempts.</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              Versions, internal notes, and render attempts.
+            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             {versionRows.length
               ? chip(`${versionRows.length} version${versionRows.length === 1 ? "" : "s"}`, "blue")
               : chip("No versions yet", "gray")}
-            {noteRows.length ? chip(`${noteRows.length} note${noteRows.length === 1 ? "" : "s"}`, "gray") : null}
+            {noteRows.length
+              ? chip(`${noteRows.length} note${noteRows.length === 1 ? "" : "s"}`, "gray")
+              : null}
             {renderRows.length
               ? chip(`${renderRows.length} render${renderRows.length === 1 ? "" : "s"}`, "gray")
               : null}
@@ -1103,7 +1114,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   );
                 })
               ) : (
-                <div className="text-sm text-gray-600 dark:text-gray-300 italic">No versions yet.</div>
+                <div className="text-sm text-gray-600 dark:text-gray-300 italic">
+                  No versions yet. Once you seed v1 from the initial quote, you’ll see it here.
+                </div>
               )}
             </div>
           </div>
@@ -1256,13 +1269,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-sm font-semibold">Pricing engine</div>
                 <div className="flex flex-wrap gap-2 items-center">
-                  {pricingBasis?.method ? chip(`Method: ${String(pricingBasis.method)}`, "blue") : chip("Method: —", "gray")}
+                  {pricingBasis?.method
+                    ? chip(`Method: ${String(pricingBasis.method)}`, "blue")
+                    : chip("Method: —", "gray")}
                   {pricingBasis?.model ? chip(`Model: ${String(pricingBasis.model)}`, "gray") : null}
                   {pricingPolicySnap?.ai_mode ? chip(`AI mode: ${String(pricingPolicySnap.ai_mode)}`, "gray") : null}
                   {typeof pricingPolicySnap?.pricing_enabled === "boolean"
                     ? chip(
                         `Pricing enabled: ${pricingPolicySnap.pricing_enabled ? "true" : "false"}`,
-                        pricingPolicySnap.pricing_enabled ? "green" : "yellow",
+                        pricingPolicySnap.pricing_enabled ? "green" : "yellow"
                       )
                     : null}
                 </div>
@@ -1279,8 +1294,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">llmKeySource:</span> {llmKeySource ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">pricing_model (policy):</span>{" "}
-                      {pricingPolicySnap?.pricing_model ?? "—"}
+                      <span className="font-semibold">pricing_model (policy):</span> {pricingPolicySnap?.pricing_model ?? "—"}
                     </div>
                   </div>
                 </div>
@@ -1366,7 +1380,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     pricing_rules_snapshot: pricingRulesSnap ?? null,
   },
   null,
-  2,
+  2
 )}
                 </pre>
               </details>
@@ -1394,7 +1408,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
                 {visibleScope.length ? (
                   <div>
-                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">VISIBLE SCOPE</div>
+                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+                      VISIBLE SCOPE
+                    </div>
                     <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
                       {visibleScope.slice(0, 8).map((q, i) => (
                         <li key={i}>{q}</li>
