@@ -432,13 +432,13 @@ export const quoteVersions = pgTable(
 /**
  * Quote notes — tenant-authored notes (internal for now; can add visibility flags later)
  *
- * ✅ MUST match prod DB (your pasted table):
+ * ✅ MUST match prod DB shape you pasted:
  * - body NOT NULL default ''
  * - created_by NOT NULL default 'tenant'
  * - quote_version_id FK ON DELETE SET NULL
  * - indexes:
- *    - quote_notes_quote_log_created_idx (quote_log_id, created_at DESC)
- *    - quote_notes_tenant_created_idx (tenant_id, created_at DESC)
+ *   - quote_notes_quote_log_created_idx (quote_log_id, created_at desc)
+ *   - quote_notes_tenant_created_idx (tenant_id, created_at desc)
  */
 export const quoteNotes = pgTable(
   "quote_notes",
