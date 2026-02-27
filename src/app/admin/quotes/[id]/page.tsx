@@ -77,10 +77,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const tenantId: string = tenantIdMaybe;
 
   // 1) Strict tenant-scoped lookup
-  const rowMaybe = await getAdminQuoteRow({ id, tenantId });
+  let row = await getAdminQuoteRow({ id, tenantId });
 
   // 2) Auto-heal if quote belongs to a different tenant the user is a member of
-  if (!rowMaybe) {
+  if (!row) {
     const redirectTenantId = await findRedirectTenantForQuote({ id, userId });
     if (redirectTenantId) {
       const next = `/admin/quotes/${encodeURIComponent(id)}`;
@@ -113,13 +113,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       </div>
     );
   }
-
-  /**
-   * ✅ Critical TS fix:
-   * Capture a non-null snapshot for nested server-action closures.
-   * (TypeScript will not narrow a `let` across "use server" closures reliably.)
-   */
-  const row = rowMaybe;
 
   // Track UI-state for read/unread (because we update DB after fetch)
   let isRead = Boolean(row.isRead);
@@ -267,7 +260,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           tenantId,
           quoteLogId: id,
           quoteVersionId: null,
-          createdBy: actorUserId,
+          actor: actorUserId,
           body: noteBody,
         })
         .returning({ id: quoteNotes.id })
@@ -365,6 +358,85 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
+  async function requestRender(formData: FormData) {
+    "use server";
+
+    const session = await auth();
+    const actorUserId = session.userId;
+    if (!actorUserId) redirect("/sign-in");
+
+    const versionId = safeTrim(formData.get("version_id"));
+    const shopNotes = safeTrim(formData.get("shop_notes"));
+
+    if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=missing_version`);
+
+    // membership check
+    const membership = await db
+      .select({ ok: sql<number>`1` })
+      .from(tenantMembers)
+      .where(
+        and(
+          eq(tenantMembers.tenantId, tenantId),
+          eq(tenantMembers.clerkUserId, actorUserId),
+          eq(tenantMembers.status, "active")
+        )
+      )
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+
+    // Validate that version belongs to this quote + tenant
+    const vr = await db.execute(sql`
+      select 1 as ok
+      from quote_versions v
+      where v.id = ${versionId}::uuid
+        and v.tenant_id = ${tenantId}::uuid
+        and v.quote_log_id = ${id}::uuid
+      limit 1
+    `);
+    const vok = Boolean((vr as any)?.rows?.[0]?.ok);
+    if (!vok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=bad_version`);
+
+    // Next attempt number for this version
+    const ar = await db.execute(sql`
+      select coalesce(max(r.attempt), 0) as "max_attempt"
+      from quote_renders r
+      where r.tenant_id = ${tenantId}::uuid
+        and r.quote_version_id = ${versionId}::uuid
+    `);
+    const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
+    const nextAttempt = Number(maxAttemptRaw ?? 0) + 1;
+
+    // Insert queued render attempt
+    const ins = await db.execute(sql`
+      insert into quote_renders (
+        tenant_id,
+        quote_log_id,
+        quote_version_id,
+        attempt,
+        status,
+        shop_notes,
+        created_at
+      )
+      values (
+        ${tenantId}::uuid,
+        ${id}::uuid,
+        ${versionId}::uuid,
+        ${nextAttempt},
+        'queued',
+        ${shopNotes || null},
+        now()
+      )
+      returning id::text as "id"
+    `);
+
+    const ok = Boolean((ins as any)?.rows?.[0]?.id);
+    if (!ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed`);
+
+    redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
+  }
+
   /* -------------------- render -------------------- */
   const submittedAtLabel = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
 
@@ -399,6 +471,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         activeVersion={activeVersion}
         createNewVersionAction={createNewVersion}
         restoreVersionAction={restoreVersion}
+        requestRenderAction={requestRender}
       />
 
       <DetailsPanel

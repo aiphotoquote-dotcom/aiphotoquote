@@ -30,6 +30,17 @@ function noteActor(n: QuoteNoteRow) {
   return safeTrim(anyN.actor) || safeTrim(anyN.createdBy) || safeTrim(anyN.created_by) || "";
 }
 
+function defaultRenderVersionId(versionRows: QuoteVersionRow[], activeVersion: number | null) {
+  if (!versionRows?.length) return "";
+  if (activeVersion != null) {
+    const hit = versionRows.find((v) => Number(v.version) === Number(activeVersion));
+    if (hit?.id) return String(hit.id);
+  }
+  // prefer latest version id (by version number)
+  const sorted = [...versionRows].sort((a, b) => Number(b.version ?? 0) - Number(a.version ?? 0));
+  return sorted[0]?.id ? String(sorted[0].id) : "";
+}
+
 export default function LifecyclePanel(props: {
   quoteId: string;
   versionRows: QuoteVersionRow[];
@@ -41,6 +52,7 @@ export default function LifecyclePanel(props: {
 
   createNewVersionAction: any;
   restoreVersionAction: any;
+  requestRenderAction: any;
 }) {
   const {
     quoteId,
@@ -51,11 +63,14 @@ export default function LifecyclePanel(props: {
     activeVersion,
     createNewVersionAction,
     restoreVersionAction,
+    requestRenderAction,
   } = props;
 
   const versionsCount = versionRows?.length ?? 0;
   const notesCount = noteRows?.length ?? 0;
   const rendersCount = renderRows?.length ?? 0;
+
+  const defaultVersionId = defaultRenderVersionId(versionRows, activeVersion);
 
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -75,13 +90,13 @@ export default function LifecyclePanel(props: {
         </div>
       </div>
 
-      {/* Create version (NOT hidden) */}
+      {/* Create version */}
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Create a new version</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              This freezes a new output in <span className="font-mono">quote_versions</span>. Optional note is saved in{" "}
+              Freezes a new output in <span className="font-mono">quote_versions</span>. Optional note is saved in{" "}
               <span className="font-mono">quote_notes</span> and linked to that version.
             </div>
           </div>
@@ -166,7 +181,7 @@ export default function LifecyclePanel(props: {
             </button>
 
             <div className="text-xs text-gray-600 dark:text-gray-300">
-              Tip: use deterministic for “pricing refresh”, full AI when the scope materially changed.
+              Tip: deterministic for “pricing refresh”, full AI when scope changed.
             </div>
           </div>
         </form>
@@ -264,11 +279,22 @@ export default function LifecyclePanel(props: {
                       <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No summary on this version.</div>
                     )}
 
-                    {v.reason ? (
-                      <div className="mt-3 text-xs text-gray-700 dark:text-gray-200">
-                        <span className="font-semibold">Reason:</span> {String(v.reason)}
+                    {/* Quick render request */}
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs text-gray-600 dark:text-gray-300">
+                        Actions
                       </div>
-                    ) : null}
+                      <form action={requestRenderAction} className="flex items-center gap-2">
+                        <input type="hidden" name="version_id" value={v.id} />
+                        <button
+                          type="submit"
+                          className="rounded-lg bg-black px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                          title="Queue a render attempt for this version"
+                        >
+                          Request render
+                        </button>
+                      </form>
+                    </div>
 
                     <details className="mt-4">
                       <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
@@ -291,7 +317,7 @@ export default function LifecyclePanel(props: {
               })
             ) : (
               <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                No versions yet. Once you create v1, this becomes your audit trail + restore point list.
+                No versions yet. Create v1 first so renders can attach to a version.
               </div>
             )}
           </div>
@@ -344,21 +370,89 @@ export default function LifecyclePanel(props: {
               })
             ) : (
               <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                No notes yet. Notes are for shop-only context (materials, measurements, special instructions, etc.).
+                No notes yet.
               </div>
             )}
           </div>
         </div>
 
         {/* Renders */}
-        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+        <div
+          id="renders"
+          className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black"
+        >
           <div className="flex items-center justify-between gap-2">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render attempts</div>
             {rendersCount ? chip("History", "gray") : chip("Empty", "gray")}
           </div>
 
-          <div className="mt-3 space-y-3">
-            {rendersCount ? (
+          {/* Request render (main form) */}
+          <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Request a render</div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+              This queues a <span className="font-mono">quote_renders</span> row (status: <span className="font-mono">queued</span>).
+              Worker wiring comes next.
+            </div>
+
+            <form action={requestRenderAction} className="mt-3 grid gap-3">
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
+                <select
+                  name="version_id"
+                  defaultValue={defaultVersionId}
+                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                  disabled={!versionRows.length}
+                >
+                  {versionRows.length ? (
+                    [...versionRows]
+                      .sort((a, b) => Number(b.version ?? 0) - Number(a.version ?? 0))
+                      .map((v) => {
+                        const isActive = activeVersion != null && Number(v.version) === Number(activeVersion);
+                        return (
+                          <option key={v.id} value={v.id}>
+                            {`v${Number(v.version ?? 0)}`} {isActive ? "(active)" : ""}
+                          </option>
+                        );
+                      })
+                  ) : (
+                    <option value="">No versions yet</option>
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes (optional)</div>
+                <textarea
+                  name="shop_notes"
+                  rows={3}
+                  placeholder="Any specific rendering instructions (materials, colors, stitching notes, keep shape, etc.)"
+                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={!versionRows.length}
+                className={
+                  "rounded-lg px-4 py-2 text-sm font-semibold " +
+                  (versionRows.length
+                    ? "bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
+                    : "bg-gray-200 text-gray-500 dark:bg-gray-800 dark:text-gray-400")
+                }
+              >
+                Queue render
+              </button>
+
+              {!versionRows.length ? (
+                <div className="text-xs text-gray-600 dark:text-gray-300">
+                  Create a version first — renders attach to a version.
+                </div>
+              ) : null}
+            </form>
+          </div>
+
+          <div className="mt-4 space-y-3">
+            {renderRows.length ? (
               renderRows.slice(0, 60).map((r) => (
                 <div
                   key={r.id}
@@ -416,11 +510,17 @@ export default function LifecyclePanel(props: {
                       </pre>
                     </details>
                   ) : null}
+
+                  {r.quoteVersionId ? (
+                    <div className="mt-3 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
+                      versionId: {r.quoteVersionId}
+                    </div>
+                  ) : null}
                 </div>
               ))
             ) : (
               <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                No render attempts yet. Next step is to add a “Request render” action that queues a render for a version.
+                No render attempts yet. Queue one above to verify the DB loop.
               </div>
             )}
           </div>
