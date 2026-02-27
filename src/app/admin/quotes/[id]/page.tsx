@@ -77,10 +77,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const tenantId: string = tenantIdMaybe;
 
   // 1) Strict tenant-scoped lookup
-  const rowMaybe = await getAdminQuoteRow({ id, tenantId });
+  let row = await getAdminQuoteRow({ id, tenantId });
 
   // 2) Auto-heal if quote belongs to a different tenant the user is a member of
-  if (!rowMaybe) {
+  if (!row) {
     const redirectTenantId = await findRedirectTenantForQuote({ id, userId });
     if (redirectTenantId) {
       const next = `/admin/quotes/${encodeURIComponent(id)}`;
@@ -113,9 +113,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       </div>
     );
   }
-
-  // From here down, row is guaranteed non-null (important for server action closures)
-  const row = rowMaybe;
 
   // Track UI-state for read/unread (because we update DB after fetch)
   let isRead = Boolean(row.isRead);
@@ -263,7 +260,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           tenantId,
           quoteLogId: id,
           quoteVersionId: null,
-          actor: actorUserId,
+
+          // ✅ prod column is created_by
+          createdBy: actorUserId,
+
           body: noteBody,
         })
         .returning({ id: quoteNotes.id })

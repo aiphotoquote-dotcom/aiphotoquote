@@ -388,21 +388,7 @@ export const quoteLogs = pgTable("quote_logs", {
 /**
  * Quote versions — human-initiated lifecycle (additive; does NOT replace quote_logs)
  *
- * ✅ MUST match prod DB shape you pasted:
- * columns:
- * - id (pk)
- * - quote_log_id (not null)
- * - tenant_id (not null)
- * - version (not null)
- * - output (not null)
- * - meta (not null)
- * - created_at (not null)
- * - ai_mode (nullable)
- * - created_by (not null)
- * - source (not null)
- * - reason (nullable)
- *
- * NOTE: prod does NOT have updated_at.
+ * ✅ MUST match prod DB shape you pasted.
  */
 export const quoteVersions = pgTable(
   "quote_versions",
@@ -439,11 +425,6 @@ export const quoteVersions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // matches your neon indexes list:
-    // - quote_versions_pkey (implicit by primaryKey)
-    // - quote_versions_quote_log_created_idx (quote_log_id, created_at desc)
-    // - quote_versions_tenant_created_idx (tenant_id, created_at desc)
-    // - unique (quote_log_id, version)
     quoteLogCreatedIdx: index("quote_versions_quote_log_created_idx").on(t.quoteLogId, t.createdAt),
     tenantCreatedIdx: index("quote_versions_tenant_created_idx").on(t.tenantId, t.createdAt),
     quoteLogVersionUq: uniqueIndex("quote_versions_quote_log_id_version_uq").on(t.quoteLogId, t.version),
@@ -452,35 +433,36 @@ export const quoteVersions = pgTable(
 
 /**
  * Quote notes — tenant-authored notes (internal for now; can add visibility flags later)
+ *
+ * ✅ MUST match prod DB you pasted:
+ * - created_by (text, not null, default 'tenant')
+ * - body (text, not null, default '')
+ * - quote_version_id FK ON DELETE SET NULL
  */
 export const quoteNotes = pgTable(
   "quote_notes",
   {
     id: uuid("id").defaultRandom().primaryKey(),
 
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-
     quoteLogId: uuid("quote_log_id")
       .notNull()
       .references(() => quoteLogs.id, { onDelete: "cascade" }),
 
-    // Optional: attach to a specific version (recommended)
-    quoteVersionId: uuid("quote_version_id").references(() => quoteVersions.id, { onDelete: "cascade" }),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
 
-    // Clerk user id or email (portable enough for now)
-    actor: text("actor"),
+    quoteVersionId: uuid("quote_version_id").references(() => quoteVersions.id, { onDelete: "set null" }),
 
-    body: text("body").notNull(),
+    body: text("body").notNull().default(""),
+
+    createdBy: text("created_by").notNull().default("tenant"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    tenantIdx: index("quote_notes_tenant_id_idx").on(t.tenantId),
-    quoteLogIdx: index("quote_notes_quote_log_id_idx").on(t.quoteLogId),
-    quoteVersionIdx: index("quote_notes_quote_version_id_idx").on(t.quoteVersionId),
-    createdIdx: index("quote_notes_created_at_idx").on(t.createdAt),
+    quoteLogCreatedIdx: index("quote_notes_quote_log_created_idx").on(t.quoteLogId, t.createdAt),
+    tenantCreatedIdx: index("quote_notes_tenant_created_idx").on(t.tenantId, t.createdAt),
   })
 );
 
@@ -619,16 +601,6 @@ export const tenantOnboarding = pgTable(
 
 /**
  * Industry prompt packs (✅ aligned to what your PCC page + merge route query)
- *
- * Your code queries:
- * - enabled
- * - version
- * - pack
- * - models
- * - prompts
- * - updated_at
- *
- * And uses "multiple versions per industry", so DO NOT unique industry_key here.
  */
 export const industryLlmPacks = pgTable(
   "industry_llm_packs",
@@ -657,11 +629,6 @@ export const industryLlmPacks = pgTable(
 
 /**
  * Industry change log (append-only)
- * ✅ MUST match prod DB:
- * - source_industry_key / target_industry_key
- * - snapshot (jsonb)
- * - created_at
- * - action check in DB (we'll expand to include canonicalize)
  */
 export const industryChangeLog = pgTable(
   "industry_change_log",
