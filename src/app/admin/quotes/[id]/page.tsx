@@ -43,6 +43,12 @@ import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * NOTE:
+ * - Server actions stay in this page to avoid Next action scoping pitfalls.
+ * - UI + data loading + parsing is modularized.
+ */
+
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
   searchParams?:
@@ -65,12 +71,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const jar = await cookies();
 
+  // IMPORTANT: keep tenantId strictly typed as string for server-action closures
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId });
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId: string = tenantIdMaybe;
 
+  // 1) Strict tenant-scoped lookup
   let row = await getAdminQuoteRow({ id, tenantId });
 
+  // 2) Auto-heal if quote belongs to a different tenant the user is a member of
   if (!row) {
     const redirectTenantId = await findRedirectTenantForQuote({ id, userId });
     if (redirectTenantId) {
@@ -105,7 +114,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     );
   }
 
-  let isRead = Boolean(row.isRead);
+  // ✅ Snapshot non-null row for server-action closures (TS won't keep narrowing inside nested functions)
+  const rowSnap = row;
+
+  // Track UI-state for read/unread (because we update DB after fetch)
+  let isRead = Boolean(rowSnap.isRead);
 
   if (!skipAutoRead && !isRead) {
     await db
@@ -115,17 +128,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     isRead = true;
   }
 
-  const lead = pickLead(row.input);
-  const notes = pickCustomerNotes(row.input);
-  const photos = pickPhotos(row.input);
+  const lead = pickLead(rowSnap.input);
+  const notes = pickCustomerNotes(rowSnap.input);
+  const photos = pickPhotos(rowSnap.input);
 
-  const stageNorm = normalizeStage(row.stage);
+  const stageNorm = normalizeStage(rowSnap.stage);
   const stageLabel =
     stageNorm === "read"
       ? "Read (legacy)"
       : (await import("@/lib/admin/quotes/normalize")).STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  const outAny: any = row.output ?? null;
+  // ---- normalize AI output (supports old and new shapes) ----
+  const outAny: any = rowSnap.output ?? null;
   const aiAssessment = pickAiAssessmentFromAny(outAny);
 
   const estLow = safeMoney(
@@ -165,7 +179,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const pricingBasis: any =
     aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
-  const inputAny: any = row.input ?? {};
+  const inputAny: any = rowSnap.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
   const pricingConfigSnap: any = inputAny?.pricing_config_snapshot ?? null;
   const pricingRulesSnap: any = inputAny?.pricing_rules_snapshot ?? null;
@@ -176,10 +190,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
+  // lifecycle
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
+  // ✅ active pointer for Versions UI
   const activeVersion =
-    typeof (row as any).currentVersion === "number" ? Number((row as any).currentVersion) : null;
+    typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
   /* -------------------- server actions -------------------- */
   async function setStage(formData: FormData) {
@@ -247,7 +263,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           tenantId,
           quoteLogId: id,
           quoteVersionId: null,
-          // ✅ DB column is created_by
+          // ✅ DB column is created_by (Drizzle field createdBy)
           createdBy: actorUserId,
           body: noteBody,
         } as any)
@@ -257,15 +273,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
+    // Run real reassessment engine + pricing (creates version + updates quote_logs.output)
     const engine: AdminReassessEngine =
       engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
     const quoteLog: QuoteLogRow = {
       id,
       tenant_id: tenantId,
-      input: row.input ?? {},
-      qa: (row as any).qa ?? {},
-      output: row.output ?? {},
+      input: rowSnap.input ?? {},
+      qa: (rowSnap as any).qa ?? {},
+      output: rowSnap.output ?? {},
     };
 
     const result = await adminReassessQuote({
@@ -277,6 +294,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       reason: reason || undefined,
     });
 
+    // If note was created, link it to the new version
     if (createdNoteId) {
       await db
         .update(quoteNotes)
@@ -284,6 +302,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
+    // UI-only selection (not persisted here; authoritative is frozen snapshot)
     void aiMode;
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
@@ -299,6 +318,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const versionId = safeTrim(formData.get("version_id"));
     if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
+    // membership check
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
@@ -314,6 +334,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
+    // atomic restore: copy output + version pointer from quote_versions
     const updated = await db.execute(sql`
       with picked as (
         select
@@ -416,7 +437,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
   }
 
-  const submittedAtLabel = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
+  /* -------------------- render -------------------- */
+  const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
@@ -426,7 +448,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         isRead={isRead}
         stageLabel={stageLabel}
         stageNorm={String(stageNorm)}
-        renderStatus={row.renderStatus}
+        renderStatus={rowSnap.renderStatus}
         confidence={confidence}
         inspectionRequired={inspectionRequired}
         activeVersion={activeVersion}
@@ -453,7 +475,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       />
 
       <DetailsPanel
-        renderOptIn={Boolean(row.renderOptIn)}
+        renderOptIn={Boolean(rowSnap.renderOptIn)}
         estimateDisplay={estimateDisplay}
         confidence={confidence}
         inspectionRequired={inspectionRequired}
@@ -467,18 +489,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         pricingRulesSnap={pricingRulesSnap}
         industryKeySnap={industryKeySnap}
         llmKeySource={llmKeySource}
-        rawOutput={row.output ?? null}
+        rawOutput={rowSnap.output ?? null}
       />
 
       <LegacyRenderPanel
-        renderStatus={row.renderStatus}
-        renderedAt={row.renderedAt}
-        renderImageUrl={row.renderImageUrl ? String(row.renderImageUrl) : null}
-        renderError={row.renderError ? String(row.renderError) : null}
-        renderPrompt={row.renderPrompt ? String(row.renderPrompt) : null}
+        renderStatus={rowSnap.renderStatus}
+        renderedAt={rowSnap.renderedAt}
+        renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
+        renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
+        renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
       />
 
-      <RawPayloadPanel input={row.input ?? {}} />
+      <RawPayloadPanel input={rowSnap.input ?? {}} />
     </div>
   );
 }
