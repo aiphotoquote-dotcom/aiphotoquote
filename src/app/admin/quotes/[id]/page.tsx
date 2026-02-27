@@ -2,12 +2,21 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
-import { db } from "@/lib/db/client";
-import { quoteLogs, tenants } from "@/lib/db/schema";
+import QuoteNotesComposer from "@/components/admin/QuoteNotesComposer";
 import QuotePhotoGallery, { type QuotePhoto } from "@/components/admin/QuotePhotoGallery";
+
+import { db } from "@/lib/db/client";
+import {
+  quoteLogs,
+  quoteNotes,
+  quoteRenders,
+  quoteVersions,
+  tenantMembers,
+  tenants,
+} from "@/lib/db/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,37 +25,10 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-// Drizzle RowList can be array-like; avoid `.rows`
-function firstRow(r: any): any | null {
-  try {
-    if (!r) return null;
-    if (Array.isArray(r)) return r[0] ?? null;
-    if (typeof r === "object" && r !== null && 0 in r) return (r as any)[0] ?? null;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// ✅ Normalize db.execute() return shape across adapters:
-// - some return { rows: [...] }
-// - some return [...] (array)
-// - some are array-like objects
-function rowsFromExecute<T = any>(r: any): T[] {
-  try {
-    if (!r) return [];
-    if (Array.isArray(r)) return r as T[];
-    if (typeof r === "object" && r !== null) {
-      if (Array.isArray((r as any).rows)) return (r as any).rows as T[];
-      if (0 in (r as any)) {
-        const arr = Array.from(r as any);
-        return arr as T[];
-      }
-    }
-    return [];
-  } catch {
-    return [];
-  }
+function isUuid(v: unknown) {
+  const s = String(v ?? "").trim();
+  // good-enough UUID v4-ish shape check (keeps DB from throwing on ::uuid casts)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 }
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
@@ -55,15 +37,14 @@ function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
     jar.get("active_tenant_id")?.value,
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
-
     jar.get("apq_activeTenantId")?.value,
     jar.get("apq_active_tenant_id")?.value,
-
     jar.get("__Host-activeTenantId")?.value,
     jar.get("__Host-active_tenant_id")?.value,
   ].filter(Boolean) as string[];
 
-  return candidates[0] || null;
+  const first = candidates[0] || null;
+  return first && isUuid(first) ? first : null;
 }
 
 function digitsOnly(s: string) {
@@ -78,6 +59,31 @@ function formatUSPhone(raw: string) {
   if (d.length <= 3) return a ? `(${a}` : "";
   if (d.length <= 6) return `(${a}) ${b}`;
   return `(${a}) ${b}-${c}`;
+}
+
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function safeMoney(n: any) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  return v;
+}
+
+function formatUSD(n: number) {
+  return n.toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  });
+}
+
+function fmtNum(v: any) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return String(Math.round(n));
 }
 
 function pickLead(input: any) {
@@ -215,25 +221,38 @@ function renderChip(renderStatusRaw: unknown) {
   return chip(s, "gray");
 }
 
-function safeMoney(n: any) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return null;
-  return v;
+function tryJson(v: any): any {
+  if (v == null) return null;
+  if (typeof v === "object") return v;
+  if (typeof v !== "string") return null;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return null;
+  }
 }
 
-function formatUSD(n: number) {
-  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+function pickAiAssessmentFromAny(outAny: any) {
+  const o = outAny ?? null;
+  return o?.assessment ?? o?.output?.assessment ?? o?.output ?? o ?? null;
 }
 
-function safeTrim(v: any) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
+function extractEstimate(outAny: any): { low: number | null; high: number | null } {
+  const a = pickAiAssessmentFromAny(outAny);
+  const low = safeMoney(a?.estimate_low ?? a?.estimateLow ?? a?.estimate?.low ?? a?.estimate?.estimate_low);
+  const high = safeMoney(a?.estimate_high ?? a?.estimateHigh ?? a?.estimate?.high ?? a?.estimate?.estimate_high);
+  return { low, high };
 }
 
-function fmtNum(v: any) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
-  return String(Math.round(n));
+function humanWhen(v: any) {
+  try {
+    if (!v) return "—";
+    const d = v instanceof Date ? v : new Date(String(v));
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString();
+  } catch {
+    return "—";
+  }
 }
 
 /* -------------------- pricing policy helpers (admin view) -------------------- */
@@ -316,44 +335,11 @@ function formatEstimateForPolicy(args: {
   return { text: null, tone: "green", label: "Range estimate" };
 }
 
-/* -------------------- quote lifecycle (new tables) helpers -------------------- */
-function tryJson(v: any): any {
-  if (v == null) return null;
-  if (typeof v === "object") return v;
-  if (typeof v !== "string") return null;
-  try {
-    return JSON.parse(v);
-  } catch {
-    return null;
-  }
-}
-
-function pickAiAssessmentFromAny(outAny: any) {
-  const o = outAny ?? null;
-  return o?.assessment ?? o?.output?.assessment ?? o?.output ?? o ?? null;
-}
-
-function extractEstimate(outAny: any): { low: number | null; high: number | null } {
-  const a = pickAiAssessmentFromAny(outAny);
-  const low = safeMoney(a?.estimate_low ?? a?.estimateLow ?? a?.estimate?.low ?? a?.estimate?.estimate_low);
-  const high = safeMoney(a?.estimate_high ?? a?.estimateHigh ?? a?.estimate?.high ?? a?.estimate?.estimate_high);
-  return { low, high };
-}
-
-function humanWhen(v: any) {
-  try {
-    if (!v) return "—";
-    const d = v instanceof Date ? v : new Date(String(v));
-    if (Number.isNaN(d.getTime())) return "—";
-    return d.toLocaleString();
-  } catch {
-    return "—";
-  }
-}
-
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
-  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+  searchParams?:
+    | Promise<Record<string, string | string[] | undefined>>
+    | Record<string, string | string[] | undefined>;
 };
 
 type EngineKey = "deterministic_pricing_only" | "full_ai_reassessment";
@@ -378,6 +364,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const id = String((p as any)?.id ?? "").trim();
   if (!id) redirect("/admin/quotes");
 
+  // Keep redirects safe: if someone hits /admin/quotes/foo, don't explode on UUID comparisons
+  if (!isUuid(id)) redirect("/admin/quotes");
+
   const sp = searchParams ? await searchParams : {};
   const skipAutoRead =
     sp?.skipAutoRead === "1" || (Array.isArray(sp?.skipAutoRead) && sp.skipAutoRead.includes("1"));
@@ -387,19 +376,23 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   // If cookie tenant exists, validate membership
   if (tenantIdMaybe) {
-    const membership = await db.execute(sql`
-      select 1 as ok
-      from tenant_members
-      where tenant_id = ${tenantIdMaybe}::uuid
-        and clerk_user_id = ${userId}
-        and status = 'active'
-      limit 1
-    `);
-    const mrow = firstRow(membership);
-    if (!mrow?.ok) tenantIdMaybe = null;
+    const membership = await db
+      .select({ ok: sql<number>`1` })
+      .from(tenantMembers)
+      .where(
+        and(
+          eq(tenantMembers.tenantId, tenantIdMaybe),
+          eq(tenantMembers.clerkUserId, userId),
+          eq(tenantMembers.status, "active"),
+        ),
+      )
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!membership?.ok) tenantIdMaybe = null;
   }
 
-  // Fallback: first owned tenant (legacy)
+  // Fallback: first owned tenant (legacy back-compat)
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -414,7 +407,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId = tenantIdMaybe;
 
-  // 1) Try strict tenant-scoped lookup (correct behavior)
+  // 1) Strict tenant-scoped lookup
   let row = await db
     .select({
       id: quoteLogs.id,
@@ -436,7 +429,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // 2) If not found, auto-heal
+  // 2) Auto-heal if quote belongs to a different tenant the user is a member of
   if (!row) {
     const q = await db
       .select({ tenantId: quoteLogs.tenantId })
@@ -447,21 +440,24 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const quoteTenantId = q?.tenantId ? String(q.tenantId) : null;
 
-    if (quoteTenantId) {
-      const membership = await db.execute(sql`
-        select 1 as ok
-        from tenant_members
-        where tenant_id = ${quoteTenantId}::uuid
-          and clerk_user_id = ${userId}
-          and status = 'active'
-        limit 1
-      `);
+    if (quoteTenantId && isUuid(quoteTenantId)) {
+      const membership = await db
+        .select({ ok: sql<number>`1` })
+        .from(tenantMembers)
+        .where(
+          and(
+            eq(tenantMembers.tenantId, quoteTenantId),
+            eq(tenantMembers.clerkUserId, userId),
+            eq(tenantMembers.status, "active"),
+          ),
+        )
+        .limit(1)
+        .then((r) => r[0] ?? null);
 
-      const mrow = firstRow(membership);
-      if (mrow?.ok) {
+      if (membership?.ok) {
         const next = `/admin/quotes/${encodeURIComponent(id)}`;
         redirect(
-          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`
+          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`,
         );
       }
     }
@@ -477,7 +473,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           <div className="mt-2">
             The quote either belongs to a different tenant (and you’re not a member), or it no longer exists.
           </div>
-          <div className="mt-3 font-mono text-xs opacity-80">quoteId={id} · activeTenantId={tenantId}</div>
+          <div className="mt-3 font-mono text-xs opacity-80">
+            quoteId={id} · activeTenantId={tenantId}
+          </div>
           <div className="mt-4">
             <Link
               href="/admin/quotes"
@@ -507,7 +505,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
-  const stageLabel = stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+  const stageLabel =
+    stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
   // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
@@ -517,13 +516,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     aiAssessment?.estimate_low ??
       aiAssessment?.estimateLow ??
       aiAssessment?.estimate?.low ??
-      aiAssessment?.estimate?.estimate_low
+      aiAssessment?.estimate?.estimate_low,
   );
   const estHigh = safeMoney(
     aiAssessment?.estimate_high ??
       aiAssessment?.estimateHigh ??
       aiAssessment?.estimate?.high ??
-      aiAssessment?.estimate?.estimate_high
+      aiAssessment?.estimate?.estimate_high,
   );
 
   const confidence = aiAssessment?.confidence ?? null;
@@ -537,13 +536,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions)
+    ? aiAssessment.questions.map((x: any) => String(x))
+    : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
+    ? aiAssessment.assumptions.map((x: any) => String(x))
+    : [];
   const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
-  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any =
+    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   const inputAny: any = row.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
@@ -565,35 +569,33 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   type QuoteVersionRow = {
     id: string;
     version: number;
-    created_at: any;
-    created_by: string | null;
+    createdAt: any;
+    createdBy: string | null;
     source: string | null;
     reason: string | null;
-    ai_mode: string | null;
+    aiMode: string | null;
     output: any;
     meta: any;
   };
 
   type QuoteNoteRow = {
     id: string;
-    created_at: any;
-    created_by: string | null;
+    createdAt: any;
+    actor: string | null;
     body: string;
-    quote_version_id: string | null;
+    quoteVersionId: string | null;
   };
 
   type QuoteRenderRow = {
     id: string;
     attempt: number;
     status: string;
-    created_at: any;
-    updated_at: any;
-    created_by: string | null;
-    image_url: string | null;
+    createdAt: any;
+    imageUrl: string | null;
     prompt: string | null;
-    shop_notes: string | null;
+    shopNotes: string | null;
     error: string | null;
-    quote_version_id: string | null;
+    quoteVersionId: string;
   };
 
   let versionRows: QuoteVersionRow[] = [];
@@ -602,67 +604,59 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   let lifecycleReadError: string | null = null;
 
   try {
-    const vr = await db.execute(sql`
-      select
-        id::text as "id",
-        version::int as "version",
-        created_at as "created_at",
-        created_by::text as "created_by",
-        source::text as "source",
-        reason::text as "reason",
-        ai_mode::text as "ai_mode",
-        output as "output",
-        meta as "meta"
-      from quote_versions
-      where quote_log_id = ${id}::uuid
-        and tenant_id = ${tenantId}::uuid
-      order by version asc, created_at asc
-    `);
-    versionRows = rowsFromExecute<QuoteVersionRow>(vr);
+    versionRows = await db
+      .select({
+        id: quoteVersions.id,
+        version: quoteVersions.version,
+        createdAt: quoteVersions.createdAt,
+        createdBy: quoteVersions.createdBy,
+        source: quoteVersions.source,
+        reason: quoteVersions.reason,
+        aiMode: quoteVersions.aiMode,
+        output: quoteVersions.output,
+        meta: quoteVersions.meta,
+      })
+      .from(quoteVersions)
+      .where(and(eq(quoteVersions.quoteLogId, id), eq(quoteVersions.tenantId, tenantId)))
+      .orderBy(asc(quoteVersions.version), asc(quoteVersions.createdAt));
   } catch (e: any) {
     lifecycleReadError = safeTrim(e?.message) || "Failed to read quote_versions";
   }
 
   try {
-    const nr = await db.execute(sql`
-      select
-        id::text as "id",
-        created_at as "created_at",
-        created_by::text as "created_by",
-        body::text as "body",
-        quote_version_id::text as "quote_version_id"
-      from quote_notes
-      where quote_log_id = ${id}::uuid
-        and tenant_id = ${tenantId}::uuid
-      order by created_at desc
-      limit 200
-    `);
-    noteRows = rowsFromExecute<QuoteNoteRow>(nr);
+    noteRows = await db
+      .select({
+        id: quoteNotes.id,
+        createdAt: quoteNotes.createdAt,
+        actor: quoteNotes.actor,
+        body: quoteNotes.body,
+        quoteVersionId: quoteNotes.quoteVersionId,
+      })
+      .from(quoteNotes)
+      .where(and(eq(quoteNotes.quoteLogId, id), eq(quoteNotes.tenantId, tenantId)))
+      .orderBy(desc(quoteNotes.createdAt))
+      .limit(200);
   } catch (e: any) {
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_notes");
   }
 
   try {
-    const rr = await db.execute(sql`
-      select
-        id::text as "id",
-        attempt::int as "attempt",
-        status::text as "status",
-        created_at as "created_at",
-        updated_at as "updated_at",
-        created_by::text as "created_by",
-        image_url::text as "image_url",
-        prompt::text as "prompt",
-        shop_notes::text as "shop_notes",
-        error::text as "error",
-        quote_version_id::text as "quote_version_id"
-      from quote_renders
-      where quote_log_id = ${id}::uuid
-        and tenant_id = ${tenantId}::uuid
-      order by created_at desc
-      limit 200
-    `);
-    renderRows = rowsFromExecute<QuoteRenderRow>(rr);
+    renderRows = await db
+      .select({
+        id: quoteRenders.id,
+        attempt: quoteRenders.attempt,
+        status: quoteRenders.status,
+        createdAt: quoteRenders.createdAt,
+        imageUrl: quoteRenders.imageUrl,
+        prompt: quoteRenders.prompt,
+        shopNotes: quoteRenders.shopNotes,
+        error: quoteRenders.error,
+        quoteVersionId: quoteRenders.quoteVersionId,
+      })
+      .from(quoteRenders)
+      .where(and(eq(quoteRenders.quoteLogId, id), eq(quoteRenders.tenantId, tenantId)))
+      .orderBy(desc(quoteRenders.createdAt))
+      .limit(200);
   } catch (e: any) {
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_renders");
   }
@@ -694,20 +688,29 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ stage: next } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: false } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: true } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -719,79 +722,63 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const reason = safeTrim(formData.get("reason"));
     const noteBody = safeTrim(formData.get("note_body"));
 
-    // compute next version number (tenant+quote scoped)
-    const vmax = await db.execute(sql`
-      select coalesce(max(version), 0)::int as v
-      from quote_versions
-      where quote_log_id = ${id}::uuid
-        and tenant_id = ${tenantId}::uuid
-      limit 1
-    `);
-    const maxRow = firstRow(vmax);
-    const nextVersion = Number(maxRow?.v ?? 0) + 1;
+    // next version number, scoped to (tenant_id, quote_log_id)
+    const vmax = await db
+      .select({
+        v: sql<number>`coalesce(max(${quoteVersions.version}), 0)`,
+      })
+      .from(quoteVersions)
+      .where(and(eq(quoteVersions.quoteLogId, id), eq(quoteVersions.tenantId, tenantId)))
+      .then((r) => r[0]?.v ?? 0);
 
-    // output strategy (v1):
-    // - deterministic: freeze current output snapshot so UI shows something immediately
-    // - full_ai: also freeze current output for now, BUT mark meta.needs_ai_reassessment=true (next step wires real AI)
-    const frozenOutput = row.output ?? null;
+    const nextVersion = Number(vmax ?? 0) + 1;
+
+    // freeze current output snapshot so UI shows something immediately
+    const frozenOutput = (row?.output ?? {}) as any;
 
     const meta = {
       engine,
       created_from: "admin",
-      created_from_version: versionRows.length ? Number(versionRows[versionRows.length - 1]?.version ?? 0) : null,
+      created_from_version: versionRows.length
+        ? Number(versionRows[versionRows.length - 1]?.version ?? 0)
+        : null,
       notes_included: Boolean(noteBody),
       note_preview: noteBody ? noteBody.slice(0, 240) : null,
       needs_ai_reassessment: engine === "full_ai_reassessment",
       ts: new Date().toISOString(),
     };
 
-    const inserted = await db.execute(sql`
-      insert into quote_versions (
-        quote_log_id,
-        tenant_id,
-        version,
-        created_by,
-        source,
-        reason,
-        ai_mode,
-        output,
-        meta
-      )
-      values (
-        ${id}::uuid,
-        ${tenantId}::uuid,
-        ${nextVersion}::int,
-        ${userId}::text,
-        ${"admin"}::text,
-        ${reason || null},
-        ${aiMode}::text,
-        ${frozenOutput},
-        ${meta}::jsonb
-      )
-      returning id::text as "id"
-    `);
+    const inserted = await db
+      .insert(quoteVersions)
+      .values({
+        tenantId,
+        quoteLogId: id,
+        version: nextVersion,
+        aiMode,
+        source: "tenant_edit",
+        createdBy: userId, // clerk user id (portable enough for now)
+        reason: reason || null,
+        output: frozenOutput ?? {},
+        meta: meta ?? {},
+      })
+      .returning({ id: quoteVersions.id })
+      .then((r) => r[0] ?? null);
 
-    const insRow = firstRow(inserted);
-    const newVersionId = safeTrim(insRow?.id);
+    const newVersionId = inserted?.id ? String(inserted.id) : null;
 
     if (noteBody) {
-      await db.execute(sql`
-        insert into quote_notes (
-          quote_log_id,
-          tenant_id,
-          quote_version_id,
-          body,
-          created_by
-        )
-        values (
-          ${id}::uuid,
-          ${tenantId}::uuid,
-          ${newVersionId ? sql`${newVersionId}::uuid` : sql`null::uuid`},
-          ${noteBody}::text,
-          ${userId}::text
-        )
-      `);
+      await db.insert(quoteNotes).values({
+        tenantId,
+        quoteLogId: id,
+        quoteVersionId: newVersionId,
+        actor: userId,
+        body: noteBody,
+      });
     }
+
+    // NOTE: The "right way" to run reassessment is to queue a job and have a worker
+    // write updated output back into quote_versions.output (+ meta).
+    // For now we only mark meta.needs_ai_reassessment=true and store notes.
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
@@ -933,19 +920,21 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Quote lifecycle</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Versions, internal notes, and render attempts. (Read-only for now.)
-            </p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Versions, internal notes, and render attempts.</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {versionRows.length ? chip(`${versionRows.length} version${versionRows.length === 1 ? "" : "s"}`, "blue") : chip("No versions yet", "gray")}
+            {versionRows.length
+              ? chip(`${versionRows.length} version${versionRows.length === 1 ? "" : "s"}`, "blue")
+              : chip("No versions yet", "gray")}
             {noteRows.length ? chip(`${noteRows.length} note${noteRows.length === 1 ? "" : "s"}`, "gray") : null}
-            {renderRows.length ? chip(`${renderRows.length} render${renderRows.length === 1 ? "" : "s"}`, "gray") : null}
+            {renderRows.length
+              ? chip(`${renderRows.length} render${renderRows.length === 1 ? "" : "s"}`, "gray")
+              : null}
           </div>
         </div>
 
-        {/* NEW: create version */}
+        {/* Create version */}
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
           <details>
             <summary className="cursor-pointer text-sm font-semibold text-gray-800 dark:text-gray-200">
@@ -953,7 +942,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             </summary>
 
             <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-              Choose engine + mode. Optional notes will be stored and can be used for the next AI reassessment.
+              Choose engine + mode. Optional notes are stored in quote_notes and linked to the new version.
             </div>
 
             <form action={createNewVersion} className="mt-4 grid gap-3">
@@ -972,7 +961,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span>
                         <span className="font-semibold">Deterministic pricing only</span>
                         <span className="block text-xs text-gray-600 dark:text-gray-400">
-                          Freeze current AI scope + compute pricing deterministically (next step wires actual engine call).
+                          Freeze current output; pricing path can be wired next.
                         </span>
                       </span>
                     </label>
@@ -982,7 +971,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span>
                         <span className="font-semibold">Full AI reassessment</span>
                         <span className="block text-xs text-gray-600 dark:text-gray-400">
-                          Stores “needs reassessment” + notes. Next step will run your AI pipeline and write the new output.
+                          Marks meta.needs_ai_reassessment=true; wiring the reassessment job is the next step.
                         </span>
                       </span>
                     </label>
@@ -1011,7 +1000,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               </div>
 
               <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
-                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">New notes for this version (optional)</div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                  New notes for this version (optional)
+                </div>
                 <textarea
                   name="note_body"
                   rows={4}
@@ -1028,7 +1019,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   Create version
                 </button>
                 <span className="text-xs text-gray-600 dark:text-gray-300">
-                  This will create a new quote_versions row (and quote_notes if provided).
+                  Creates quote_versions row (+ quote_notes if provided).
                 </span>
               </div>
             </form>
@@ -1057,7 +1048,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   const est = extractEstimate(out);
                   const conf = safeTrim(pickAiAssessmentFromAny(out)?.confidence ?? "");
                   const summ = safeTrim(pickAiAssessmentFromAny(out)?.summary ?? "");
-                  const policyMode = safeTrim(v.ai_mode) || null;
+                  const policyMode = safeTrim(v.aiMode) || null;
 
                   const estText =
                     est.low != null && est.high != null
@@ -1069,15 +1060,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                           : null;
 
                   return (
-                    <div key={v.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                    <div
+                      key={v.id}
+                      className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-2">
                           {versionChip(Number(v.version ?? 0))}
                           {policyMode ? chip(`mode: ${policyMode}`, "gray") : null}
                           {safeTrim(v.source) ? chip(String(v.source), "gray") : null}
-                          {safeTrim(v.created_by) ? chip(String(v.created_by), "gray") : null}
+                          {safeTrim(v.createdBy) ? chip(String(v.createdBy), "gray") : null}
                         </div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(v.created_at)}</div>
+                        <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(v.createdAt)}</div>
                       </div>
 
                       {v.reason ? (
@@ -1109,9 +1103,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   );
                 })
               ) : (
-                <div className="text-sm text-gray-600 dark:text-gray-300 italic">
-                  No versions yet. Once you seed v1 from the initial quote, you’ll see it here.
-                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-300 italic">No versions yet.</div>
               )}
             </div>
           </div>
@@ -1123,23 +1115,30 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               {noteRows.length ? chip("Log", "gray") : chip("Empty", "gray")}
             </div>
 
+            <div className="mt-3">
+              <QuoteNotesComposer quoteLogId={id} />
+            </div>
+
             <div className="mt-3 space-y-3">
               {noteRows.length ? (
                 noteRows.slice(0, 100).map((n) => (
-                  <div key={n.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                  <div
+                    key={n.id}
+                    className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        {safeTrim(n.created_by) ? chip(String(n.created_by), "gray") : chip("tenant", "gray")}
-                        {n.quote_version_id ? chip("linked to version", "blue") : chip("general", "gray")}
+                        {safeTrim(n.actor) ? chip(String(n.actor), "gray") : chip("tenant", "gray")}
+                        {n.quoteVersionId ? chip("linked to version", "blue") : chip("general", "gray")}
                       </div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.created_at)}</div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
                     </div>
                     <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
                       {safeTrim(n.body) || <span className="italic text-gray-500">Empty note.</span>}
                     </div>
-                    {n.quote_version_id ? (
+                    {n.quoteVersionId ? (
                       <div className="mt-2 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
-                        versionId: {n.quote_version_id}
+                        versionId: {n.quoteVersionId}
                       </div>
                     ) : null}
                   </div>
@@ -1160,29 +1159,35 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             <div className="mt-3 space-y-3">
               {renderRows.length ? (
                 renderRows.slice(0, 60).map((r) => (
-                  <div key={r.id} className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                  <div
+                    key={r.id}
+                    className="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         {chip(`Attempt ${Number(r.attempt ?? 1)}`, "gray")}
                         {chip(String(r.status ?? "unknown"), renderStatusTone(String(r.status ?? "")))}
-                        {safeTrim(r.created_by) ? chip(String(r.created_by), "gray") : null}
-                        {r.quote_version_id ? chip("from version", "blue") : null}
+                        {r.quoteVersionId ? chip("from version", "blue") : null}
                       </div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(r.created_at)}</div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(r.createdAt)}</div>
                     </div>
 
-                    {r.image_url ? (
-                      <a href={r.image_url} target="_blank" rel="noreferrer" className="mt-3 block">
+                    {r.imageUrl ? (
+                      <a href={r.imageUrl} target="_blank" rel="noreferrer" className="mt-3 block">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={r.image_url}
+                          src={r.imageUrl}
                           alt="Render attempt"
                           className="w-full rounded-xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                         />
-                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
+                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
+                          Click to open original
+                        </div>
                       </a>
                     ) : (
-                      <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No image_url for this attempt.</div>
+                      <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">
+                        No image_url for this attempt.
+                      </div>
                     )}
 
                     {r.error ? (
@@ -1191,11 +1196,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       </div>
                     ) : null}
 
-                    {r.shop_notes ? (
+                    {r.shopNotes ? (
                       <details className="mt-3">
-                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes</summary>
+                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Shop notes
+                        </summary>
                         <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
-                          {String(r.shop_notes)}
+                          {String(r.shopNotes)}
                         </div>
                       </details>
                     ) : null}
@@ -1225,7 +1232,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Details</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI describes scope. Server computes dollars (deterministic).</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              AI describes scope. Server computes dollars (deterministic).
+            </p>
           </div>
           {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
         </div>
@@ -1253,7 +1262,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   {typeof pricingPolicySnap?.pricing_enabled === "boolean"
                     ? chip(
                         `Pricing enabled: ${pricingPolicySnap.pricing_enabled ? "true" : "false"}`,
-                        pricingPolicySnap.pricing_enabled ? "green" : "yellow"
+                        pricingPolicySnap.pricing_enabled ? "green" : "yellow",
                       )
                     : null}
                 </div>
@@ -1270,7 +1279,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">llmKeySource:</span> {llmKeySource ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">pricing_model (policy):</span> {pricingPolicySnap?.pricing_model ?? "—"}
+                      <span className="font-semibold">pricing_model (policy):</span>{" "}
+                      {pricingPolicySnap?.pricing_model ?? "—"}
                     </div>
                   </div>
                 </div>
@@ -1288,10 +1298,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">minJobApplied:</span> {pricingBasis?.minJobApplied ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">maxWithoutInspectionApplied:</span> {pricingBasis?.maxWithoutInspectionApplied ?? "—"}
+                      <span className="font-semibold">maxWithoutInspectionApplied:</span>{" "}
+                      {pricingBasis?.maxWithoutInspectionApplied ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">forcedInspection:</span> {pricingBasis?.forcedInspection ? "true" : "false"}
+                      <span className="font-semibold">forcedInspection:</span>{" "}
+                      {pricingBasis?.forcedInspection ? "true" : "false"}
                     </div>
                   </div>
                 </div>
@@ -1301,12 +1313,14 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   <div className="mt-2 space-y-1 text-gray-700 dark:text-gray-300">
                     {pricingBasis?.hours ? (
                       <div>
-                        <span className="font-semibold">hours:</span> {fmtNum(pricingBasis.hours?.low)} – {fmtNum(pricingBasis.hours?.high)}
+                        <span className="font-semibold">hours:</span> {fmtNum(pricingBasis.hours?.low)} –{" "}
+                        {fmtNum(pricingBasis.hours?.high)}
                       </div>
                     ) : null}
                     {pricingBasis?.units ? (
                       <div>
-                        <span className="font-semibold">units:</span> {fmtNum(pricingBasis.units?.low)} – {fmtNum(pricingBasis.units?.high)}
+                        <span className="font-semibold">units:</span> {fmtNum(pricingBasis.units?.low)} –{" "}
+                        {fmtNum(pricingBasis.units?.high)}
                       </div>
                     ) : null}
                     {pricingBasis?.hourly ? (
@@ -1352,7 +1366,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     pricing_rules_snapshot: pricingRulesSnap ?? null,
   },
   null,
-  2
+  2,
 )}
                 </pre>
               </details>
@@ -1401,13 +1415,17 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                 ) : null}
 
                 {!aiAssessment ? (
-                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">No AI output found yet (quoteLogs.output is empty).</div>
+                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">
+                    No AI output found yet (quoteLogs.output is empty).
+                  </div>
                 ) : null}
               </div>
             </div>
 
             <details className="mt-4">
-              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Raw AI JSON (debug)</summary>
+              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                Raw AI JSON (debug)
+              </summary>
               <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {JSON.stringify(row.output ?? {}, null, 2)}
               </pre>
@@ -1433,7 +1451,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                     alt="AI render"
                     className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                   />
-                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
+                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
+                    Click to open original
+                  </div>
                 </a>
               ) : (
                 <div className="text-sm text-gray-600 dark:text-gray-300 italic">No render available for this quote.</div>
@@ -1447,7 +1467,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
               {row.renderPrompt ? (
                 <details className="mt-4">
-                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Render prompt (debug)</summary>
+                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    Render prompt (debug)
+                  </summary>
                   <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {String(row.renderPrompt)}
                   </pre>
