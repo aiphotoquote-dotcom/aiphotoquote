@@ -383,45 +383,52 @@ export const quoteLogs = pgTable("quote_logs", {
 });
 
 /**
- * Quote versions — human-initiated lifecycle (additive; does NOT replace quote_logs)
+ * Quote versions — prod-aligned shape
+ * NOTE: This table is not used directly by Drizzle inserts in your submit route
+ * (you use raw SQL), but the schema must match the real DB to avoid drift.
  */
 export const quoteVersions = pgTable(
   "quote_versions",
   {
     id: uuid("id").defaultRandom().primaryKey(),
 
-    tenantId: uuid("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-
-    // Anchor to the original customer submission
     quoteLogId: uuid("quote_log_id")
       .notNull()
       .references(() => quoteLogs.id, { onDelete: "cascade" }),
 
-    // Version number per quote_log_id (1..n)
-    version: integer("version").notNull().default(1),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
 
-    // assessment_only | range | fixed (aligns to tenant_settings.ai_mode semantics)
-    aiMode: text("ai_mode").notNull().default("assessment_only"),
+    version: integer("version").notNull(),
 
-    // tenant_edit | ai_conversion | system
-    source: text("source").notNull().default("tenant_edit"),
+    // ✅ prod: nullable
+    aiMode: text("ai_mode"),
 
-    // Editable “result-like” snapshot for this version (same general shape as quote_logs.output)
-    output: jsonb("output").$type<any>().notNull().default({}),
+    // ✅ prod: NOT NULL
+    createdBy: text("created_by").notNull(),
 
-    // Optional metadata (diff hints, audit breadcrumbs, etc.)
-    meta: jsonb("meta").$type<any>(),
+    // ✅ prod: NOT NULL
+    source: text("source").notNull(),
 
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    // ✅ prod: nullable
+    reason: text("reason"),
+
+    // ✅ prod: NOT NULL
+    output: jsonb("output").$type<any>().notNull(),
+
+    // ✅ prod: NOT NULL
+    meta: jsonb("meta").$type<any>().notNull(),
+
+    // ✅ prod: NOT NULL
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (t) => ({
-    tenantIdx: index("quote_versions_tenant_id_idx").on(t.tenantId),
-    quoteLogIdx: index("quote_versions_quote_log_id_idx").on(t.quoteLogId),
-    quoteLogVersionIdx: index("quote_versions_quote_log_id_version_idx").on(t.quoteLogId, t.version),
-    createdIdx: index("quote_versions_created_at_idx").on(t.createdAt),
+    // matches your real indexes
+    quoteLogCreatedIdx: index("quote_versions_quote_log_created_idx").on(t.quoteLogId, t.createdAt),
+    tenantCreatedIdx: index("quote_versions_tenant_created_idx").on(t.tenantId, t.createdAt),
+    quoteLogIdVersionUq: uniqueIndex("quote_versions_quote_log_id_version_uq").on(t.quoteLogId, t.version),
+    // keep pkey implicit on id
   })
 );
 
@@ -530,7 +537,6 @@ export const industries = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // keep your naming but align uniqueness
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
     statusIdx: index("industries_status_idx").on(t.status),
   })
