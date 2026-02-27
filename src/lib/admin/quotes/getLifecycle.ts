@@ -20,7 +20,7 @@ export type QuoteVersionRow = {
 export type QuoteNoteRow = {
   id: string;
   createdAt: any;
-  createdBy: string | null;
+  actor: string | null; // keep UI compat (maps to created_by)
   body: string;
   quoteVersionId: string | null;
 };
@@ -66,11 +66,12 @@ export async function getQuoteLifecycle(args: { id: string; tenantId: string }) 
   }
 
   try {
+    // ✅ prod column is created_by; we map it to "actor" for UI compatibility
     noteRows = await db
       .select({
         id: quoteNotes.id,
         createdAt: quoteNotes.createdAt,
-        createdBy: quoteNotes.createdBy,
+        actor: quoteNotes.createdBy,
         body: quoteNotes.body,
         quoteVersionId: quoteNotes.quoteVersionId,
       })

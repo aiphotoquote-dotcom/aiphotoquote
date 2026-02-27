@@ -39,7 +39,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const { body, reassess, engine, linkNoteToVersion, contextNotesLimit } = parsed.data;
 
-  // Load quote log (id + tenant only, strict)
+  // Load quote log (strict by ID)
   const qr = await db.execute(sql`
     select
       id::text as "id",
@@ -51,6 +51,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     where id = ${quoteLogId}::uuid
     limit 1
   `);
+
   const qrow: any = (qr as any)?.rows?.[0] ?? (Array.isArray(qr) ? (qr as any)[0] : null);
   if (!qrow?.id || !qrow?.tenant_id) {
     return NextResponse.json({ ok: false, error: "QUOTE_NOT_FOUND" }, { status: 404 });
@@ -88,6 +89,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     )
     returning id::text as "id", created_at as "created_at"
   `);
+
   const nrow: any = (nr as any)?.rows?.[0] ?? (Array.isArray(nr) ? (nr as any)[0] : null);
   const noteId = String(nrow?.id ?? "");
   if (!noteId) return NextResponse.json({ ok: false, error: "FAILED_TO_CREATE_NOTE" }, { status: 500 });
