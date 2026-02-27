@@ -43,12 +43,6 @@ import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * NOTE:
- * - Server actions stay in this page to avoid Next action scoping pitfalls.
- * - UI + data loading + parsing is modularized.
- */
-
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
   searchParams?:
@@ -71,15 +65,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const jar = await cookies();
 
-  // IMPORTANT: keep tenantId strictly typed as string for server-action closures
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId });
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId: string = tenantIdMaybe;
 
-  // 1) Strict tenant-scoped lookup
   let row = await getAdminQuoteRow({ id, tenantId });
 
-  // 2) Auto-heal if quote belongs to a different tenant the user is a member of
   if (!row) {
     const redirectTenantId = await findRedirectTenantForQuote({ id, userId });
     if (redirectTenantId) {
@@ -114,7 +105,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     );
   }
 
-  // Track UI-state for read/unread (because we update DB after fetch)
   let isRead = Boolean(row.isRead);
 
   if (!skipAutoRead && !isRead) {
@@ -135,7 +125,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       ? "Read (legacy)"
       : (await import("@/lib/admin/quotes/normalize")).STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
   const aiAssessment = pickAiAssessmentFromAny(outAny);
 
@@ -187,10 +176,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
-  // lifecycle
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
-  // ✅ active pointer for Versions UI
   const activeVersion =
     typeof (row as any).currentVersion === "number" ? Number((row as any).currentVersion) : null;
 
@@ -260,16 +247,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           tenantId,
           quoteLogId: id,
           quoteVersionId: null,
-          actor: actorUserId,
+          // ✅ DB column is created_by
+          createdBy: actorUserId,
           body: noteBody,
-        })
+        } as any)
         .returning({ id: quoteNotes.id })
         .then((r) => r[0] ?? null);
 
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
-    // Run real reassessment engine + pricing (creates version + updates quote_logs.output)
     const engine: AdminReassessEngine =
       engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
@@ -290,7 +277,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       reason: reason || undefined,
     });
 
-    // If note was created, link it to the new version
     if (createdNoteId) {
       await db
         .update(quoteNotes)
@@ -298,7 +284,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
-    // UI-only selection (not persisted here; authoritative is frozen snapshot)
     void aiMode;
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
@@ -314,7 +299,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const versionId = safeTrim(formData.get("version_id"));
     if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // membership check
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
@@ -330,7 +314,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // atomic restore: copy output + version pointer from quote_versions
     const updated = await db.execute(sql`
       with picked as (
         select
@@ -370,7 +353,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=missing_version`);
 
-    // membership check
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
@@ -386,7 +368,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // Validate that version belongs to this quote + tenant
     const vr = await db.execute(sql`
       select 1 as ok
       from quote_versions v
@@ -398,7 +379,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const vok = Boolean((vr as any)?.rows?.[0]?.ok);
     if (!vok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=bad_version`);
 
-    // Next attempt number for this version
     const ar = await db.execute(sql`
       select coalesce(max(r.attempt), 0) as "max_attempt"
       from quote_renders r
@@ -408,7 +388,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
     const nextAttempt = Number(maxAttemptRaw ?? 0) + 1;
 
-    // Insert queued render attempt
     const ins = await db.execute(sql`
       insert into quote_renders (
         tenant_id,
@@ -437,7 +416,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
   }
 
-  /* -------------------- render -------------------- */
   const submittedAtLabel = row.createdAt ? new Date(row.createdAt).toLocaleString() : "—";
 
   return (
