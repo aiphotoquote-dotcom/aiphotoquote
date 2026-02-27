@@ -271,7 +271,7 @@ export default function LifecyclePanel(props: {
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      {safeTrim(n.actor) ? chip(String(n.actor), "gray") : chip("tenant", "gray")}
+                      {safeTrim((n as any).createdBy) ? chip(String((n as any).createdBy), "gray") : chip("tenant", "gray")}
                       {n.quoteVersionId ? chip("linked to version", "blue") : chip("general", "gray")}
                     </div>
                     <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
@@ -328,7 +328,9 @@ export default function LifecyclePanel(props: {
                       </div>
                     </a>
                   ) : (
-                    <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No image_url for this attempt.</div>
+                    <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">
+                      No image_url for this attempt.
+                    </div>
                   )}
 
                   {r.error ? (
