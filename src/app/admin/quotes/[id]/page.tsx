@@ -356,6 +356,20 @@ type PageProps = {
   searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
 };
 
+type EngineKey = "deterministic_pricing_only" | "full_ai_reassessment";
+
+function normalizeEngine(v: any): EngineKey {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "full_ai_reassessment" || s === "full" || s === "ai") return "full_ai_reassessment";
+  return "deterministic_pricing_only";
+}
+
+function normalizeAiMode(v: any): AiMode {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "fixed" || s === "range" || s === "assessment_only") return s as AiMode;
+  return "assessment_only";
+}
+
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const { userId } = await auth();
   if (!userId) redirect("/sign-in");
@@ -422,7 +436,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // 2) If not found, auto-heal:
+  // 2) If not found, auto-heal
   if (!row) {
     const q = await db
       .select({ tenantId: quoteLogs.tenantId })
@@ -447,9 +461,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       if (mrow?.ok) {
         const next = `/admin/quotes/${encodeURIComponent(id)}`;
         redirect(
-          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(
-            quoteTenantId
-          )}&next=${encodeURIComponent(next)}`
+          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`
         );
       }
     }
@@ -465,9 +477,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           <div className="mt-2">
             The quote either belongs to a different tenant (and you’re not a member), or it no longer exists.
           </div>
-          <div className="mt-3 font-mono text-xs opacity-80">
-            quoteId={id} · activeTenantId={tenantId}
-          </div>
+          <div className="mt-3 font-mono text-xs opacity-80">quoteId={id} · activeTenantId={tenantId}</div>
           <div className="mt-4">
             <Link
               href="/admin/quotes"
@@ -497,8 +507,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
-  const stageLabel =
-    stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+  const stageLabel = stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
   // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
@@ -528,18 +537,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions)
-    ? aiAssessment.questions.map((x: any) => String(x))
-    : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
-    ? aiAssessment.assumptions.map((x: any) => String(x))
-    : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
   const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
-  const pricingBasis: any =
-    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   const inputAny: any = row.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
@@ -557,7 +561,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
-  // -------------------- lifecycle tables (read-only for now) --------------------
+  // -------------------- lifecycle tables --------------------
   type QuoteVersionRow = {
     id: string;
     version: number;
@@ -583,7 +587,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     attempt: number;
     status: string;
     created_at: any;
-    updated_at: any; // (mapped from completed_at)
+    updated_at: any;
     created_by: string | null;
     image_url: string | null;
     prompt: string | null;
@@ -619,7 +623,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     lifecycleReadError = safeTrim(e?.message) || "Failed to read quote_versions";
   }
 
-    try {
+  try {
     const nr = await db.execute(sql`
       select
         id::text as "id",
@@ -638,33 +642,30 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_notes");
   }
 
-try {
-  const rr = await db.execute(sql`
-    select
-      id::text as "id",
-      attempt::int as "attempt",
-      status::text as "status",
-      created_at as "created_at",
-      updated_at as "updated_at",
-      created_by::text as "created_by",
-      image_url::text as "image_url",
-      prompt::text as "prompt",
-      shop_notes::text as "shop_notes",
-      error::text as "error",
-      quote_version_id::text as "quote_version_id"
-    from quote_renders
-    where quote_log_id = ${id}::uuid
-      and tenant_id = ${tenantId}::uuid
-    order by created_at desc
-    limit 200
-  `);
-
-  renderRows = rowsFromExecute<QuoteRenderRow>(rr);
-} catch (e: any) {
-  lifecycleReadError =
-    lifecycleReadError ??
-    (safeTrim(e?.message) || "Failed to read quote_renders");
-}
+  try {
+    const rr = await db.execute(sql`
+      select
+        id::text as "id",
+        attempt::int as "attempt",
+        status::text as "status",
+        created_at as "created_at",
+        updated_at as "updated_at",
+        created_by::text as "created_by",
+        image_url::text as "image_url",
+        prompt::text as "prompt",
+        shop_notes::text as "shop_notes",
+        error::text as "error",
+        quote_version_id::text as "quote_version_id"
+      from quote_renders
+      where quote_log_id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+      order by created_at desc
+      limit 200
+    `);
+    renderRows = rowsFromExecute<QuoteRenderRow>(rr);
+  } catch (e: any) {
+    lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_renders");
+  }
 
   function renderStatusTone(s: string): "gray" | "blue" | "green" | "red" | "yellow" {
     const v = String(s ?? "").toLowerCase().trim();
@@ -693,29 +694,105 @@ try {
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db
-      .update(quoteLogs)
-      .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+  }
+
+  async function createNewVersion(formData: FormData) {
+    "use server";
+
+    const engine = normalizeEngine(formData.get("engine"));
+    const aiMode = normalizeAiMode(formData.get("ai_mode"));
+    const reason = safeTrim(formData.get("reason"));
+    const noteBody = safeTrim(formData.get("note_body"));
+
+    // compute next version number (tenant+quote scoped)
+    const vmax = await db.execute(sql`
+      select coalesce(max(version), 0)::int as v
+      from quote_versions
+      where quote_log_id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+      limit 1
+    `);
+    const maxRow = firstRow(vmax);
+    const nextVersion = Number(maxRow?.v ?? 0) + 1;
+
+    // output strategy (v1):
+    // - deterministic: freeze current output snapshot so UI shows something immediately
+    // - full_ai: also freeze current output for now, BUT mark meta.needs_ai_reassessment=true (next step wires real AI)
+    const frozenOutput = row.output ?? null;
+
+    const meta = {
+      engine,
+      created_from: "admin",
+      created_from_version: versionRows.length ? Number(versionRows[versionRows.length - 1]?.version ?? 0) : null,
+      notes_included: Boolean(noteBody),
+      note_preview: noteBody ? noteBody.slice(0, 240) : null,
+      needs_ai_reassessment: engine === "full_ai_reassessment",
+      ts: new Date().toISOString(),
+    };
+
+    const inserted = await db.execute(sql`
+      insert into quote_versions (
+        quote_log_id,
+        tenant_id,
+        version,
+        created_by,
+        source,
+        reason,
+        ai_mode,
+        output,
+        meta
+      )
+      values (
+        ${id}::uuid,
+        ${tenantId}::uuid,
+        ${nextVersion}::int,
+        ${userId}::text,
+        ${"admin"}::text,
+        ${reason || null},
+        ${aiMode}::text,
+        ${frozenOutput},
+        ${meta}::jsonb
+      )
+      returning id::text as "id"
+    `);
+
+    const insRow = firstRow(inserted);
+    const newVersionId = safeTrim(insRow?.id);
+
+    if (noteBody) {
+      await db.execute(sql`
+        insert into quote_notes (
+          quote_log_id,
+          tenant_id,
+          quote_version_id,
+          body,
+          created_by
+        )
+        values (
+          ${id}::uuid,
+          ${tenantId}::uuid,
+          ${newVersionId ? sql`${newVersionId}::uuid` : sql`null::uuid`},
+          ${noteBody}::text,
+          ${userId}::text
+        )
+      `);
+    }
+
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -841,7 +918,11 @@ try {
         </div>
 
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? <div className="whitespace-pre-wrap leading-relaxed">{notes}</div> : <div className="italic text-gray-500">No notes provided.</div>}
+          {notes ? (
+            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
+          ) : (
+            <div className="italic text-gray-500">No notes provided.</div>
+          )}
         </div>
       </section>
 
@@ -862,6 +943,96 @@ try {
             {noteRows.length ? chip(`${noteRows.length} note${noteRows.length === 1 ? "" : "s"}`, "gray") : null}
             {renderRows.length ? chip(`${renderRows.length} render${renderRows.length === 1 ? "" : "s"}`, "gray") : null}
           </div>
+        </div>
+
+        {/* NEW: create version */}
+        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+          <details>
+            <summary className="cursor-pointer text-sm font-semibold text-gray-800 dark:text-gray-200">
+              Create new version
+            </summary>
+
+            <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+              Choose engine + mode. Optional notes will be stored and can be used for the next AI reassessment.
+            </div>
+
+            <form action={createNewVersion} className="mt-4 grid gap-3">
+              <div className="grid gap-2 lg:grid-cols-2">
+                <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Engine</div>
+                  <div className="mt-2 space-y-2 text-sm">
+                    <label className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="engine"
+                        value="deterministic_pricing_only"
+                        defaultChecked
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="font-semibold">Deterministic pricing only</span>
+                        <span className="block text-xs text-gray-600 dark:text-gray-400">
+                          Freeze current AI scope + compute pricing deterministically (next step wires actual engine call).
+                        </span>
+                      </span>
+                    </label>
+
+                    <label className="flex items-start gap-2">
+                      <input type="radio" name="engine" value="full_ai_reassessment" className="mt-0.5" />
+                      <span>
+                        <span className="font-semibold">Full AI reassessment</span>
+                        <span className="block text-xs text-gray-600 dark:text-gray-400">
+                          Stores “needs reassessment” + notes. Next step will run your AI pipeline and write the new output.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+                  <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">AI mode</div>
+                  <select
+                    name="ai_mode"
+                    defaultValue="assessment_only"
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                  >
+                    <option value="assessment_only">assessment_only</option>
+                    <option value="range">range</option>
+                    <option value="fixed">fixed</option>
+                  </select>
+
+                  <div className="mt-3 text-xs font-semibold text-gray-700 dark:text-gray-300">Reason (optional)</div>
+                  <input
+                    name="reason"
+                    placeholder="e.g. customer clarified scope, new photos, reprice..."
+                    className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">New notes for this version (optional)</div>
+                <textarea
+                  name="note_body"
+                  rows={4}
+                  placeholder="Add anything the shop learned. This will be saved to quote_notes linked to the new version."
+                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="submit"
+                  className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                >
+                  Create version
+                </button>
+                <span className="text-xs text-gray-600 dark:text-gray-300">
+                  This will create a new quote_versions row (and quote_notes if provided).
+                </span>
+              </div>
+            </form>
+          </details>
         </div>
 
         {lifecycleReadError ? (
@@ -1008,14 +1179,10 @@ try {
                           alt="Render attempt"
                           className="w-full rounded-xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                         />
-                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
-                          Click to open original
-                        </div>
+                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
                       </a>
                     ) : (
-                      <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">
-                        No image_url for this attempt.
-                      </div>
+                      <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No image_url for this attempt.</div>
                     )}
 
                     {r.error ? (
@@ -1026,9 +1193,7 @@ try {
 
                     {r.shop_notes ? (
                       <details className="mt-3">
-                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                          Shop notes
-                        </summary>
+                        <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes</summary>
                         <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
                           {String(r.shop_notes)}
                         </div>
@@ -1060,9 +1225,7 @@ try {
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Details</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              AI describes scope. Server computes dollars (deterministic).
-            </p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI describes scope. Server computes dollars (deterministic).</p>
           </div>
           {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
         </div>
@@ -1238,17 +1401,13 @@ try {
                 ) : null}
 
                 {!aiAssessment ? (
-                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">
-                    No AI output found yet (quoteLogs.output is empty).
-                  </div>
+                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">No AI output found yet (quoteLogs.output is empty).</div>
                 ) : null}
               </div>
             </div>
 
             <details className="mt-4">
-              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                Raw AI JSON (debug)
-              </summary>
+              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Raw AI JSON (debug)</summary>
               <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {JSON.stringify(row.output ?? {}, null, 2)}
               </pre>
@@ -1274,9 +1433,7 @@ try {
                     alt="AI render"
                     className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                   />
-                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
-                    Click to open original
-                  </div>
+                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
                 </a>
               ) : (
                 <div className="text-sm text-gray-600 dark:text-gray-300 italic">No render available for this quote.</div>
@@ -1290,9 +1447,7 @@ try {
 
               {row.renderPrompt ? (
                 <details className="mt-4">
-                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                    Render prompt (debug)
-                  </summary>
+                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Render prompt (debug)</summary>
                   <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {String(row.renderPrompt)}
                   </pre>
