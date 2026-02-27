@@ -638,14 +638,14 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_notes");
   }
 
-  try {
-    // ✅ schema-aligned: started_at / completed_at; no created_by column
+   try {
+    // ✅ schema-aligned: quote_renders uses started_at / completed_at (not created_at)
     const rr = await db.execute(sql`
       select
         id::text as "id",
         attempt::int as "attempt",
         status::text as "status",
-        created_at as "created_at",
+        started_at as "created_at",
         completed_at as "updated_at",
         null::text as "created_by",
         image_url::text as "image_url",
@@ -656,7 +656,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       from quote_renders
       where quote_log_id = ${id}::uuid
         and tenant_id = ${tenantId}::uuid
-      order by created_at desc
+      order by started_at desc
       limit 200
     `);
     renderRows = rowsFromExecute<QuoteRenderRow>(rr);
