@@ -767,7 +767,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       engine,
       contextNotesLimit: 50,
       source: "admin.page",
-      reason: reason ? reason : null,
+      reason: reason || undefined,
     });
 
     // If note was created, link it to the new version
