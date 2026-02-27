@@ -45,13 +45,9 @@ export const dynamic = "force-dynamic";
 
 /**
  * NOTE:
- * - We keep server actions inside this page for now to avoid Next.js action scoping pitfalls.
+ * - Server actions stay in this page to avoid Next action scoping pitfalls.
  * - UI + data loading + parsing is modularized.
  */
-
-/* -------- page-compat types re-export layer (keeps imports tight) -------- */
-// We keep AdminReassessEngine / QuoteLogRow type compatibility through a tiny shim.
-// See file: src/lib/admin/quotes/pageCompat.ts
 
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
@@ -74,8 +70,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     sp?.skipAutoRead === "1" || (Array.isArray(sp?.skipAutoRead) && sp.skipAutoRead.includes("1"));
 
   const jar = await cookies();
-  const tenantId = await resolveActiveTenantId({ jar, userId });
-  if (!tenantId) redirect("/admin/quotes");
+
+  // IMPORTANT: keep tenantId strictly typed as string for server-action closures
+  const tenantIdMaybe = await resolveActiveTenantId({ jar, userId });
+  if (!tenantIdMaybe) redirect("/admin/quotes");
+  const tenantId: string = tenantIdMaybe;
 
   // 1) Strict tenant-scoped lookup
   let row = await getAdminQuoteRow({ id, tenantId });
@@ -90,7 +89,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       );
     }
 
-    // same UI as before (inline, not worth extracting yet)
     return (
       <div className="mx-auto max-w-3xl px-6 py-10">
         <a href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
@@ -133,7 +131,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const stageNorm = normalizeStage(row.stage);
   const stageLabel =
-    stageNorm === "read" ? "Read (legacy)" : (await import("@/lib/admin/quotes/normalize")).STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+    stageNorm === "read"
+      ? "Read (legacy)"
+      : (await import("@/lib/admin/quotes/normalize")).STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
   // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
@@ -163,9 +163,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
-  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope) ? aiAssessment.visible_scope.map((x: any) => String(x)) : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions)
+    ? aiAssessment.questions.map((x: any) => String(x))
+    : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
+    ? aiAssessment.assumptions.map((x: any) => String(x))
+    : [];
+  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
+    ? aiAssessment.visible_scope.map((x: any) => String(x))
+    : [];
 
   const pricingBasis: any =
     aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
@@ -271,7 +277,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       id,
       tenant_id: tenantId,
       input: row.input ?? {},
-      qa: (row as any).qa ?? {}, // row selection doesn't include qa in this page; keep safe
+      qa: (row as any).qa ?? {},
       output: row.output ?? {},
     };
 
