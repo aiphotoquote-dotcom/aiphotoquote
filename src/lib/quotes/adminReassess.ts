@@ -416,7 +416,7 @@ export async function adminReassessQuote(args: {
   engine: AdminReassessEngine;
   contextNotesLimit: number;
 
-  // ✅ allow callers (route) to stamp provenance
+  // ✅ allow callers (route/page) to stamp provenance
   source?: string;
   reason?: string;
 }) {
@@ -626,10 +626,12 @@ export async function adminReassessQuote(args: {
     meta,
   });
 
-  // Advance "current" snapshot.
+  // ✅ Advance "current" snapshot + pointer.
   await db.execute(sql`
     update quote_logs
-    set output = ${JSON.stringify(output)}::jsonb
+    set
+      output = ${JSON.stringify(output)}::jsonb,
+      current_version = ${version}::int
     where id = ${quoteLogId}::uuid
       and tenant_id = ${tenantId}::uuid
   `);

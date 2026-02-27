@@ -416,6 +416,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       renderError: quoteLogs.renderError,
       renderPrompt: quoteLogs.renderPrompt,
       renderedAt: quoteLogs.renderedAt,
+
+      // ✅ NEW pointer (may be null)
+      currentVersion: quoteLogs.currentVersion,
     })
     .from(quoteLogs)
     .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)))
@@ -654,6 +657,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_renders");
   }
 
+  // ✅ active pointer for Versions UI
+  const activeVersion =
+    typeof (row as any).currentVersion === "number" ? Number((row as any).currentVersion) : null;
+
   function renderStatusTone(s: string): "gray" | "blue" | "green" | "red" | "yellow" {
     const v = String(s ?? "").toLowerCase().trim();
     if (v === "rendered") return "green";
@@ -778,10 +785,62 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
-    // We keep aiMode selection stored on the version row as part of reassess output policy snapshot.
-    // The authoritative ai_mode still comes from pricing_policy_snapshot (frozen) inside the quote.
-    // (aiMode is currently UI-only selection; future: allow overriding policy with proper snapshot controls.)
+    // UI-only selection (not persisted here; authoritative is frozen snapshot)
     void aiMode;
+
+    redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+  }
+
+  async function restoreVersion(formData: FormData) {
+    "use server";
+
+    const session = await auth();
+    const actorUserId = session.userId;
+    if (!actorUserId) redirect("/sign-in");
+
+    const versionId = safeTrim(formData.get("version_id"));
+    if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+
+    // membership check
+    const membership = await db
+      .select({ ok: sql<number>`1` })
+      .from(tenantMembers)
+      .where(
+        and(
+          eq(tenantMembers.tenantId, tenantId),
+          eq(tenantMembers.clerkUserId, actorUserId),
+          eq(tenantMembers.status, "active")
+        )
+      )
+      .limit(1)
+      .then((r) => r[0] ?? null);
+
+    if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+
+    // atomic restore: copy output + version pointer from quote_versions
+    const updated = await db.execute(sql`
+      with picked as (
+        select
+          v.output as output,
+          v.version as version
+        from quote_versions v
+        where v.id = ${versionId}::uuid
+          and v.tenant_id = ${tenantId}::uuid
+          and v.quote_log_id = ${id}::uuid
+        limit 1
+      )
+      update quote_logs q
+      set
+        output = picked.output,
+        current_version = picked.version
+      from picked
+      where q.id = ${id}::uuid
+        and q.tenant_id = ${tenantId}::uuid
+      returning q.id::text as "id"
+    `);
+
+    const ok = Boolean((updated as any)?.rows?.[0]?.id);
+    if (!ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?restoreError=1`);
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
@@ -810,6 +869,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             {renderChip(row.renderStatus)}
             {confidence ? chip(`Confidence: ${String(confidence)}`, "gray") : null}
             {inspectionRequired === true ? chip("Inspection required", "yellow") : null}
+            {activeVersion != null ? chip(`Active: v${activeVersion}`, "green") : chip("Active: —", "gray")}
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1060,6 +1120,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   const summ = safeTrim(pickAiAssessmentFromAny(out)?.summary ?? "");
                   const policyMode = safeTrim(v.aiMode) || null;
 
+                  const isActive = activeVersion != null && Number(v.version) === activeVersion;
+
                   const estText =
                     est.low != null && est.high != null
                       ? `${formatUSD(est.low)} – ${formatUSD(est.high)}`
@@ -1077,11 +1139,27 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-2">
                           {versionChip(Number(v.version ?? 0))}
+                          {isActive ? chip("ACTIVE", "green") : null}
                           {policyMode ? chip(`mode: ${policyMode}`, "gray") : null}
                           {safeTrim(v.source) ? chip(String(v.source), "gray") : null}
                           {safeTrim(v.createdBy) ? chip(String(v.createdBy), "gray") : null}
                         </div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(v.createdAt)}</div>
+
+                        <div className="flex items-center gap-2">
+                          <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(v.createdAt)}</div>
+
+                          {!isActive ? (
+                            <form action={restoreVersion}>
+                              <input type="hidden" name="version_id" value={v.id} />
+                              <button
+                                type="submit"
+                                className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                              >
+                                Restore
+                              </button>
+                            </form>
+                          ) : null}
+                        </div>
                       </div>
 
                       {v.reason ? (
@@ -1293,7 +1371,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">llmKeySource:</span> {llmKeySource ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">pricing_model (policy):</span> {pricingPolicySnap?.pricing_model ?? "—"}
+                      <span className="font-semibold">pricing_model (policy):</span>{" "}
+                      {pricingPolicySnap?.pricing_model ?? "—"}
                     </div>
                   </div>
                 </div>
