@@ -436,11 +436,6 @@ export const quoteVersions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // matches your neon indexes list:
-    // - quote_versions_pkey (implicit by primaryKey)
-    // - quote_versions_quote_log_created_idx (quote_log_id, created_at desc)
-    // - quote_versions_tenant_created_idx (tenant_id, created_at desc)
-    // - unique (quote_log_id, version)
     quoteLogCreatedIdx: index("quote_versions_quote_log_created_idx").on(t.quoteLogId, t.createdAt),
     tenantCreatedIdx: index("quote_versions_tenant_created_idx").on(t.tenantId, t.createdAt),
     quoteLogVersionUq: uniqueIndex("quote_versions_quote_log_id_version_uq").on(t.quoteLogId, t.version),
@@ -449,6 +444,11 @@ export const quoteVersions = pgTable(
 
 /**
  * Quote notes — tenant-authored notes (internal for now; can add visibility flags later)
+ *
+ * IMPORTANT:
+ * Prod writes column "created_by" (see route.ts insert).
+ * The admin UI expects a field named "actor".
+ * So we map the "actor" property to the real DB column "created_by".
  */
 export const quoteNotes = pgTable(
   "quote_notes",
@@ -466,8 +466,8 @@ export const quoteNotes = pgTable(
     // Optional: attach to a specific version (recommended)
     quoteVersionId: uuid("quote_version_id").references(() => quoteVersions.id, { onDelete: "cascade" }),
 
-    // Clerk user id or email (portable enough for now)
-    actor: text("actor"),
+    // ✅ map "actor" -> prod column "created_by"
+    actor: text("created_by"),
 
     body: text("body").notNull(),
 
@@ -552,7 +552,6 @@ export const industries = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
-    // keep your naming but align uniqueness
     keyIdx: uniqueIndex("industries_key_idx").on(t.key),
     statusIdx: index("industries_status_idx").on(t.status),
   })

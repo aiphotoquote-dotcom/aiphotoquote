@@ -15,7 +15,7 @@ import { computeEstimate } from "@/lib/pricing/computeEstimate";
 export type AdminReassessEngine = "openai_assessment" | "deterministic_only";
 export type KeySource = "tenant" | "platform_grace" | null;
 
-export type QuoteLogRow = {
+type QuoteLogRow = {
   id: string;
   tenant_id: string;
   input: any;
@@ -300,7 +300,12 @@ function clampTextByChars(s: string, maxChars: number) {
   return s.slice(0, maxChars);
 }
 
-async function buildNotesContext(args: { tenantId: string; quoteLogId: string; limit: number; maxChars: number }) {
+async function buildNotesContext(args: {
+  tenantId: string;
+  quoteLogId: string;
+  limit: number;
+  maxChars: number;
+}) {
   const { tenantId, quoteLogId, limit, maxChars } = args;
 
   const cnr = await db.execute(sql`
@@ -411,14 +416,14 @@ export async function adminReassessQuote(args: {
   engine: AdminReassessEngine;
   contextNotesLimit: number;
 
-  // optional metadata controls (no schema changes required)
-  reason?: string | null;
-  source?: string; // default "admin"
+  // ✅ allow callers (route) to stamp provenance
+  source?: string;
+  reason?: string;
 }) {
   const { quoteLog, createdBy, engine, contextNotesLimit } = args;
 
-  const reason = typeof args.reason === "string" ? (args.reason.trim() || null) : args.reason ?? "reassess_from_notes";
   const source = safeTrim(args.source) || "admin";
+  const reason = safeTrim(args.reason) || "reassess_from_notes";
 
   if (engine !== "deterministic_only" && engine !== "openai_assessment") {
     throw new Error("INVALID_ENGINE");
@@ -602,7 +607,7 @@ export async function adminReassessQuote(args: {
   const ai_mode = safeTrim(pricing_policy_snapshot?.ai_mode) || "assessment_only";
 
   const meta = {
-    createdFrom: "admin.reassess",
+    createdFrom: source,
     ai_snapshot,
     hashes: {
       estimatorSystemSha256: estimatorSystemSha,
@@ -616,7 +621,7 @@ export async function adminReassessQuote(args: {
     createdBy,
     ai_mode,
     source,
-    reason,
+    reason: reason || null,
     output,
     meta,
   });
@@ -631,3 +636,5 @@ export async function adminReassessQuote(args: {
 
   return { versionId, version, output };
 }
+
+export type { QuoteLogRow };
