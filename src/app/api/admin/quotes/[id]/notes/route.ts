@@ -5,7 +5,7 @@ import { z } from "zod";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { adminReassessQuote, type AdminReassessEngine } from "@/lib/quotes/adminReassess";
+import { adminReassessQuote, type AdminReassessEngine, type QuoteLogRow } from "@/lib/quotes/adminReassess";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,9 +14,7 @@ const BodySchema = z.object({
   body: z.string().trim().min(1).max(20_000),
   reassess: z.boolean().optional().default(false),
   engine: z.enum(["openai_assessment", "deterministic_only"]).optional().default("openai_assessment"),
-  // if true, we link THIS new note to the created version (recommended)
   linkNoteToVersion: z.boolean().optional().default(true),
-  // how many notes to include as context when re-running
   contextNotesLimit: z.number().int().min(1).max(200).optional().default(50),
 });
 
@@ -25,7 +23,6 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
-/* --------------------- handler --------------------- */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> | { id: string } }) {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ ok: false, error: "UNAUTHORIZED" }, { status: 401 });
@@ -42,7 +39,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const { body, reassess, engine, linkNoteToVersion, contextNotesLimit } = parsed.data;
 
-  // Load quote log + tenant
+  // Load quote log (id + tenant only, strict)
   const qr = await db.execute(sql`
     select
       id::text as "id",
@@ -100,49 +97,29 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ ok: true, noteId, reassessed: false });
   }
 
-  // Harden engine (strict union)
-  const engineSafe: AdminReassessEngine =
-    engine === "deterministic_only" ? "deterministic_only" : "openai_assessment";
+  // Reassess via shared engine (creates quote_versions row + updates quote_logs.output)
+  const quoteLog: QuoteLogRow = {
+    id: String(qrow.id),
+    tenant_id: tenantId,
+    input: qrow.input ?? {},
+    qa: qrow.qa ?? {},
+    output: qrow.output ?? {},
+  };
 
-  // Run reassess (service handles notes context, OpenAI gating, versioning, and quote_logs snapshot update)
-  let versionId = "";
-  let version = 0;
-
-  try {
-    const r = await adminReassessQuote({
-      quoteLog: {
-        id: String(qrow.id),
-        tenant_id: tenantId,
-        input: qrow.input ?? {},
-        qa: qrow.qa ?? {},
-        output: qrow.output ?? {},
-      },
-      createdBy: userId,
-      engine: engineSafe,
-      contextNotesLimit,
-    });
-
-    versionId = r.versionId;
-    version = r.version;
-  } catch (e: any) {
-    const msg = safeTrim(e?.message);
-
-    // Keep errors deterministic and safe for admin clients.
-    // (We do not delete the note; notes are immutable audit artifacts.)
-    if (msg === "MISSING_OPENAI_KEY" || msg === "MISSING_PLATFORM_OPENAI_KEY") {
-      return NextResponse.json({ ok: false, error: msg, noteId }, { status: 400 });
-    }
-    if (msg === "INVALID_ENGINE") {
-      return NextResponse.json({ ok: false, error: "INVALID_ENGINE", noteId }, { status: 400 });
-    }
-    return NextResponse.json({ ok: false, error: "REASSESS_FAILED", noteId }, { status: 500 });
-  }
+  const result = await adminReassessQuote({
+    quoteLog,
+    createdBy: userId,
+    engine: engine as AdminReassessEngine,
+    contextNotesLimit,
+    source: "admin.notes",
+    reason: "reassess_from_notes",
+  });
 
   // Link note -> version (optional)
   if (linkNoteToVersion) {
     await db.execute(sql`
       update quote_notes
-      set quote_version_id = ${versionId}::uuid
+      set quote_version_id = ${result.versionId}::uuid
       where id = ${noteId}::uuid
         and tenant_id = ${tenantId}::uuid
     `);
@@ -152,8 +129,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     ok: true,
     noteId,
     reassessed: true,
-    engine: engineSafe,
-    versionId,
-    version,
+    engine,
+    versionId: result.versionId,
+    version: result.version,
   });
 }

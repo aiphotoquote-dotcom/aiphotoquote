@@ -15,7 +15,7 @@ import { computeEstimate } from "@/lib/pricing/computeEstimate";
 export type AdminReassessEngine = "openai_assessment" | "deterministic_only";
 export type KeySource = "tenant" | "platform_grace" | null;
 
-type QuoteLogRow = {
+export type QuoteLogRow = {
   id: string;
   tenant_id: string;
   input: any;
@@ -300,12 +300,7 @@ function clampTextByChars(s: string, maxChars: number) {
   return s.slice(0, maxChars);
 }
 
-async function buildNotesContext(args: {
-  tenantId: string;
-  quoteLogId: string;
-  limit: number;
-  maxChars: number;
-}) {
+async function buildNotesContext(args: { tenantId: string; quoteLogId: string; limit: number; maxChars: number }) {
   const { tenantId, quoteLogId, limit, maxChars } = args;
 
   const cnr = await db.execute(sql`
@@ -415,8 +410,15 @@ export async function adminReassessQuote(args: {
   createdBy: string;
   engine: AdminReassessEngine;
   contextNotesLimit: number;
+
+  // optional metadata controls (no schema changes required)
+  reason?: string | null;
+  source?: string; // default "admin"
 }) {
   const { quoteLog, createdBy, engine, contextNotesLimit } = args;
+
+  const reason = typeof args.reason === "string" ? (args.reason.trim() || null) : args.reason ?? "reassess_from_notes";
+  const source = safeTrim(args.source) || "admin";
 
   if (engine !== "deterministic_only" && engine !== "openai_assessment") {
     throw new Error("INVALID_ENGINE");
@@ -465,7 +467,7 @@ export async function adminReassessQuote(args: {
   const resolvedBase = await resolveTenantLlm(tenantId);
 
   // Compose prompt through PCC composition layer (policy-aware)
-  const platformLlm = await getPlatformLlm(); // used by composeEstimatorPrompt()
+  const platformLlm = await getPlatformLlm();
   const industryKey = safeTrim(inputAny?.industryKeySnapshot) || category;
 
   const composedEstimator = composeEstimatorPrompt({
@@ -482,8 +484,7 @@ export async function adminReassessQuote(args: {
   const estimatorSystemSha = sha256Hex(composedEstimator);
 
   // Pull maxOutputTokens from PCC platform cfg (authoritative)
-  const maxOutputTokens =
-    Number((resolvedBase as any)?.platform?.guardrails?.maxOutputTokens ?? 1200) || 1200;
+  const maxOutputTokens = Number((resolvedBase as any)?.platform?.guardrails?.maxOutputTokens ?? 1200) || 1200;
 
   // AI output
   let rawOutput: any = null;
@@ -537,7 +538,7 @@ export async function adminReassessQuote(args: {
     answers: Array.isArray(qaAny?.answers) ? qaAny.answers : [],
   };
 
-  // Stronger immutable snapshot (now that we know resolveTenantLlm() shape)
+  // Stronger immutable snapshot
   const ai_snapshot = {
     version: 3,
     capturedAt: new Date().toISOString(),
@@ -601,7 +602,7 @@ export async function adminReassessQuote(args: {
   const ai_mode = safeTrim(pricing_policy_snapshot?.ai_mode) || "assessment_only";
 
   const meta = {
-    createdFrom: "admin.notes.reassess",
+    createdFrom: "admin.reassess",
     ai_snapshot,
     hashes: {
       estimatorSystemSha256: estimatorSystemSha,
@@ -614,8 +615,8 @@ export async function adminReassessQuote(args: {
     quoteLogId,
     createdBy,
     ai_mode,
-    source: "admin",
-    reason: "reassess_from_notes",
+    source,
+    reason,
     output,
     meta,
   });
