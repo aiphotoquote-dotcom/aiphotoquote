@@ -423,7 +423,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     .then((r) => r[0] ?? null);
 
   // 2) If not found, auto-heal:
-  // Find the quote's tenant, verify membership, activate tenant cookie, and retry.
   if (!row) {
     const q = await db
       .select({ tenantId: quoteLogs.tenantId })
@@ -448,12 +447,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       if (mrow?.ok) {
         const next = `/admin/quotes/${encodeURIComponent(id)}`;
         redirect(
-          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(quoteTenantId)}&next=${encodeURIComponent(next)}`
+          `/api/admin/tenant/activate?tenantId=${encodeURIComponent(
+            quoteTenantId
+          )}&next=${encodeURIComponent(next)}`
         );
       }
     }
 
-    // If we got here, user either isn't a member or quote doesn't exist
     return (
       <div className="mx-auto max-w-3xl px-6 py-10">
         <Link href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
@@ -465,7 +465,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           <div className="mt-2">
             The quote either belongs to a different tenant (and you’re not a member), or it no longer exists.
           </div>
-          <div className="mt-3 font-mono text-xs opacity-80">quoteId={id} · activeTenantId={tenantId}</div>
+          <div className="mt-3 font-mono text-xs opacity-80">
+            quoteId={id} · activeTenantId={tenantId}
+          </div>
           <div className="mt-4">
             <Link
               href="/admin/quotes"
@@ -495,15 +497,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(row.input);
 
   const stageNorm = normalizeStage(row.stage);
-  const stageLabel = stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+  const stageLabel =
+    stageNorm === "read" ? "Read (legacy)" : STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
   // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = row.output ?? null;
-
-  // "aiAssessment" is the bucket we render from; with the deterministic engine we store fields at top level.
   const aiAssessment = pickAiAssessmentFromAny(outAny);
 
-  // Prefer new deterministic fields first
   const estLow = safeMoney(
     aiAssessment?.estimate_low ??
       aiAssessment?.estimateLow ??
@@ -528,16 +528,19 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions)
+    ? aiAssessment.questions.map((x: any) => String(x))
+    : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
+    ? aiAssessment.assumptions.map((x: any) => String(x))
+    : [];
   const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
-  // Deterministic pricing basis (new)
-  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any =
+    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
-  // Frozen snapshots (new)
   const inputAny: any = row.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
   const pricingConfigSnap: any = inputAny?.pricing_config_snapshot ?? null;
@@ -554,7 +557,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
-  // -------------------- NEW: lifecycle tables (read-only for now) --------------------
+  // -------------------- lifecycle tables (read-only for now) --------------------
   type QuoteVersionRow = {
     id: string;
     version: number;
@@ -580,8 +583,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     attempt: number;
     status: string;
     created_at: any;
-    updated_at: any; // (we’ll map completed_at -> updated_at for UI)
-    created_by: string | null; // not present in DB; keep null
+    updated_at: any; // (mapped from completed_at)
+    created_by: string | null;
     image_url: string | null;
     prompt: string | null;
     shop_notes: string | null;
@@ -617,12 +620,14 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   }
 
   try {
-    // ✅ schema-aligned: quote_notes has actor, not created_by
+    // ✅ backwards-compatible: supports BOTH schemas:
+    // - old column: actor
+    // - new column: created_by
     const nr = await db.execute(sql`
       select
         id::text as "id",
         created_at as "created_at",
-        actor::text as "created_by",
+        coalesce(created_by::text, actor::text) as "created_by",
         body::text as "body",
         quote_version_id::text as "quote_version_id"
       from quote_notes
@@ -637,7 +642,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   }
 
   try {
-    // ✅ schema-aligned: quote_renders has started_at/completed_at, not updated_at; no created_by column
+    // ✅ schema-aligned: started_at / completed_at; no created_by column
     const rr = await db.execute(sql`
       select
         id::text as "id",
@@ -689,20 +694,29 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set(STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ stage: next } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: false } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: true } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -828,17 +842,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
 
         <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200">
-          {notes ? (
-            <div className="whitespace-pre-wrap leading-relaxed">{notes}</div>
-          ) : (
-            <div className="italic text-gray-500">No notes provided.</div>
-          )}
+          {notes ? <div className="whitespace-pre-wrap leading-relaxed">{notes}</div> : <div className="italic text-gray-500">No notes provided.</div>}
         </div>
       </section>
 
       <QuotePhotoGallery photos={photos} />
 
-      {/* NEW: Quote lifecycle (read-only) */}
+      {/* Quote lifecycle */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -877,7 +887,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   const est = extractEstimate(out);
                   const conf = safeTrim(pickAiAssessmentFromAny(out)?.confidence ?? "");
                   const summ = safeTrim(pickAiAssessmentFromAny(out)?.summary ?? "");
-
                   const policyMode = safeTrim(v.ai_mode) || null;
 
                   const estText =
@@ -1000,7 +1009,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                           alt="Render attempt"
                           className="w-full rounded-xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                         />
-                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
+                        <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
+                          Click to open original
+                        </div>
                       </a>
                     ) : (
                       <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">
@@ -1050,7 +1061,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-lg font-semibold">Details</h3>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">AI describes scope. Server computes dollars (deterministic).</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              AI describes scope. Server computes dollars (deterministic).
+            </p>
           </div>
           {row.renderOptIn ? chip("Customer opted into render", "blue") : chip("No render opt-in", "gray")}
         </div>
@@ -1226,20 +1239,24 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                 ) : null}
 
                 {!aiAssessment ? (
-                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">No AI output found yet (quoteLogs.output is empty).</div>
+                  <div className="text-sm text-gray-600 dark:text-gray-300 italic">
+                    No AI output found yet (quoteLogs.output is empty).
+                  </div>
                 ) : null}
               </div>
             </div>
 
             <details className="mt-4">
-              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Raw AI JSON (debug)</summary>
+              <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                Raw AI JSON (debug)
+              </summary>
               <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {JSON.stringify(row.output ?? {}, null, 2)}
               </pre>
             </details>
           </div>
 
-          {/* Rendering (legacy single-render fields on quote_logs; keep for back-compat) */}
+          {/* Rendering (legacy) */}
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm font-semibold">Rendering (legacy)</div>
@@ -1258,7 +1275,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                     alt="AI render"
                     className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                   />
-                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
+                  <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
+                    Click to open original
+                  </div>
                 </a>
               ) : (
                 <div className="text-sm text-gray-600 dark:text-gray-300 italic">No render available for this quote.</div>
@@ -1272,7 +1291,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
               {row.renderPrompt ? (
                 <details className="mt-4">
-                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">Render prompt (debug)</summary>
+                  <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
+                    Render prompt (debug)
+                  </summary>
                   <pre className="mt-3 overflow-auto rounded-xl border border-gray-200 bg-black p-4 text-xs text-white dark:border-gray-800">
 {String(row.renderPrompt)}
                   </pre>
