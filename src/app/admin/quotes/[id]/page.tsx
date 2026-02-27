@@ -319,7 +319,6 @@ function formatEstimateForPolicy(args: {
     return { text: one != null ? formatUSD(one) : null, tone: "green", label: "Fixed estimate" };
   }
 
-  // range
   if (low != null && high != null) {
     return { text: `${formatUSD(low)} – ${formatUSD(high)}`, tone: "green", label: "Range estimate" };
   }
@@ -365,7 +364,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // If cookie tenant exists, validate membership
   if (tenantIdMaybe) {
     const membership = await db
       .select({ ok: sql<number>`1` })
@@ -383,7 +381,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     if (!membership?.ok) tenantIdMaybe = null;
   }
 
-  // Fallback: first owned tenant (legacy back-compat)
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -572,7 +569,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   type QuoteNoteRow = {
     id: string;
     createdAt: any;
-    actor: string | null;
+    createdBy: string | null;
     body: string;
     quoteVersionId: string | null;
   };
@@ -614,19 +611,31 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     lifecycleReadError = safeTrim(e?.message) || "Failed to read quote_versions";
   }
 
+  // NOTE: Do NOT use quoteNotes.actor here; DB column is created_by.
+  // We deliberately use raw SQL projection to stay compatible even if Drizzle schema is stale.
   try {
-    noteRows = await db
-      .select({
-        id: quoteNotes.id,
-        createdAt: quoteNotes.createdAt,
-        actor: quoteNotes.actor,
-        body: quoteNotes.body,
-        quoteVersionId: quoteNotes.quoteVersionId,
-      })
-      .from(quoteNotes)
-      .where(and(eq(quoteNotes.quoteLogId, id), eq(quoteNotes.tenantId, tenantId)))
-      .orderBy(desc(quoteNotes.createdAt))
-      .limit(200);
+    const nr = await db.execute(sql`
+      select
+        id::text as "id",
+        created_at as "createdAt",
+        created_by::text as "createdBy",
+        body::text as "body",
+        quote_version_id::text as "quoteVersionId"
+      from quote_notes
+      where quote_log_id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+      order by created_at desc
+      limit 200
+    `);
+
+    const rows: any[] = (nr as any)?.rows ?? (Array.isArray(nr) ? (nr as any) : []);
+    noteRows = rows.map((r) => ({
+      id: safeTrim(r?.id),
+      createdAt: r?.createdAt,
+      createdBy: safeTrim(r?.createdBy) || null,
+      body: safeTrim(r?.body),
+      quoteVersionId: safeTrim(r?.quoteVersionId) || null,
+    }));
   } catch (e: any) {
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_notes");
   }
@@ -759,29 +768,41 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const inserted = await db
       .insert(quoteVersions)
       .values({
-        tenantId, // ✅ string
-        quoteLogId: id, // ✅ string(uuid)
+        tenantId,
+        quoteLogId: id,
         version: nextVersion,
-        aiMode, // ✅ nullable column, but we always pass a valid AiMode anyway
+        aiMode,
         source: "tenant_edit",
-        createdBy: actorUserId, // ✅ NOT NULL (don’t pass null)
-        reason: reason ? reason : null, // ✅ nullable column
-        output: frozenOutput || {}, // ✅ NOT NULL
-        meta: meta || {}, // ✅ NOT NULL
+        createdBy: actorUserId,
+        reason: reason ? reason : null,
+        output: frozenOutput || {},
+        meta: meta || {},
       })
       .returning({ id: quoteVersions.id })
       .then((r) => r[0] ?? null);
 
     const newVersionId = inserted?.id ? String(inserted.id) : null;
 
+    // NOTE: Do NOT use quoteNotes.actor insert; DB column is created_by.
     if (noteBody) {
-      await db.insert(quoteNotes).values({
-        tenantId,
-        quoteLogId: id,
-        quoteVersionId: newVersionId ?? null,
-        actor: actorUserId,
-        body: noteBody,
-      });
+      await db.execute(sql`
+        insert into quote_notes (
+          quote_log_id,
+          tenant_id,
+          quote_version_id,
+          body,
+          created_by,
+          created_at
+        )
+        values (
+          ${id}::uuid,
+          ${tenantId}::uuid,
+          ${newVersionId ? sql`${newVersionId}::uuid` : sql`null`},
+          ${noteBody},
+          ${actorUserId},
+          now()
+        )
+      `);
     }
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
@@ -1141,7 +1162,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        {safeTrim(n.actor) ? chip(String(n.actor), "gray") : chip("tenant", "gray")}
+                        {safeTrim(n.createdBy) ? chip(String(n.createdBy), "gray") : chip("tenant", "gray")}
                         {n.quoteVersionId ? chip("linked to version", "blue") : chip("general", "gray")}
                       </div>
                       <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
@@ -1294,7 +1315,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                       <span className="font-semibold">llmKeySource:</span> {llmKeySource ?? "—"}
                     </div>
                     <div>
-                      <span className="font-semibold">pricing_model (policy):</span> {pricingPolicySnap?.pricing_model ?? "—"}
+                      <span className="font-semibold">pricing_model (policy):</span>{" "}
+                      {pricingPolicySnap?.pricing_model ?? "—"}
                     </div>
                   </div>
                 </div>
@@ -1363,7 +1385,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
                         <span className="font-semibold">fee:</span> {fmtNum(pricingBasis.fee)}
                       </div>
                     ) : null}
-                    {!pricingBasis ? <div className="italic text-gray-500">No pricing_basis found (older quote).</div> : null}
+                    {!pricingBasis ? (
+                      <div className="italic text-gray-500">No pricing_basis found (older quote).</div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -1397,7 +1421,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               <div className="grid gap-3">
                 {questions.length ? (
                   <div>
-                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">QUESTIONS</div>
+                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+                      QUESTIONS
+                    </div>
                     <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
                       {questions.slice(0, 8).map((q, i) => (
                         <li key={i}>{q}</li>
@@ -1421,7 +1447,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
                 {assumptions.length ? (
                   <div>
-                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">ASSUMPTIONS</div>
+                    <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
+                      ASSUMPTIONS
+                    </div>
                     <ul className="mt-2 list-disc pl-5 text-sm text-gray-800 dark:text-gray-200 space-y-1">
                       {assumptions.slice(0, 8).map((q, i) => (
                         <li key={i}>{q}</li>
