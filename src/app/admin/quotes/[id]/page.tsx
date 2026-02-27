@@ -619,15 +619,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     lifecycleReadError = safeTrim(e?.message) || "Failed to read quote_versions";
   }
 
-  try {
-    // ✅ backwards-compatible: supports BOTH schemas:
-    // - old column: actor
-    // - new column: created_by
+    try {
     const nr = await db.execute(sql`
       select
         id::text as "id",
         created_at as "created_at",
-        coalesce(created_by::text, actor::text) as "created_by",
+        created_by::text as "created_by",
         body::text as "body",
         quote_version_id::text as "quote_version_id"
       from quote_notes
