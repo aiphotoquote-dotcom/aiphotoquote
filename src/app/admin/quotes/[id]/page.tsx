@@ -28,6 +28,27 @@ function firstRow(r: any): any | null {
   }
 }
 
+// ✅ Normalize db.execute() return shape across adapters:
+// - some return { rows: [...] }
+// - some return [...] (array)
+// - some are array-like objects
+function rowsFromExecute<T = any>(r: any): T[] {
+  try {
+    if (!r) return [];
+    if (Array.isArray(r)) return r as T[];
+    if (typeof r === "object" && r !== null) {
+      if (Array.isArray((r as any).rows)) return (r as any).rows as T[];
+      if (0 in (r as any)) {
+        const arr = Array.from(r as any);
+        return arr as T[];
+      }
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
     jar.get("activeTenantId")?.value,
@@ -207,11 +228,6 @@ function formatUSD(n: number) {
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
-}
-
-function titleizeKey(k: string) {
-  const s = safeTrim(k).replace(/_/g, " ");
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 }
 
 function fmtNum(v: any) {
@@ -564,8 +580,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     attempt: number;
     status: string;
     created_at: any;
-    updated_at: any;
-    created_by: string | null;
+    updated_at: any; // (we’ll map completed_at -> updated_at for UI)
+    created_by: string | null; // not present in DB; keep null
     image_url: string | null;
     prompt: string | null;
     shop_notes: string | null;
@@ -595,18 +611,18 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         and tenant_id = ${tenantId}::uuid
       order by version asc, created_at asc
     `);
-    versionRows = ((vr as any)?.rows ?? []) as QuoteVersionRow[];
+    versionRows = rowsFromExecute<QuoteVersionRow>(vr);
   } catch (e: any) {
-    // Keep page working even if tables are not present yet (or permission mismatch)
     lifecycleReadError = safeTrim(e?.message) || "Failed to read quote_versions";
   }
 
   try {
+    // ✅ schema-aligned: quote_notes has actor, not created_by
     const nr = await db.execute(sql`
       select
         id::text as "id",
         created_at as "created_at",
-        created_by::text as "created_by",
+        actor::text as "created_by",
         body::text as "body",
         quote_version_id::text as "quote_version_id"
       from quote_notes
@@ -615,20 +631,21 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       order by created_at desc
       limit 200
     `);
-    noteRows = ((nr as any)?.rows ?? []) as QuoteNoteRow[];
+    noteRows = rowsFromExecute<QuoteNoteRow>(nr);
   } catch (e: any) {
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_notes");
   }
 
   try {
+    // ✅ schema-aligned: quote_renders has started_at/completed_at, not updated_at; no created_by column
     const rr = await db.execute(sql`
       select
         id::text as "id",
         attempt::int as "attempt",
         status::text as "status",
         created_at as "created_at",
-        updated_at as "updated_at",
-        created_by::text as "created_by",
+        completed_at as "updated_at",
+        null::text as "created_by",
         image_url::text as "image_url",
         prompt::text as "prompt",
         shop_notes::text as "shop_notes",
@@ -640,7 +657,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       order by created_at desc
       limit 200
     `);
-    renderRows = ((rr as any)?.rows ?? []) as QuoteRenderRow[];
+    renderRows = rowsFromExecute<QuoteRenderRow>(rr);
   } catch (e: any) {
     lifecycleReadError = lifecycleReadError ?? (safeTrim(e?.message) || "Failed to read quote_renders");
   }
@@ -1044,7 +1061,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm font-semibold">AI assessment</div>
               <div className="flex flex-wrap items-center gap-2">
-                {/* ✅ policy-aware: fixed vs range vs assessment */}
                 {estimateDisplay.text ? chip(estimateDisplay.text, estimateDisplay.tone) : null}
                 {chip(estimateDisplay.label, estimateDisplay.label === "Assessment only" ? "gray" : "blue")}
                 {confidence ? chip(`Confidence: ${String(confidence)}`, "gray") : null}
@@ -1052,7 +1068,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
               </div>
             </div>
 
-            {/* NEW: Deterministic pricing debug panel */}
             <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-sm font-semibold">Pricing engine</div>
