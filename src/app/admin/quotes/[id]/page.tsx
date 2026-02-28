@@ -14,6 +14,8 @@ import DetailsPanel from "@/components/admin/quote/DetailsPanel";
 import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 
+import QuoteEmailPackager from "@/components/admin/quoteEmail/QuoteEmailPackager";
+
 import { db } from "@/lib/db/client";
 import { quoteLogs, quoteNotes, quoteRenders, quoteVersions, tenantMembers } from "@/lib/db/schema";
 
@@ -175,8 +177,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
-  const pricingBasis: any =
-    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   const inputAny: any = rowSnap.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
@@ -205,10 +206,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set((await import("@/lib/admin/quotes/normalize")).STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db
-      .update(quoteLogs)
-      .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
@@ -219,10 +217,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
-    await db
-      .update(quoteLogs)
-      .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
@@ -232,10 +227,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -268,8 +260,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
-    const engine: AdminReassessEngine =
-      engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
+    const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
     const quoteLog: QuoteLogRow = {
       id,
@@ -289,14 +280,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     });
 
     if (createdNoteId) {
-      await db
-        .update(quoteNotes)
-        .set({ quoteVersionId: result.versionId } as any)
-        .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
+      await db.update(quoteNotes).set({ quoteVersionId: result.versionId } as any).where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
     void aiMode;
-
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -431,7 +418,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           .orderBy(desc(quoteVersions.version))
           .limit(50);
 
-        const availableVersions = avail.map((x) => Number(x.version)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+        const availableVersions = avail
+          .map((x) => Number(x.version))
+          .filter((n) => Number.isFinite(n))
+          .sort((a, b) => a - b);
+
         redirect(
           `/admin/quotes/${encodeURIComponent(id)}?renderError=version_number_not_found&version_number=${encodeURIComponent(
             String(vnum)
@@ -501,6 +492,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         <CustomerNotesCard notes={notes} />
 
         <QuotePhotoGallery photos={photos} />
+
+        {/* ✅ WOW moment: packaging station */}
+        <QuoteEmailPackager
+          quoteId={id}
+          activeVersion={activeVersion}
+          versionRows={versionRows as any}
+          renderRows={renderRows as any}
+          customerPhotos={(photos as any[]) ?? []}
+          initialTemplateKey="visual_first"
+        />
 
         <DetailsPanel
           renderOptIn={Boolean(rowSnap.renderOptIn)}
