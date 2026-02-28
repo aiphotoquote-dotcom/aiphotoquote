@@ -56,6 +56,84 @@ type PageProps = {
     | Record<string, string | string[] | undefined>;
 };
 
+function tryJson(v: any) {
+  try {
+    if (v == null) return null;
+    if (typeof v === "object") return v;
+    if (typeof v === "string") return JSON.parse(v);
+    return v;
+  } catch {
+    return null;
+  }
+}
+
+function clampText(s: string, max = 1600) {
+  const t = safeTrim(s);
+  if (!t) return "";
+  return t.length <= max ? t : t.slice(0, max - 1) + "…";
+}
+
+function buildRenderPrompt(args: {
+  quoteId: string;
+  versionNum: number | null;
+  quoteInput: any;
+  versionOutput: any;
+  shopNotes: string;
+}) {
+  const input = args.quoteInput ?? {};
+  const out = args.versionOutput ?? {};
+
+  const customerNotes =
+    safeTrim(input?.customer_context?.notes) ||
+    safeTrim(input?.notes) ||
+    safeTrim(input?.customer?.notes) ||
+    "";
+
+  const serviceType =
+    safeTrim(input?.customer_context?.service_type) ||
+    safeTrim(input?.customer_context?.category) ||
+    safeTrim(out?.industry_key) ||
+    "";
+
+  const summary = safeTrim(out?.summary) || safeTrim(out?.ai_assessment?.summary) || "";
+  const estLow = typeof out?.estimate_low === "number" ? out.estimate_low : null;
+  const estHigh = typeof out?.estimate_high === "number" ? out.estimate_high : null;
+
+  const estimateLine =
+    estLow != null && estHigh != null
+      ? `Estimate: $${Math.round(estLow)} – $${Math.round(estHigh)}`
+      : estLow != null
+        ? `Estimate: $${Math.round(estLow)}`
+        : estHigh != null
+          ? `Estimate: $${Math.round(estHigh)}`
+          : "";
+
+  const versionLabel = args.versionNum != null ? `v${args.versionNum}` : "version";
+
+  return clampText(
+    [
+      `You are generating ONE photorealistic concept render anchored to the customer's uploaded photo.`,
+      `The output must still look like the SAME item in the photo (same proportions and geometry).`,
+      ``,
+      `Quote: ${args.quoteId} (${versionLabel})`,
+      serviceType ? `Service type: ${serviceType}` : "",
+      estimateLine,
+      summary ? `Scope summary: ${summary}` : "",
+      customerNotes ? `Customer notes: ${customerNotes}` : "",
+      args.shopNotes ? `Shop notes (strict): ${args.shopNotes}` : "",
+      ``,
+      `Hard constraints:`,
+      `- Preserve the exact object geometry and overall shape from the input photo.`,
+      `- Do NOT add text, labels, watermarks, logos, UI elements.`,
+      `- Do NOT invent extra objects in the scene.`,
+      `- Keep lighting natural and realistic.`,
+      `- Output exactly ONE image.`,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+}
+
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const session = await auth();
   const userId = session.userId;
@@ -389,17 +467,27 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
+    // Verify version belongs to this quote+tenant AND load version info (for prompt)
     const vr = await db.execute(sql`
-      select 1 as ok
+      select
+        v.id::text as version_id,
+        v.version::int as version_num,
+        v.output as version_output
       from quote_versions v
       where v.id = ${versionId}::uuid
         and v.tenant_id = ${tenantId}::uuid
         and v.quote_log_id = ${id}::uuid
       limit 1
     `);
-    const vok = Boolean((vr as any)?.rows?.[0]?.ok);
+
+    const vrow: any = (vr as any)?.rows?.[0] ?? null;
+    const vok = Boolean(vrow?.version_id);
     if (!vok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=bad_version`);
 
+    const versionNum = Number.isFinite(Number(vrow?.version_num)) ? Number(vrow.version_num) : null;
+    const versionOutput = tryJson(vrow?.version_output) ?? vrow?.version_output ?? {};
+
+    // attempt sequencing per version
     const ar = await db.execute(sql`
       select coalesce(max(r.attempt), 0) as "max_attempt"
       from quote_renders r
@@ -409,6 +497,17 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
     const nextAttempt = Number(maxAttemptRaw ?? 0) + 1;
 
+    // Build a real prompt (so cron renderer has job context)
+    const quoteInput = rowSnap.input ?? {};
+    const prompt = buildRenderPrompt({
+      quoteId: id,
+      versionNum,
+      quoteInput,
+      versionOutput,
+      shopNotes,
+    });
+
+    // Insert queued render attempt
     const ins = await db.execute(sql`
       insert into quote_renders (
         tenant_id,
@@ -416,6 +515,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         quote_version_id,
         attempt,
         status,
+        prompt,
         shop_notes,
         created_at
       )
@@ -425,6 +525,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         ${versionId}::uuid,
         ${nextAttempt},
         'queued',
+        ${prompt},
         ${shopNotes || null},
         now()
       )
@@ -433,6 +534,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const ok = Boolean((ins as any)?.rows?.[0]?.id);
     if (!ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed`);
+
+    // Optional: mark quote as queued in legacy columns so other panels reflect activity
+    await db.execute(sql`
+      update quote_logs
+      set
+        render_status = 'queued',
+        render_error = null
+      where id = ${id}::uuid
+        and tenant_id = ${tenantId}::uuid
+    `);
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
   }
