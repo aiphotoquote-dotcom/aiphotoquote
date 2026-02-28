@@ -2,7 +2,8 @@
 import React from "react";
 
 import QuoteNotesComposer from "@/components/admin/QuoteNotesComposer";
-import { chip, renderStatusTone } from "@/components/admin/quote/ui";
+import RenderGallery from "@/components/admin/quote/RenderGallery";
+import { chip } from "@/components/admin/quote/ui";
 import { extractEstimate, pickAiAssessmentFromAny } from "@/lib/admin/quotes/normalize";
 import { formatUSD, humanWhen, safeTrim, tryJson } from "@/lib/admin/quotes/utils";
 
@@ -40,14 +41,6 @@ function sortVersionsDesc(versionRows: QuoteVersionRow[]) {
   return [...(versionRows ?? [])].sort((a, b) => Number(b.version ?? 0) - Number(a.version ?? 0));
 }
 
-function sortRendersDesc(renderRows: QuoteRenderRow[]) {
-  return [...(renderRows ?? [])].sort((a, b) => {
-    const ta = a.createdAt ? new Date(a.createdAt as any).getTime() : 0;
-    const tb = b.createdAt ? new Date(b.createdAt as any).getTime() : 0;
-    return tb - ta;
-  });
-}
-
 function sortNotesDesc(noteRows: QuoteNoteRow[]) {
   return [...(noteRows ?? [])].sort((a, b) => {
     const ta = a.createdAt ? new Date(a.createdAt as any).getTime() : 0;
@@ -83,11 +76,10 @@ export default function LifecyclePanel(props: {
 
   const versions = sortVersionsDesc(versionRows ?? []);
   const notes = sortNotesDesc(noteRows ?? []);
-  const renders = sortRendersDesc(renderRows ?? []);
 
   const versionsCount = versions.length;
   const notesCount = notes.length;
-  const rendersCount = renders.length;
+  const rendersCount = (renderRows ?? []).length;
 
   const defaultVersionNumber = defaultRenderVersionNumber(versions, activeVersion);
 
@@ -121,14 +113,14 @@ export default function LifecyclePanel(props: {
         ) : null}
       </div>
 
-      {/* PRIMARY: Renders */}
+      {/* Renders (gallery + request form) */}
       <div className="mt-5">
         <div className="flex items-center justify-between gap-2">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Renders</div>
-          {rendersCount ? chip("Attempts", "gray") : chip("None yet", "gray")}
+          {rendersCount ? chip("Gallery", "gray") : chip("None yet", "gray")}
         </div>
 
-        {/* Request render (single obvious place) */}
+        {/* Request render */}
         <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
           <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Request a render</div>
           <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
@@ -136,39 +128,37 @@ export default function LifecyclePanel(props: {
           </div>
 
           <form action={requestRenderAction} className="mt-3 grid gap-3">
-            <div className="grid gap-3">
-              <div>
-                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
-                <select
-                  name="version_number"
-                  defaultValue={defaultVersionNumber}
-                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-                  disabled={!versionsCount}
-                >
-                  {versionsCount ? (
-                    versions.map((v) => {
-                      const isActive = activeVersion != null && Number(v.version) === Number(activeVersion);
-                      return (
-                        <option key={v.id} value={String(Number(v.version ?? 0))}>
-                          {`v${Number(v.version ?? 0)}`} {isActive ? "(active)" : ""}
-                        </option>
-                      );
-                    })
-                  ) : (
-                    <option value="">No versions yet</option>
-                  )}
-                </select>
-              </div>
+            <div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
+              <select
+                name="version_number"
+                defaultValue={defaultVersionNumber}
+                className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                disabled={!versionsCount}
+              >
+                {versionsCount ? (
+                  versions.map((v) => {
+                    const isActive = activeVersion != null && Number(v.version) === Number(activeVersion);
+                    return (
+                      <option key={v.id} value={String(Number(v.version ?? 0))}>
+                        {`v${Number(v.version ?? 0)}`} {isActive ? "(active)" : ""}
+                      </option>
+                    );
+                  })
+                ) : (
+                  <option value="">No versions yet</option>
+                )}
+              </select>
+            </div>
 
-              <div>
-                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes (optional)</div>
-                <textarea
-                  name="shop_notes"
-                  rows={3}
-                  placeholder="Add specific render instructions (ex: tint windows, always add clown, keep proportions...)"
-                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-                />
-              </div>
+            <div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes (optional)</div>
+              <textarea
+                name="shop_notes"
+                rows={3}
+                placeholder="Add specific render instructions (materials, colors, keep proportions, etc.)"
+                className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+              />
             </div>
 
             <button
@@ -192,118 +182,13 @@ export default function LifecyclePanel(props: {
           </form>
         </div>
 
-        {/* Recent render attempts */}
-        <div className="mt-4 space-y-3">
-          {rendersCount ? (
-            renders.slice(0, 8).map((r) => (
-              <div
-                key={r.id}
-                className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {chip(`Attempt ${Number(r.attempt ?? 1)}`, "gray")}
-                    {chip(String(r.status ?? "unknown"), renderStatusTone(String(r.status ?? "")))}
-                    {r.quoteVersionId ? chip("from version", "blue") : null}
-                  </div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(r.createdAt)}</div>
-                </div>
-
-                {r.imageUrl ? (
-                  <a href={r.imageUrl} target="_blank" rel="noreferrer" className="mt-3 block">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={r.imageUrl}
-                      alt="Render attempt"
-                      className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
-                    />
-                    <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Open original</div>
-                  </a>
-                ) : (
-                  <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No image yet for this attempt.</div>
-                )}
-
-                {r.error ? (
-                  <div className="mt-3 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700 whitespace-pre-wrap dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200">
-                    {r.error}
-                  </div>
-                ) : null}
-
-                {(r.shopNotes || r.prompt) ? (
-                  <details className="mt-3">
-                    <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                      Details
-                    </summary>
-
-                    {r.shopNotes ? (
-                      <div className="mt-2">
-                        <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes</div>
-                        <div className="mt-1 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
-                          {String(r.shopNotes)}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {r.prompt ? (
-                      <div className="mt-3">
-                        <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Render prompt (debug)</div>
-                        <pre className="mt-2 overflow-auto rounded-2xl border border-gray-200 bg-black p-3 text-[11px] text-white dark:border-gray-800">
-{String(r.prompt)}
-                        </pre>
-                      </div>
-                    ) : null}
-                  </details>
-                ) : null}
-
-                {r.quoteVersionId ? (
-                  <div className="mt-3 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
-                    versionId: {r.quoteVersionId}
-                  </div>
-                ) : null}
-              </div>
-            ))
-          ) : (
-            <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-              No render attempts yet.
-            </div>
-          )}
-
-          {rendersCount > 8 ? (
-            <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-              <summary className="cursor-pointer text-sm font-semibold text-gray-800 dark:text-gray-200">
-                Show older attempts ({rendersCount - 8})
-              </summary>
-              <div className="mt-3 space-y-3">
-                {renders.slice(8, 40).map((r) => (
-                  <div
-                    key={r.id}
-                    className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {chip(`Attempt ${Number(r.attempt ?? 1)}`, "gray")}
-                        {chip(String(r.status ?? "unknown"), renderStatusTone(String(r.status ?? "")))}
-                      </div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(r.createdAt)}</div>
-                    </div>
-
-                    {r.imageUrl ? (
-                      <a href={r.imageUrl} target="_blank" rel="noreferrer" className="mt-3 block">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={r.imageUrl}
-                          alt="Render attempt"
-                          className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
-                        />
-                      </a>
-                    ) : (
-                      <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No image.</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </details>
-          ) : null}
+        <div className="mt-4">
+          <RenderGallery
+            quoteId={quoteId}
+            renderRows={renderRows}
+            versionRows={versionRows}
+            activeVersion={activeVersion}
+          />
         </div>
       </div>
 
@@ -314,7 +199,7 @@ export default function LifecyclePanel(props: {
           {versionsCount ? chip("Frozen outputs", "blue") : chip("None yet", "gray")}
         </div>
 
-        {/* Active version summary (always visible) */}
+        {/* Active version summary */}
         <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -368,7 +253,7 @@ export default function LifecyclePanel(props: {
           )}
         </div>
 
-        {/* Version history collapsed */}
+        {/* Version history */}
         {versionsCount ? (
           <details className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
             <summary className="cursor-pointer text-sm font-semibold text-gray-800 dark:text-gray-200">
@@ -430,12 +315,6 @@ export default function LifecyclePanel(props: {
                       </div>
                     </div>
 
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {safeTrim(v.source) ? chip(String(v.source), "gray") : null}
-                      {safeTrim(v.createdBy) ? chip(String(v.createdBy), "gray") : null}
-                      {v.reason ? chip("has reason", "gray") : null}
-                    </div>
-
                     <div className="mt-3 flex flex-wrap gap-3">
                       {miniKeyValue("Estimate", estText)}
                       {miniKeyValue("Confidence", conf || "—")}
@@ -446,24 +325,6 @@ export default function LifecyclePanel(props: {
                         {clamp(summ, 200)}
                       </div>
                     ) : null}
-
-                    <details className="mt-3">
-                      <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                        Debug
-                      </summary>
-
-                      <div className="mt-3 space-y-2">
-                        {miniKeyValue("Version id (db)", v.id)}
-                        {miniKeyValue("Version number", v.version)}
-                        {miniKeyValue("Source", v.source)}
-                        {miniKeyValue("Created by", v.createdBy)}
-                        {miniKeyValue("AI mode", v.aiMode)}
-                      </div>
-
-                      <pre className="mt-3 overflow-auto rounded-2xl border border-gray-200 bg-black p-3 text-[11px] text-white dark:border-gray-800">
-{JSON.stringify(out ?? {}, null, 2)}
-                      </pre>
-                    </details>
                   </div>
                 );
               })}
@@ -484,7 +345,6 @@ export default function LifecyclePanel(props: {
 
           <form action={createNewVersionAction} className="mt-4 grid gap-3">
             <div className="grid gap-3">
-              {/* Engine */}
               <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Engine</div>
                 <div className="mt-3 space-y-2 text-sm">
@@ -510,7 +370,6 @@ export default function LifecyclePanel(props: {
                 </div>
               </div>
 
-              {/* Mode + reason */}
               <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">AI mode snapshot</div>
                 <select
@@ -531,7 +390,6 @@ export default function LifecyclePanel(props: {
                 />
               </div>
 
-              {/* Optional note */}
               <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
                   Optional note (linked to new version)
@@ -592,17 +450,6 @@ export default function LifecyclePanel(props: {
                   <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
                     {safeTrim(n.body) || <span className="italic text-gray-500">Empty note.</span>}
                   </div>
-
-                  {n.quoteVersionId ? (
-                    <details className="mt-3">
-                      <summary className="cursor-pointer text-xs font-semibold text-gray-700 dark:text-gray-300">
-                        Linked version id
-                      </summary>
-                      <div className="mt-2 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
-                        {n.quoteVersionId}
-                      </div>
-                    </details>
-                  ) : null}
                 </div>
               );
             })
@@ -611,37 +458,6 @@ export default function LifecyclePanel(props: {
               No notes yet.
             </div>
           )}
-
-          {notesCount > 10 ? (
-            <details className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
-              <summary className="cursor-pointer text-sm font-semibold text-gray-800 dark:text-gray-200">
-                Show older notes ({notesCount - 10})
-              </summary>
-              <div className="mt-3 space-y-3">
-                {notes.slice(10, 60).map((n) => {
-                  const actor = noteActor(n);
-                  return (
-                    <div
-                      key={n.id}
-                      className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          {actor ? chip(String(actor), "gray") : chip("tenant", "gray")}
-                          {n.quoteVersionId ? chip("linked", "blue") : chip("general", "gray")}
-                        </div>
-                        <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
-                      </div>
-
-                      <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
-                        {safeTrim(n.body) || <span className="italic text-gray-500">Empty note.</span>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </details>
-          ) : null}
         </div>
       </div>
     </section>
