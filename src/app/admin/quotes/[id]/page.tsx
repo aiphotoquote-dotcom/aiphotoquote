@@ -503,51 +503,75 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         markReadAction={markRead}
       />
 
-      <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStage} />
+      {/* ✅ Two-column workspace */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        {/* LEFT: main */}
+        <div className="space-y-6 lg:col-span-8">
+          <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStage} />
 
-      <CustomerNotesCard notes={notes} />
+          <CustomerNotesCard notes={notes} />
 
-      <QuotePhotoGallery photos={photos} />
+          <QuotePhotoGallery photos={photos} />
 
-      <LifecyclePanel
-        quoteId={id}
-        versionRows={versionRows}
-        noteRows={noteRows}
-        renderRows={renderRows}
-        lifecycleReadError={lifecycleReadError}
-        activeVersion={activeVersion}
-        createNewVersionAction={createNewVersion}
-        restoreVersionAction={restoreVersion}
-        requestRenderAction={requestRender}
-      />
+          <DetailsPanel
+            renderOptIn={Boolean(rowSnap.renderOptIn)}
+            estimateDisplay={estimateDisplay}
+            confidence={confidence}
+            inspectionRequired={inspectionRequired}
+            summary={summary}
+            questions={questions}
+            assumptions={assumptions}
+            visibleScope={visibleScope}
+            pricingBasis={pricingBasis}
+            pricingPolicySnap={pricingPolicySnap}
+            pricingConfigSnap={pricingConfigSnap}
+            pricingRulesSnap={pricingRulesSnap}
+            industryKeySnap={industryKeySnap}
+            llmKeySource={llmKeySource}
+            rawOutput={rowSnap.output ?? null}
+          />
+        </div>
 
-      <DetailsPanel
-        renderOptIn={Boolean(rowSnap.renderOptIn)}
-        estimateDisplay={estimateDisplay}
-        confidence={confidence}
-        inspectionRequired={inspectionRequired}
-        summary={summary}
-        questions={questions}
-        assumptions={assumptions}
-        visibleScope={visibleScope}
-        pricingBasis={pricingBasis}
-        pricingPolicySnap={pricingPolicySnap}
-        pricingConfigSnap={pricingConfigSnap}
-        pricingRulesSnap={pricingRulesSnap}
-        industryKeySnap={industryKeySnap}
-        llmKeySource={llmKeySource}
-        rawOutput={rowSnap.output ?? null}
-      />
+        {/* RIGHT: sticky sidebar */}
+        <div className="space-y-6 lg:col-span-4">
+          <div className="lg:sticky lg:top-6 space-y-6">
+            <div id="renders" />
 
-      <LegacyRenderPanel
-        renderStatus={rowSnap.renderStatus}
-        renderedAt={rowSnap.renderedAt}
-        renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
-        renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
-        renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
-      />
+            <LifecyclePanel
+              quoteId={id}
+              versionRows={versionRows}
+              noteRows={noteRows}
+              renderRows={renderRows}
+              lifecycleReadError={lifecycleReadError}
+              activeVersion={activeVersion}
+              createNewVersionAction={createNewVersion}
+              restoreVersionAction={restoreVersion}
+              requestRenderAction={requestRender}
+            />
 
-      <RawPayloadPanel input={rowSnap.input ?? {}} />
+            <LegacyRenderPanel
+              renderStatus={rowSnap.renderStatus}
+              renderedAt={rowSnap.renderedAt}
+              renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
+              renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
+              renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* ✅ Debug moved out of the way */}
+      <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
+        <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
+          Debug / raw payload
+          <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
+            (collapsed by default)
+          </span>
+        </summary>
+        <div className="mt-4">
+          <RawPayloadPanel input={rowSnap.input ?? {}} />
+        </div>
+      </details>
     </div>
   );
 }
