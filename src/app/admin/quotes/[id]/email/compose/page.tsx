@@ -33,6 +33,13 @@ function parseCsvList(v: string) {
     .filter(Boolean);
 }
 
+function parsePositiveIntString(v: string) {
+  const n = Number(String(v ?? "").trim());
+  if (!Number.isFinite(n)) return "";
+  const i = Math.trunc(n);
+  return i > 0 ? String(i) : "";
+}
+
 export default async function QuoteEmailComposePage({ params, searchParams }: PageProps) {
   const session = await auth();
   const userId = session.userId;
@@ -46,6 +53,7 @@ export default async function QuoteEmailComposePage({ params, searchParams }: Pa
   const templateKey = safeTrim(asString(sp.template)) || "standard";
   const renderIds = parseCsvList(asString(sp.renders));
   const photoKeys = parseCsvList(asString(sp.photos));
+  const versionNumber = parsePositiveIntString(asString((sp as any).version));
 
   const jar = await cookies();
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId });
@@ -85,7 +93,7 @@ export default async function QuoteEmailComposePage({ params, searchParams }: Pa
           </a>
           <h1 className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">Compose quote email</h1>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Choose a layout, pick images, tweak wording, preview, then send.
+            Choose a version, pick images, select a layout, tweak wording, preview, then send.
           </p>
         </div>
 
@@ -103,6 +111,7 @@ export default async function QuoteEmailComposePage({ params, searchParams }: Pa
         customerPhotos={(photos as any[]) ?? []}
         renderedRenders={(renderedRenders as any[]) ?? []}
         initialTemplateKey={templateKey}
+        initialSelectedVersionNumber={versionNumber}
         initialSelectedRenderIds={renderIds}
         initialSelectedPhotoKeys={photoKeys}
       />

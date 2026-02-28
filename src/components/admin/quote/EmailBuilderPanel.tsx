@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
@@ -30,7 +30,6 @@ type Photo = {
   url?: string;
   publicUrl?: string;
   blobUrl?: string;
-  // plus any other fields your pickPhotos emits
 };
 
 function templateLabel(k: TemplateKey) {
@@ -58,6 +57,16 @@ function photoUrl(p: any) {
 function photoKey(p: any, idx: number) {
   const u = photoUrl(p);
   return u ? `url:${u}` : `idx:${idx}`;
+}
+
+function toTs(v: any): number {
+  try {
+    const d = v instanceof Date ? v : new Date(v);
+    const t = d.getTime();
+    return Number.isFinite(t) ? t : 0;
+  } catch {
+    return 0;
+  }
 }
 
 export default function EmailBuilderPanel(props: {
@@ -114,6 +123,38 @@ export default function EmailBuilderPanel(props: {
 
   const totalSelectedImages = selectedRenders.length + selectedPhotos.length;
 
+  // ✅ Auto-select defaults:
+  // - if renders exist: pick newest 1–2 renders
+  // - else: pick first 1–2 photos with URLs
+  useEffect(() => {
+    if (selectedRenderIds.length || selectedPhotoKeys.length) return;
+
+    const renders = [...(renderedRenders ?? [])]
+      .filter((r) => safeTrim(r.imageUrl))
+      .sort((a, b) => {
+        const ta = toTs(a.createdAt);
+        const tb = toTs(b.createdAt);
+        if (tb !== ta) return tb - ta;
+        return Number(b.attempt ?? 0) - Number(a.attempt ?? 0);
+      });
+
+    if (renders.length) {
+      const pick = renders.slice(0, 2).map((r) => String(r.id));
+      setSelectedRenderIds(pick);
+
+      // Optional: if you have renders, “Visual First” feels more magical
+      if (pick.length >= 2) setTemplateKey("visual_first");
+      return;
+    }
+
+    const photos = (customerPhotoItems ?? []).filter((p) => safeTrim(p.url));
+    if (photos.length) {
+      setSelectedPhotoKeys(photos.slice(0, 2).map((p) => p.key));
+      setTemplateKey("before_after");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderedRenders, customerPhotoItems]);
+
   const composeHref = useMemo(() => {
     const q = new URLSearchParams();
     q.set("template", templateKey);
@@ -121,7 +162,7 @@ export default function EmailBuilderPanel(props: {
     if (selectedRenderIds.length) q.set("renders", selectedRenderIds.join(","));
     if (selectedPhotoKeys.length) q.set("photos", selectedPhotoKeys.join(","));
 
-    // v1: composer page doesn’t require version, but we capture it now for future use.
+    // ✅ v2: composer will consume this
     if (safeTrim(versionNumber)) q.set("version", safeTrim(versionNumber));
 
     return `/admin/quotes/${encodeURIComponent(quoteId)}/email/compose?${q.toString()}`;
@@ -149,7 +190,7 @@ export default function EmailBuilderPanel(props: {
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">1) Choose a version</div>
         <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-          This lets you anchor the email to the version you’re quoting from.
+          This anchors the email to the version you’re quoting from.
         </div>
 
         <select
@@ -199,9 +240,7 @@ export default function EmailBuilderPanel(props: {
         <div className="mt-4">
           <div className="flex items-center justify-between">
             <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Renders</div>
-            <div className="text-xs text-gray-500 dark:text-gray-400">
-              Showing rendered attempts only
-            </div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">Showing rendered attempts only</div>
           </div>
 
           {renderedRenders?.length ? (

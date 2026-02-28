@@ -10,6 +10,12 @@ function safeTrim(v: any) {
 
 type TemplateKey = "standard" | "before_after" | "visual_first";
 
+type VersionRow = {
+  id: string;
+  version?: number | string | null;
+  createdAt?: any;
+};
+
 type RenderRow = {
   id: string;
   imageUrl?: string | null;
@@ -23,7 +29,6 @@ type Photo = {
   url?: string;
   publicUrl?: string;
   blobUrl?: string;
-  // anything else your pickPhotos returns
 };
 
 function photoUrl(p: any) {
@@ -61,28 +66,62 @@ function chip(text: string) {
   );
 }
 
+function parsePositiveIntString(v: any) {
+  const n = Number(String(v ?? "").trim());
+  if (!Number.isFinite(n)) return "";
+  const i = Math.trunc(n);
+  return i > 0 ? String(i) : "";
+}
+
 export default function QuoteEmailComposeClient(props: {
   quoteId: string;
   tenantId: string;
   lead: any;
 
-  versionRows: any[];
+  versionRows: VersionRow[];
   customerPhotos: Photo[];
   renderedRenders: RenderRow[];
 
   initialTemplateKey: string;
+  initialSelectedVersionNumber?: string;
   initialSelectedRenderIds: string[];
   initialSelectedPhotoKeys: string[];
 }) {
   const {
     quoteId,
     lead,
+    versionRows,
     customerPhotos,
     renderedRenders,
     initialTemplateKey,
+    initialSelectedVersionNumber,
     initialSelectedRenderIds,
     initialSelectedPhotoKeys,
   } = props;
+
+  const sortedVersions = useMemo(() => {
+    const xs = [...(versionRows ?? [])];
+    xs.sort((a, b) => Number(b.version ?? 0) - Number(a.version ?? 0));
+    return xs;
+  }, [versionRows]);
+
+  const initialVersionNumber = useMemo(() => {
+    const fromQuery = parsePositiveIntString(initialSelectedVersionNumber);
+    if (fromQuery) return fromQuery;
+
+    const top = sortedVersions[0];
+    return top?.version != null ? String(Number(top.version)) : "";
+  }, [initialSelectedVersionNumber, sortedVersions]);
+
+  const [versionNumber, setVersionNumber] = useState<string>(initialVersionNumber);
+  const [showAllRenders, setShowAllRenders] = useState(false);
+
+  const versionIdForSelected = useMemo(() => {
+    const vnum = Number(versionNumber || 0);
+    if (!vnum) return "";
+    const hit = (versionRows ?? []).find((v) => Number(v.version ?? 0) === vnum);
+    return hit?.id ? String(hit.id) : "";
+  }, [versionRows, versionNumber]);
 
   const initialTemplate = ((): TemplateKey => {
     const t = safeTrim(initialTemplateKey) as TemplateKey;
@@ -114,7 +153,7 @@ export default function QuoteEmailComposeClient(props: {
 
   const [to, setTo] = useState(defaultTo);
   const [cc, setCc] = useState("");
-  const [bcc, setBcc] = useState(""); // later: checkbox to auto BCC lead_to_email
+  const [bcc, setBcc] = useState("");
   const [subject, setSubject] = useState(
     defaultName ? `Your quote is ready — ${defaultName}` : "Your quote is ready"
   );
@@ -131,6 +170,13 @@ export default function QuoteEmailComposeClient(props: {
     setSelectedPhotoKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
   }
 
+  const filteredRenders = useMemo(() => {
+    const base = renderedRenders ?? [];
+    if (showAllRenders) return base;
+    if (!versionIdForSelected) return base;
+    return base.filter((r) => safeTrim(r.quoteVersionId) === versionIdForSelected);
+  }, [renderedRenders, showAllRenders, versionIdForSelected]);
+
   const selectedRenders = useMemo(() => {
     const set = new Set(selectedRenderIds);
     return (renderedRenders ?? []).filter((r) => set.has(String(r.id)));
@@ -143,9 +189,76 @@ export default function QuoteEmailComposeClient(props: {
 
   const totalSelectedImages = selectedRenders.length + selectedPhotos.length;
 
+  function onChangeVersion(next: string) {
+    const nextNorm = parsePositiveIntString(next);
+    setVersionNumber(nextNorm);
+    setShowAllRenders(false);
+
+    // keep only renders that belong to the selected version (when possible)
+    const nextVnum = Number(nextNorm || 0);
+    const nextVid = (versionRows ?? []).find((v) => Number(v.version ?? 0) === nextVnum)?.id
+      ? String((versionRows ?? []).find((v) => Number(v.version ?? 0) === nextVnum)!.id)
+      : "";
+
+    if (nextVid) {
+      const allowed = new Set(
+        (renderedRenders ?? [])
+          .filter((r) => safeTrim(r.quoteVersionId) === nextVid)
+          .map((r) => String(r.id))
+      );
+      setSelectedRenderIds((prev) => prev.filter((id) => allowed.has(id)));
+    }
+  }
+
+  const noRendersForVersion = !showAllRenders && versionIdForSelected && (filteredRenders?.length ?? 0) === 0;
+
   return (
     <div className="space-y-6">
-      {/* Top row: template picker */}
+      {/* Step 0: version */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">0) Choose a version</h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              We’ll use this version as the source-of-truth for what you’re emailing.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {chip(`Selected: ${versionNumber ? `v${versionNumber}` : "—"}`)}
+            {chip(`Images selected: ${totalSelectedImages}`)}
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <select
+            value={versionNumber}
+            onChange={(e) => onChangeVersion(e.target.value)}
+            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+            disabled={!sortedVersions.length}
+          >
+            {sortedVersions.length ? (
+              sortedVersions.map((v) => {
+                const n = String(Number(v.version ?? 0));
+                return (
+                  <option key={v.id} value={n}>
+                    v{n}
+                  </option>
+                );
+              })
+            ) : (
+              <option value="">No versions yet</option>
+            )}
+          </select>
+
+          {!sortedVersions.length ? (
+            <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
+              Create v1 first (Lifecycle panel) so the email can be anchored to a version.
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      {/* Step 1: template picker */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -190,7 +303,7 @@ export default function QuoteEmailComposeClient(props: {
         </div>
       </section>
 
-      {/* Media picker: gallery-style */}
+      {/* Step 2: media picker */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -210,13 +323,24 @@ export default function QuoteEmailComposeClient(props: {
           <div className="flex items-center justify-between">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Renders</div>
             <div className="text-xs text-gray-600 dark:text-gray-300">
-              Only <span className="font-mono">rendered</span> attempts are shown.
+              Filtered to <span className="font-mono">v{versionNumber || "—"}</span> by default
             </div>
           </div>
 
-          {renderedRenders?.length ? (
+          {noRendersForVersion ? (
+            <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+              No rendered images found for this version.
+              <button
+                type="button"
+                onClick={() => setShowAllRenders(true)}
+                className="ml-2 underline font-semibold"
+              >
+                Show all renders
+              </button>
+            </div>
+          ) : filteredRenders?.length ? (
             <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {renderedRenders.map((r) => {
+              {filteredRenders.map((r) => {
                 const url = safeTrim(r.imageUrl);
                 if (!url) return null;
                 const active = selectedRenderIds.includes(String(r.id));
@@ -265,6 +389,18 @@ export default function QuoteEmailComposeClient(props: {
               No rendered images found yet.
             </div>
           )}
+
+          {showAllRenders ? (
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={() => setShowAllRenders(false)}
+                className="text-xs font-semibold underline text-gray-700 dark:text-gray-200"
+              >
+                Back to version-only renders
+              </button>
+            </div>
+          ) : null}
         </div>
 
         {/* Customer photos gallery */}
@@ -329,7 +465,7 @@ export default function QuoteEmailComposeClient(props: {
         </div>
       </section>
 
-      {/* Draft fields */}
+      {/* Step 3: Draft fields */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">3) Draft email</h2>
@@ -396,10 +532,10 @@ export default function QuoteEmailComposeClient(props: {
           </div>
         </div>
 
-        {/* Actions */}
         <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-xs text-gray-600 dark:text-gray-300 font-mono break-all">
-            template={templateKey} · quote={quoteId} · renders={selectedRenders.length} · photos={selectedPhotos.length}
+            version=v{versionNumber || "—"} · template={templateKey} · quote={quoteId} · renders={selectedRenders.length} ·
+            photos={selectedPhotos.length}
           </div>
 
           <div className="flex items-center gap-2">
