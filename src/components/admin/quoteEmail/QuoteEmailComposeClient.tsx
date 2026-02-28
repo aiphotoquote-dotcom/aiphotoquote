@@ -10,12 +10,6 @@ function safeTrim(v: any) {
 
 type TemplateKey = "standard" | "before_after" | "visual_first";
 
-type VersionRow = {
-  id: string;
-  version?: number | string | null;
-  createdAt?: any;
-};
-
 type RenderRow = {
   id: string;
   imageUrl?: string | null;
@@ -29,6 +23,7 @@ type Photo = {
   url?: string;
   publicUrl?: string;
   blobUrl?: string;
+  // anything else your pickPhotos returns
 };
 
 function photoUrl(p: any) {
@@ -44,18 +39,16 @@ function photoKey(p: any, idx: number) {
   return u ? `url:${u}` : `idx:${idx}`;
 }
 
-function templateCardLabel(k: TemplateKey) {
+function templateLabel(k: TemplateKey) {
   if (k === "standard") return "Standard Quote";
   if (k === "before_after") return "Before / After";
   return "Visual First";
 }
 
-function templateCardDesc(k: TemplateKey) {
-  if (k === "standard")
-    return "Balanced: estimate summary + key notes, with an optional featured render and a small photo strip.";
-  if (k === "before_after")
-    return "Great for transformations: emphasizes customer photos (before/after) with a clean pricing section.";
-  return "Sales-first: big render gallery, minimal assessment text, strong visual impact.";
+function templateOneLiner(k: TemplateKey) {
+  if (k === "standard") return "Balanced: featured render + details.";
+  if (k === "before_after") return "Transformation: before/after emphasis.";
+  return "Sales-first: big visuals, minimal text.";
 }
 
 function chip(text: string) {
@@ -66,11 +59,247 @@ function chip(text: string) {
   );
 }
 
-function parsePositiveIntString(v: any) {
-  const n = Number(String(v ?? "").trim());
-  if (!Number.isFinite(n)) return "";
-  const i = Math.trunc(n);
-  return i > 0 ? String(i) : "";
+function splitEmails(v: string) {
+  return safeTrim(v)
+    .split(",")
+    .map((x) => safeTrim(x))
+    .filter(Boolean);
+}
+
+function MiniLabel({ label }: { label: string }) {
+  return <div className="text-[11px] font-semibold text-gray-700 dark:text-gray-300">{label}</div>;
+}
+
+function Hr() {
+  return <div className="h-px w-full bg-gray-200 dark:bg-gray-800" />;
+}
+
+function EmailSheet({
+  templateKey,
+  brandName,
+  preheader,
+  subject,
+  intro,
+  scopeBullets,
+  closing,
+  signature,
+  selectedRenders,
+  selectedPhotos,
+}: {
+  templateKey: TemplateKey;
+  brandName: string;
+  preheader: string;
+  subject: string;
+  intro: string;
+  scopeBullets: string[];
+  closing: string;
+  signature: string;
+  selectedRenders: RenderRow[];
+  selectedPhotos: Array<{ key: string; url: string }>;
+}) {
+  const renders = selectedRenders.filter((r) => safeTrim(r.imageUrl));
+  const photos = selectedPhotos.filter((p) => safeTrim(p.url));
+
+  const heroUrl =
+    templateKey === "visual_first"
+      ? safeTrim(renders[0]?.imageUrl) || safeTrim(photos[0]?.url)
+      : safeTrim(renders[0]?.imageUrl) || safeTrim(photos[0]?.url);
+
+  // Light “marketing” accent without hardcoding brand colors too much.
+  // Later: drive from tenant branding config.
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950 overflow-hidden">
+      {/* top accent */}
+      <div className="h-1 w-full bg-black dark:bg-white" />
+
+      {/* “Email header” */}
+      <div className="p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            {/* logo placeholder */}
+            <div className="h-10 w-10 rounded-xl bg-gray-100 border border-gray-200 flex items-center justify-center dark:bg-black dark:border-gray-800">
+              <span className="text-xs font-black text-gray-700 dark:text-gray-200">APQ</span>
+            </div>
+            <div>
+              <div className="text-sm font-bold text-gray-900 dark:text-gray-100">{brandName}</div>
+              <div className="text-[11px] text-gray-600 dark:text-gray-300">{preheader}</div>
+            </div>
+          </div>
+
+          <div className="text-right">
+            <div className="text-[11px] text-gray-500 dark:text-gray-400">Subject</div>
+            <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{subject}</div>
+          </div>
+        </div>
+
+        <div className="mt-5">
+          <Hr />
+        </div>
+
+        {/* Template-specific visual section */}
+        <div className="mt-6 space-y-4">
+          {templateKey === "visual_first" ? (
+            <>
+              {heroUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={heroUrl}
+                  alt="Featured visual"
+                  className="w-full max-h-[420px] object-cover rounded-2xl border border-gray-200 dark:border-gray-800 bg-black/5"
+                />
+              ) : (
+                <div className="rounded-2xl border border-dashed border-gray-300 p-8 text-sm text-gray-600 dark:border-gray-800 dark:text-gray-300">
+                  Select at least one render or photo to feature here.
+                </div>
+              )}
+
+              {(renders.length + photos.length) > 1 ? (
+                <div className="grid gap-3 grid-cols-2 sm:grid-cols-3">
+                  {[
+                    ...renders.slice(0, 6).map((r) => ({ key: `r:${r.id}`, url: safeTrim(r.imageUrl) })),
+                    ...photos.slice(0, 6).map((p) => ({ key: p.key, url: safeTrim(p.url) })),
+                  ]
+                    .filter((x) => x.url)
+                    .slice(0, 6)
+                    .map((x) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={x.key}
+                        src={x.url}
+                        alt="Gallery"
+                        className="h-32 w-full object-cover rounded-xl border border-gray-200 dark:border-gray-800 bg-black/5"
+                      />
+                    ))}
+                </div>
+              ) : null}
+            </>
+          ) : templateKey === "before_after" ? (
+            <>
+              <div className="grid gap-3 grid-cols-1 sm:grid-cols-2">
+                <div className="rounded-2xl border border-gray-200 dark:border-gray-800 p-3">
+                  <div className="text-[11px] font-bold text-gray-700 dark:text-gray-300">BEFORE</div>
+                  <div className="mt-2">
+                    {photos[0]?.url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={photos[0].url}
+                        alt="Before"
+                        className="h-56 w-full object-cover rounded-xl border border-gray-200 dark:border-gray-800 bg-black/5"
+                      />
+                    ) : (
+                      <div className="h-56 rounded-xl border border-dashed border-gray-300 dark:border-gray-800 flex items-center justify-center text-sm text-gray-600 dark:text-gray-300">
+                        Select a customer photo
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 dark:border-gray-800 p-3">
+                  <div className="text-[11px] font-bold text-gray-700 dark:text-gray-300">AFTER</div>
+                  <div className="mt-2">
+                    {renders[0]?.imageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={safeTrim(renders[0].imageUrl)}
+                        alt="After"
+                        className="h-56 w-full object-cover rounded-xl border border-gray-200 dark:border-gray-800 bg-black/5"
+                      />
+                    ) : (
+                      <div className="h-56 rounded-xl border border-dashed border-gray-300 dark:border-gray-800 flex items-center justify-center text-sm text-gray-600 dark:text-gray-300">
+                        Select a render
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* small strip */}
+              {(renders.length + photos.length) > 2 ? (
+                <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+                  {[
+                    ...photos.slice(1, 5).map((p) => ({ key: p.key, url: safeTrim(p.url) })),
+                    ...renders.slice(1, 5).map((r) => ({ key: `r:${r.id}`, url: safeTrim(r.imageUrl) })),
+                  ]
+                    .filter((x) => x.url)
+                    .slice(0, 4)
+                    .map((x) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={x.key}
+                        src={x.url}
+                        alt="More"
+                        className="h-24 w-full object-cover rounded-xl border border-gray-200 dark:border-gray-800 bg-black/5"
+                      />
+                    ))}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            // standard
+            <>
+              {heroUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={heroUrl}
+                  alt="Featured"
+                  className="w-full max-h-[360px] object-cover rounded-2xl border border-gray-200 dark:border-gray-800 bg-black/5"
+                />
+              ) : (
+                <div className="rounded-2xl border border-dashed border-gray-300 p-8 text-sm text-gray-600 dark:border-gray-800 dark:text-gray-300">
+                  Select at least one render or photo to feature here.
+                </div>
+              )}
+
+              {(renders.length + photos.length) > 1 ? (
+                <div className="flex flex-wrap gap-2">
+                  {renders.slice(0, 4).map((r) => (
+                    <span key={r.id} className="text-[11px] text-gray-600 dark:text-gray-300">
+                      • Render #{r.attempt ?? "?"}
+                    </span>
+                  ))}
+                  {photos.slice(0, 4).map((p) => (
+                    <span key={p.key} className="text-[11px] text-gray-600 dark:text-gray-300">
+                      • Customer photo
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
+
+        {/* Copy + bullets */}
+        <div className="mt-6 space-y-4">
+          <div className="text-sm text-gray-900 dark:text-gray-100 whitespace-pre-wrap leading-relaxed">{intro}</div>
+
+          {scopeBullets.length ? (
+            <div className="rounded-2xl border border-gray-200 dark:border-gray-800 p-4 bg-gray-50 dark:bg-black">
+              <div className="text-xs font-bold text-gray-900 dark:text-gray-100">Scope highlights</div>
+              <ul className="mt-2 list-disc pl-5 space-y-1">
+                {scopeBullets.map((b, idx) => (
+                  <li key={idx} className="text-sm text-gray-800 dark:text-gray-200">
+                    {b}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <div className="text-sm text-gray-900 dark:text-gray-100 whitespace-pre-wrap leading-relaxed">{closing}</div>
+
+          <div className="pt-2">
+            <Hr />
+            <div className="mt-3 text-sm font-semibold text-gray-900 dark:text-gray-100 whitespace-pre-wrap">
+              {signature}
+            </div>
+            <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+              Sent via AI Photo Quote · Reply to this email to reach the shop
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function QuoteEmailComposeClient(props: {
@@ -78,50 +307,23 @@ export default function QuoteEmailComposeClient(props: {
   tenantId: string;
   lead: any;
 
-  versionRows: VersionRow[];
+  versionRows: any[];
   customerPhotos: Photo[];
   renderedRenders: RenderRow[];
 
   initialTemplateKey: string;
-  initialSelectedVersionNumber?: string;
   initialSelectedRenderIds: string[];
   initialSelectedPhotoKeys: string[];
 }) {
   const {
     quoteId,
     lead,
-    versionRows,
     customerPhotos,
     renderedRenders,
     initialTemplateKey,
-    initialSelectedVersionNumber,
     initialSelectedRenderIds,
     initialSelectedPhotoKeys,
   } = props;
-
-  const sortedVersions = useMemo(() => {
-    const xs = [...(versionRows ?? [])];
-    xs.sort((a, b) => Number(b.version ?? 0) - Number(a.version ?? 0));
-    return xs;
-  }, [versionRows]);
-
-  const initialVersionNumber = useMemo(() => {
-    const fromQuery = parsePositiveIntString(initialSelectedVersionNumber);
-    if (fromQuery) return fromQuery;
-
-    const top = sortedVersions[0];
-    return top?.version != null ? String(Number(top.version)) : "";
-  }, [initialSelectedVersionNumber, sortedVersions]);
-
-  const [versionNumber, setVersionNumber] = useState<string>(initialVersionNumber);
-  const [showAllRenders, setShowAllRenders] = useState(false);
-
-  const versionIdForSelected = useMemo(() => {
-    const vnum = Number(versionNumber || 0);
-    if (!vnum) return "";
-    const hit = (versionRows ?? []).find((v) => Number(v.version ?? 0) === vnum);
-    return hit?.id ? String(hit.id) : "";
-  }, [versionRows, versionNumber]);
 
   const initialTemplate = ((): TemplateKey => {
     const t = safeTrim(initialTemplateKey) as TemplateKey;
@@ -129,11 +331,7 @@ export default function QuoteEmailComposeClient(props: {
     return "standard";
   })();
 
-  const [templateKey, setTemplateKey] = useState<TemplateKey>(initialTemplate);
-
-  const [selectedRenderIds, setSelectedRenderIds] = useState<string[]>(
-    Array.isArray(initialSelectedRenderIds) ? initialSelectedRenderIds : []
-  );
+  const [templateKey] = useState<TemplateKey>(initialTemplate);
 
   const customerPhotoItems = useMemo(() => {
     return (customerPhotos ?? []).map((p: any, idx: number) => ({
@@ -143,42 +341,15 @@ export default function QuoteEmailComposeClient(props: {
     }));
   }, [customerPhotos]);
 
+  const [selectedRenderIds, setSelectedRenderIds] = useState<string[]>(
+    Array.isArray(initialSelectedRenderIds) ? initialSelectedRenderIds : []
+  );
   const [selectedPhotoKeys, setSelectedPhotoKeys] = useState<string[]>(
     Array.isArray(initialSelectedPhotoKeys) ? initialSelectedPhotoKeys : []
   );
 
-  // Basic draft fields (v1)
-  const defaultTo = safeTrim(lead?.email || lead?.customerEmail || lead?.contact?.email || "");
-  const defaultName = safeTrim(lead?.name || lead?.customerName || lead?.contact?.name || "");
-
-  const [to, setTo] = useState(defaultTo);
-  const [cc, setCc] = useState("");
-  const [bcc, setBcc] = useState("");
-  const [subject, setSubject] = useState(
-    defaultName ? `Your quote is ready — ${defaultName}` : "Your quote is ready"
-  );
-
-  const [body, setBody] = useState(
-    `Hi ${defaultName || "there"},\n\nAttached is your quote. Reply to this email with any questions, or to approve and schedule the job.\n\nThanks,\n`
-  );
-
-  function toggleRender(id: string) {
-    setSelectedRenderIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  }
-
-  function togglePhoto(k: string) {
-    setSelectedPhotoKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
-  }
-
-  const filteredRenders = useMemo(() => {
-    const base = renderedRenders ?? [];
-    if (showAllRenders) return base;
-    if (!versionIdForSelected) return base;
-    return base.filter((r) => safeTrim(r.quoteVersionId) === versionIdForSelected);
-  }, [renderedRenders, showAllRenders, versionIdForSelected]);
-
   const selectedRenders = useMemo(() => {
-    const set = new Set(selectedRenderIds);
+    const set = new Set(selectedRenderIds.map(String));
     return (renderedRenders ?? []).filter((r) => set.has(String(r.id)));
   }, [renderedRenders, selectedRenderIds]);
 
@@ -189,373 +360,345 @@ export default function QuoteEmailComposeClient(props: {
 
   const totalSelectedImages = selectedRenders.length + selectedPhotos.length;
 
-  function onChangeVersion(next: string) {
-    const nextNorm = parsePositiveIntString(next);
-    setVersionNumber(nextNorm);
-    setShowAllRenders(false);
+  // Draft fields
+  const defaultTo = safeTrim(lead?.email || lead?.customerEmail || lead?.contact?.email || "");
+  const defaultName = safeTrim(lead?.name || lead?.customerName || lead?.contact?.name || "");
 
-    // keep only renders that belong to the selected version (when possible)
-    const nextVnum = Number(nextNorm || 0);
-    const nextVid = (versionRows ?? []).find((v) => Number(v.version ?? 0) === nextVnum)?.id
-      ? String((versionRows ?? []).find((v) => Number(v.version ?? 0) === nextVnum)!.id)
-      : "";
+  const [to, setTo] = useState(defaultTo);
+  const [cc, setCc] = useState("");
+  const [bcc, setBcc] = useState("");
+  const [subject, setSubject] = useState(
+    defaultName ? `Your quote is ready — ${defaultName}` : "Your quote is ready"
+  );
 
-    if (nextVid) {
-      const allowed = new Set(
-        (renderedRenders ?? [])
-          .filter((r) => safeTrim(r.quoteVersionId) === nextVid)
-          .map((r) => String(r.id))
-      );
-      setSelectedRenderIds((prev) => prev.filter((id) => allowed.has(id)));
-    }
+  const [intro, setIntro] = useState(
+    `Hi ${defaultName || "there"},\n\nThanks for sending the photos. Here’s a first look at the scope and next steps.`
+  );
+
+  const [scopeBulletsRaw, setScopeBulletsRaw] = useState(
+    [
+      "Review the visuals and let us know what you like (materials/colors).",
+      "If anything changes about the scope, we can update the quote quickly.",
+      "Reply to approve and we’ll schedule your job.",
+    ].join("\n")
+  );
+
+  const [closing, setClosing] = useState(
+    `\nIf you have any questions, just hit reply — we’re happy to walk through options.\n\nThanks!`
+  );
+
+  const [signature, setSignature] = useState("— The Shop");
+
+  const scopeBullets = useMemo(() => {
+    return scopeBulletsRaw
+      .split("\n")
+      .map((x) => safeTrim(x))
+      .filter(Boolean);
+  }, [scopeBulletsRaw]);
+
+  const brandName = "Your Shop"; // v1 placeholder; later: tenant branding
+  const preheader = `${templateOneLiner(templateKey)} · ${totalSelectedImages} image${totalSelectedImages === 1 ? "" : "s"}`;
+
+  const toOk = safeTrim(to).includes("@");
+  const sendDisabled = true; // until wired
+  const previewDisabled = false;
+
+  function toggleRender(id: string) {
+    setSelectedRenderIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  function togglePhoto(k: string) {
+    setSelectedPhotoKeys((prev) => (prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]));
   }
 
-  const noRendersForVersion = !showAllRenders && versionIdForSelected && (filteredRenders?.length ?? 0) === 0;
+  const changeSelectionHref = `/admin/quotes/${encodeURIComponent(quoteId)}#renders`;
 
   return (
     <div className="space-y-6">
-      {/* Step 0: version */}
+      {/* Header actions (stacked, no builder vibe) */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-gray-600 dark:text-gray-300">Compose quote email</div>
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Template <span className="font-mono">{templateKey}</span> · {totalSelectedImages} selected image
+                {totalSelectedImages === 1 ? "" : "s"}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {chip(`Template: ${templateLabel(templateKey)}`)}
+              {chip(`Renders: ${selectedRenders.length}`)}
+              {chip(`Photos: ${selectedPhotos.length}`)}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href={changeSelectionHref}
+                className="text-sm font-semibold text-gray-700 hover:underline dark:text-gray-200"
+              >
+                ← Change layout/images
+              </a>
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                (takes you back to the quote selection area)
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={previewDisabled}
+                className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold hover:bg-gray-50 disabled:opacity-60 dark:border-gray-800 dark:hover:bg-gray-900"
+                title="Preview is already shown below"
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                disabled={sendDisabled || !toOk}
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-black"
+                title="Send wiring comes next"
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Quick selection picker (optional, lightweight) */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex items-end justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">0) Choose a version</h2>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Selected images</h2>
             <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              We’ll use this version as the source-of-truth for what you’re emailing.
+              Click to include/exclude. (Fast tweaks without going back.)
             </p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {chip(`Selected: ${versionNumber ? `v${versionNumber}` : "—"}`)}
-            {chip(`Images selected: ${totalSelectedImages}`)}
+          <div className="text-xs text-gray-500 dark:text-gray-400">
+            Tip: Visual First looks best with at least 1 render selected.
           </div>
         </div>
 
+        {/* Renders */}
         <div className="mt-4">
-          <select
-            value={versionNumber}
-            onChange={(e) => onChangeVersion(e.target.value)}
-            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-            disabled={!sortedVersions.length}
-          >
-            {sortedVersions.length ? (
-              sortedVersions.map((v) => {
-                const n = String(Number(v.version ?? 0));
-                return (
-                  <option key={v.id} value={n}>
-                    v{n}
-                  </option>
-                );
-              })
-            ) : (
-              <option value="">No versions yet</option>
-            )}
-          </select>
-
-          {!sortedVersions.length ? (
-            <div className="mt-3 text-xs text-gray-600 dark:text-gray-300">
-              Create v1 first (Lifecycle panel) so the email can be anchored to a version.
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      {/* Step 1: template picker */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">1) Choose a template</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Templates control layout and emphasis. You’ll still edit wording and pick images.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {chip(`Selected: ${templateCardLabel(templateKey)}`)}
-            {chip(`Images selected: ${totalSelectedImages}`)}
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-3 lg:grid-cols-3">
-          {(["standard", "before_after", "visual_first"] as TemplateKey[]).map((k) => {
-            const active = k === templateKey;
-            return (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setTemplateKey(k)}
-                className={
-                  "text-left rounded-2xl border p-4 transition " +
-                  (active
-                    ? "border-black ring-1 ring-black bg-gray-50 dark:border-white dark:ring-white dark:bg-black"
-                    : "border-gray-200 bg-white hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:hover:bg-gray-900")
-                }
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{templateCardLabel(k)}</div>
-                  {active ? (
-                    <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
-                      ACTIVE
-                    </span>
-                  ) : null}
-                </div>
-                <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">{templateCardDesc(k)}</div>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Step 2: media picker */}
-      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">2) Pick images</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              Select multiple renders and/or customer photos to include in the email.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {chip(`Renders: ${selectedRenders.length}`)}
-            {chip(`Customer photos: ${selectedPhotos.length}`)}
-          </div>
-        </div>
-
-        {/* Renders gallery */}
-        <div className="mt-5">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Renders</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">
-              Filtered to <span className="font-mono">v{versionNumber || "—"}</span> by default
-            </div>
-          </div>
-
-          {noRendersForVersion ? (
-            <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-              No rendered images found for this version.
-              <button
-                type="button"
-                onClick={() => setShowAllRenders(true)}
-                className="ml-2 underline font-semibold"
-              >
-                Show all renders
-              </button>
-            </div>
-          ) : filteredRenders?.length ? (
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {filteredRenders.map((r) => {
-                const url = safeTrim(r.imageUrl);
-                if (!url) return null;
-                const active = selectedRenderIds.includes(String(r.id));
-                return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => toggleRender(String(r.id))}
-                    className={
-                      "group rounded-2xl border overflow-hidden text-left transition " +
-                      (active
-                        ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
-                        : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700")
-                    }
-                    title="Select render"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={url} alt="Render" className="h-48 w-full object-cover bg-black/5" />
-                    <div className="p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+          <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Renders</div>
+          {renderedRenders?.length ? (
+            <div className="mt-2 grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+              {renderedRenders
+                .filter((r) => safeTrim(r.imageUrl))
+                .slice(0, 12)
+                .map((r) => {
+                  const active = selectedRenderIds.includes(String(r.id));
+                  const url = safeTrim(r.imageUrl);
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => toggleRender(String(r.id))}
+                      className={
+                        "rounded-2xl border overflow-hidden text-left transition " +
+                        (active
+                          ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
+                          : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700")
+                      }
+                      title="Toggle render"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={url} alt="Render" className="h-28 w-full object-cover bg-black/5" />
+                      <div className="p-2 flex items-center justify-between">
+                        <div className="text-[11px] font-semibold text-gray-800 dark:text-gray-200">
                           Render {r.attempt != null ? `#${Number(r.attempt)}` : ""}
                         </div>
-                        {active ? (
-                          <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
-                            SELECTED
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-gray-500 dark:text-gray-400 group-hover:underline">
-                            Click to select
-                          </span>
-                        )}
+                        <div className="text-[11px] text-gray-500 dark:text-gray-400">{active ? "✓" : "+"}</div>
                       </div>
-                      {r.quoteVersionId ? (
-                        <div className="mt-1 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
-                          vId: {String(r.quoteVersionId).slice(0, 8)}…
-                        </div>
-                      ) : null}
-                    </div>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })}
             </div>
           ) : (
-            <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+            <div className="mt-2 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
               No rendered images found yet.
             </div>
           )}
-
-          {showAllRenders ? (
-            <div className="mt-3">
-              <button
-                type="button"
-                onClick={() => setShowAllRenders(false)}
-                className="text-xs font-semibold underline text-gray-700 dark:text-gray-200"
-              >
-                Back to version-only renders
-              </button>
-            </div>
-          ) : null}
         </div>
 
-        {/* Customer photos gallery */}
-        <div className="mt-8">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Customer photos</div>
-            <div className="text-xs text-gray-600 dark:text-gray-300">Uses the photos stored on the quote.</div>
-          </div>
-
+        {/* Customer photos */}
+        <div className="mt-6">
+          <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Customer photos</div>
           {customerPhotoItems?.length ? (
-            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {customerPhotoItems.map((p) => {
-                const active = selectedPhotoKeys.includes(p.key);
-                const url = p.url;
-                return (
-                  <button
-                    key={p.key}
-                    type="button"
-                    onClick={() => togglePhoto(p.key)}
-                    className={
-                      "group rounded-2xl border overflow-hidden text-left transition " +
-                      (active
-                        ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
-                        : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700")
-                    }
-                    title="Select customer photo"
-                  >
-                    {url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={url} alt="Customer photo" className="h-40 w-full object-cover bg-black/5" />
-                    ) : (
-                      <div className="h-40 w-full flex items-center justify-center text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-black">
-                        Missing URL
+            <div className="mt-2 grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
+              {customerPhotoItems
+                .filter((p) => safeTrim(p.url))
+                .slice(0, 15)
+                .map((p) => {
+                  const active = selectedPhotoKeys.includes(p.key);
+                  return (
+                    <button
+                      key={p.key}
+                      type="button"
+                      onClick={() => togglePhoto(p.key)}
+                      className={
+                        "rounded-2xl border overflow-hidden text-left transition " +
+                        (active
+                          ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
+                          : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700")
+                      }
+                      title="Toggle photo"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={p.url} alt="Customer" className="h-24 w-full object-cover bg-black/5" />
+                      <div className="p-2 flex items-center justify-between">
+                        <div className="text-[11px] font-semibold text-gray-800 dark:text-gray-200">Photo</div>
+                        <div className="text-[11px] text-gray-500 dark:text-gray-400">{active ? "✓" : "+"}</div>
                       </div>
-                    )}
-                    <div className="p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">Customer photo</div>
-                        {active ? (
-                          <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
-                            SELECTED
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-gray-500 dark:text-gray-400 group-hover:underline">
-                            Click to select
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-1 text-[11px] text-gray-600 dark:text-gray-300 font-mono break-all">
-                        {p.key.startsWith("url:") ? "url" : "idx"}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })}
             </div>
           ) : (
-            <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+            <div className="mt-2 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
               No customer photos found on this quote.
             </div>
           )}
         </div>
       </section>
 
-      {/* Step 3: Draft fields */}
+      {/* Recipients + subject (stacked) */}
       <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">3) Draft email</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Final wording will be editable. Preview + send comes next.
-          </p>
-        </div>
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Recipients</h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          Keep it simple. (BCC-to-shop checkbox comes next.)
+        </p>
 
-        <div className="mt-5 grid gap-4 lg:grid-cols-2">
-          <div className="space-y-3">
+        <div className="mt-5 space-y-4">
+          <div>
+            <MiniLabel label="To" />
+            <input
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              placeholder="customer@email.com"
+              className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+            />
+            {!toOk ? (
+              <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">Enter a valid To address.</div>
+            ) : null}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
             <div>
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">To</div>
+              <MiniLabel label="CC (optional, comma-separated)" />
               <input
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                placeholder="customer@email.com"
+                value={cc}
+                onChange={(e) => setCc(e.target.value)}
+                placeholder="cc@email.com"
                 className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
               />
             </div>
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">CC (optional)</div>
-                <input
-                  value={cc}
-                  onChange={(e) => setCc(e.target.value)}
-                  placeholder="cc@email.com"
-                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">BCC (optional)</div>
-                <input
-                  value={bcc}
-                  onChange={(e) => setBcc(e.target.value)}
-                  placeholder="shop@email.com"
-                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
-                />
-              </div>
-            </div>
-
             <div>
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Subject</div>
+              <MiniLabel label="BCC (optional, comma-separated)" />
               <input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
+                value={bcc}
+                onChange={(e) => setBcc(e.target.value)}
+                placeholder="shop@email.com"
                 className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
               />
             </div>
           </div>
 
           <div>
-            <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Body</div>
-            <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={10}
+            <MiniLabel label="Subject" />
+            <input
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
               className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
-            <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-              Next step: we’ll convert this into template blocks + HTML preview.
+          </div>
+        </div>
+      </section>
+
+      {/* Editor controls (stacked) */}
+      <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Message editor</h2>
+        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+          Edit the parts you care about — the preview updates below.
+        </p>
+
+        <div className="mt-5 space-y-4">
+          <div>
+            <MiniLabel label="Intro" />
+            <textarea
+              value={intro}
+              onChange={(e) => setIntro(e.target.value)}
+              rows={4}
+              className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+            />
+          </div>
+
+          <div>
+            <MiniLabel label="Scope bullets (one per line)" />
+            <textarea
+              value={scopeBulletsRaw}
+              onChange={(e) => setScopeBulletsRaw(e.target.value)}
+              rows={4}
+              className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black font-mono text-[12px]"
+            />
+          </div>
+
+          <div>
+            <MiniLabel label="Closing" />
+            <textarea
+              value={closing}
+              onChange={(e) => setClosing(e.target.value)}
+              rows={4}
+              className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+            />
+          </div>
+
+          <div>
+            <MiniLabel label="Signature" />
+            <input
+              value={signature}
+              onChange={(e) => setSignature(e.target.value)}
+              className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* Preview-first (marketing-style sheet) */}
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Live preview</h2>
+            <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              This is what the customer email will look like.
             </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {chip(`To: ${safeTrim(to) || "—"}`)}
+            {cc ? chip(`CC: ${splitEmails(cc).length}`) : chip("CC: 0")}
+            {bcc ? chip(`BCC: ${splitEmails(bcc).length}`) : chip("BCC: 0")}
           </div>
         </div>
 
-        <div className="mt-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-xs text-gray-600 dark:text-gray-300 font-mono break-all">
-            version=v{versionNumber || "—"} · template={templateKey} · quote={quoteId} · renders={selectedRenders.length} ·
-            photos={selectedPhotos.length}
-          </div>
+        <EmailSheet
+          templateKey={templateKey}
+          brandName={brandName}
+          preheader={preheader}
+          subject={subject}
+          intro={intro}
+          scopeBullets={scopeBullets}
+          closing={closing}
+          signature={signature}
+          selectedRenders={selectedRenders}
+          selectedPhotos={selectedPhotos.map((p) => ({ key: p.key, url: p.url }))}
+        />
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled
-              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-400 dark:border-gray-800 dark:text-gray-500"
-              title="Preview comes next"
-            >
-              Preview (next)
-            </button>
-            <button
-              type="button"
-              disabled
-              className="rounded-lg bg-gray-200 px-4 py-2 text-sm font-semibold text-gray-500 dark:bg-gray-800 dark:text-gray-400"
-              title="Send comes after preview"
-            >
-              Send (after preview)
-            </button>
-          </div>
+        <div className="text-[11px] text-gray-500 dark:text-gray-400 font-mono break-all">
+          template={templateKey} · quote={quoteId} · renders={selectedRenders.length} · photos={selectedPhotos.length}
         </div>
       </section>
     </div>

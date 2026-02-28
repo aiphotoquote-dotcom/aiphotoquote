@@ -82,26 +82,14 @@ export default async function QuoteEmailComposePage({ params, searchParams }: Pa
   const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && r.imageUrl);
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <a
-            href={`/admin/quotes/${encodeURIComponent(id)}`}
-            className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300"
-          >
-            ← Back to quote
-          </a>
-          <h1 className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">Compose quote email</h1>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Choose a version, pick images, select a layout, tweak wording, preview, then send.
-          </p>
-        </div>
-
-        <div className="rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm dark:border-gray-800 dark:bg-gray-950">
-          <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Quote ID</div>
-          <div className="mt-1 font-mono text-xs text-gray-800 dark:text-gray-200 break-all">{id}</div>
-        </div>
-      </div>
+    <div className="mx-auto max-w-6xl px-6 py-10 space-y-4">
+      {/* Keep navigation, drop redundant page header */}
+      <a
+        href={`/admin/quotes/${encodeURIComponent(id)}`}
+        className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300"
+      >
+        ← Back to quote
+      </a>
 
       <QuoteEmailComposeClient
         quoteId={id}
