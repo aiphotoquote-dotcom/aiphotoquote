@@ -348,6 +348,20 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const actorUserId = session.userId;
     if (!actorUserId) redirect("/sign-in");
 
+    // ✅ Authoritative tenant context at ACTION TIME (prevents stale closure issues)
+    const jarNow = await cookies();
+    const tenantIdNowMaybe = await resolveActiveTenantId({ jar: jarNow, userId: actorUserId });
+    if (!tenantIdNowMaybe) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=no_active_tenant#renders`);
+    const tenantIdNow = String(tenantIdNowMaybe);
+
+    if (tenantIdNow !== tenantId) {
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderError=tenant_mismatch&expectedTenant=${encodeURIComponent(
+          tenantId
+        )}&activeTenant=${encodeURIComponent(tenantIdNow)}#renders`
+      );
+    }
+
     const shopNotes = safeTrim(formData.get("shop_notes"));
 
     // Back-compat: accept either version_id (uuid) or version_number
@@ -359,7 +373,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       .from(tenantMembers)
       .where(
         and(
-          eq(tenantMembers.tenantId, tenantId),
+          eq(tenantMembers.tenantId, tenantIdNow),
           eq(tenantMembers.clerkUserId, actorUserId),
           eq(tenantMembers.status, "active")
         )
@@ -369,16 +383,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=forbidden#renders`);
 
-    // Resolve to a real quote_versions.id
     let resolvedVersionId: string | null = null;
 
-    // 1) If a uuid-ish version_id was submitted, try it first.
+    // 1) Try uuid version_id if provided
     if (versionIdRaw && versionIdRaw.includes("-")) {
       const vAny = await db.execute(sql`
         select v.id::text as id
         from quote_versions v
         where v.id = ${versionIdRaw}::uuid
-          and v.tenant_id = ${tenantId}::uuid
+          and v.tenant_id = ${tenantIdNow}::uuid
           and v.quote_log_id = ${id}::uuid
         limit 1
       `);
@@ -398,9 +411,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       }
 
       const picked = await db.execute(sql`
-        select v.id::text as id
+        select v.id::text as id, v.version::int as version
         from quote_versions v
-        where v.tenant_id = ${tenantId}::uuid
+        where v.tenant_id = ${tenantIdNow}::uuid
           and v.quote_log_id = ${id}::uuid
           and v.version = ${Math.trunc(vnum)}
         order by v.created_at desc
@@ -411,19 +424,32 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       resolvedVersionId = prow?.id ? String(prow.id) : null;
 
       if (!resolvedVersionId) {
+        // ✅ Debug: show what the DB sees for this tenant+quote right now
+        const avail = await db.execute(sql`
+          select v.version::int as version
+          from quote_versions v
+          where v.tenant_id = ${tenantIdNow}::uuid
+            and v.quote_log_id = ${id}::uuid
+          order by v.version asc
+          limit 50
+        `);
+        const versions: number[] = ((avail as any)?.rows ?? []).map((r: any) => Number(r?.version)).filter((n: any) => Number.isFinite(n));
+        const availableVersions = versions.length ? versions.join(",") : "";
+
         redirect(
           `/admin/quotes/${encodeURIComponent(id)}?renderError=version_number_not_found&version_number=${encodeURIComponent(
             String(Math.trunc(vnum))
+          )}&available_versions=${encodeURIComponent(availableVersions)}&activeTenant=${encodeURIComponent(
+            tenantIdNow
           )}#renders`
         );
       }
     }
 
-    // Next attempt number (scoped to this version)
     const ar = await db.execute(sql`
       select coalesce(max(r.attempt), 0) as "max_attempt"
       from quote_renders r
-      where r.tenant_id = ${tenantId}::uuid
+      where r.tenant_id = ${tenantIdNow}::uuid
         and r.quote_version_id = ${resolvedVersionId}::uuid
     `);
     const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
@@ -440,7 +466,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         created_at
       )
       values (
-        ${tenantId}::uuid,
+        ${tenantIdNow}::uuid,
         ${id}::uuid,
         ${resolvedVersionId}::uuid,
         ${nextAttempt},
