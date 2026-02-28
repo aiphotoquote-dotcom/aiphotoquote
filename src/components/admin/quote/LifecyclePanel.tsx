@@ -77,8 +77,8 @@ export default function LifecyclePanel(props: {
         </div>
       </div>
 
-      {/* Create version (collapsible to reduce clutter) */}
-      <details className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 open:bg-gray-50 dark:border-gray-800 dark:bg-black">
+      {/* Create version (collapsible so it doesn't dominate) */}
+      <details className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
         <summary className="cursor-pointer select-none">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div>
@@ -100,13 +100,7 @@ export default function LifecyclePanel(props: {
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Engine</div>
               <div className="mt-3 space-y-2 text-sm">
                 <label className="flex items-start gap-2">
-                  <input
-                    type="radio"
-                    name="engine"
-                    value="deterministic_pricing_only"
-                    defaultChecked
-                    className="mt-0.5"
-                  />
+                  <input type="radio" name="engine" value="deterministic_pricing_only" defaultChecked className="mt-0.5" />
                   <span>
                     <span className="font-semibold text-gray-900 dark:text-gray-100">Deterministic pricing only</span>
                     <span className="block text-xs text-gray-600 dark:text-gray-400">
@@ -182,8 +176,8 @@ export default function LifecyclePanel(props: {
         </div>
       ) : null}
 
-      {/* Main: 2 columns (versions + notes). Renders gets FULL WIDTH below. */}
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+      {/* STACKED SECTIONS */}
+      <div className="mt-6 space-y-4">
         {/* Versions */}
         <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
           <div className="flex items-center justify-between gap-2">
@@ -248,12 +242,6 @@ export default function LifecyclePanel(props: {
                       </div>
                     </div>
 
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {safeTrim(v.source) ? chip(String(v.source), "gray") : null}
-                      {safeTrim(v.createdBy) ? chip(String(v.createdBy), "gray") : null}
-                      {v.reason ? chip("has reason", "gray") : null}
-                    </div>
-
                     <div className="mt-3 space-y-1">
                       {miniKeyValue("Estimate", estText)}
                       {miniKeyValue("Confidence", conf || "—")}
@@ -267,7 +255,6 @@ export default function LifecyclePanel(props: {
                       <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No summary on this version.</div>
                     )}
 
-                    {/* Quick render request */}
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                       <div className="text-xs text-gray-600 dark:text-gray-300">Actions</div>
                       <form action={requestRenderAction} className="flex items-center gap-2">
@@ -308,10 +295,7 @@ export default function LifecyclePanel(props: {
               noteRows.slice(0, 100).map((n) => {
                 const actor = noteActor(n);
                 return (
-                  <div
-                    key={n.id}
-                    className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
-                  >
+                  <div key={n.id} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         {actor ? chip(String(actor), "gray") : chip("tenant", "gray")}
@@ -334,10 +318,8 @@ export default function LifecyclePanel(props: {
           </div>
         </div>
 
-        {/* Renders: FULL WIDTH */}
-        <div className="lg:col-span-2">
-          <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
-        </div>
+        {/* Renders */}
+        <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
       </div>
     </section>
   );

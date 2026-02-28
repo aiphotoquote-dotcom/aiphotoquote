@@ -359,7 +359,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const actorUserId = session.userId;
     if (!actorUserId) redirect("/sign-in");
 
-    // ✅ authoritative tenant at action-time
     const jarNow = await cookies();
     const tenantIdNowMaybe = await resolveActiveTenantId({ jar: jarNow, userId: actorUserId });
     if (!tenantIdNowMaybe) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=no_active_tenant#renders`);
@@ -382,10 +381,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const shopNotes = safeTrim(formData.get("shop_notes"));
 
-    // forms can send either:
-    // - version_id (uuid) OR
-    // - version_id (a number string) OR
-    // - version_number (number string)
     const rawA = safeTrim(formData.get("version_id"));
     const rawB = safeTrim(formData.get("version_number"));
     const candidate = rawA || rawB;
@@ -393,7 +388,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     let resolvedVersionId: string | null = null;
     let resolvedVersionNumber: number | null = null;
 
-    // 1) UUID path
     if (looksUuid(candidate)) {
       const hit = await db
         .select({ id: quoteVersions.id, version: quoteVersions.version })
@@ -408,7 +402,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       }
     }
 
-    // 2) version number path
     if (!resolvedVersionId) {
       const vnum = parsePositiveInt(candidate);
       if (!vnum) {
@@ -449,7 +442,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       }
     }
 
-    // attempt number (per version)
     const maxAttemptRow = await db
       .select({ maxAttempt: sql<number>`coalesce(max(${quoteRenders.attempt}), 0)` })
       .from(quoteRenders)
@@ -459,7 +451,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const nextAttempt = Number(maxAttemptRow?.maxAttempt ?? 0) + 1;
 
-    // ✅ insert render row via Drizzle (avoids column-name drift)
     const inserted = await db
       .insert(quoteRenders)
       .values({
@@ -503,70 +494,61 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         markReadAction={markRead}
       />
 
-      {/* ✅ Two-column workspace */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* LEFT: main */}
-        <div className="space-y-6 lg:col-span-8">
-          <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStage} />
+      {/* ✅ Single-column stacked layout (v1) */}
+      <div className="space-y-6">
+        <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStage} />
 
-          <CustomerNotesCard notes={notes} />
+        <CustomerNotesCard notes={notes} />
 
-          <QuotePhotoGallery photos={photos} />
+        <QuotePhotoGallery photos={photos} />
 
-          <DetailsPanel
-            renderOptIn={Boolean(rowSnap.renderOptIn)}
-            estimateDisplay={estimateDisplay}
-            confidence={confidence}
-            inspectionRequired={inspectionRequired}
-            summary={summary}
-            questions={questions}
-            assumptions={assumptions}
-            visibleScope={visibleScope}
-            pricingBasis={pricingBasis}
-            pricingPolicySnap={pricingPolicySnap}
-            pricingConfigSnap={pricingConfigSnap}
-            pricingRulesSnap={pricingRulesSnap}
-            industryKeySnap={industryKeySnap}
-            llmKeySource={llmKeySource}
-            rawOutput={rowSnap.output ?? null}
-          />
-        </div>
+        <DetailsPanel
+          renderOptIn={Boolean(rowSnap.renderOptIn)}
+          estimateDisplay={estimateDisplay}
+          confidence={confidence}
+          inspectionRequired={inspectionRequired}
+          summary={summary}
+          questions={questions}
+          assumptions={assumptions}
+          visibleScope={visibleScope}
+          pricingBasis={pricingBasis}
+          pricingPolicySnap={pricingPolicySnap}
+          pricingConfigSnap={pricingConfigSnap}
+          pricingRulesSnap={pricingRulesSnap}
+          industryKeySnap={industryKeySnap}
+          llmKeySource={llmKeySource}
+          rawOutput={rowSnap.output ?? null}
+        />
 
-        {/* RIGHT: sticky sidebar */}
-        <div className="space-y-6 lg:col-span-4">
-          <div className="lg:sticky lg:top-6 space-y-6">
-            <div id="renders" />
+        {/* Anchor for “#renders” */}
+        <div id="renders" />
 
-            <LifecyclePanel
-              quoteId={id}
-              versionRows={versionRows}
-              noteRows={noteRows}
-              renderRows={renderRows}
-              lifecycleReadError={lifecycleReadError}
-              activeVersion={activeVersion}
-              createNewVersionAction={createNewVersion}
-              restoreVersionAction={restoreVersion}
-              requestRenderAction={requestRender}
-            />
+        <LifecyclePanel
+          quoteId={id}
+          versionRows={versionRows}
+          noteRows={noteRows}
+          renderRows={renderRows}
+          lifecycleReadError={lifecycleReadError}
+          activeVersion={activeVersion}
+          createNewVersionAction={createNewVersion}
+          restoreVersionAction={restoreVersion}
+          requestRenderAction={requestRender}
+        />
 
-            <LegacyRenderPanel
-              renderStatus={rowSnap.renderStatus}
-              renderedAt={rowSnap.renderedAt}
-              renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
-              renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
-              renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
-            />
-          </div>
-        </div>
+        <LegacyRenderPanel
+          renderStatus={rowSnap.renderStatus}
+          renderedAt={rowSnap.renderedAt}
+          renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
+          renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
+          renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
+        />
       </div>
 
       {/* ✅ Debug moved out of the way */}
       <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
         <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
           Debug / raw payload
-          <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
-            (collapsed by default)
-          </span>
+          <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">(collapsed by default)</span>
         </summary>
         <div className="mt-4">
           <RawPayloadPanel input={rowSnap.input ?? {}} />
