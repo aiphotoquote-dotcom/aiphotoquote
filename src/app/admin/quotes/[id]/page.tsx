@@ -43,12 +43,6 @@ import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * NOTE:
- * - Server actions stay in this page to avoid Next action scoping pitfalls.
- * - UI + data loading + parsing is modularized.
- */
-
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
   searchParams?:
@@ -56,82 +50,16 @@ type PageProps = {
     | Record<string, string | string[] | undefined>;
 };
 
-function tryJson(v: any) {
-  try {
-    if (v == null) return null;
-    if (typeof v === "object") return v;
-    if (typeof v === "string") return JSON.parse(v);
-    return v;
-  } catch {
-    return null;
-  }
+function spGet(sp: any, key: string): string {
+  const v = sp?.[key];
+  if (Array.isArray(v)) return String(v[0] ?? "");
+  return v == null ? "" : String(v);
 }
 
-function clampText(s: string, max = 1600) {
-  const t = safeTrim(s);
-  if (!t) return "";
-  return t.length <= max ? t : t.slice(0, max - 1) + "…";
-}
-
-function buildRenderPrompt(args: {
-  quoteId: string;
-  versionNum: number | null;
-  quoteInput: any;
-  versionOutput: any;
-  shopNotes: string;
-}) {
-  const input = args.quoteInput ?? {};
-  const out = args.versionOutput ?? {};
-
-  const customerNotes =
-    safeTrim(input?.customer_context?.notes) ||
-    safeTrim(input?.notes) ||
-    safeTrim(input?.customer?.notes) ||
-    "";
-
-  const serviceType =
-    safeTrim(input?.customer_context?.service_type) ||
-    safeTrim(input?.customer_context?.category) ||
-    safeTrim(out?.industry_key) ||
-    "";
-
-  const summary = safeTrim(out?.summary) || safeTrim(out?.ai_assessment?.summary) || "";
-  const estLow = typeof out?.estimate_low === "number" ? out.estimate_low : null;
-  const estHigh = typeof out?.estimate_high === "number" ? out.estimate_high : null;
-
-  const estimateLine =
-    estLow != null && estHigh != null
-      ? `Estimate: $${Math.round(estLow)} – $${Math.round(estHigh)}`
-      : estLow != null
-        ? `Estimate: $${Math.round(estLow)}`
-        : estHigh != null
-          ? `Estimate: $${Math.round(estHigh)}`
-          : "";
-
-  const versionLabel = args.versionNum != null ? `v${args.versionNum}` : "version";
-
-  return clampText(
-    [
-      `You are generating ONE photorealistic concept render anchored to the customer's uploaded photo.`,
-      `The output must still look like the SAME item in the photo (same proportions and geometry).`,
-      ``,
-      `Quote: ${args.quoteId} (${versionLabel})`,
-      serviceType ? `Service type: ${serviceType}` : "",
-      estimateLine,
-      summary ? `Scope summary: ${summary}` : "",
-      customerNotes ? `Customer notes: ${customerNotes}` : "",
-      args.shopNotes ? `Shop notes (strict): ${args.shopNotes}` : "",
-      ``,
-      `Hard constraints:`,
-      `- Preserve the exact object geometry and overall shape from the input photo.`,
-      `- Do NOT add text, labels, watermarks, logos, UI elements.`,
-      `- Do NOT invent extra objects in the scene.`,
-      `- Keep lighting natural and realistic.`,
-      `- Output exactly ONE image.`,
-    ]
-      .filter(Boolean)
-      .join("\n")
-  );
+function bannerTone(kind: "error" | "info") {
+  return kind === "error"
+    ? "border-red-200 bg-red-50 text-red-900 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200"
+    : "border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/40 dark:text-blue-200";
 }
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
@@ -145,7 +73,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const sp = searchParams ? await searchParams : {};
   const skipAutoRead =
-    sp?.skipAutoRead === "1" || (Array.isArray(sp?.skipAutoRead) && sp.skipAutoRead.includes("1"));
+    spGet(sp, "skipAutoRead") === "1" || (Array.isArray((sp as any)?.skipAutoRead) && (sp as any).skipAutoRead.includes("1"));
 
   const jar = await cookies();
 
@@ -192,7 +120,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     );
   }
 
-  // ✅ Snapshot non-null row for server-action closures (TS won't keep narrowing inside nested functions)
+  // ✅ Snapshot non-null row for server-action closures
   const rowSnap = row;
 
   // Track UI-state for read/unread (because we update DB after fetch)
@@ -254,8 +182,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
-  const pricingBasis: any =
-    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   const inputAny: any = rowSnap.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
@@ -272,8 +199,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
   // ✅ active pointer for Versions UI
-  const activeVersion =
-    typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
+  const activeVersion = typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
+
+  // banners from querystring
+  const renderError = safeTrim(spGet(sp, "renderError"));
+  const renderVersionId = safeTrim(spGet(sp, "versionId"));
+  const renderExpectedQuote = safeTrim(spGet(sp, "expectedQuote"));
+  const renderExpectedTenant = safeTrim(spGet(sp, "expectedTenant"));
+  const renderFoundQuote = safeTrim(spGet(sp, "foundQuote"));
+  const renderFoundTenant = safeTrim(spGet(sp, "foundTenant"));
 
   /* -------------------- server actions -------------------- */
   async function setStage(formData: FormData) {
@@ -341,7 +275,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           tenantId,
           quoteLogId: id,
           quoteVersionId: null,
-          // ✅ DB column is created_by (Drizzle field createdBy)
           createdBy: actorUserId,
           body: noteBody,
         } as any)
@@ -351,9 +284,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
-    // Run real reassessment engine + pricing (creates version + updates quote_logs.output)
-    const engine: AdminReassessEngine =
-      engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
+    const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
     const quoteLog: QuoteLogRow = {
       id,
@@ -372,7 +303,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       reason: reason || undefined,
     });
 
-    // If note was created, link it to the new version
     if (createdNoteId) {
       await db
         .update(quoteNotes)
@@ -380,7 +310,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
-    // UI-only selection (not persisted here; authoritative is frozen snapshot)
+    // UI-only selection (not persisted here)
     void aiMode;
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
@@ -396,23 +326,17 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const versionId = safeTrim(formData.get("version_id"));
     if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // membership check
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
       .where(
-        and(
-          eq(tenantMembers.tenantId, tenantId),
-          eq(tenantMembers.clerkUserId, actorUserId),
-          eq(tenantMembers.status, "active")
-        )
+        and(eq(tenantMembers.tenantId, tenantId), eq(tenantMembers.clerkUserId, actorUserId), eq(tenantMembers.status, "active"))
       )
       .limit(1)
       .then((r) => r[0] ?? null);
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // atomic restore: copy output + version pointer from quote_versions
     const updated = await db.execute(sql`
       with picked as (
         select
@@ -450,64 +374,72 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const versionId = safeTrim(formData.get("version_id"));
     const shopNotes = safeTrim(formData.get("shop_notes"));
 
-    if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=missing_version`);
+    if (!versionId) {
+      redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=missing_version`);
+    }
 
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
       .where(
-        and(
-          eq(tenantMembers.tenantId, tenantId),
-          eq(tenantMembers.clerkUserId, actorUserId),
-          eq(tenantMembers.status, "active")
-        )
+        and(eq(tenantMembers.tenantId, tenantId), eq(tenantMembers.clerkUserId, actorUserId), eq(tenantMembers.status, "active"))
       )
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
+    if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=forbidden`);
 
-    // Verify version belongs to this quote+tenant AND load version info (for prompt)
-    const vr = await db.execute(sql`
+    // ✅ Diagnostics: does this version exist at all? and what does it belong to?
+    const vmeta = await db.execute(sql`
       select
-        v.id::text as version_id,
-        v.version::int as version_num,
-        v.output as version_output
+        v.id::text as id,
+        v.tenant_id::text as tenant_id,
+        v.quote_log_id::text as quote_log_id
       from quote_versions v
       where v.id = ${versionId}::uuid
-        and v.tenant_id = ${tenantId}::uuid
-        and v.quote_log_id = ${id}::uuid
       limit 1
     `);
 
-    const vrow: any = (vr as any)?.rows?.[0] ?? null;
-    const vok = Boolean(vrow?.version_id);
-    if (!vok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=bad_version`);
+    const vm: any = (vmeta as any)?.rows?.[0] ?? null;
 
-    const versionNum = Number.isFinite(Number(vrow?.version_num)) ? Number(vrow.version_num) : null;
-    const versionOutput = tryJson(vrow?.version_output) ?? vrow?.version_output ?? {};
+    if (!vm?.id) {
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderError=version_not_found&versionId=${encodeURIComponent(
+          versionId
+        )}&expectedQuote=${encodeURIComponent(id)}&expectedTenant=${encodeURIComponent(tenantId)}`
+      );
+    }
 
-    // attempt sequencing per version
+    const foundTenant = String(vm.tenant_id ?? "");
+    const foundQuote = String(vm.quote_log_id ?? "");
+
+    if (foundTenant !== tenantId) {
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderError=version_tenant_mismatch&versionId=${encodeURIComponent(
+          versionId
+        )}&expectedTenant=${encodeURIComponent(tenantId)}&foundTenant=${encodeURIComponent(foundTenant)}`
+      );
+    }
+
+    if (foundQuote !== id) {
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderError=version_quote_mismatch&versionId=${encodeURIComponent(
+          versionId
+        )}&expectedQuote=${encodeURIComponent(id)}&foundQuote=${encodeURIComponent(foundQuote)}`
+      );
+    }
+
+    // Next attempt per version
     const ar = await db.execute(sql`
       select coalesce(max(r.attempt), 0) as "max_attempt"
       from quote_renders r
       where r.tenant_id = ${tenantId}::uuid
         and r.quote_version_id = ${versionId}::uuid
     `);
+
     const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
     const nextAttempt = Number(maxAttemptRaw ?? 0) + 1;
 
-    // Build a real prompt (so cron renderer has job context)
-    const quoteInput = rowSnap.input ?? {};
-    const prompt = buildRenderPrompt({
-      quoteId: id,
-      versionNum,
-      quoteInput,
-      versionOutput,
-      shopNotes,
-    });
-
-    // Insert queued render attempt
     const ins = await db.execute(sql`
       insert into quote_renders (
         tenant_id,
@@ -515,7 +447,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         quote_version_id,
         attempt,
         status,
-        prompt,
         shop_notes,
         created_at
       )
@@ -525,7 +456,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         ${versionId}::uuid,
         ${nextAttempt},
         'queued',
-        ${prompt},
         ${shopNotes || null},
         now()
       )
@@ -533,17 +463,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     `);
 
     const ok = Boolean((ins as any)?.rows?.[0]?.id);
-    if (!ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed`);
-
-    // Optional: mark quote as queued in legacy columns so other panels reflect activity
-    await db.execute(sql`
-      update quote_logs
-      set
-        render_status = 'queued',
-        render_error = null
-      where id = ${id}::uuid
-        and tenant_id = ${tenantId}::uuid
-    `);
+    if (!ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed&versionId=${encodeURIComponent(versionId)}`);
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
   }
@@ -553,6 +473,23 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
+      {renderError ? (
+        <div className={"rounded-2xl border p-4 text-sm " + bannerTone("error")}>
+          <div className="font-semibold">Render request failed: {renderError}</div>
+          <div className="mt-2 text-xs font-mono break-all opacity-90">
+            quoteId={id} · tenantId={tenantId}
+            {renderVersionId ? ` · versionId=${renderVersionId}` : ""}
+            {renderExpectedQuote ? ` · expectedQuote=${renderExpectedQuote}` : ""}
+            {renderFoundQuote ? ` · foundQuote=${renderFoundQuote}` : ""}
+            {renderExpectedTenant ? ` · expectedTenant=${renderExpectedTenant}` : ""}
+            {renderFoundTenant ? ` · foundTenant=${renderFoundTenant}` : ""}
+          </div>
+          <div className="mt-2 text-xs opacity-90">
+            This usually means the Versions list is not properly scoped to this quote+tenant. Next step: fix <span className="font-mono">getQuoteLifecycle</span>.
+          </div>
+        </div>
+      ) : null}
+
       <QuoteHeader
         quoteId={id}
         submittedAtLabel={submittedAtLabel}
