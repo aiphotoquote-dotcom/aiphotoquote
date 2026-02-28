@@ -13,8 +13,7 @@ import LifecyclePanel from "@/components/admin/quote/LifecyclePanel";
 import DetailsPanel from "@/components/admin/quote/DetailsPanel";
 import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
-
-import QuoteEmailPackager from "@/components/admin/quoteEmail/QuoteEmailPackager";
+import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs, quoteNotes, quoteRenders, quoteVersions, tenantMembers } from "@/lib/db/schema";
@@ -177,7 +176,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     ? aiAssessment.visible_scope.map((x: any) => String(x))
     : [];
 
-  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any =
+    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   const inputAny: any = rowSnap.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
@@ -195,6 +195,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const activeVersion =
     typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
+  // ✅ Only rendered attempts (for email builder)
+  const renderedRenders = (renderRows ?? []).filter(
+    (r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl)
+  );
+
   /* -------------------- server actions -------------------- */
   async function setStage(formData: FormData) {
     "use server";
@@ -206,7 +211,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set((await import("@/lib/admin/quotes/normalize")).STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ stage: next } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
@@ -217,7 +225,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
-    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: false } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
@@ -227,7 +238,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
-    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db
+      .update(quoteLogs)
+      .set({ isRead: true } as any)
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -260,7 +274,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
-    const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
+    const engine: AdminReassessEngine =
+      engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
     const quoteLog: QuoteLogRow = {
       id,
@@ -280,10 +295,14 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     });
 
     if (createdNoteId) {
-      await db.update(quoteNotes).set({ quoteVersionId: result.versionId } as any).where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
+      await db
+        .update(quoteNotes)
+        .set({ quoteVersionId: result.versionId } as any)
+        .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
     void aiMode;
+
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -379,7 +398,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       const hit = await db
         .select({ id: quoteVersions.id, version: quoteVersions.version })
         .from(quoteVersions)
-        .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.id, candidate)))
+        .where(
+          and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.id, candidate))
+        )
         .limit(1)
         .then((r) => r[0] ?? null);
 
@@ -402,7 +423,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       const picked = await db
         .select({ id: quoteVersions.id, version: quoteVersions.version })
         .from(quoteVersions)
-        .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.version, vnum)))
+        .where(
+          and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.version, vnum))
+        )
         .orderBy(desc(quoteVersions.createdAt))
         .limit(1)
         .then((r) => r[0] ?? null);
@@ -493,16 +516,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
         <QuotePhotoGallery photos={photos} />
 
-        {/* ✅ WOW moment: packaging station */}
-        <QuoteEmailPackager
-          quoteId={id}
-          activeVersion={activeVersion}
-          versionRows={versionRows as any}
-          renderRows={renderRows as any}
-          customerPhotos={(photos as any[]) ?? []}
-          initialTemplateKey="visual_first"
-        />
-
         <DetailsPanel
           renderOptIn={Boolean(rowSnap.renderOptIn)}
           estimateDisplay={estimateDisplay}
@@ -519,6 +532,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           industryKeySnap={industryKeySnap}
           llmKeySource={llmKeySource}
           rawOutput={rowSnap.output ?? null}
+        />
+
+        {/* ✅ The “wow” step: pick version + images + template, then open composer pre-filled */}
+        <EmailBuilderPanel
+          quoteId={id}
+          activeVersion={activeVersion}
+          versionRows={versionRows as any}
+          renderedRenders={renderedRenders as any}
+          customerPhotos={(photos as any[]) ?? []}
         />
 
         {/* Anchor for “#renders” */}
