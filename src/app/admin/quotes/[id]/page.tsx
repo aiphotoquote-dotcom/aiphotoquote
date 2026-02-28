@@ -1,7 +1,7 @@
 // src/app/admin/quotes/[id]/page.tsx
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, desc } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import QuotePhotoGallery from "@/components/admin/QuotePhotoGallery";
@@ -15,7 +15,7 @@ import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, quoteNotes, tenantMembers } from "@/lib/db/schema";
+import { quoteLogs, quoteNotes, quoteRenders, quoteVersions, tenantMembers } from "@/lib/db/schema";
 
 import { resolveActiveTenantId } from "@/lib/admin/quotes/getActiveTenant";
 import { findRedirectTenantForQuote, getAdminQuoteRow } from "@/lib/admin/quotes/getQuote";
@@ -49,6 +49,17 @@ type PageProps = {
     | Promise<Record<string, string | string[] | undefined>>
     | Record<string, string | string[] | undefined>;
 };
+
+function looksUuid(v: string) {
+  const s = safeTrim(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+function parsePositiveInt(v: string) {
+  const n = Number(String(v ?? "").trim());
+  if (!Number.isFinite(n)) return null;
+  const i = Math.trunc(n);
+  return i > 0 ? i : null;
+}
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const session = await auth();
@@ -348,25 +359,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const actorUserId = session.userId;
     if (!actorUserId) redirect("/sign-in");
 
-    // ✅ Authoritative tenant context at ACTION TIME (prevents stale closure issues)
+    // ✅ authoritative tenant at action-time
     const jarNow = await cookies();
     const tenantIdNowMaybe = await resolveActiveTenantId({ jar: jarNow, userId: actorUserId });
     if (!tenantIdNowMaybe) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=no_active_tenant#renders`);
     const tenantIdNow = String(tenantIdNowMaybe);
-
-    if (tenantIdNow !== tenantId) {
-      redirect(
-        `/admin/quotes/${encodeURIComponent(id)}?renderError=tenant_mismatch&expectedTenant=${encodeURIComponent(
-          tenantId
-        )}&activeTenant=${encodeURIComponent(tenantIdNow)}#renders`
-      );
-    }
-
-    const shopNotes = safeTrim(formData.get("shop_notes"));
-
-    // Back-compat: accept either version_id (uuid) or version_number
-    const versionIdRaw = safeTrim(formData.get("version_id"));
-    const versionNumberRaw = safeTrim(formData.get("version_number"));
 
     const membership = await db
       .select({ ok: sql<number>`1` })
@@ -383,102 +380,107 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=forbidden#renders`);
 
-    let resolvedVersionId: string | null = null;
+    const shopNotes = safeTrim(formData.get("shop_notes"));
 
-    // 1) Try uuid version_id if provided
-    if (versionIdRaw && versionIdRaw.includes("-")) {
-      const vAny = await db.execute(sql`
-        select v.id::text as id
-        from quote_versions v
-        where v.id = ${versionIdRaw}::uuid
-          and v.tenant_id = ${tenantIdNow}::uuid
-          and v.quote_log_id = ${id}::uuid
-        limit 1
-      `);
-      const vrow: any = (vAny as any)?.rows?.[0] ?? null;
-      if (vrow?.id) resolvedVersionId = String(vrow.id);
+    // forms can send either:
+    // - version_id (uuid) OR
+    // - version_id (a number string) OR
+    // - version_number (number string)
+    const rawA = safeTrim(formData.get("version_id"));
+    const rawB = safeTrim(formData.get("version_number"));
+    const candidate = rawA || rawB;
+
+    let resolvedVersionId: string | null = null;
+    let resolvedVersionNumber: number | null = null;
+
+    // 1) UUID path
+    if (looksUuid(candidate)) {
+      const hit = await db
+        .select({ id: quoteVersions.id, version: quoteVersions.version })
+        .from(quoteVersions)
+        .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.id, candidate)))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      if (hit?.id) {
+        resolvedVersionId = String(hit.id);
+        resolvedVersionNumber = Number(hit.version ?? null);
+      }
     }
 
-    // 2) Primary path: resolve version_number -> id
+    // 2) version number path
     if (!resolvedVersionId) {
-      const vnum = Number(versionNumberRaw);
-      if (!Number.isFinite(vnum) || vnum <= 0) {
+      const vnum = parsePositiveInt(candidate);
+      if (!vnum) {
         redirect(
-          `/admin/quotes/${encodeURIComponent(id)}?renderError=missing_or_bad_version_number&version_number=${encodeURIComponent(
-            versionNumberRaw || ""
-          )}#renders`
+          `/admin/quotes/${encodeURIComponent(id)}?renderError=missing_or_bad_version&version_value=${encodeURIComponent(
+            candidate || ""
+          )}&activeTenant=${encodeURIComponent(tenantIdNow)}#renders`
         );
       }
 
-      const picked = await db.execute(sql`
-        select v.id::text as id, v.version::int as version
-        from quote_versions v
-        where v.tenant_id = ${tenantIdNow}::uuid
-          and v.quote_log_id = ${id}::uuid
-          and v.version = ${Math.trunc(vnum)}
-        order by v.created_at desc
-        limit 1
-      `);
+      const picked = await db
+        .select({ id: quoteVersions.id, version: quoteVersions.version })
+        .from(quoteVersions)
+        .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.version, vnum)))
+        .orderBy(desc(quoteVersions.createdAt))
+        .limit(1)
+        .then((r) => r[0] ?? null);
 
-      const prow: any = (picked as any)?.rows?.[0] ?? null;
-      resolvedVersionId = prow?.id ? String(prow.id) : null;
+      if (picked?.id) {
+        resolvedVersionId = String(picked.id);
+        resolvedVersionNumber = vnum;
+      } else {
+        const avail = await db
+          .select({ version: quoteVersions.version })
+          .from(quoteVersions)
+          .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id)))
+          .orderBy(desc(quoteVersions.version))
+          .limit(50);
 
-      if (!resolvedVersionId) {
-        // ✅ Debug: show what the DB sees for this tenant+quote right now
-        const avail = await db.execute(sql`
-          select v.version::int as version
-          from quote_versions v
-          where v.tenant_id = ${tenantIdNow}::uuid
-            and v.quote_log_id = ${id}::uuid
-          order by v.version asc
-          limit 50
-        `);
-        const versions: number[] = ((avail as any)?.rows ?? []).map((r: any) => Number(r?.version)).filter((n: any) => Number.isFinite(n));
-        const availableVersions = versions.length ? versions.join(",") : "";
-
+        const availableVersions = avail.map((x) => Number(x.version)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
         redirect(
           `/admin/quotes/${encodeURIComponent(id)}?renderError=version_number_not_found&version_number=${encodeURIComponent(
-            String(Math.trunc(vnum))
-          )}&available_versions=${encodeURIComponent(availableVersions)}&activeTenant=${encodeURIComponent(
+            String(vnum)
+          )}&available_versions=${encodeURIComponent(availableVersions.join(","))}&activeTenant=${encodeURIComponent(
             tenantIdNow
           )}#renders`
         );
       }
     }
 
-    const ar = await db.execute(sql`
-      select coalesce(max(r.attempt), 0) as "max_attempt"
-      from quote_renders r
-      where r.tenant_id = ${tenantIdNow}::uuid
-        and r.quote_version_id = ${resolvedVersionId}::uuid
-    `);
-    const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
-    const nextAttempt = Number(maxAttemptRaw ?? 0) + 1;
+    // attempt number (per version)
+    const maxAttemptRow = await db
+      .select({ maxAttempt: sql<number>`coalesce(max(${quoteRenders.attempt}), 0)` })
+      .from(quoteRenders)
+      .where(and(eq(quoteRenders.tenantId, tenantIdNow), eq(quoteRenders.quoteVersionId, resolvedVersionId!)))
+      .limit(1)
+      .then((r) => r[0] ?? null);
 
-    const ins = await db.execute(sql`
-      insert into quote_renders (
-        tenant_id,
-        quote_log_id,
-        quote_version_id,
-        attempt,
-        status,
-        shop_notes,
-        created_at
-      )
-      values (
-        ${tenantIdNow}::uuid,
-        ${id}::uuid,
-        ${resolvedVersionId}::uuid,
-        ${nextAttempt},
-        'queued',
-        ${shopNotes || null},
-        now()
-      )
-      returning id::text as "id"
-    `);
+    const nextAttempt = Number(maxAttemptRow?.maxAttempt ?? 0) + 1;
 
-    const ok = Boolean((ins as any)?.rows?.[0]?.id);
-    if (!ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed#renders`);
+    // ✅ insert render row via Drizzle (avoids column-name drift)
+    const inserted = await db
+      .insert(quoteRenders)
+      .values({
+        tenantId: tenantIdNow,
+        quoteLogId: id,
+        quoteVersionId: resolvedVersionId!,
+        attempt: nextAttempt,
+        status: "queued" as any,
+        shopNotes: shopNotes || null,
+      } as any)
+      .returning({ id: quoteRenders.id })
+      .then((r) => r[0] ?? null);
+
+    const ok = Boolean(inserted?.id);
+    if (!ok) {
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed&activeTenant=${encodeURIComponent(
+          tenantIdNow
+        )}&version=${encodeURIComponent(String(resolvedVersionNumber ?? ""))}#renders`
+      );
+    }
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
   }
