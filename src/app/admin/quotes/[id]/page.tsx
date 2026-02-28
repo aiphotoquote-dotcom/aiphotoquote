@@ -43,12 +43,6 @@ import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/**
- * NOTE:
- * - Server actions stay in this page to avoid Next action scoping pitfalls.
- * - UI + data loading + parsing is modularized.
- */
-
 type PageProps = {
   params: Promise<{ id: string }> | { id: string };
   searchParams?:
@@ -71,15 +65,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const jar = await cookies();
 
-  // IMPORTANT: keep tenantId strictly typed as string for server-action closures
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId });
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId: string = tenantIdMaybe;
 
-  // 1) Strict tenant-scoped lookup
   let row = await getAdminQuoteRow({ id, tenantId });
 
-  // 2) Auto-heal if quote belongs to a different tenant the user is a member of
   if (!row) {
     const redirectTenantId = await findRedirectTenantForQuote({ id, userId });
     if (redirectTenantId) {
@@ -114,10 +105,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     );
   }
 
-  // ✅ Snapshot non-null row for server-action closures (TS won't keep narrowing inside nested functions)
   const rowSnap = row;
 
-  // Track UI-state for read/unread (because we update DB after fetch)
   let isRead = Boolean(rowSnap.isRead);
 
   if (!skipAutoRead && !isRead) {
@@ -138,7 +127,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       ? "Read (legacy)"
       : (await import("@/lib/admin/quotes/normalize")).STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
 
-  // ---- normalize AI output (supports old and new shapes) ----
   const outAny: any = rowSnap.output ?? null;
   const aiAssessment = pickAiAssessmentFromAny(outAny);
 
@@ -190,10 +178,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
 
-  // lifecycle
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
-  // ✅ active pointer for Versions UI
   const activeVersion =
     typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
@@ -254,7 +240,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const reason = safeTrim(formData.get("reason"));
     const noteBody = safeTrim(formData.get("note_body"));
 
-    // Optional note first (unlinked for now)
     let createdNoteId: string | null = null;
     if (noteBody) {
       const inserted = await db
@@ -272,7 +257,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
-    // Run real reassessment engine + pricing (creates version + updates quote_logs.output)
     const engine: AdminReassessEngine =
       engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
@@ -293,7 +277,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       reason: reason || undefined,
     });
 
-    // If note was created, link it to the new version
     if (createdNoteId) {
       await db
         .update(quoteNotes)
@@ -301,7 +284,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
-    // UI-only selection (not persisted here; authoritative is frozen snapshot)
     void aiMode;
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
@@ -317,7 +299,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const versionId = safeTrim(formData.get("version_id"));
     if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // membership check
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
@@ -333,7 +314,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    // atomic restore: copy output + version pointer from quote_versions
     const updated = await db.execute(sql`
       with picked as (
         select
@@ -368,12 +348,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const actorUserId = session.userId;
     if (!actorUserId) redirect("/sign-in");
 
-    const versionId = safeTrim(formData.get("version_id"));
     const shopNotes = safeTrim(formData.get("shop_notes"));
 
-    if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=missing_version`);
+    // Back-compat: accept either version_id (uuid) or version_number
+    const versionIdRaw = safeTrim(formData.get("version_id"));
+    const versionNumberRaw = safeTrim(formData.get("version_number"));
 
-    // membership check
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
@@ -387,47 +367,56 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       .limit(1)
       .then((r) => r[0] ?? null);
 
-    if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=forbidden`);
+    if (!membership?.ok) redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=forbidden#renders`);
 
-    // 🔎 Debuggable validation:
-    // 1) Does this version id exist at all?
-    const vAny = await db.execute(sql`
-      select
-        v.id::text as id,
-        v.tenant_id::text as tenant_id,
-        v.quote_log_id::text as quote_log_id
-      from quote_versions v
-      where v.id = ${versionId}::uuid
-      limit 1
-    `);
+    // Resolve to a real quote_versions.id
+    let resolvedVersionId: string | null = null;
 
-    const vrow: any = (vAny as any)?.rows?.[0] ?? null;
-
-    if (!vrow?.id) {
-      redirect(
-        `/admin/quotes/${encodeURIComponent(id)}?renderError=version_not_found&versionId=${encodeURIComponent(
-          versionId
-        )}&expectedTenant=${encodeURIComponent(tenantId)}&expectedQuote=${encodeURIComponent(id)}#renders`
-      );
+    // 1) If a uuid-ish version_id was submitted, try it first.
+    if (versionIdRaw && versionIdRaw.includes("-")) {
+      const vAny = await db.execute(sql`
+        select v.id::text as id
+        from quote_versions v
+        where v.id = ${versionIdRaw}::uuid
+          and v.tenant_id = ${tenantId}::uuid
+          and v.quote_log_id = ${id}::uuid
+        limit 1
+      `);
+      const vrow: any = (vAny as any)?.rows?.[0] ?? null;
+      if (vrow?.id) resolvedVersionId = String(vrow.id);
     }
 
-    const actualTenant = String(vrow.tenant_id ?? "");
-    const actualQuote = String(vrow.quote_log_id ?? "");
+    // 2) Primary path: resolve version_number -> id
+    if (!resolvedVersionId) {
+      const vnum = Number(versionNumberRaw);
+      if (!Number.isFinite(vnum) || vnum <= 0) {
+        redirect(
+          `/admin/quotes/${encodeURIComponent(id)}?renderError=missing_or_bad_version_number&version_number=${encodeURIComponent(
+            versionNumberRaw || ""
+          )}#renders`
+        );
+      }
 
-    if (actualTenant !== tenantId) {
-      redirect(
-        `/admin/quotes/${encodeURIComponent(id)}?renderError=version_wrong_tenant&versionId=${encodeURIComponent(
-          versionId
-        )}&expectedTenant=${encodeURIComponent(tenantId)}&actualTenant=${encodeURIComponent(actualTenant)}#renders`
-      );
-    }
+      const picked = await db.execute(sql`
+        select v.id::text as id
+        from quote_versions v
+        where v.tenant_id = ${tenantId}::uuid
+          and v.quote_log_id = ${id}::uuid
+          and v.version = ${Math.trunc(vnum)}
+        order by v.created_at desc
+        limit 1
+      `);
 
-    if (actualQuote !== id) {
-      redirect(
-        `/admin/quotes/${encodeURIComponent(id)}?renderError=version_wrong_quote&versionId=${encodeURIComponent(
-          versionId
-        )}&expectedQuote=${encodeURIComponent(id)}&actualQuote=${encodeURIComponent(actualQuote)}#renders`
-      );
+      const prow: any = (picked as any)?.rows?.[0] ?? null;
+      resolvedVersionId = prow?.id ? String(prow.id) : null;
+
+      if (!resolvedVersionId) {
+        redirect(
+          `/admin/quotes/${encodeURIComponent(id)}?renderError=version_number_not_found&version_number=${encodeURIComponent(
+            String(Math.trunc(vnum))
+          )}#renders`
+        );
+      }
     }
 
     // Next attempt number (scoped to this version)
@@ -435,12 +424,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       select coalesce(max(r.attempt), 0) as "max_attempt"
       from quote_renders r
       where r.tenant_id = ${tenantId}::uuid
-        and r.quote_version_id = ${versionId}::uuid
+        and r.quote_version_id = ${resolvedVersionId}::uuid
     `);
     const maxAttemptRaw = (ar as any)?.rows?.[0]?.max_attempt ?? 0;
     const nextAttempt = Number(maxAttemptRaw ?? 0) + 1;
 
-    // Insert render row (queued)
     const ins = await db.execute(sql`
       insert into quote_renders (
         tenant_id,
@@ -454,7 +442,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       values (
         ${tenantId}::uuid,
         ${id}::uuid,
-        ${versionId}::uuid,
+        ${resolvedVersionId}::uuid,
         ${nextAttempt},
         'queued',
         ${shopNotes || null},
@@ -469,7 +457,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
   }
 
-  /* -------------------- render -------------------- */
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
   return (

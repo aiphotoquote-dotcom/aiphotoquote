@@ -25,20 +25,15 @@ function clamp(s: string, max = 180) {
 }
 
 function noteActor(n: QuoteNoteRow) {
-  // Be resilient to schema/typing drift across branches
   const anyN: any = n as any;
   return safeTrim(anyN.actor) || safeTrim(anyN.createdBy) || safeTrim(anyN.created_by) || "";
 }
 
-function defaultRenderVersionId(versionRows: QuoteVersionRow[], activeVersion: number | null) {
+function defaultRenderVersionNumber(versionRows: QuoteVersionRow[], activeVersion: number | null) {
   if (!versionRows?.length) return "";
-  if (activeVersion != null) {
-    const hit = versionRows.find((v) => Number(v.version) === Number(activeVersion));
-    if (hit?.id) return String(hit.id);
-  }
-  // prefer latest version id (by version number)
+  if (activeVersion != null) return String(Number(activeVersion));
   const sorted = [...versionRows].sort((a, b) => Number(b.version ?? 0) - Number(a.version ?? 0));
-  return sorted[0]?.id ? String(sorted[0].id) : "";
+  return sorted[0]?.version != null ? String(Number(sorted[0].version)) : "";
 }
 
 export default function LifecyclePanel(props: {
@@ -70,7 +65,7 @@ export default function LifecyclePanel(props: {
   const notesCount = noteRows?.length ?? 0;
   const rendersCount = renderRows?.length ?? 0;
 
-  const defaultVersionId = defaultRenderVersionId(versionRows, activeVersion);
+  const defaultVersionNumber = defaultRenderVersionNumber(versionRows, activeVersion);
 
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -279,13 +274,11 @@ export default function LifecyclePanel(props: {
                       <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No summary on this version.</div>
                     )}
 
-                    {/* Quick render request */}
+                    {/* Quick render request (use version NUMBER, not id) */}
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-xs text-gray-600 dark:text-gray-300">
-                        Actions
-                      </div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">Actions</div>
                       <form action={requestRenderAction} className="flex items-center gap-2">
-                        <input type="hidden" name="version_id" value={v.id} />
+                        <input type="hidden" name="version_number" value={String(Number(v.version ?? 0))} />
                         <button
                           type="submit"
                           className="rounded-lg bg-black px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
@@ -302,7 +295,8 @@ export default function LifecyclePanel(props: {
                       </summary>
 
                       <div className="mt-3 space-y-2">
-                        {miniKeyValue("Version id", v.id)}
+                        {miniKeyValue("Version id (db)", v.id)}
+                        {miniKeyValue("Version number", v.version)}
                         {miniKeyValue("Source", v.source)}
                         {miniKeyValue("Created by", v.createdBy)}
                         {miniKeyValue("AI mode", v.aiMode)}
@@ -377,10 +371,7 @@ export default function LifecyclePanel(props: {
         </div>
 
         {/* Renders */}
-        <div
-          id="renders"
-          className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black"
-        >
+        <div id="renders" className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
           <div className="flex items-center justify-between gap-2">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Render attempts</div>
             {rendersCount ? chip("History", "gray") : chip("Empty", "gray")}
@@ -390,7 +381,7 @@ export default function LifecyclePanel(props: {
           <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Request a render</div>
             <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
-              This queues a <span className="font-mono">quote_renders</span> row (status: <span className="font-mono">queued</span>).
+              Queues a <span className="font-mono">quote_renders</span> row (status: <span className="font-mono">queued</span>).
               Worker wiring comes next.
             </div>
 
@@ -398,8 +389,8 @@ export default function LifecyclePanel(props: {
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
                 <select
-                  name="version_id"
-                  defaultValue={defaultVersionId}
+                  name="version_number"
+                  defaultValue={defaultVersionNumber}
                   className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
                   disabled={!versionRows.length}
                 >
@@ -409,7 +400,7 @@ export default function LifecyclePanel(props: {
                       .map((v) => {
                         const isActive = activeVersion != null && Number(v.version) === Number(activeVersion);
                         return (
-                          <option key={v.id} value={v.id}>
+                          <option key={v.id} value={String(Number(v.version ?? 0))}>
                             {`v${Number(v.version ?? 0)}`} {isActive ? "(active)" : ""}
                           </option>
                         );
@@ -444,9 +435,7 @@ export default function LifecyclePanel(props: {
               </button>
 
               {!versionRows.length ? (
-                <div className="text-xs text-gray-600 dark:text-gray-300">
-                  Create a version first — renders attach to a version.
-                </div>
+                <div className="text-xs text-gray-600 dark:text-gray-300">Create a version first — renders attach to a version.</div>
               ) : null}
             </form>
           </div>
@@ -475,9 +464,7 @@ export default function LifecyclePanel(props: {
                         alt="Render attempt"
                         className="w-full rounded-2xl border border-gray-200 bg-white object-contain dark:border-gray-800"
                       />
-                      <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">
-                        Click to open original
-                      </div>
+                      <div className="mt-2 text-xs font-semibold text-gray-600 dark:text-gray-300">Click to open original</div>
                     </a>
                   ) : (
                     <div className="mt-3 text-sm text-gray-600 dark:text-gray-300 italic">No image yet for this attempt.</div>
