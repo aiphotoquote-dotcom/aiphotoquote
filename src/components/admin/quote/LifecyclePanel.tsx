@@ -55,7 +55,7 @@ export default function LifecyclePanel(props: {
   restoreVersionAction: any;
   requestRenderAction: any;
 
-  // ✅ new actions
+  // ✅ optional delete actions (exported from /actions.ts)
   deleteVersionAction?: any;
   deleteNoteAction?: any;
   deleteRenderAction?: any;
@@ -274,22 +274,14 @@ export default function LifecyclePanel(props: {
                           </form>
                         ) : null}
 
-                        {/* ✅ Delete version */}
+                        {/* ✅ Delete version (server action expects quote_id + version_id + version_number + active_version) */}
                         {deleteVersionAction ? (
-                          <form
-                            action={deleteVersionAction}
-                            onSubmit={(e) => {
-                              if (isActive) {
-                                e.preventDefault();
-                                return;
-                              }
-                              if (!window.confirm(`Delete v${vnum}? This will also delete its renders + linked notes.`)) {
-                                e.preventDefault();
-                              }
-                            }}
-                          >
+                          <form action={deleteVersionAction}>
+                            <input type="hidden" name="quote_id" value={quoteId} />
                             <input type="hidden" name="version_id" value={v.id} />
                             <input type="hidden" name="version_number" value={String(vnum)} />
+                            <input type="hidden" name="active_version" value={activeVersion != null ? String(activeVersion) : ""} />
+
                             <button
                               type="submit"
                               disabled={isActive}
@@ -299,7 +291,7 @@ export default function LifecyclePanel(props: {
                                   ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500 cursor-not-allowed"
                                   : "border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30")
                               }
-                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version"}
+                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version (and its renders + linked notes)"}
                             >
                               Delete
                             </button>
@@ -374,14 +366,10 @@ export default function LifecyclePanel(props: {
                       <div className="flex items-center gap-2">
                         <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
 
-                        {/* ✅ Delete note */}
+                        {/* ✅ Delete note (server action expects quote_id + note_id) */}
                         {deleteNoteAction ? (
-                          <form
-                            action={deleteNoteAction}
-                            onSubmit={(e) => {
-                              if (!window.confirm("Delete this note? This cannot be undone.")) e.preventDefault();
-                            }}
-                          >
+                          <form action={deleteNoteAction}>
+                            <input type="hidden" name="quote_id" value={quoteId} />
                             <input type="hidden" name="note_id" value={n.id} />
                             <button
                               type="submit"
@@ -421,9 +409,7 @@ export default function LifecyclePanel(props: {
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                  Queues a render attempt for the selected version.
-                </div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">Queues a render attempt for the selected version.</div>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 Default: <span className="font-mono">{defaultRenderVersionNumber || "—"}</span>
