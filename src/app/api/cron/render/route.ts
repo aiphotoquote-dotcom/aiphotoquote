@@ -194,7 +194,9 @@ async function claimJobs(max: number) {
     quoteLogId: String(x.quote_log_id),
     quoteVersionId: String(x.quote_version_id),
     attempt: Number(x.attempt ?? 1),
-    prompt: String(x.prompt ?? ""),
+    // NOTE: prompt on the row is the “final prompt used” once completed.
+    // We do NOT treat this as “job context” anymore.
+    promptStored: String(x.prompt ?? ""),
     shopNotes: String(x.shop_notes ?? ""),
     createdAt: x.created_at,
   }));
@@ -300,10 +302,13 @@ async function loadRenderContext(args: { tenantId: string; quoteLogId: string; q
 }
 
 /**
- * ✅ Legacy render fields on quote_logs should be WRITE-ONCE.
- * If a legacy image already exists, do not flip legacy status to running.
+ * ✅ Legacy behavior, but non-destructive:
+ * We do NOT want lifecycle renders to overwrite the original legacy render image.
+ *
+ * This is used to show “running/failed” states for older UI, but we only
+ * set running/failed if legacy has NOT already been rendered.
  */
-async function markQuoteRunning(args: { tenantId: string; quoteLogId: string }) {
+async function markQuoteRunningLegacyIfNotRendered(args: { tenantId: string; quoteLogId: string }) {
   await db.execute(sql`
     update quote_logs
     set
@@ -311,40 +316,45 @@ async function markQuoteRunning(args: { tenantId: string; quoteLogId: string }) 
       render_error = null
     where id = ${args.quoteLogId}::uuid
       and tenant_id = ${args.tenantId}::uuid
+      and coalesce(render_status, '') <> 'rendered'
       and render_image_url is null
   `);
 }
 
 /**
- * ✅ Legacy render snapshot (quote_logs) is WRITE-ONCE:
- * - Always clear error and mark status rendered (safe for legacy-only quotes)
- * - Only set render_image_url/render_prompt/rendered_at the FIRST time (when render_image_url is null)
+ * ✅ Legacy “rendered” update: FIRST TIME ONLY
+ * - only populate legacy render_* fields if they are empty
+ * - prevents overwriting the original render when new attempts are created
  */
-async function updateQuoteRendered(args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
+async function updateQuoteRenderedLegacyFirstOnly(args: {
+  tenantId: string;
+  quoteLogId: string;
+  imageUrl: string;
+  prompt: string;
+}) {
   await db.execute(sql`
     update quote_logs
     set
       render_status = 'rendered',
+      render_image_url = ${args.imageUrl},
+      render_prompt = ${args.prompt},
       render_error = null,
-
-      -- write-once legacy snapshot
-      render_image_url = coalesce(render_image_url, ${args.imageUrl}),
-      render_prompt = case
-        when render_image_url is null then ${args.prompt}
-        else render_prompt
-      end,
-      rendered_at = coalesce(rendered_at, now())
+      rendered_at = now()
     where id = ${args.quoteLogId}::uuid
       and tenant_id = ${args.tenantId}::uuid
+      and render_image_url is null
   `);
 }
 
 /**
- * ✅ Legacy render snapshot (quote_logs) is WRITE-ONCE:
- * - Only record failure on quote_logs if there is NO legacy image yet.
- * - Per-attempt failures always live on quote_renders.error.
+ * ✅ Legacy “failed” update: only if legacy not already rendered
  */
-async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; prompt: string; error: string }) {
+async function updateQuoteFailedLegacyIfNotRendered(args: {
+  tenantId: string;
+  quoteLogId: string;
+  prompt: string;
+  error: string;
+}) {
   await db.execute(sql`
     update quote_logs
     set
@@ -353,6 +363,7 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
       render_error = ${args.error}
     where id = ${args.quoteLogId}::uuid
       and tenant_id = ${args.tenantId}::uuid
+      and coalesce(render_status, '') <> 'rendered'
       and render_image_url is null
   `);
 }
@@ -421,7 +432,7 @@ async function isRateLimitedNow(args: { tenantId: string; maxPerDay: number }) {
     return { limited: false as const, maxPerDay };
   }
 
-  // Count renders today (UTC), per-tenant (legacy field = rendered_at on quote_logs)
+  // Count legacy renders today (UTC) — keep semantics as-is for now
   const r = await db.execute(sql`
     select count(*)::int as n
     from quote_logs
@@ -534,11 +545,18 @@ function extractTenantRenderFields(ctx: any, resolved: any) {
   return { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative };
 }
 
-function buildJobContextFallback(args: { shopNotes: string; quoteId: string; versionNum?: number | null }) {
+function buildJobContext(args: {
+  shopNotes: string;
+  quoteId: string;
+  versionNum?: number | null;
+}) {
   const parts: string[] = [];
+
   const sn = safeTrim(args.shopNotes);
-  if (sn) parts.push(`Shop notes:\n${sn}`);
+  if (sn) parts.push(`Shop notes (must honor):\n${sn}`);
+
   parts.push(`Quote: ${args.quoteId}${args.versionNum != null ? ` (v${args.versionNum})` : ""}`);
+
   return collapseBlankLines(parts.join("\n\n"));
 }
 
@@ -588,9 +606,9 @@ async function handleCron(req: Request) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
-      // ✅ do NOT disturb legacy snapshot if it already exists
+      // legacy “running” (non-destructive)
       try {
-        await markQuoteRunning({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
+        await markQuoteRunningLegacyIfNotRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
       } catch {
         // ignore
       }
@@ -616,14 +634,14 @@ async function handleCron(req: Request) {
       if (tenantRenderEnabled === false) {
         const msg = "Rendering disabled by tenant settings.";
 
-        await updateQuoteFailed({
+        await updateQuoteFailedLegacyIfNotRendered({
           tenantId: job.tenantId,
           quoteLogId: job.quoteLogId,
-          prompt: job.prompt || msg,
+          prompt: msg,
           error: msg,
         });
 
-        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: job.prompt || null });
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
         processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
         continue;
       }
@@ -635,14 +653,14 @@ async function handleCron(req: Request) {
       if (rate.limited) {
         const msg = `Renderings are disabled by rate limit (max per day = ${rate.maxPerDay}).`;
 
-        await updateQuoteFailed({
+        await updateQuoteFailedLegacyIfNotRendered({
           tenantId: job.tenantId,
           quoteLogId: job.quoteLogId,
-          prompt: job.prompt || msg,
+          prompt: msg,
           error: msg,
         });
 
-        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: job.prompt || null });
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
         processed.push({
           renderId: job.id,
           quoteLogId: job.quoteLogId,
@@ -668,7 +686,7 @@ async function handleCron(req: Request) {
 
       if (!optIn) {
         const msg = "Customer did not opt-in to rendering.";
-        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: job.prompt || null });
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
         processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
         continue;
       }
@@ -677,14 +695,14 @@ async function handleCron(req: Request) {
       if (!images.length) {
         const msg = "No images stored on quote.";
 
-        await updateQuoteFailed({
+        await updateQuoteFailedLegacyIfNotRendered({
           tenantId: job.tenantId,
           quoteLogId: job.quoteLogId,
-          prompt: job.prompt || msg,
+          prompt: msg,
           error: msg,
         });
 
-        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: job.prompt || null });
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
         processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
         continue;
       }
@@ -708,14 +726,14 @@ async function handleCron(req: Request) {
             ? "Grace exhausted for rendering."
             : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
 
-        await updateQuoteFailed({
+        await updateQuoteFailedLegacyIfNotRendered({
           tenantId: job.tenantId,
           quoteLogId: job.quoteLogId,
-          prompt: job.prompt || why,
+          prompt: why,
           error: why,
         });
 
-        await markRenderRowDone({ renderId: job.id, status: "failed", error: why, prompt: job.prompt || null });
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: why, prompt: null });
         processed.push({
           renderId: job.id,
           quoteLogId: job.quoteLogId,
@@ -799,6 +817,9 @@ async function handleCron(req: Request) {
 
       const tenantRenderNotesLine = safeLine("Tenant render notes", tenantRenderNotes);
 
+      // ✅ ALWAYS include shop notes as a first-class layer
+      const shopNotesLine = safeLine("Shop notes", safeTrim(job.shopNotes));
+
       // Compose preamble (platform + industry + tenant)
       const renderPromptPreamble = collapseBlankLines(
         [
@@ -819,16 +840,10 @@ async function handleCron(req: Request) {
         ? collapseBlankLines(["Hard negatives (must avoid):", ...negativeParts].join("\n\n"))
         : "";
 
-      // Job context:
-      // - prefer the prompt already stored on quote_renders (if any)
-      // - else fallback to shop_notes + quote/version identity
       const versionNum =
         typeof ctx.quote_version_num === "number"
           ? Number(ctx.quote_version_num)
           : Number(ctx.quote_version_num ?? 0) || null;
-
-      const jobContext =
-        safeTrim(job.prompt) || buildJobContextFallback({ shopNotes: job.shopNotes, quoteId: job.quoteLogId, versionNum });
 
       // Use platform template if present; fallback to composed body
       const templateVars = {
@@ -838,6 +853,7 @@ async function handleCron(req: Request) {
         summaryLine,
         customerNotesLine,
         tenantRenderNotesLine,
+        shopNotesLine,
       };
 
       const templatedBodyRaw = platformRenderTemplate ? renderTemplate(platformRenderTemplate, templateVars) : "";
@@ -851,6 +867,7 @@ async function handleCron(req: Request) {
           summaryLine,
           customerNotesLine,
           tenantRenderNotesLine,
+          shopNotesLine,
         ]
           .filter(Boolean)
           .join("\n")
@@ -858,11 +875,14 @@ async function handleCron(req: Request) {
 
       const coreBody = templatedBody || fallbackBody;
 
+      // ✅ Job context is now ONLY job identity; shop notes already included above.
+      const jobContext = buildJobContext({ shopNotes: job.shopNotes, quoteId: job.quoteLogId, versionNum });
+
       const finalPrompt = collapseBlankLines(
         [
           coreBody,
           negativeBlock,
-          jobContext ? `Job context (must honor):\n${jobContext}` : "",
+          jobContext ? `Job context:\n${jobContext}` : "",
           "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
         ]
           .filter(Boolean)
@@ -907,6 +927,9 @@ async function handleCron(req: Request) {
               renderNotesLen: tenantRenderNotes ? tenantRenderNotes.length : 0,
               promptAddendumLen: tenantAddendum ? tenantAddendum.length : 0,
               negativeGuidanceLen: tenantNegative ? tenantNegative.length : 0,
+            },
+            job: {
+              shopNotesLen: safeTrim(job.shopNotes).length,
             },
           },
           keyPolicy: {
@@ -988,8 +1011,13 @@ async function handleCron(req: Request) {
 
       await selectThisAttempt({ tenantId: job.tenantId, quoteVersionId: job.quoteVersionId, renderId: job.id });
 
-      // ✅ Update legacy quote_logs snapshot WITHOUT overwriting prior legacy
-      await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
+      // ✅ Legacy quote_logs: FIRST TIME ONLY (prevents overwriting original)
+      await updateQuoteRenderedLegacyFirstOnly({
+        tenantId: job.tenantId,
+        quoteLogId: job.quoteLogId,
+        imageUrl,
+        prompt: finalPrompt,
+      });
 
       // Consume 1 grace credit on success
       if (!hasTenantKey && canUsePlatformGrace) {
@@ -1003,7 +1031,8 @@ async function handleCron(req: Request) {
         const brandLogoUrl = ctx.brand_logo_url ?? null;
 
         const brandLogoVariantRaw = String((ctx as any)?.brand_logo_variant ?? "").trim().toLowerCase();
-        const brandLogoVariant = brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
+        const brandLogoVariant =
+          brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
 
         const customer = quoteInputAny?.customer ?? quoteInputAny?.contact ?? null;
         const customerName = String(customer?.name ?? "Customer").trim();
@@ -1132,10 +1161,10 @@ async function handleCron(req: Request) {
       const msg = safeErr(e);
 
       try {
-        await updateQuoteFailed({
+        await updateQuoteFailedLegacyIfNotRendered({
           tenantId: job.tenantId,
           quoteLogId: job.quoteLogId,
-          prompt: job.prompt || "render_failed",
+          prompt: "render_failed",
           error: msg,
         });
       } catch {
@@ -1147,7 +1176,7 @@ async function handleCron(req: Request) {
           renderId: job.id,
           status: "failed",
           error: msg,
-          prompt: job.prompt || null,
+          prompt: null,
         });
       } catch {
         // ignore
