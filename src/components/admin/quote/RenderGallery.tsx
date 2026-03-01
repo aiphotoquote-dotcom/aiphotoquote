@@ -4,6 +4,9 @@
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
 
+// ✅ Import the server action directly (do NOT pass as prop)
+import { deleteRenderAction } from "@/app/admin/quotes/[id]/actions";
+
 function safeTrim(v: any) {
   const s = String(v ?? "").trim();
   return s ? s : "";
@@ -16,7 +19,6 @@ type RenderRow = {
   createdAt?: any;
   attempt?: number | null;
   quoteVersionId?: string | null;
-  shopNotes?: string | null;
 };
 
 type FilterKey = "all" | "rendered" | "queued" | "running" | "failed" | "other";
@@ -40,12 +42,8 @@ function pill(active: boolean) {
   );
 }
 
-export default function RenderGallery(props: {
-  quoteId: string;
-  renderRows: RenderRow[];
-  deleteRenderAction?: any; // ✅ exported server action from /actions.ts
-}) {
-  const { quoteId, renderRows, deleteRenderAction } = props;
+export default function RenderGallery(props: { quoteId: string; renderRows: RenderRow[] }) {
+  const { quoteId, renderRows } = props;
 
   const rows = useMemo(() => (Array.isArray(renderRows) ? renderRows : []), [renderRows]);
 
@@ -54,8 +52,6 @@ export default function RenderGallery(props: {
     for (const r of rows) c[normStatus(r.status)]++;
     return c;
   }, [rows]);
-
-  const inProgress = (counts.queued ?? 0) + (counts.running ?? 0);
 
   const [filter, setFilter] = useState<FilterKey>("rendered");
   const [selected, setSelected] = useState<string[]>([]);
@@ -91,14 +87,13 @@ export default function RenderGallery(props: {
   }, [selected, renderedOnly]);
 
   return (
-    <section
-      id="renders"
-      className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950"
-    >
+    <section id="renders" className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Render gallery</h3>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Click to preview. Select tiles to include them in an email.</p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+            Click to preview. Shift-select isn’t needed — just click tiles to multi-select.
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -128,25 +123,6 @@ export default function RenderGallery(props: {
           </Link>
         </div>
       </div>
-
-      {/* ✅ Progress bar (indeterminate) when queued/running exist */}
-      {inProgress > 0 ? (
-        <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/40 dark:bg-blue-950/30">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-sm font-semibold text-blue-900 dark:text-blue-200">Rendering in progress…</div>
-            <div className="text-xs text-blue-800/80 dark:text-blue-200/70">
-              Running: <span className="font-semibold">{counts.running}</span> · Queued:{" "}
-              <span className="font-semibold">{counts.queued}</span>
-            </div>
-          </div>
-
-          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-blue-200/70 dark:bg-blue-900/30">
-            <div className="h-full w-full animate-pulse bg-blue-500/70 dark:bg-blue-300/60" />
-          </div>
-
-          <div className="mt-2 text-[11px] text-blue-900/70 dark:text-blue-200/70">Tip: refresh to see updates (next: polling).</div>
-        </div>
-      ) : null}
 
       {/* Filters */}
       <div className="mt-4 flex flex-wrap gap-2">
@@ -179,7 +155,6 @@ export default function RenderGallery(props: {
               const url = safeTrim(r.imageUrl);
               const isRendered = normStatus(r.status) === "rendered" && !!url;
               const active = selected.includes(id);
-              const status = safeTrim(r.status) || "unknown";
 
               return (
                 <div
@@ -212,7 +187,9 @@ export default function RenderGallery(props: {
                       <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
                         Attempt {r.attempt != null ? `#${Number(r.attempt)}` : ""}
                       </div>
-                      <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">{status}</span>
+                      <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">
+                        {safeTrim(r.status) || "unknown"}
+                      </span>
                     </div>
 
                     <div className="mt-2 flex items-center justify-between gap-2">
@@ -231,41 +208,41 @@ export default function RenderGallery(props: {
                         {active ? "Selected" : "Select"}
                       </button>
 
-                      {url ? (
-                        <a
-                          href={url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[11px] font-semibold text-gray-600 hover:underline dark:text-gray-300"
-                        >
-                          Open
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-gray-400">—</span>
-                      )}
-                    </div>
+                      <div className="flex items-center gap-2">
+                        {url ? (
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] font-semibold text-gray-600 hover:underline dark:text-gray-300"
+                          >
+                            Open
+                          </a>
+                        ) : (
+                          <span className="text-[11px] text-gray-400">—</span>
+                        )}
 
-                    {/* ✅ Delete attempt (server action) */}
-                    {deleteRenderAction ? (
-                      <div className="mt-2">
+                        {/* ✅ Delete render attempt (archive/delete) */}
                         <form
                           action={deleteRenderAction}
                           onSubmit={(e) => {
-                            if (!window.confirm("Delete this render attempt? This cannot be undone.")) e.preventDefault();
+                            if (!window.confirm("Delete this render attempt? This cannot be undone.")) {
+                              e.preventDefault();
+                            }
                           }}
                         >
                           <input type="hidden" name="quote_id" value={quoteId} />
                           <input type="hidden" name="render_id" value={id} />
                           <button
                             type="submit"
-                            className="w-full rounded-lg border border-red-200 px-3 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
+                            className="text-[11px] font-semibold text-red-700 hover:underline dark:text-red-300"
                             title="Delete this render attempt"
                           >
-                            Delete attempt
+                            Delete
                           </button>
                         </form>
                       </div>
-                    ) : null}
+                    </div>
                   </div>
                 </div>
               );

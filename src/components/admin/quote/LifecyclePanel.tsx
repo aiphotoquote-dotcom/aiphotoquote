@@ -469,7 +469,7 @@ export default function LifecyclePanel(props: {
           </div>
 
           <div className="mt-4">
-            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} deleteRenderAction={deleteRenderAction} />
+<RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
           </div>
         </div>
       </div>
