@@ -299,6 +299,10 @@ async function loadRenderContext(args: { tenantId: string; quoteLogId: string; q
   return row ?? null;
 }
 
+/**
+ * ✅ Legacy render fields on quote_logs should be WRITE-ONCE.
+ * If a legacy image already exists, do not flip legacy status to running.
+ */
 async function markQuoteRunning(args: { tenantId: string; quoteLogId: string }) {
   await db.execute(sql`
     update quote_logs
@@ -307,23 +311,39 @@ async function markQuoteRunning(args: { tenantId: string; quoteLogId: string }) 
       render_error = null
     where id = ${args.quoteLogId}::uuid
       and tenant_id = ${args.tenantId}::uuid
+      and render_image_url is null
   `);
 }
 
+/**
+ * ✅ Legacy render snapshot (quote_logs) is WRITE-ONCE:
+ * - Always clear error and mark status rendered (safe for legacy-only quotes)
+ * - Only set render_image_url/render_prompt/rendered_at the FIRST time (when render_image_url is null)
+ */
 async function updateQuoteRendered(args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
   await db.execute(sql`
     update quote_logs
     set
       render_status = 'rendered',
-      render_image_url = ${args.imageUrl},
-      render_prompt = ${args.prompt},
       render_error = null,
-      rendered_at = now()
+
+      -- write-once legacy snapshot
+      render_image_url = coalesce(render_image_url, ${args.imageUrl}),
+      render_prompt = case
+        when render_image_url is null then ${args.prompt}
+        else render_prompt
+      end,
+      rendered_at = coalesce(rendered_at, now())
     where id = ${args.quoteLogId}::uuid
       and tenant_id = ${args.tenantId}::uuid
   `);
 }
 
+/**
+ * ✅ Legacy render snapshot (quote_logs) is WRITE-ONCE:
+ * - Only record failure on quote_logs if there is NO legacy image yet.
+ * - Per-attempt failures always live on quote_renders.error.
+ */
 async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; prompt: string; error: string }) {
   await db.execute(sql`
     update quote_logs
@@ -333,6 +353,7 @@ async function updateQuoteFailed(args: { tenantId: string; quoteLogId: string; p
       render_error = ${args.error}
     where id = ${args.quoteLogId}::uuid
       and tenant_id = ${args.tenantId}::uuid
+      and render_image_url is null
   `);
 }
 
@@ -567,7 +588,7 @@ async function handleCron(req: Request) {
     const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
     try {
-      // make quote show “running” immediately (legacy)
+      // ✅ do NOT disturb legacy snapshot if it already exists
       try {
         await markQuoteRunning({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
       } catch {
@@ -646,7 +667,6 @@ async function handleCron(req: Request) {
         Boolean(quoteInputAny?.customer_context?.render_opt_in);
 
       if (!optIn) {
-        // If not opted-in: mark the render row as failed (or you can choose "done"/"skipped"; table enum is yours)
         const msg = "Customer did not opt-in to rendering.";
         await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: job.prompt || null });
         processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
@@ -775,10 +795,7 @@ async function handleCron(req: Request) {
 
       const summaryLine = safeLine("Estimate summary", typeof outputAny?.summary === "string" ? outputAny.summary : "");
 
-      const customerNotesLine = safeLine(
-        "Customer notes",
-        String(quoteInputAny?.customer_context?.notes ?? "").trim()
-      );
+      const customerNotesLine = safeLine("Customer notes", String(quoteInputAny?.customer_context?.notes ?? "").trim());
 
       const tenantRenderNotesLine = safeLine("Tenant render notes", tenantRenderNotes);
 
@@ -806,9 +823,12 @@ async function handleCron(req: Request) {
       // - prefer the prompt already stored on quote_renders (if any)
       // - else fallback to shop_notes + quote/version identity
       const versionNum =
-        typeof ctx.quote_version_num === "number" ? Number(ctx.quote_version_num) : Number(ctx.quote_version_num ?? 0) || null;
+        typeof ctx.quote_version_num === "number"
+          ? Number(ctx.quote_version_num)
+          : Number(ctx.quote_version_num ?? 0) || null;
 
-      const jobContext = safeTrim(job.prompt) || buildJobContextFallback({ shopNotes: job.shopNotes, quoteId: job.quoteLogId, versionNum });
+      const jobContext =
+        safeTrim(job.prompt) || buildJobContextFallback({ shopNotes: job.shopNotes, quoteId: job.quoteLogId, versionNum });
 
       // Use platform template if present; fallback to composed body
       const templateVars = {
@@ -968,7 +988,7 @@ async function handleCron(req: Request) {
 
       await selectThisAttempt({ tenantId: job.tenantId, quoteVersionId: job.quoteVersionId, renderId: job.id });
 
-      // ✅ Also update legacy quote_logs so existing UI + emails keep working
+      // ✅ Update legacy quote_logs snapshot WITHOUT overwriting prior legacy
       await updateQuoteRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
 
       // Consume 1 grace credit on success
@@ -983,8 +1003,7 @@ async function handleCron(req: Request) {
         const brandLogoUrl = ctx.brand_logo_url ?? null;
 
         const brandLogoVariantRaw = String((ctx as any)?.brand_logo_variant ?? "").trim().toLowerCase();
-        const brandLogoVariant =
-          brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
+        const brandLogoVariant = brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
 
         const customer = quoteInputAny?.customer ?? quoteInputAny?.contact ?? null;
         const customerName = String(customer?.name ?? "Customer").trim();
