@@ -69,7 +69,6 @@ function joinCsv(xs: string[]) {
 function parseEmailList(input: string): string[] {
   const s = safeTrim(input);
   if (!s) return [];
-  // split on commas/semicolons/newlines
   return s
     .split(/[,;\n]+/g)
     .map((x) => safeTrim(x))
@@ -77,7 +76,6 @@ function parseEmailList(input: string): string[] {
 }
 
 function looksLikeEmail(email: string): boolean {
-  // lightweight sanity check (not RFC-perfect, but good UX)
   const s = safeTrim(email);
   if (!s) return false;
   if (s.includes(" ")) return false;
@@ -143,6 +141,29 @@ function formatEstimateText(lowMaybe: any, highMaybe: any) {
 function asStringArray(v: any): string[] {
   if (!Array.isArray(v)) return [];
   return v.map((x) => safeTrim(x)).filter(Boolean);
+}
+
+/* ------------------------------ Editable models ------------------------------ */
+type PricingMode = "range" | "fixed";
+type PricingModel = {
+  mode: PricingMode;
+  currency?: "USD";
+  fixed?: number | null;
+  low?: number | null;
+  high?: number | null;
+};
+
+type VersionEdits = {
+  // user edits in preview
+  summary: string;
+  visibleScope: string[];
+  questions: string[];
+  assumptions: string[];
+  pricing: PricingModel | null;
+};
+
+function emptyEdits(): VersionEdits {
+  return { summary: "", visibleScope: [], questions: [], assumptions: [], pricing: null };
 }
 
 export default function QuoteEmailComposeClient(props: {
@@ -222,22 +243,28 @@ export default function QuoteEmailComposeClient(props: {
     return pickAiAssessmentFromAny(out);
   }, [selectedVersionRow]);
 
-  const estimateText = useMemo(() => {
-    if (!assessment) return "";
-    const low =
+  const estimateParts = useMemo(() => {
+    if (!assessment) return { low: null as number | null, high: null as number | null, text: "" };
+    const lowMaybe =
       assessment?.estimate_low ??
       assessment?.estimateLow ??
       assessment?.estimate?.low ??
       assessment?.estimate?.estimate_low ??
       null;
-    const high =
+    const highMaybe =
       assessment?.estimate_high ??
       assessment?.estimateHigh ??
       assessment?.estimate?.high ??
       assessment?.estimate?.estimate_high ??
       null;
-    return formatEstimateText(low, high);
+
+    const low = money(lowMaybe);
+    const high = money(highMaybe);
+    const text = formatEstimateText(lowMaybe, highMaybe);
+    return { low, high, text };
   }, [assessment]);
+
+  const estimateText = estimateParts.text;
 
   const confidence = safeTrim(assessment?.confidence ?? "");
   const inspectionRequired =
@@ -247,10 +274,67 @@ export default function QuoteEmailComposeClient(props: {
         ? assessment.inspectionRequired
         : null;
 
-  const summary = safeTrim(assessment?.summary ?? "");
-  const questions = asStringArray(assessment?.questions);
-  const assumptions = asStringArray(assessment?.assumptions);
-  const visibleScope = asStringArray(assessment?.visible_scope ?? assessment?.visibleScope);
+  const aiSummary = safeTrim(assessment?.summary ?? "");
+  const aiQuestions = asStringArray(assessment?.questions);
+  const aiAssumptions = asStringArray(assessment?.assumptions);
+  const aiVisibleScope = asStringArray(assessment?.visible_scope ?? assessment?.visibleScope);
+
+  /* ------------------------------ per-version edits ------------------------------ */
+  const [editsByVersion, setEditsByVersion] = useState<Record<string, VersionEdits>>({});
+
+  // Ensure we have an edit record for current version (seeded from AI once)
+  useEffect(() => {
+    const v = safeTrim(selectedVersionNumber);
+    if (!v) return;
+
+    setEditsByVersion((prev) => {
+      if (prev[v]) return prev;
+
+      const seeded: VersionEdits = {
+        summary: aiSummary,
+        visibleScope: aiVisibleScope,
+        questions: aiQuestions,
+        assumptions: aiAssumptions,
+        pricing:
+          estimateParts.low != null || estimateParts.high != null
+            ? {
+                mode: estimateParts.low != null && estimateParts.high == null ? "fixed" : "range",
+                currency: "USD",
+                fixed: estimateParts.low != null && estimateParts.high == null ? estimateParts.low : null,
+                low: estimateParts.low != null && estimateParts.high != null ? estimateParts.low : null,
+                high: estimateParts.low != null && estimateParts.high != null ? estimateParts.high : null,
+              }
+            : null,
+      };
+
+      return { ...prev, [v]: seeded };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    selectedVersionNumber,
+    // seed from AI for new versions
+    aiSummary,
+    aiVisibleScope.join("|"),
+    aiQuestions.join("|"),
+    aiAssumptions.join("|"),
+    estimateParts.low,
+    estimateParts.high,
+  ]);
+
+  const currentEdits: VersionEdits = useMemo(() => {
+    const v = safeTrim(selectedVersionNumber);
+    if (!v) return emptyEdits();
+    return editsByVersion[v] ?? emptyEdits();
+  }, [editsByVersion, selectedVersionNumber]);
+
+  function patchCurrentEdits(patch: Partial<VersionEdits>) {
+    const v = safeTrim(selectedVersionNumber);
+    if (!v) return;
+    setEditsByVersion((prev) => {
+      const cur = prev[v] ?? emptyEdits();
+      return { ...prev, [v]: { ...cur, ...patch } };
+    });
+  }
 
   /* ------------------------------ selection state ------------------------------ */
   const [selectedRenderIds, setSelectedRenderIds] = useState<string[]>(
@@ -332,6 +416,28 @@ export default function QuoteEmailComposeClient(props: {
 
   const totalSelectedImages = selectedImages.length;
 
+  // Brand info (best-effort; no hunting)
+  const brand = useMemo(() => {
+    const name =
+      safeTrim(lead?.shopName) ||
+      safeTrim(lead?.shop?.name) ||
+      safeTrim(lead?.tenantName) ||
+      "Your Shop Name";
+
+    const logoUrl =
+      safeTrim(lead?.shopLogoUrl) ||
+      safeTrim(lead?.logoUrl) ||
+      safeTrim(lead?.shop?.logoUrl) ||
+      safeTrim(lead?.shop?.logo_url) ||
+      "";
+
+    return {
+      name,
+      logoUrl: logoUrl || null,
+      tagline: "Quote ready to review",
+    };
+  }, [lead]);
+
   const previewModel: QuoteEmailPreviewModel = useMemo(() => {
     const featured =
       templateKey === "before_after"
@@ -358,6 +464,8 @@ export default function QuoteEmailComposeClient(props: {
       featuredImage: featured ? { url: featured.url, label: featured.label } : null,
       galleryImages: gallery.map((x) => ({ url: x.url, label: x.label })),
 
+      brand,
+
       quoteBlocks: {
         showPricing,
         showSummary,
@@ -369,10 +477,13 @@ export default function QuoteEmailComposeClient(props: {
         confidence: safeTrim(confidence),
         inspectionRequired,
 
-        summary: safeTrim(summary),
-        visibleScope,
-        questions,
-        assumptions,
+        // ✅ editable overrides (per version)
+        summary: safeTrim(currentEdits.summary),
+        visibleScope: Array.isArray(currentEdits.visibleScope) ? currentEdits.visibleScope : [],
+        questions: Array.isArray(currentEdits.questions) ? currentEdits.questions : [],
+        assumptions: Array.isArray(currentEdits.assumptions) ? currentEdits.assumptions : [],
+
+        pricing: currentEdits.pricing ?? null,
       },
 
       badges: [
@@ -403,10 +514,8 @@ export default function QuoteEmailComposeClient(props: {
     estimateText,
     confidence,
     inspectionRequired,
-    summary,
-    visibleScope,
-    questions,
-    assumptions,
+    currentEdits,
+    brand,
   ]);
 
   /* ------------------------------ media drawer ------------------------------ */
@@ -486,7 +595,6 @@ export default function QuoteEmailComposeClient(props: {
     setSendError(null);
     setSendOk(null);
 
-    // UX guardrails (don’t rely on backend validation)
     if (!toOk) {
       setSendError("Please enter a valid customer email in To.");
       return;
@@ -512,11 +620,8 @@ export default function QuoteEmailComposeClient(props: {
       return;
     }
 
-    // Hard requirement for server-side template building:
-    // Send actual image URLs (not only ids/keys).
     const featuredImage = previewModel.featuredImage ?? null;
     const galleryImages = Array.isArray(previewModel.galleryImages) ? previewModel.galleryImages : [];
-
     if (!featuredImage && galleryImages.length === 0) {
       setSendError("No images available to send. Select at least one image.");
       return;
@@ -524,24 +629,20 @@ export default function QuoteEmailComposeClient(props: {
 
     setSending(true);
     try {
-      // New send engine endpoint (does NOT touch existing /quote/submit email paths)
       const url = `/api/admin/quotes/${encodeURIComponent(quoteId)}/email/send`;
 
       const payload = {
         tenantId,
         quoteId,
 
-        // “package” selectors (useful for telemetry / future server-side re-hydration)
         templateKey,
         versionNumber: safeTrim(selectedVersionNumber),
         renderIds: [...selectedRenderIds],
         photoKeys: [...selectedPhotoKeys],
 
-        // ✅ Actual images needed to build email HTML without DB:
+        // HTML building inputs
         featuredImage,
         galleryImages,
-
-        // ✅ Optional: complete list (route supports selectedImages too)
         selectedImages: selectedImages.map((x) => ({ url: x.url, label: x.label })),
 
         // addressing + copy overrides
@@ -554,7 +655,7 @@ export default function QuoteEmailComposeClient(props: {
         intro,
         closing,
 
-        // blocks/toggles (kept for future template variants; route may ignore today)
+        // toggles + editable content overrides
         quoteBlocks: {
           showPricing,
           showSummary,
@@ -563,7 +664,17 @@ export default function QuoteEmailComposeClient(props: {
           showAssumptions,
         },
 
-        // optional context (helpful for server logs)
+        quoteBlocksContent: {
+          summary: safeTrim(currentEdits.summary),
+          visibleScope: Array.isArray(currentEdits.visibleScope) ? currentEdits.visibleScope : [],
+          questions: Array.isArray(currentEdits.questions) ? currentEdits.questions : [],
+          assumptions: Array.isArray(currentEdits.assumptions) ? currentEdits.assumptions : [],
+        },
+
+        pricing: currentEdits.pricing ?? null,
+
+        brand,
+
         shareUrl: safeTrim(shareUrl),
       };
 
@@ -575,14 +686,10 @@ export default function QuoteEmailComposeClient(props: {
 
       const j: any = await r.json().catch(() => ({}));
       if (!r.ok || j?.ok === false) {
-        const msg =
-          safeTrim(j?.message) ||
-          safeTrim(j?.error) ||
-          (r.status ? `Send failed (${r.status})` : "Send failed");
+        const msg = safeTrim(j?.message) || safeTrim(j?.error) || (r.status ? `Send failed (${r.status})` : "Send failed");
         throw new Error(msg);
       }
 
-      // normalize common return shapes
       const messageId = safeTrim(j?.providerMessageId || j?.messageId || j?.id || "");
       setSendOk(messageId ? `Sent! (id: ${messageId})` : "Sent!");
     } catch (e: any) {
@@ -652,11 +759,7 @@ export default function QuoteEmailComposeClient(props: {
                 <button type="button" onClick={() => setShowQuestions((v) => !v)} className={toggleBtn(showQuestions)}>
                   Questions
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setShowAssumptions((v) => !v)}
-                  className={toggleBtn(showAssumptions)}
-                >
+                <button type="button" onClick={() => setShowAssumptions((v) => !v)} className={toggleBtn(showAssumptions)}>
                   Assumptions
                 </button>
                 <button type="button" onClick={() => setShowScope((v) => !v)} className={toggleBtn(showScope)}>
@@ -834,6 +937,15 @@ export default function QuoteEmailComposeClient(props: {
               setHeadline,
               setIntro,
               setClosing,
+
+              // ✅ New editable blocks
+              setSummary: (v) => patchCurrentEdits({ summary: v }),
+              setVisibleScope: (xs) => patchCurrentEdits({ visibleScope: xs }),
+              setQuestions: (xs) => patchCurrentEdits({ questions: xs }),
+              setAssumptions: (xs) => patchCurrentEdits({ assumptions: xs }),
+
+              // ✅ Pricing override
+              setPricing: (p: any) => patchCurrentEdits({ pricing: (p as PricingModel) ?? null }),
             }}
           />
         </div>
