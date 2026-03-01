@@ -42,56 +42,6 @@ function pickDefaultRenderVersionNumber(versionRows: QuoteVersionRow[], activeVe
   return "";
 }
 
-function statusOfRender(r: any): string {
-  return safeTrim(r?.status).toLowerCase();
-}
-
-function hasQueuedOrRunning(renderRows: QuoteRenderRow[]) {
-  for (const r of renderRows ?? []) {
-    const s = statusOfRender(r);
-    if (s === "queued" || s === "running") return true;
-  }
-  return false;
-}
-
-/**
- * Simple indeterminate progress bar (no JS, no polling).
- */
-function RenderProgressBanner({ show }: { show: boolean }) {
-  if (!show) return null;
-
-  return (
-    <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/50 dark:bg-blue-950/40">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="text-sm font-semibold text-blue-900 dark:text-blue-100">Rendering in progress…</div>
-          <div className="mt-1 text-xs text-blue-800/90 dark:text-blue-200/90">
-            One or more attempts are <span className="font-mono">queued</span> or{" "}
-            <span className="font-mono">running</span>. Refresh to see updates.
-          </div>
-        </div>
-
-        <div className="text-xs text-blue-900/80 dark:text-blue-100/80">Tip: this can take a minute or two on Vercel.</div>
-      </div>
-
-      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-blue-200/60 dark:bg-blue-900/40">
-        <div
-          className="h-2 w-1/3 rounded-full bg-blue-600/80 dark:bg-blue-400/80"
-          style={{ animation: "apq-progress 1.25s ease-in-out infinite" }}
-        />
-      </div>
-
-      <style>{`
-        @keyframes apq-progress {
-          0% { transform: translateX(-120%); }
-          50% { transform: translateX(120%); }
-          100% { transform: translateX(360%); }
-        }
-      `}</style>
-    </div>
-  );
-}
-
 export default function LifecyclePanel(props: {
   quoteId: string;
   versionRows: QuoteVersionRow[];
@@ -105,10 +55,10 @@ export default function LifecyclePanel(props: {
   restoreVersionAction: any;
   requestRenderAction: any;
 
-  // ✅ destructive actions (hard delete for now)
-  deleteVersionAction: any;
-  deleteNoteAction: any;
-  deleteRenderAction: any;
+  // ✅ new actions
+  deleteVersionAction?: any;
+  deleteNoteAction?: any;
+  deleteRenderAction?: any;
 }) {
   const {
     quoteId,
@@ -130,10 +80,12 @@ export default function LifecyclePanel(props: {
   const rendersCount = renderRows?.length ?? 0;
 
   const defaultRenderVersionNumber = pickDefaultRenderVersionNumber(versionRows, activeVersion);
-  const showProgress = hasQueuedOrRunning(renderRows);
 
   return (
-    <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+    <section
+      id="lifecycle"
+      className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950"
+    >
       {/* Header */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
@@ -150,10 +102,7 @@ export default function LifecyclePanel(props: {
         </div>
       </div>
 
-      {/* ✅ progress banner */}
-      <RenderProgressBanner show={showProgress} />
-
-      {/* Create version */}
+      {/* Create version (collapsible so it doesn't dominate) */}
       <details className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
         <summary className="cursor-pointer select-none">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -260,6 +209,7 @@ export default function LifecyclePanel(props: {
         </div>
       ) : null}
 
+      {/* STACKED SECTIONS */}
       <div className="mt-6 space-y-4">
         {/* Versions */}
         <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
@@ -279,7 +229,8 @@ export default function LifecyclePanel(props: {
                 const summ = safeTrim(assessment?.summary ?? "");
                 const policyMode = safeTrim(v.aiMode) || null;
 
-                const isActive = activeVersion != null && Number(v.version) === activeVersion;
+                const vnum = Number(v.version ?? 0);
+                const isActive = activeVersion != null && vnum === Number(activeVersion);
 
                 const estText =
                   est.low != null && est.high != null
@@ -302,7 +253,7 @@ export default function LifecyclePanel(props: {
                   >
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        {chip(`v${Number(v.version ?? 0)}`, "blue")}
+                        {chip(`v${vnum}`, "blue")}
                         {isActive ? chip("ACTIVE", "green") : null}
                         {policyMode ? chip(`mode: ${policyMode}`, "gray") : null}
                       </div>
@@ -323,17 +274,37 @@ export default function LifecyclePanel(props: {
                           </form>
                         ) : null}
 
-                        <form action={deleteVersionAction}>
-                          <input type="hidden" name="version_id" value={v.id} />
-                          <input type="hidden" name="version_number" value={String(Number(v.version ?? 0))} />
-                          <button
-                            type="submit"
-                            className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
-                            title="Delete this version (also deletes its renders + any linked notes)"
+                        {/* ✅ Delete version */}
+                        {deleteVersionAction ? (
+                          <form
+                            action={deleteVersionAction}
+                            onSubmit={(e) => {
+                              if (isActive) {
+                                e.preventDefault();
+                                return;
+                              }
+                              if (!window.confirm(`Delete v${vnum}? This will also delete its renders + linked notes.`)) {
+                                e.preventDefault();
+                              }
+                            }}
                           >
-                            Delete
-                          </button>
-                        </form>
+                            <input type="hidden" name="version_id" value={v.id} />
+                            <input type="hidden" name="version_number" value={String(vnum)} />
+                            <button
+                              type="submit"
+                              disabled={isActive}
+                              className={
+                                "rounded-lg border px-3 py-1.5 text-xs font-semibold " +
+                                (isActive
+                                  ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500 cursor-not-allowed"
+                                  : "border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30")
+                              }
+                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version"}
+                            >
+                              Delete
+                            </button>
+                          </form>
+                        ) : null}
                       </div>
                     </div>
 
@@ -353,7 +324,7 @@ export default function LifecyclePanel(props: {
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                       <div className="text-xs text-gray-600 dark:text-gray-300">Actions</div>
                       <form action={requestRenderAction} className="flex items-center gap-2">
-                        <input type="hidden" name="version_number" value={String(Number(v.version ?? 0))} />
+                        <input type="hidden" name="version_number" value={String(vnum)} />
                         <button
                           type="submit"
                           className="rounded-lg bg-black px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
@@ -403,16 +374,24 @@ export default function LifecyclePanel(props: {
                       <div className="flex items-center gap-2">
                         <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
 
-                        <form action={deleteNoteAction}>
-                          <input type="hidden" name="note_id" value={n.id} />
-                          <button
-                            type="submit"
-                            className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
-                            title="Delete this note"
+                        {/* ✅ Delete note */}
+                        {deleteNoteAction ? (
+                          <form
+                            action={deleteNoteAction}
+                            onSubmit={(e) => {
+                              if (!window.confirm("Delete this note? This cannot be undone.")) e.preventDefault();
+                            }}
                           >
-                            Delete
-                          </button>
-                        </form>
+                            <input type="hidden" name="note_id" value={n.id} />
+                            <button
+                              type="submit"
+                              className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
+                              title="Delete this note"
+                            >
+                              Delete
+                            </button>
+                          </form>
+                        ) : null}
                       </div>
                     </div>
 
@@ -437,11 +416,14 @@ export default function LifecyclePanel(props: {
             {rendersCount ? chip("Attempts", "gray") : chip("Empty", "gray")}
           </div>
 
+          {/* ✅ New render control */}
           <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">Queues a render attempt for the selected version.</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                  Queues a render attempt for the selected version.
+                </div>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 Default: <span className="font-mono">{defaultRenderVersionNumber || "—"}</span>
@@ -501,14 +483,7 @@ export default function LifecyclePanel(props: {
           </div>
 
           <div className="mt-4">
-            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
-          </div>
-
-          {/* NOTE:
-              Render delete UI will be added inside RenderGallery (safest place),
-              once we update its prop types + tile actions. */}
-          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Render deletion controls will appear here once <span className="font-mono">RenderGallery</span> is updated.
+            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} deleteRenderAction={deleteRenderAction} />
           </div>
         </div>
       </div>
