@@ -37,13 +37,16 @@ function asOptionalStringArray(v: any): string[] | undefined {
   return xs.length ? xs : undefined;
 }
 
-type Img = { url: string; label?: string };
+// NOTE: label is REQUIRED because buildQuoteCanvasEmailHtml expects it.
+type Img = { url: string; label: string };
 
 function normalizeImg(v: any): Img | null {
   const url = safeTrim(v?.url ?? v?.publicUrl ?? v?.blobUrl ?? v);
   if (!url) return null;
+
+  // Always provide a label (can be empty string)
   const label = safeTrim(v?.label ?? "");
-  return label ? { url, label } : { url };
+  return { url, label };
 }
 
 function normalizeImgs(v: any): Img[] {
@@ -154,8 +157,6 @@ export async function POST(
 
     const result = await sendComposerEmail({
       tenantId,
-      // Optional: if your sendComposerEmail supports passing context, you can add it there.
-      // quoteId is still useful for server logs if you want to add telemetry later.
       message: {
         from,
         to,
