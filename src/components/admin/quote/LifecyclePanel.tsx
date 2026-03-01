@@ -56,7 +56,6 @@ function hasQueuedOrRunning(renderRows: QuoteRenderRow[]) {
 
 /**
  * Simple indeterminate progress bar (no JS, no polling).
- * This makes it *obvious* something is happening during long renders.
  */
 function RenderProgressBanner({ show }: { show: boolean }) {
   if (!show) return null;
@@ -67,23 +66,18 @@ function RenderProgressBanner({ show }: { show: boolean }) {
         <div>
           <div className="text-sm font-semibold text-blue-900 dark:text-blue-100">Rendering in progress…</div>
           <div className="mt-1 text-xs text-blue-800/90 dark:text-blue-200/90">
-            One or more attempts are <span className="font-mono">queued</span> or <span className="font-mono">running</span>.
-            Refresh to see updates.
+            One or more attempts are <span className="font-mono">queued</span> or{" "}
+            <span className="font-mono">running</span>. Refresh to see updates.
           </div>
         </div>
 
-        <div className="text-xs text-blue-900/80 dark:text-blue-100/80">
-          Tip: this can take a minute or two on Vercel.
-        </div>
+        <div className="text-xs text-blue-900/80 dark:text-blue-100/80">Tip: this can take a minute or two on Vercel.</div>
       </div>
 
-      {/* Indeterminate bar */}
       <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-blue-200/60 dark:bg-blue-900/40">
         <div
           className="h-2 w-1/3 rounded-full bg-blue-600/80 dark:bg-blue-400/80"
-          style={{
-            animation: "apq-progress 1.25s ease-in-out infinite",
-          }}
+          style={{ animation: "apq-progress 1.25s ease-in-out infinite" }}
         />
       </div>
 
@@ -159,7 +153,7 @@ export default function LifecyclePanel(props: {
       {/* ✅ progress banner */}
       <RenderProgressBanner show={showProgress} />
 
-      {/* Create version (collapsible so it doesn't dominate) */}
+      {/* Create version */}
       <details className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
         <summary className="cursor-pointer select-none">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -266,7 +260,6 @@ export default function LifecyclePanel(props: {
         </div>
       ) : null}
 
-      {/* STACKED SECTIONS */}
       <div className="mt-6 space-y-4">
         {/* Versions */}
         <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
@@ -330,7 +323,6 @@ export default function LifecyclePanel(props: {
                           </form>
                         ) : null}
 
-                        {/* ✅ delete version (hard delete) */}
                         <form action={deleteVersionAction}>
                           <input type="hidden" name="version_id" value={v.id} />
                           <input type="hidden" name="version_number" value={String(Number(v.version ?? 0))} />
@@ -445,14 +437,11 @@ export default function LifecyclePanel(props: {
             {rendersCount ? chip("Attempts", "gray") : chip("Empty", "gray")}
           </div>
 
-          {/* ✅ Bring back the obvious “new render” control near the gallery */}
           <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                  Queues a render attempt for the selected version.
-                </div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">Queues a render attempt for the selected version.</div>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 Default: <span className="font-mono">{defaultRenderVersionNumber || "—"}</span>
@@ -511,13 +500,15 @@ export default function LifecyclePanel(props: {
             </form>
           </div>
 
-          {/* render gallery */}
           <div className="mt-4">
-            <RenderGallery
-              quoteId={quoteId}
-              renderRows={renderRows as any}
-              deleteRenderAction={deleteRenderAction}
-            />
+            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
+          </div>
+
+          {/* NOTE:
+              Render delete UI will be added inside RenderGallery (safest place),
+              once we update its prop types + tile actions. */}
+          <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+            Render deletion controls will appear here once <span className="font-mono">RenderGallery</span> is updated.
           </div>
         </div>
       </div>
