@@ -30,6 +30,18 @@ function noteActor(n: QuoteNoteRow) {
   return safeTrim(anyN.actor) || safeTrim(anyN.createdBy) || safeTrim(anyN.created_by) || "";
 }
 
+function pickDefaultRenderVersionNumber(versionRows: QuoteVersionRow[], activeVersion: number | null): string {
+  if (activeVersion != null && Number.isFinite(activeVersion) && activeVersion > 0) return String(activeVersion);
+
+  const nums = (versionRows ?? [])
+    .map((v: any) => Number(v?.version))
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+
+  if (nums.length) return String(nums[nums.length - 1]);
+  return "";
+}
+
 export default function LifecyclePanel(props: {
   quoteId: string;
   versionRows: QuoteVersionRow[];
@@ -58,6 +70,8 @@ export default function LifecyclePanel(props: {
   const versionsCount = versionRows?.length ?? 0;
   const notesCount = noteRows?.length ?? 0;
   const rendersCount = renderRows?.length ?? 0;
+
+  const defaultRenderVersionNumber = pickDefaultRenderVersionNumber(versionRows, activeVersion);
 
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -100,7 +114,13 @@ export default function LifecyclePanel(props: {
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Engine</div>
               <div className="mt-3 space-y-2 text-sm">
                 <label className="flex items-start gap-2">
-                  <input type="radio" name="engine" value="deterministic_pricing_only" defaultChecked className="mt-0.5" />
+                  <input
+                    type="radio"
+                    name="engine"
+                    value="deterministic_pricing_only"
+                    defaultChecked
+                    className="mt-0.5"
+                  />
                   <span>
                     <span className="font-semibold text-gray-900 dark:text-gray-100">Deterministic pricing only</span>
                     <span className="block text-xs text-gray-600 dark:text-gray-400">
@@ -145,7 +165,9 @@ export default function LifecyclePanel(props: {
 
           {/* Optional note */}
           <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
-            <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Optional note (linked to new version)</div>
+            <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Optional note (linked to new version)
+            </div>
             <textarea
               name="note_body"
               rows={4}
@@ -295,7 +317,10 @@ export default function LifecyclePanel(props: {
               noteRows.slice(0, 100).map((n) => {
                 const actor = noteActor(n);
                 return (
-                  <div key={n.id} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+                  <div
+                    key={n.id}
+                    className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950"
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         {actor ? chip(String(actor), "gray") : chip("tenant", "gray")}
@@ -319,7 +344,82 @@ export default function LifecyclePanel(props: {
         </div>
 
         {/* Renders */}
-        <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
+        <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Renders</div>
+            {rendersCount ? chip("Attempts", "gray") : chip("Empty", "gray")}
+          </div>
+
+          {/* ✅ Bring back the obvious “new render” control near the gallery */}
+          <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                  Queues a render attempt for the selected version.
+                </div>
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                Default: <span className="font-mono">{defaultRenderVersionNumber || "—"}</span>
+              </div>
+            </div>
+
+            <form action={requestRenderAction} className="mt-3 grid gap-3 lg:grid-cols-12">
+              <div className="lg:col-span-4">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
+                <select
+                  name="version_number"
+                  defaultValue={defaultRenderVersionNumber}
+                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                >
+                  {versionsCount ? (
+                    versionRows
+                      .map((v: any) => Number(v?.version))
+                      .filter((n) => Number.isFinite(n) && n > 0)
+                      .sort((a, b) => a - b)
+                      .map((n) => (
+                        <option key={String(n)} value={String(n)}>
+                          v{n}
+                          {activeVersion != null && n === activeVersion ? " (active)" : ""}
+                        </option>
+                      ))
+                  ) : (
+                    <option value="">(no versions)</option>
+                  )}
+                </select>
+              </div>
+
+              <div className="lg:col-span-6">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Shop notes (optional)</div>
+                <input
+                  name="shop_notes"
+                  placeholder="e.g. change material color, add stitching, remove logo, etc."
+                  className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                />
+              </div>
+
+              <div className="lg:col-span-2 flex items-end">
+                <button
+                  type="submit"
+                  disabled={!versionsCount}
+                  className={
+                    "w-full rounded-lg px-4 py-2 text-sm font-semibold " +
+                    (versionsCount
+                      ? "bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
+                      : "bg-black text-white opacity-50 dark:bg-white dark:text-black")
+                  }
+                  title={versionsCount ? "Queue a render attempt" : "Create a version first"}
+                >
+                  New render
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <div className="mt-4">
+            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
+          </div>
+        </div>
       </div>
     </section>
   );
