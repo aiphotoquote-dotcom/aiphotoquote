@@ -3,12 +3,30 @@ import React from "react";
 
 import QuoteNotesComposer from "@/components/admin/QuoteNotesComposer";
 import RenderGallery from "@/components/admin/quote/RenderGallery";
-import RenderProgressBar from "@/components/admin/quote/RenderProgressBar";
-import { chip } from "@/components/admin/quote/ui";
 import { extractEstimate, pickAiAssessmentFromAny } from "@/lib/admin/quotes/normalize";
 import { formatUSD, humanWhen, safeTrim, tryJson } from "@/lib/admin/quotes/utils";
 
 import type { QuoteNoteRow, QuoteRenderRow, QuoteVersionRow } from "@/lib/admin/quotes/getLifecycle";
+
+// ✅ Inline chip helper to keep this file SERVER-ONLY.
+// If you import chip() from a module with "use client", THIS component becomes client,
+// and server actions can't be used/passed -> your exact error.
+function chip(label: string, tone: "gray" | "blue" | "green" | "red" = "gray") {
+  const base =
+    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold " +
+    "dark:border-gray-800";
+
+  const toneClass =
+    tone === "blue"
+      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-200"
+      : tone === "green"
+        ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/40 dark:bg-green-950/30 dark:text-green-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200"
+          : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
+
+  return <span className={base + toneClass}>{label}</span>;
+}
 
 function miniKeyValue(label: string, value: any) {
   return (
@@ -81,11 +99,6 @@ export default function LifecyclePanel(props: {
   const rendersCount = renderRows?.length ?? 0;
 
   const defaultRenderVersionNumber = pickDefaultRenderVersionNumber(versionRows, activeVersion);
-
-  // ✅ progress bar state (simple + stable)
-  const queuedCount = (renderRows ?? []).filter((r: any) => String(r?.status ?? "").toLowerCase() === "queued").length;
-  const runningCount = (renderRows ?? []).filter((r: any) => String(r?.status ?? "").toLowerCase() === "running").length;
-  const renderingActive = queuedCount + runningCount > 0;
 
   return (
     <section
@@ -280,17 +293,12 @@ export default function LifecyclePanel(props: {
                           </form>
                         ) : null}
 
-                        {/* ✅ Delete version (server action expects quote_id + version_id + version_number + active_version) */}
                         {deleteVersionAction ? (
                           <form action={deleteVersionAction}>
                             <input type="hidden" name="quote_id" value={quoteId} />
                             <input type="hidden" name="version_id" value={v.id} />
                             <input type="hidden" name="version_number" value={String(vnum)} />
-                            <input
-                              type="hidden"
-                              name="active_version"
-                              value={activeVersion != null ? String(activeVersion) : ""}
-                            />
+                            <input type="hidden" name="active_version" value={activeVersion != null ? String(activeVersion) : ""} />
 
                             <button
                               type="submit"
@@ -301,11 +309,7 @@ export default function LifecyclePanel(props: {
                                   ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500 cursor-not-allowed"
                                   : "border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30")
                               }
-                              title={
-                                isActive
-                                  ? "Cannot delete the ACTIVE version"
-                                  : "Delete this version (and its renders + linked notes)"
-                              }
+                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version (and its renders + linked notes)"}
                             >
                               Delete
                             </button>
@@ -380,7 +384,6 @@ export default function LifecyclePanel(props: {
                       <div className="flex items-center gap-2">
                         <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
 
-                        {/* ✅ Delete note (server action expects quote_id + note_id) */}
                         {deleteNoteAction ? (
                           <form action={deleteNoteAction}>
                             <input type="hidden" name="quote_id" value={quoteId} />
@@ -418,10 +421,7 @@ export default function LifecyclePanel(props: {
             {rendersCount ? chip("Attempts", "gray") : chip("Empty", "gray")}
           </div>
 
-          {/* ✅ Progress bar restored */}
-          <RenderProgressBar active={renderingActive} queuedCount={queuedCount} runningCount={runningCount} />
-
-          {/* ✅ New render control */}
+          {/* New render control */}
           <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
