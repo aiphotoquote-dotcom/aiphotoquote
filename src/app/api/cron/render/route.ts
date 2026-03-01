@@ -24,6 +24,20 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+type RenderQueueSource = "quote_renders" | "legacy_migrated";
+
+type RenderJob = {
+  id: string;
+  tenantId: string;
+  quoteLogId: string;
+  quoteVersionId: string;
+  attempt: number;
+  promptStored: string;
+  shopNotes: string;
+  createdAt: any;
+  sourceQueue: RenderQueueSource;
+};
+
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
   if (debugId) res.headers.set("x-debug-id", debugId);
@@ -204,7 +218,7 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
  * ✅ Also re-claim stale running jobs (prevents “stuck forever”):
  * - if status='running' and started_at older than 10 minutes => treat as stale and retry
  */
-async function claimRenderJobs(max: number) {
+async function claimRenderJobs(max: number): Promise<RenderJob[]> {
   const r = await db.execute(sql`
     with picked as (
       select id
@@ -243,7 +257,7 @@ async function claimRenderJobs(max: number) {
     promptStored: String(x.prompt ?? ""),
     shopNotes: String(x.shop_notes ?? ""),
     createdAt: x.created_at,
-    sourceQueue: "quote_renders" as const,
+    sourceQueue: "quote_renders",
   }));
 }
 
@@ -254,7 +268,7 @@ async function claimRenderJobs(max: number) {
  * - insert into quote_renders (attempt 1) if not exists
  * - claim it immediately as running and return it as a normal render job
  */
-async function claimLegacyJobsAsRenderJobs(max: number) {
+async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
   // 1) Claim legacy quote_logs rows
   const claimedLegacy = await db.execute(sql`
     with picked as (
@@ -279,7 +293,7 @@ async function claimLegacyJobsAsRenderJobs(max: number) {
   const legacyRows: any[] = (claimedLegacy as any)?.rows ?? (Array.isArray(claimedLegacy) ? (claimedLegacy as any) : []);
   if (!legacyRows.length) return [];
 
-  const jobs: any[] = [];
+  const jobs: Array<{ tenantId: string; quoteLogId: string; quoteVersionId: string }> = [];
 
   for (const row of legacyRows) {
     const tenantId = String(row.tenant_id);
@@ -301,7 +315,6 @@ async function claimLegacyJobsAsRenderJobs(max: number) {
     }
 
     // 3) Insert a render row if none exists for this version (attempt 1)
-    //    If it exists, we won’t double-insert; we’ll just claim from quote_renders next.
     await db.execute(sql`
       insert into quote_renders (
         id,
@@ -444,7 +457,12 @@ async function markQuoteRunningLegacyIfNotRendered(args: { tenantId: string; quo
   `);
 }
 
-async function updateQuoteRenderedLegacyFirstOnly(args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
+async function updateQuoteRenderedLegacyFirstOnly(args: {
+  tenantId: string;
+  quoteLogId: string;
+  imageUrl: string;
+  prompt: string;
+}) {
   await db.execute(sql`
     update quote_logs
     set
@@ -668,7 +686,7 @@ async function handleCron(req: Request) {
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
   // ✅ 1) claim lifecycle jobs first
-  let claimed = await claimRenderJobs(max);
+  let claimed: RenderJob[] = await claimRenderJobs(max);
 
   // ✅ 2) if none, drain legacy queue by migrating to quote_renders
   if (!claimed.length) {
@@ -886,7 +904,8 @@ async function handleCron(req: Request) {
           ? safeTrim(presets.custom)
           : safeTrim(presets.photoreal);
 
-      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      const styleText =
+        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
       const serviceTypeLine = safeLine(
         "Service type",
@@ -985,7 +1004,7 @@ async function handleCron(req: Request) {
             images,
           }),
           queue: {
-            sourceQueue: (job as any).sourceQueue ?? "quote_renders",
+            sourceQueue: job.sourceQueue,
           },
         };
 
@@ -1188,7 +1207,7 @@ async function handleCron(req: Request) {
         industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
-        sourceQueue: (job as any).sourceQueue ?? "quote_renders",
+        sourceQueue: job.sourceQueue,
       });
     } catch (e: any) {
       const msg = safeErr(e);
@@ -1215,7 +1234,7 @@ async function handleCron(req: Request) {
         // ignore
       }
 
-      processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: msg, sourceQueue: (job as any).sourceQueue ?? "quote_renders" });
+      processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: msg, sourceQueue: job.sourceQueue });
     }
   }
 
