@@ -62,6 +62,143 @@ function parsePositiveInt(v: string) {
   return i > 0 ? i : null;
 }
 
+function safeTrimLocal(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+/**
+ * ✅ Free Vercel pattern:
+ * We can’t rely on scheduled cron, so we “kick” the worker immediately
+ * after enqueue by calling /api/cron/render?max=1 with CRON_SECRET.
+ */
+function getBaseUrlFromEnv() {
+  const envBase = safeTrimLocal(process.env.NEXT_PUBLIC_APP_URL) || safeTrimLocal(process.env.APP_URL);
+  if (envBase) return envBase.replace(/\/+$/, "");
+
+  const vercel = safeTrimLocal(process.env.VERCEL_URL);
+  if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
+
+  // local dev fallback
+  return "http://localhost:3000";
+}
+
+async function tryKickRenderCronNow(): Promise<
+  | { attempted: false; ok: false; reason: "missing_cron_secret" | "missing_base_url" }
+  | { attempted: true; ok: boolean; reason: string; status?: number; bodySnippet?: string | null; url: string }
+> {
+  const secret = safeTrimLocal(process.env.CRON_SECRET);
+  if (!secret) return { attempted: false, ok: false, reason: "missing_cron_secret" };
+
+  const baseUrl = getBaseUrlFromEnv();
+  if (!baseUrl) return { attempted: false, ok: false, reason: "missing_base_url" };
+
+  const url = `${baseUrl}/api/cron/render?max=1`;
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 1750);
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}` },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    let bodySnippet: string | null = null;
+    try {
+      const txt = await r.text();
+      bodySnippet = txt ? txt.slice(0, 200) : "";
+    } catch {
+      bodySnippet = null;
+    }
+
+    return {
+      attempted: true,
+      ok: Boolean(r.ok),
+      reason: r.ok ? "ok" : "cron_http_error",
+      url,
+      status: r.status,
+      bodySnippet,
+    };
+  } catch (e: any) {
+    return {
+      attempted: true,
+      ok: false,
+      reason: e?.name === "AbortError" ? "timeout" : "fetch_error",
+      url,
+    };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * ✅ Ensure we always have a “v0” so lifecycle renders can attach to something.
+ * This makes “original quote = version0” true.
+ */
+async function ensureVersion0(args: {
+  tenantId: string;
+  quoteLogId: string;
+  actorUserId: string;
+  quoteOutput: any;
+}) {
+  const { tenantId, quoteLogId, quoteOutput } = args;
+
+  // If any version exists, do nothing.
+  const existing = await db
+    .select({ id: quoteVersions.id, version: quoteVersions.version })
+    .from(quoteVersions)
+    .where(and(eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.quoteLogId, quoteLogId)))
+    .orderBy(desc(quoteVersions.createdAt))
+    .limit(1)
+    .then((r) => r[0] ?? null);
+
+  if (existing?.id) return { created: false as const, versionId: String(existing.id), version: Number(existing.version ?? 0) };
+
+  // Try to create v0 with raw SQL so we don’t get blocked by schema typing drift.
+  // We only reference columns we *know* exist from your cron loader: (id, tenant_id, quote_log_id, version, output, ai_mode).
+  const inserted = await db.execute(sql`
+    insert into quote_versions (
+      id,
+      tenant_id,
+      quote_log_id,
+      version,
+      output,
+      ai_mode,
+      created_at
+    )
+    values (
+      gen_random_uuid(),
+      ${tenantId}::uuid,
+      ${quoteLogId}::uuid,
+      0,
+      ${JSON.stringify(quoteOutput ?? {})}::jsonb,
+      'unknown',
+      now()
+    )
+    returning id::text as "id"
+  `);
+
+  const versionId = (inserted as any)?.rows?.[0]?.id ? String((inserted as any).rows[0].id) : null;
+  if (!versionId) return { created: false as const, versionId: null as any, version: null as any };
+
+  // Best-effort: mark current_version=0 on quote_logs (helps the “ACTIVE” concept)
+  try {
+    await db.execute(sql`
+      update quote_logs
+      set current_version = 0
+      where id = ${quoteLogId}::uuid
+        and tenant_id = ${tenantId}::uuid
+    `);
+  } catch {
+    // ignore
+  }
+
+  return { created: true as const, versionId, version: 0 };
+}
+
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const session = await auth();
   const userId = session.userId;
@@ -387,6 +524,19 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const shopNotes = safeTrim(formData.get("shop_notes"));
 
+    // ✅ Ensure we have version0 at least (original quote snapshot)
+    // Uses quote_logs.output (current) as the v0 output.
+    try {
+      await ensureVersion0({
+        tenantId: tenantIdNow,
+        quoteLogId: id,
+        actorUserId,
+        quoteOutput: rowSnap.output ?? {},
+      });
+    } catch {
+      // ignore; we’ll still attempt normal resolution below
+    }
+
     const rawA = safeTrim(formData.get("version_id"));
     const rawB = safeTrim(formData.get("version_number"));
     const candidate = rawA || rawB;
@@ -411,15 +561,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     }
 
     if (!resolvedVersionId) {
-      const vnum = parsePositiveInt(candidate);
-      if (!vnum) {
-        redirect(
-          `/admin/quotes/${encodeURIComponent(id)}?renderError=missing_or_bad_version&version_value=${encodeURIComponent(
-            candidate || ""
-          )}&activeTenant=${encodeURIComponent(tenantIdNow)}#renders`
-        );
-      }
-
+      const vnum = parsePositiveInt(candidate) ?? 0; // ✅ allow v0
       const picked = await db
         .select({ id: quoteVersions.id, version: quoteVersions.version })
         .from(quoteVersions)
@@ -484,6 +626,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         `/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed&activeTenant=${encodeURIComponent(
           tenantIdNow
         )}&version=${encodeURIComponent(String(resolvedVersionNumber ?? ""))}#renders`
+      );
+    }
+
+    // ✅ Immediately kick the worker (Free Vercel “no schedule” approach)
+    const kick = await tryKickRenderCronNow();
+    if (kick.attempted && !kick.ok) {
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderWarn=cron_kick_failed&kick_reason=${encodeURIComponent(
+          kick.reason
+        )}&kick_status=${encodeURIComponent(String((kick as any).status ?? ""))}#renders`
       );
     }
 
