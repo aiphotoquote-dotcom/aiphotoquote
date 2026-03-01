@@ -39,8 +39,12 @@ function pill(active: boolean) {
   );
 }
 
-export default function RenderGallery(props: { quoteId: string; renderRows: RenderRow[] }) {
-  const { quoteId, renderRows } = props;
+export default function RenderGallery(props: {
+  quoteId: string;
+  renderRows: RenderRow[];
+  deleteRenderAction?: any; // ✅ optional server action (form action)
+}) {
+  const { quoteId, renderRows, deleteRenderAction } = props;
 
   const rows = useMemo(() => (Array.isArray(renderRows) ? renderRows : []), [renderRows]);
 
@@ -59,7 +63,10 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
     return rows.filter((r) => normStatus(r.status) === filter);
   }, [rows, filter]);
 
-  const renderedOnly = useMemo(() => rows.filter((r) => normStatus(r.status) === "rendered" && safeTrim(r.imageUrl)), [rows]);
+  const renderedOnly = useMemo(
+    () => rows.filter((r) => normStatus(r.status) === "rendered" && safeTrim(r.imageUrl)),
+    [rows]
+  );
 
   function toggle(id: string) {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -81,8 +88,16 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
     return renderedOnly.filter((r) => set.has(String(r.id))).length;
   }, [selected, renderedOnly]);
 
+  function confirmDelete(attemptLabel: string) {
+    // client-side confirm only; server action enforces authorization + tenant checks
+    return window.confirm(`Delete ${attemptLabel}? This cannot be undone.`);
+  }
+
   return (
-    <section id="renders" className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+    <section
+      id="renders"
+      className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950"
+    >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Render gallery</h3>
@@ -151,6 +166,8 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
               const isRendered = normStatus(r.status) === "rendered" && !!url;
               const active = selected.includes(id);
 
+              const attemptLabel = `Attempt ${r.attempt != null ? `#${Number(r.attempt)}` : ""}`.trim() || "Attempt";
+
               return (
                 <div
                   key={id}
@@ -179,9 +196,7 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
 
                   <div className="p-3">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
-                        Attempt {r.attempt != null ? `#${Number(r.attempt)}` : ""}
-                      </div>
+                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{attemptLabel}</div>
                       <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">
                         {safeTrim(r.status) || "unknown"}
                       </span>
@@ -214,6 +229,36 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                         </a>
                       ) : (
                         <span className="text-[11px] text-gray-400">—</span>
+                      )}
+                    </div>
+
+                    {/* ✅ Delete / archive control */}
+                    <div className="mt-2 flex items-center justify-end">
+                      {deleteRenderAction ? (
+                        <form
+                          action={deleteRenderAction}
+                          onSubmit={(e) => {
+                            if (!confirmDelete(attemptLabel)) e.preventDefault();
+                          }}
+                        >
+                          <input type="hidden" name="render_id" value={id} />
+                          <button
+                            type="submit"
+                            className="rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
+                            title="Delete this render attempt"
+                          >
+                            Delete
+                          </button>
+                        </form>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled
+                          className="rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] font-semibold text-gray-400 dark:border-gray-800 dark:text-gray-500"
+                          title="Delete action not wired yet"
+                        >
+                          Delete
+                        </button>
                       )}
                     </div>
                   </div>
