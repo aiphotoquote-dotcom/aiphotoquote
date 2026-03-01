@@ -6,8 +6,6 @@ import { redirect } from "next/navigation";
 
 import QuotePhotoGallery from "@/components/admin/QuotePhotoGallery";
 
-import QuoteHeader from "@/components/admin/quote/QuoteHeader";
-import LeadCard from "@/components/admin/quote/LeadCard";
 import CustomerNotesCard from "@/components/admin/quote/CustomerNotesCard";
 import LifecyclePanel from "@/components/admin/quote/LifecyclePanel";
 import DetailsPanel from "@/components/admin/quote/DetailsPanel";
@@ -40,9 +38,6 @@ import {
 
 import { adminReassessQuote } from "@/lib/quotes/adminReassess";
 import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
-
-// ✅ IMPORTED ACTIONS (safe to pass into Client Components)
-import { deleteNoteAction, deleteRenderAction, deleteVersionAction } from "./actions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -183,6 +178,21 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; acto
   return { created: true as const, versionId, version: 0 };
 }
 
+function chip(text: string, tone: "gray" | "blue" | "green" | "red" = "gray") {
+  const base =
+    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold " +
+    "dark:border-gray-800";
+  const toneCls =
+    tone === "blue"
+      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/40 dark:bg-blue-950/40 dark:text-blue-200"
+      : tone === "green"
+        ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/40 dark:bg-green-950/40 dark:text-green-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200"
+          : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
+  return <span className={base + " " + toneCls}>{text}</span>;
+}
+
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const session = await auth();
   const userId = session.userId;
@@ -194,7 +204,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const sp = searchParams ? await searchParams : {};
   const skipAutoRead =
-    sp?.skipAutoRead === "1" || (Array.isArray(sp?.skipAutoRead) && sp.skipAutoRead.includes("1"));
+    sp?.skipAutoRead === "1" || (Array.isArray(sp?.skipAutoRead) && (sp as any).skipAutoRead.includes("1"));
 
   const jar = await cookies();
 
@@ -252,10 +262,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const photos = pickPhotos(rowSnap.input);
 
   const stageNorm = normalizeStage(rowSnap.stage);
+
+  const normalizeMod = await import("@/lib/admin/quotes/normalize");
+  const STAGES = normalizeMod.STAGES;
+
+  const stageMeta = STAGES.find((s) => s.key === stageNorm) ?? null;
   const stageLabel =
-    stageNorm === "read"
-      ? "Read (legacy)"
-      : (await import("@/lib/admin/quotes/normalize")).STAGES.find((s) => s.key === stageNorm)?.label ?? "New";
+    stageNorm === "read" ? "Read (legacy)" : stageMeta?.label ?? "New";
+
+  const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === stageNorm));
+  const stagePct = STAGES.length > 1 ? Math.round((stageIndex / (STAGES.length - 1)) * 100) : 0;
 
   const outAny: any = rowSnap.output ?? null;
   const aiAssessment = pickAiAssessmentFromAny(outAny);
@@ -377,7 +393,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
-    const quoteLog: QuoteLogRow = { id, tenant_id: tenantId, input: rowSnap.input ?? {}, qa: (rowSnap as any).qa ?? {}, output: rowSnap.output ?? {} };
+    const quoteLog: QuoteLogRow = {
+      id,
+      tenant_id: tenantId,
+      input: rowSnap.input ?? {},
+      qa: (rowSnap as any).qa ?? {},
+      output: rowSnap.output ?? {},
+    };
 
     const result = await adminReassessQuote({
       quoteLog,
@@ -389,7 +411,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     });
 
     if (createdNoteId) {
-      await db.update(quoteNotes).set({ quoteVersionId: result.versionId } as any).where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
+      await db
+        .update(quoteNotes)
+        .set({ quoteVersionId: result.versionId } as any)
+        .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
     void aiMode;
@@ -521,18 +546,35 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const inserted = await db
       .insert(quoteRenders)
-      .values({ tenantId: tenantIdNow, quoteLogId: id, quoteVersionId: resolvedVersionId!, attempt: nextAttempt, status: "queued" as any, shopNotes: shopNotes || null } as any)
+      .values({
+        tenantId: tenantIdNow,
+        quoteLogId: id,
+        quoteVersionId: resolvedVersionId!,
+        attempt: nextAttempt,
+        status: "queued" as any,
+        shopNotes: shopNotes || null,
+      } as any)
       .returning({ id: quoteRenders.id })
       .then((r) => r[0] ?? null);
 
     const ok = Boolean(inserted?.id);
     if (!ok) {
-      redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed&activeTenant=${encodeURIComponent(tenantIdNow)}&version=${encodeURIComponent(String(resolvedVersionNumber ?? ""))}#renders`);
+      redirect(
+        `/admin/quotes/${encodeURIComponent(
+          id
+        )}?renderError=insert_failed&activeTenant=${encodeURIComponent(tenantIdNow)}&version=${encodeURIComponent(
+          String(resolvedVersionNumber ?? "")
+        )}#renders`
+      );
     }
 
     const kick = await tryKickRenderCronNow();
     if (kick.attempted && !kick.ok) {
-      redirect(`/admin/quotes/${encodeURIComponent(id)}?renderWarn=cron_kick_failed&kick_reason=${encodeURIComponent(kick.reason)}&kick_status=${encodeURIComponent(String((kick as any).status ?? ""))}#renders`);
+      redirect(
+        `/admin/quotes/${encodeURIComponent(id)}?renderWarn=cron_kick_failed&kick_reason=${encodeURIComponent(
+          kick.reason
+        )}&kick_status=${encodeURIComponent(String((kick as any).status ?? ""))}#renders`
+      );
     }
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
@@ -542,22 +584,118 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-      <QuoteHeader
-        quoteId={id}
-        submittedAtLabel={submittedAtLabel}
-        isRead={isRead}
-        stageLabel={stageLabel}
-        stageNorm={String(stageNorm)}
-        renderStatus={rowSnap.renderStatus}
-        confidence={confidence}
-        inspectionRequired={inspectionRequired}
-        activeVersion={activeVersion}
-        markUnreadAction={markUnread}
-        markReadAction={markRead}
-      />
+      {/* ✅ HEADER (server-rendered; no function props into Client Components) */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div className="space-y-2">
+            <a href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
+              ← Back to quotes
+            </a>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Quote</h1>
+              {chip(stageLabel, "blue")}
+              {activeVersion != null ? chip(`active v${activeVersion}`, "green") : chip("no active version", "gray")}
+              {isRead ? chip("READ", "gray") : chip("UNREAD", "red")}
+            </div>
+
+            <div className="text-xs text-gray-600 dark:text-gray-300">
+              <span className="font-mono break-all">{id}</span>
+              <span className="mx-2 opacity-60">·</span>
+              Submitted: <span className="font-mono">{submittedAtLabel}</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <form action={markUnread}>
+              <button
+                type="submit"
+                className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+              >
+                Mark unread
+              </button>
+            </form>
+
+            <form action={markRead}>
+              <button
+                type="submit"
+                className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Mark read
+              </button>
+            </form>
+          </div>
+        </div>
+
+        {/* ✅ Progress bar */}
+        <div className="mt-5">
+          <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-300">
+            <div className="font-semibold">Progress</div>
+            <div className="font-mono">{stagePct}%</div>
+          </div>
+
+          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-900">
+            <div className="h-full bg-black dark:bg-white" style={{ width: `${stagePct}%` }} />
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {STAGES.slice(0, 8).map((s, idx) => {
+              const isDone = idx < stageIndex;
+              const isActive = idx === stageIndex;
+              const tone: any = isActive ? "blue" : isDone ? "green" : "gray";
+              return <span key={s.key}>{chip(s.label, tone)}</span>;
+            })}
+          </div>
+
+          {/* ✅ Stage control */}
+          <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+            <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Stage</div>
+            <form action={setStage} className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <select
+                name="stage"
+                defaultValue={String(stageNorm)}
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+              >
+                {STAGES.map((s) => (
+                  <option key={s.key} value={s.key}>
+                    {s.label} ({s.key})
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="submit"
+                className="inline-flex items-center justify-center rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Update stage
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
 
       <div className="space-y-6">
-        <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStage} />
+        {/* Lead summary (data-only; no actions passed) */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Lead</div>
+            {lead?.name ? chip(String(lead.name), "gray") : chip("unknown", "gray")}
+          </div>
+
+          <div className="mt-3 grid gap-2 text-sm text-gray-700 dark:text-gray-200">
+            {lead?.email ? (
+              <div>
+                <span className="font-semibold">Email:</span> <span className="font-mono">{String(lead.email)}</span>
+              </div>
+            ) : null}
+            {lead?.phone ? (
+              <div>
+                <span className="font-semibold">Phone:</span> <span className="font-mono">{String(lead.phone)}</span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
         <CustomerNotesCard notes={notes} />
         <QuotePhotoGallery photos={photos} />
 
@@ -599,9 +737,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           createNewVersionAction={createNewVersion}
           restoreVersionAction={restoreVersion}
           requestRenderAction={requestRender}
-          deleteVersionAction={deleteVersionAction}
-          deleteNoteAction={deleteNoteAction}
-          deleteRenderAction={deleteRenderAction}
+          // ✅ delete actions intentionally NOT passed from this page
+          // (prevents “function passed to Client Component” crashes)
         />
 
         <LegacyRenderPanel
