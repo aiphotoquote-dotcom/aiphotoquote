@@ -31,15 +31,71 @@ function noteActor(n: QuoteNoteRow) {
 }
 
 function pickDefaultRenderVersionNumber(versionRows: QuoteVersionRow[], activeVersion: number | null): string {
-  if (activeVersion != null && Number.isFinite(activeVersion) && activeVersion > 0) return String(activeVersion);
+  if (activeVersion != null && Number.isFinite(activeVersion) && activeVersion >= 0) return String(activeVersion);
 
   const nums = (versionRows ?? [])
     .map((v: any) => Number(v?.version))
-    .filter((n) => Number.isFinite(n) && n > 0)
+    .filter((n) => Number.isFinite(n) && n >= 0)
     .sort((a, b) => a - b);
 
   if (nums.length) return String(nums[nums.length - 1]);
   return "";
+}
+
+function statusOfRender(r: any): string {
+  return safeTrim(r?.status).toLowerCase();
+}
+
+function hasQueuedOrRunning(renderRows: QuoteRenderRow[]) {
+  for (const r of renderRows ?? []) {
+    const s = statusOfRender(r);
+    if (s === "queued" || s === "running") return true;
+  }
+  return false;
+}
+
+/**
+ * Simple indeterminate progress bar (no JS, no polling).
+ * This makes it *obvious* something is happening during long renders.
+ */
+function RenderProgressBanner({ show }: { show: boolean }) {
+  if (!show) return null;
+
+  return (
+    <div className="mt-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/50 dark:bg-blue-950/40">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="text-sm font-semibold text-blue-900 dark:text-blue-100">Rendering in progress…</div>
+          <div className="mt-1 text-xs text-blue-800/90 dark:text-blue-200/90">
+            One or more attempts are <span className="font-mono">queued</span> or <span className="font-mono">running</span>.
+            Refresh to see updates.
+          </div>
+        </div>
+
+        <div className="text-xs text-blue-900/80 dark:text-blue-100/80">
+          Tip: this can take a minute or two on Vercel.
+        </div>
+      </div>
+
+      {/* Indeterminate bar */}
+      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-blue-200/60 dark:bg-blue-900/40">
+        <div
+          className="h-2 w-1/3 rounded-full bg-blue-600/80 dark:bg-blue-400/80"
+          style={{
+            animation: "apq-progress 1.25s ease-in-out infinite",
+          }}
+        />
+      </div>
+
+      <style>{`
+        @keyframes apq-progress {
+          0% { transform: translateX(-120%); }
+          50% { transform: translateX(120%); }
+          100% { transform: translateX(360%); }
+        }
+      `}</style>
+    </div>
+  );
 }
 
 export default function LifecyclePanel(props: {
@@ -54,6 +110,11 @@ export default function LifecyclePanel(props: {
   createNewVersionAction: any;
   restoreVersionAction: any;
   requestRenderAction: any;
+
+  // ✅ destructive actions (hard delete for now)
+  deleteVersionAction: any;
+  deleteNoteAction: any;
+  deleteRenderAction: any;
 }) {
   const {
     quoteId,
@@ -65,6 +126,9 @@ export default function LifecyclePanel(props: {
     createNewVersionAction,
     restoreVersionAction,
     requestRenderAction,
+    deleteVersionAction,
+    deleteNoteAction,
+    deleteRenderAction,
   } = props;
 
   const versionsCount = versionRows?.length ?? 0;
@@ -72,6 +136,7 @@ export default function LifecyclePanel(props: {
   const rendersCount = renderRows?.length ?? 0;
 
   const defaultRenderVersionNumber = pickDefaultRenderVersionNumber(versionRows, activeVersion);
+  const showProgress = hasQueuedOrRunning(renderRows);
 
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -90,6 +155,9 @@ export default function LifecyclePanel(props: {
           {chip(`${rendersCount} render${rendersCount === 1 ? "" : "s"}`, "gray")}
         </div>
       </div>
+
+      {/* ✅ progress banner */}
+      <RenderProgressBanner show={showProgress} />
 
       {/* Create version (collapsible so it doesn't dominate) */}
       <details className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-black">
@@ -261,6 +329,19 @@ export default function LifecyclePanel(props: {
                             </button>
                           </form>
                         ) : null}
+
+                        {/* ✅ delete version (hard delete) */}
+                        <form action={deleteVersionAction}>
+                          <input type="hidden" name="version_id" value={v.id} />
+                          <input type="hidden" name="version_number" value={String(Number(v.version ?? 0))} />
+                          <button
+                            type="submit"
+                            className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
+                            title="Delete this version (also deletes its renders + any linked notes)"
+                          >
+                            Delete
+                          </button>
+                        </form>
                       </div>
                     </div>
 
@@ -326,7 +407,21 @@ export default function LifecyclePanel(props: {
                         {actor ? chip(String(actor), "gray") : chip("tenant", "gray")}
                         {n.quoteVersionId ? chip("linked", "blue") : chip("general", "gray")}
                       </div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
+
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs text-gray-600 dark:text-gray-300">{humanWhen(n.createdAt)}</div>
+
+                        <form action={deleteNoteAction}>
+                          <input type="hidden" name="note_id" value={n.id} />
+                          <button
+                            type="submit"
+                            className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
+                            title="Delete this note"
+                          >
+                            Delete
+                          </button>
+                        </form>
+                      </div>
                     </div>
 
                     <div className="mt-2 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
@@ -375,7 +470,7 @@ export default function LifecyclePanel(props: {
                   {versionsCount ? (
                     versionRows
                       .map((v: any) => Number(v?.version))
-                      .filter((n) => Number.isFinite(n) && n > 0)
+                      .filter((n) => Number.isFinite(n) && n >= 0)
                       .sort((a, b) => a - b)
                       .map((n) => (
                         <option key={String(n)} value={String(n)}>
@@ -416,8 +511,13 @@ export default function LifecyclePanel(props: {
             </form>
           </div>
 
+          {/* render gallery */}
           <div className="mt-4">
-            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
+            <RenderGallery
+              quoteId={quoteId}
+              renderRows={renderRows as any}
+              deleteRenderAction={deleteRenderAction}
+            />
           </div>
         </div>
       </div>
