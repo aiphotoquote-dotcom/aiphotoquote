@@ -75,9 +75,9 @@ function safeTrimLocal(v: unknown) {
  * IMPORTANT:
  * Prefer request headers first (preview/prod safe), then env fallbacks.
  */
-function getBaseUrlFromHeaders() {
+async function getBaseUrlFromHeaders() {
   try {
-    const h = headers();
+    const h = await headers(); // ✅ Next 16: headers() can be async
     const host = safeTrimLocal(h.get("x-forwarded-host") || h.get("host") || "");
     const proto = safeTrimLocal(h.get("x-forwarded-proto") || "https");
     if (host) return `${proto}://${host}`.replace(/\/+$/, "");
@@ -105,7 +105,8 @@ async function tryKickRenderCronNow(): Promise<
   const secret = safeTrimLocal(process.env.CRON_SECRET);
   if (!secret) return { attempted: false, ok: false, reason: "missing_cron_secret" };
 
-  const baseUrl = getBaseUrlFromHeaders() || getBaseUrlFromEnv();
+  const baseFromHeaders = await getBaseUrlFromHeaders();
+  const baseUrl = baseFromHeaders || getBaseUrlFromEnv();
   if (!baseUrl) return { attempted: false, ok: false, reason: "missing_base_url" };
 
   const url = `${baseUrl}/api/cron/render?max=1`;
