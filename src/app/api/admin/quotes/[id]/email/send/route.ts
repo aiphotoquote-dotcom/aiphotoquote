@@ -1,10 +1,7 @@
 // src/app/api/admin/quotes/[id]/email/send/route.ts
 import { NextResponse, type NextRequest } from "next/server";
 import { sendComposerEmail } from "@/lib/emailComposer/sendComposerEmail";
-import {
-  buildQuoteCanvasEmailHtml,
-  buildQuoteCanvasText,
-} from "@/lib/emailComposer/templates/quoteCanvas";
+import { buildQuoteCanvasEmailHtml, buildQuoteCanvasText } from "@/lib/emailComposer/templates/quoteCanvas";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -12,10 +9,7 @@ function safeTrim(v: unknown) {
 }
 
 function buildPlatformFrom(): string | null {
-  const fallback =
-    safeTrim(process.env.RESEND_FALLBACK_FROM) ||
-    safeTrim(process.env.PLATFORM_FROM_EMAIL);
-
+  const fallback = safeTrim(process.env.RESEND_FALLBACK_FROM) || safeTrim(process.env.PLATFORM_FROM_EMAIL);
   if (!fallback) return null;
 
   // If RESEND_FALLBACK_FROM already includes a display-name, keep it.
@@ -37,14 +31,12 @@ function asOptionalStringArray(v: any): string[] | undefined {
   return xs.length ? xs : undefined;
 }
 
-// NOTE: label is REQUIRED because buildQuoteCanvasEmailHtml expects it.
+// NOTE: label is REQUIRED by template typing (can be empty string)
 type Img = { url: string; label: string };
 
 function normalizeImg(v: any): Img | null {
   const url = safeTrim(v?.url ?? v?.publicUrl ?? v?.blobUrl ?? v);
   if (!url) return null;
-
-  // Always provide a label (can be empty string)
   const label = safeTrim(v?.label ?? "");
   return { url, label };
 }
@@ -56,12 +48,11 @@ function normalizeImgs(v: any): Img[] {
 
 /**
  * Accept a few possible client payloads:
- * 1) { featuredImage, galleryImages } (your current route)
- * 2) { selectedImages: [{url,label,kind}] } (easy add if you want)
- * 3) { images: [...] } (generic)
+ * 1) { featuredImage, galleryImages }
+ * 2) { selectedImages: [{url,label}] } (we auto-pick first as featured)
+ * 3) { images: [...] }
  */
 function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Img[] } {
-  // Preferred: explicit featured + gallery
   const featured = normalizeImg(body?.featuredImage);
   const gallery = normalizeImgs(body?.galleryImages);
 
@@ -69,7 +60,6 @@ function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Im
     return { featuredImage: featured, galleryImages: gallery };
   }
 
-  // Alternative: selectedImages array (we can auto-pick first as featured)
   const selected = normalizeImgs(body?.selectedImages ?? body?.images ?? []);
   if (selected.length) {
     return { featuredImage: selected[0], galleryImages: selected.slice(1) };
@@ -78,10 +68,7 @@ function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Im
   return { featuredImage: null, galleryImages: [] };
 }
 
-export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
-) {
+export async function POST(req: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
     const quoteId = safeTrim(id);
@@ -90,64 +77,61 @@ export async function POST(
 
     const tenantId = safeTrim(body?.tenantId);
     if (!tenantId) {
-      return NextResponse.json(
-        { ok: false, error: "Missing tenantId" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing tenantId" }, { status: 400 });
     }
 
     const to = asStringArray(body?.to);
     if (!to.length) {
-      return NextResponse.json(
-        { ok: false, error: "Missing to" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing to" }, { status: 400 });
     }
 
     const subject = safeTrim(body?.subject);
     if (!subject) {
-      return NextResponse.json(
-        { ok: false, error: "Missing subject" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing subject" }, { status: 400 });
     }
 
     const headline = safeTrim(body?.headline);
-    const intro = safeTrim(body?.intro);
-    const closing = safeTrim(body?.closing);
+    const intro = String(body?.intro ?? "");
+    const closing = String(body?.closing ?? "");
 
-    // Images: accept multiple shapes
+    // Branding (from preview payload)
+    const shopName = safeTrim(body?.shopName ?? body?.brand?.shopName ?? body?.lead?.shopName ?? "");
+    const shopLogoUrl = safeTrim(body?.shopLogoUrl ?? body?.brand?.shopLogoUrl ?? body?.logoUrl ?? "");
+    const brandSubtitle = safeTrim(body?.brandSubtitle ?? "");
+
+    // Images
     const { featuredImage, galleryImages } = deriveImages(body);
 
-    // Template HTML/Text
+    // Quote blocks payload (forwarded)
+    const qb = body?.quoteBlocks && typeof body.quoteBlocks === "object" ? body.quoteBlocks : null;
+
+    // Template HTML/Text (now supports brand + quoteBlocks)
     const html = buildQuoteCanvasEmailHtml({
-      headline,
+      headline: headline || subject,
       intro,
       closing,
       subject,
+      shopName: shopName || null,
+      shopLogoUrl: shopLogoUrl || null,
+      brandSubtitle: brandSubtitle || null,
       featuredImage,
       galleryImages,
+      quoteBlocks: qb,
     });
 
     const text = buildQuoteCanvasText({
-      headline,
+      headline: headline || subject,
       intro,
       closing,
+      shopName: shopName || null,
+      quoteBlocks: qb,
     });
 
     // Ensure From exists (providers require it)
-    const from =
-      safeTrim(body?.from) ||
-      buildPlatformFrom() ||
-      null;
-
+    const from = safeTrim(body?.from) || buildPlatformFrom() || null;
     if (!from) {
       return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured",
-        },
+        { ok: false, error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured" },
         { status: 400 }
       );
     }
@@ -174,9 +158,6 @@ export async function POST(
 
     return NextResponse.json(result);
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
   }
 }
