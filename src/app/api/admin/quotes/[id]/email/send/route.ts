@@ -1,5 +1,5 @@
 // src/app/api/admin/quotes/[id]/email/send/route.ts
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { sendComposerEmail } from "@/lib/emailComposer/sendComposerEmail";
 import {
   buildQuoteCanvasEmailHtml,
@@ -75,9 +75,14 @@ function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Im
   return { featuredImage: null, galleryImages: [] };
 }
 
-export async function POST(req: Request, { params }: { params: { id: string } }) {
+export async function POST(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
   try {
-    const quoteId = safeTrim(params?.id);
+    const { id } = await context.params;
+    const quoteId = safeTrim(id);
+
     const body: any = await req.json().catch(() => ({}));
 
     const tenantId = safeTrim(body?.tenantId);
@@ -135,7 +140,11 @@ export async function POST(req: Request, { params }: { params: { id: string } })
 
     if (!from) {
       return NextResponse.json(
-        { ok: false, error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured" },
+        {
+          ok: false,
+          error:
+            "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured",
+        },
         { status: 400 }
       );
     }
