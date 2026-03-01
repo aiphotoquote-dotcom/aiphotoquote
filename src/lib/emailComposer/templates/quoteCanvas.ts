@@ -2,245 +2,205 @@
 
 type Img = { url: string; label: string };
 
-type PricingMode = "auto" | "fixed" | "range";
+type QuoteBlocks = {
+  showPricing?: boolean;
+  showSummary?: boolean;
+  showScope?: boolean;
+  showQuestions?: boolean;
+  showAssumptions?: boolean;
+
+  estimateText?: string;
+  pricingMode?: "fixed" | "range";
+  fixedPrice?: string;
+  rangeLow?: string;
+  rangeHigh?: string;
+
+  summary?: string;
+  visibleScope?: string[];
+  questions?: string[];
+  assumptions?: string[];
+};
+
+type Brand = {
+  name?: string;
+  logoUrl?: string;
+  tagline?: string;
+};
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
   return s ? s : "";
 }
 
-function escapeHtml(input: unknown) {
-  const s = String(input ?? "");
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function escAttr(input: unknown) {
-  // for attributes like src/href
-  return escapeHtml(input);
-}
-
 function toLines(text: unknown) {
-  // preserve newlines for pre-wrap blocks
-  return String(text ?? "").replace(/\r/g, "");
+  return String(text ?? "")
+    .split("\n")
+    .map((x) => x.replace(/\r/g, ""))
+    .join("\n");
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => safeTrim(x)).filter(Boolean);
+}
+
+function moneyFromString(v: unknown): number | null {
+  const s = safeTrim(v);
+  if (!s) return null;
+  const cleaned = s.replace(/[^0-9.]/g, "");
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return null;
+  return n;
 }
 
 function formatMoney(n: number) {
   try {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
   } catch {
     return `$${Math.round(n)}`;
   }
 }
 
-function parseMoneyMaybe(v: any): number | null {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+function escapeHtml(s: string) {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function pill(label: string) {
-  return `
-    <span style="
-      display:inline-block;
-      border:1px solid #E5E7EB;
-      background:#FFFFFF;
-      color:#111827;
-      border-radius:999px;
-      padding:6px 10px;
-      font-size:12px;
-      font-weight:700;
-      margin:0 8px 8px 0;
-    ">${escapeHtml(label)}</span>
-  `;
+function renderList(items: string[]) {
+  if (!items.length) return "";
+  const lis = items.map((x) => `<li style="margin:6px 0;">${escapeHtml(x)}</li>`).join("");
+  return `<ul style="margin:10px 0 0 18px;padding:0;">${lis}</ul>`;
 }
 
-function sectionCard(title: string, innerHtml: string) {
-  return `
-    <div style="
-      border:1px solid #E5E7EB;
-      background:#F9FAFB;
-      border-radius:14px;
-      padding:16px;
-      margin-top:12px;
-    ">
-      <div style="font-size:14px;font-weight:800;color:#111827;">${escapeHtml(title)}</div>
-      <div style="margin-top:8px;font-size:14px;line-height:1.6;color:#1F2937;">
-        ${innerHtml}
-      </div>
-    </div>
-  `;
-}
+function computePricingDisplay(qb: QuoteBlocks | undefined): { title: string; detail: string } {
+  const estimateText = safeTrim(qb?.estimateText);
 
-function list(items: string[]) {
-  if (!items?.length) return "";
-  const lis = items
-    .map((x) => `<li style="margin:0 0 6px 0;">${escapeHtml(x)}</li>`)
-    .join("");
-  return `<ul style="margin:8px 0 0 18px;padding:0;">${lis}</ul>`;
-}
+  const mode = qb?.pricingMode === "range" ? "range" : "fixed";
+  const fixed = moneyFromString(qb?.fixedPrice);
+  const low = moneyFromString(qb?.rangeLow);
+  const high = moneyFromString(qb?.rangeHigh);
 
-function normalizeImg(v: any): Img | null {
-  const url = safeTrim(v?.url ?? v?.publicUrl ?? v?.blobUrl ?? v);
-  if (!url) return null;
-  const label = safeTrim(v?.label ?? "");
-  return { url, label };
-}
-
-function normalizeImgs(v: any): Img[] {
-  if (!Array.isArray(v)) return [];
-  return v.map(normalizeImg).filter(Boolean) as Img[];
-}
-
-function derivePricing(args: {
-  pricingMode?: PricingMode;
-  priceFixed?: any;
-  priceLow?: any;
-  priceHigh?: any;
-  estimateText?: string;
-}) {
-  const mode: PricingMode = (args.pricingMode as PricingMode) || "auto";
-
-  const fixed = parseMoneyMaybe(args.priceFixed);
-  const low = parseMoneyMaybe(args.priceLow);
-  const high = parseMoneyMaybe(args.priceHigh);
-
-  if (mode === "fixed") {
-    if (fixed != null) return { mode, label: formatMoney(fixed) };
-    // fallback to estimateText if provided
-    const est = safeTrim(args.estimateText);
-    return { mode, label: est || "—" };
+  if (mode === "range" && low != null && high != null) {
+    return { title: "Quote at a glance", detail: `${formatMoney(low)} — ${formatMoney(high)}` };
+  }
+  if (mode === "fixed" && fixed != null) {
+    return { title: "Quote at a glance", detail: `${formatMoney(fixed)}` };
   }
 
-  if (mode === "range") {
-    if (low != null && high != null) return { mode, label: `${formatMoney(low)} — ${formatMoney(high)}` };
-    if (low != null) return { mode, label: `${formatMoney(low)}+` };
-    if (high != null) return { mode, label: `Up to ${formatMoney(high)}` };
-    const est = safeTrim(args.estimateText);
-    return { mode, label: est || "—" };
+  // ✅ fallback to AI estimate text (now sent in payload)
+  if (estimateText) {
+    return { title: "Quote at a glance", detail: estimateText };
   }
 
-  // auto
-  const est = safeTrim(args.estimateText);
-  return { mode: "auto" as const, label: est || "—" };
+  return { title: "Quote at a glance", detail: "Estimate pending" };
+}
+
+function emailFromDisplay(fromLike: string): string {
+  const s = safeTrim(fromLike);
+  if (!s) return "";
+  const m = s.match(/<([^>]+)>/);
+  if (m && m[1]) return safeTrim(m[1]);
+  return s;
 }
 
 export function buildQuoteCanvasEmailHtml(args: {
-  // required copy
   headline: string;
   intro: string;
   closing: string;
   subject: string;
 
-  // branding (optional)
-  shopName?: string | null;
-  shopLogoUrl?: string | null;
-  brandSubtitle?: string | null;
-
-  // images
   featuredImage?: Img | null;
   galleryImages?: Img[];
 
-  // quote blocks / toggles (optional)
-  quoteBlocks?: {
-    showPricing?: boolean;
-    showSummary?: boolean;
-    showScope?: boolean;
-    showQuestions?: boolean;
-    showAssumptions?: boolean;
+  brand?: Brand;
+  quoteBlocks?: QuoteBlocks;
 
-    // pricing
-    pricingMode?: PricingMode; // "auto" | "fixed" | "range"
-    priceFixed?: number | string | null;
-    priceLow?: number | string | null;
-    priceHigh?: number | string | null;
-
-    estimateText?: string; // used by auto mode (or fallback)
-    confidence?: string;
-    inspectionRequired?: boolean | null;
-
-    summary?: string;
-    visibleScope?: string[];
-    questions?: string[];
-    assumptions?: string[];
-  } | null;
+  // Optional: if you pass this later from route (e.g. the actual "from" address),
+  // the mailto button will use it.
+  replyToEmail?: string;
 }) {
-  const featured = normalizeImg(args.featuredImage);
-  const gallery = normalizeImgs(args.galleryImages);
+  const headline = escapeHtml(safeTrim(args.headline));
+  const intro = escapeHtml(toLines(args.intro));
+  const closing = escapeHtml(toLines(args.closing));
 
-  const qb = args.quoteBlocks || {};
+  const brandName = escapeHtml(safeTrim(args.brand?.name) || "Your Shop");
+  const brandTagline = escapeHtml(safeTrim(args.brand?.tagline) || "Quote ready to review");
+  const brandLogoUrl = safeTrim(args.brand?.logoUrl);
 
-  const showPricing = qb.showPricing !== false; // default true
-  const showSummary = qb.showSummary !== false; // default true
-  const showScope = qb.showScope === true; // default false
-  const showQuestions = qb.showQuestions !== false; // default true
-  const showAssumptions = qb.showAssumptions === true; // default false
+  const qb: QuoteBlocks = args.quoteBlocks ?? {};
+  const showPricing = qb.showPricing !== false;
+  const showSummary = qb.showSummary !== false;
+  const showScope = qb.showScope === true;
+  const showQuestions = qb.showQuestions !== false;
+  const showAssumptions = qb.showAssumptions === true;
 
-  const shopName = safeTrim(args.shopName) || "Your Shop";
-  const shopLogoUrl = safeTrim(args.shopLogoUrl);
-  const brandSubtitle = safeTrim(args.brandSubtitle) || "Quote ready to review";
+  const pricing = computePricingDisplay(qb);
 
-  const headline = safeTrim(args.headline);
-  const intro = toLines(args.intro);
-  const closing = toLines(args.closing);
+  const summary = safeTrim(qb.summary);
+  const visibleScope = asStringArray(qb.visibleScope);
+  const questions = asStringArray(qb.questions);
+  const assumptions = asStringArray(qb.assumptions);
 
-  const estimateText = safeTrim(qb.estimateText);
-  const confidence = safeTrim(qb.confidence);
-  const inspectionRequired = qb.inspectionRequired === true;
+  const featured = args.featuredImage?.url
+    ? `
+      <div style="margin-top:22px;">
+        <img src="${args.featuredImage.url}" alt="${escapeHtml(args.featuredImage.label || "Featured")}" style="width:100%;border-radius:16px;display:block;" />
+      </div>
+    `
+    : "";
 
-  const pricing = derivePricing({
-    pricingMode: qb.pricingMode,
-    priceFixed: qb.priceFixed,
-    priceLow: qb.priceLow,
-    priceHigh: qb.priceHigh,
-    estimateText,
-  });
+  const gallery =
+    args.galleryImages?.length
+      ? args.galleryImages
+          .map(
+            (img) => `
+            <div style="margin-top:14px;">
+              <img src="${img.url}" alt="${escapeHtml(img.label || "Image")}" style="width:100%;border-radius:12px;display:block;" />
+            </div>
+          `
+          )
+          .join("")
+      : "";
 
-  const summary = toLines(qb.summary);
-  const visibleScope = Array.isArray(qb.visibleScope) ? qb.visibleScope.map(safeTrim).filter(Boolean) : [];
-  const questions = Array.isArray(qb.questions) ? qb.questions.map(safeTrim).filter(Boolean) : [];
-  const assumptions = Array.isArray(qb.assumptions) ? qb.assumptions.map(safeTrim).filter(Boolean) : [];
+  const replyTo = safeTrim(args.replyToEmail);
+  const replyToEmail = replyTo ? emailFromDisplay(replyTo) : ""; // safe if already email
+  const mailto =
+    replyToEmail
+      ? `mailto:${encodeURIComponent(replyToEmail)}?subject=${encodeURIComponent(`Re: ${args.subject}`)}&body=${encodeURIComponent("Approved")}`
+      : "";
 
-  const pillsHtml = [
-    showPricing && pricing.label && pricing.label !== "—" ? pill(`Price: ${pricing.label}`) : "",
-    confidence ? pill(`Confidence: ${confidence}`) : "",
-    inspectionRequired ? pill("Inspection required") : "",
-  ]
-    .filter(Boolean)
-    .join("");
+  const brandLogo = brandLogoUrl
+    ? `<img src="${brandLogoUrl}" alt="${brandName}" style="width:36px;height:36px;border-radius:10px;object-fit:cover;display:block;" />`
+    : `<div style="width:36px;height:36px;border-radius:10px;background:#111827;"></div>`;
 
   const pricingBlock = showPricing
     ? `
-      <div style="
-        border:1px solid #E5E7EB;
-        background:#FFFFFF;
-        border-radius:16px;
-        padding:18px;
-        margin-top:18px;
-      ">
-        <div style="font-size:14px;font-weight:800;color:#111827;">Quote at a glance</div>
-        <div style="margin-top:10px;font-size:22px;font-weight:900;color:#111827;">
-          ${escapeHtml(pricing.label || "—")}
-        </div>
-        <div style="margin-top:10px;font-size:14px;line-height:1.6;color:#1F2937;">
+      <div style="margin-top:22px;border:1px solid #e5e7eb;border-radius:16px;padding:18px;background:#ffffff;">
+        <div style="font-size:14px;font-weight:700;color:#111827;">${escapeHtml(pricing.title)}</div>
+        <div style="margin-top:8px;font-size:22px;font-weight:800;color:#111827;">${escapeHtml(pricing.detail)}</div>
+        <div style="margin-top:10px;font-size:14px;line-height:1.6;color:#374151;">
           Reply to approve and we’ll schedule the job. If anything looks off, tell us what to adjust.
         </div>
-        <div style="
-          margin-top:14px;
-          border-radius:12px;
-          background:#111827;
-          color:#FFFFFF;
-          text-align:center;
-          font-size:14px;
-          font-weight:900;
-          padding:12px 14px;
-        ">
-          Reply “Approved” to schedule
-        </div>
-        <div style="margin-top:8px;font-size:12px;color:#6B7280;text-align:center;">
+
+        ${
+          mailto
+            ? `
+            <a href="${mailto}" style="display:block;margin-top:14px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;padding:12px 10px;font-weight:800;font-size:14px;text-decoration:none;">
+              Reply “Approved” to schedule
+            </a>
+          `
+            : `
+            <div style="margin-top:14px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;padding:12px 10px;font-weight:800;font-size:14px;">
+              Reply “Approved” to schedule
+            </div>
+          `
+        }
+
+        <div style="margin-top:8px;font-size:12px;color:#6b7280;text-align:center;">
           (You can ask questions or request changes — we’ll update the quote.)
         </div>
       </div>
@@ -248,128 +208,84 @@ export function buildQuoteCanvasEmailHtml(args: {
     : "";
 
   const summaryBlock =
-    showSummary && safeTrim(summary)
-      ? sectionCard("Summary", `<div style="white-space:pre-wrap;">${escapeHtml(summary)}</div>`)
+    showSummary && summary
+      ? `
+      <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
+        <div style="font-size:14px;font-weight:800;color:#111827;">Summary</div>
+        <div style="margin-top:8px;font-size:14px;line-height:1.6;color:#374151;white-space:pre-wrap;">${escapeHtml(
+          toLines(summary)
+        )}</div>
+      </div>
+    `
       : "";
 
   const scopeBlock =
     showScope && visibleScope.length
-      ? sectionCard("Visible scope", list(visibleScope))
+      ? `
+      <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
+        <div style="font-size:14px;font-weight:800;color:#111827;">Visible scope</div>
+        <div style="font-size:14px;line-height:1.6;color:#374151;">${renderList(visibleScope)}</div>
+      </div>
+    `
       : "";
 
   const questionsBlock =
     showQuestions && questions.length
-      ? sectionCard("A few quick questions (optional)", list(questions))
+      ? `
+      <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
+        <div style="font-size:14px;font-weight:800;color:#111827;">A few quick questions (optional)</div>
+        <div style="font-size:14px;line-height:1.6;color:#374151;">${renderList(questions)}</div>
+      </div>
+    `
       : "";
 
   const assumptionsBlock =
     showAssumptions && assumptions.length
-      ? sectionCard("Assumptions", list(assumptions))
+      ? `
+      <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
+        <div style="font-size:14px;font-weight:800;color:#111827;">Assumptions</div>
+        <div style="font-size:14px;line-height:1.6;color:#374151;">${renderList(assumptions)}</div>
+      </div>
+    `
       : "";
 
-  const featuredHtml = featured
-    ? `
-      <div style="margin-top:18px;overflow:hidden;border-radius:16px;border:1px solid #E5E7EB;">
-        <img src="${escAttr(featured.url)}" alt="${escAttr(featured.label)}" style="width:100%;display:block;max-height:520px;object-fit:cover;" />
-        ${
-          featured.label
-            ? `<div style="padding:10px 12px;font-size:12px;color:#4B5563;display:flex;justify-content:space-between;gap:10px;">
-                 <div style="font-weight:800;">${escapeHtml(featured.label)}</div>
-                 <div style="font-family:monospace;opacity:.7;">featured</div>
-               </div>`
-            : ""
-        }
-      </div>
-    `
-    : `
-      <div style="margin-top:18px;border:1px dashed #D1D5DB;border-radius:16px;background:#F9FAFB;padding:16px;color:#6B7280;font-size:14px;">
-        No images selected.
-      </div>
-    `;
-
-  const galleryHtml = gallery.length
-    ? `
-      <div style="margin-top:18px;">
-        <div style="font-size:12px;font-weight:800;color:#4B5563;margin-bottom:10px;">Included images</div>
-        ${gallery
-          .map(
-            (img, idx) => `
-              <div style="margin-top:12px;overflow:hidden;border-radius:14px;border:1px solid #E5E7EB;">
-                <img src="${escAttr(img.url)}" alt="${escAttr(img.label)}" style="width:100%;display:block;max-height:360px;object-fit:cover;" />
-                <div style="padding:8px 10px;font-size:11px;color:#4B5563;display:flex;justify-content:space-between;gap:10px;">
-                  <div style="font-weight:800;">${escapeHtml(img.label || "Image")}</div>
-                  <div style="font-family:monospace;opacity:.7;">#${idx + 1}</div>
-                </div>
-              </div>
-            `
-          )
-          .join("")}
-      </div>
-    `
-    : "";
-
-  const logoHtml = shopLogoUrl
-    ? `
-      <div style="width:40px;height:40px;border-radius:12px;overflow:hidden;background:#111827;">
-        <img src="${escAttr(shopLogoUrl)}" alt="${escAttr(shopName)}" style="width:40px;height:40px;object-fit:cover;display:block;" />
-      </div>
-    `
-    : `
-      <div style="width:40px;height:40px;border-radius:12px;background:#111827;"></div>
-    `;
-
   return `
-  <div style="font-family:Arial,Helvetica,sans-serif;background:#F3F4F6;padding:28px;">
-    <div style="max-width:720px;margin:0 auto;background:#FFFFFF;border-radius:18px;padding:24px;border:1px solid #E5E7EB;">
-      <!-- Brand bar -->
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          ${logoHtml}
+  <div style="font-family:Arial,Helvetica,sans-serif;background:#f3f4f6;padding:28px;">
+    <div style="max-width:680px;margin:0 auto;background:#ffffff;border-radius:18px;padding:26px;border:1px solid #e5e7eb;">
+      
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          ${brandLogo}
           <div>
-            <div style="font-size:14px;font-weight:900;color:#111827;">${escapeHtml(shopName)}</div>
-            <div style="font-size:12px;color:#6B7280;margin-top:2px;">${escapeHtml(brandSubtitle)}</div>
+            <div style="font-size:14px;font-weight:800;color:#111827;">${brandName}</div>
+            <div style="margin-top:2px;font-size:12px;color:#6b7280;">${brandTagline}</div>
           </div>
         </div>
       </div>
 
-      <!-- Headline -->
-      <div style="margin-top:18px;">
-        <div style="font-size:26px;line-height:1.2;font-weight:900;color:#111827;">
-          ${escapeHtml(headline || args.subject)}
-        </div>
+      <h1 style="margin:18px 0 0 0;font-size:26px;line-height:1.2;color:#111827;">
+        ${headline}
+      </h1>
+
+      <div style="margin-top:12px;white-space:pre-wrap;font-size:14px;line-height:1.7;color:#374151;">
+        ${intro}
       </div>
 
-      <!-- Intro -->
-      <div style="margin-top:12px;white-space:pre-wrap;font-size:14px;line-height:1.7;color:#1F2937;">
-        ${escapeHtml(intro)}
-      </div>
-
-      <!-- Pills -->
-      ${
-        pillsHtml
-          ? `<div style="margin-top:14px;">${pillsHtml}</div>`
-          : ""
-      }
-
-      <!-- Pricing + blocks -->
       ${pricingBlock}
       ${summaryBlock}
       ${scopeBlock}
       ${questionsBlock}
       ${assumptionsBlock}
 
-      <!-- Images -->
-      ${featuredHtml}
-      ${galleryHtml}
+      ${featured}
+      ${gallery}
 
-      <!-- Closing -->
-      <div style="margin-top:18px;white-space:pre-wrap;font-size:14px;line-height:1.7;color:#1F2937;">
-        ${escapeHtml(closing)}
+      <div style="margin-top:22px;white-space:pre-wrap;font-size:14px;line-height:1.7;color:#374151;">
+        ${closing}
       </div>
 
-      <!-- Footer -->
-      <div style="margin-top:22px;border-top:1px solid #E5E7EB;padding-top:12px;font-size:11px;color:#6B7280;">
-        Sent via AIPhotoQuote · Reply to this email for scheduling or adjustments.
+      <div style="margin-top:18px;border-top:1px solid #e5e7eb;padding-top:12px;font-size:11px;color:#9ca3af;">
+        This quote was generated from your photos. Reply to this email to approve, ask questions, or request changes.
       </div>
     </div>
   </div>
@@ -381,89 +297,39 @@ export function buildQuoteCanvasText(args: {
   intro: string;
   closing: string;
 
-  shopName?: string | null;
-
-  quoteBlocks?: {
-    showPricing?: boolean;
-    pricingMode?: PricingMode;
-    priceFixed?: number | string | null;
-    priceLow?: number | string | null;
-    priceHigh?: number | string | null;
-
-    estimateText?: string;
-    confidence?: string;
-    inspectionRequired?: boolean | null;
-
-    showSummary?: boolean;
-    summary?: string;
-
-    showScope?: boolean;
-    visibleScope?: string[];
-
-    showQuestions?: boolean;
-    questions?: string[];
-
-    showAssumptions?: boolean;
-    assumptions?: string[];
-  } | null;
+  brand?: Brand;
+  quoteBlocks?: QuoteBlocks;
 }) {
-  const shopName = safeTrim(args.shopName) || "Your Shop";
-  const qb = args.quoteBlocks || {};
+  const brandName = safeTrim(args.brand?.name);
+  const brandTagline = safeTrim(args.brand?.tagline);
 
+  const qb: QuoteBlocks = args.quoteBlocks ?? {};
   const showPricing = qb.showPricing !== false;
   const showSummary = qb.showSummary !== false;
   const showScope = qb.showScope === true;
   const showQuestions = qb.showQuestions !== false;
   const showAssumptions = qb.showAssumptions === true;
 
-  const pricing = derivePricing({
-    pricingMode: qb.pricingMode,
-    priceFixed: qb.priceFixed,
-    priceLow: qb.priceLow,
-    priceHigh: qb.priceHigh,
-    estimateText: safeTrim(qb.estimateText),
-  });
+  const pricing = computePricingDisplay(qb);
 
-  const lines: string[] = [];
-  lines.push(shopName);
-  lines.push("");
-  lines.push(safeTrim(args.headline));
-  lines.push("");
-  lines.push(toLines(args.intro));
-  lines.push("");
+  const summary = safeTrim(qb.summary);
+  const visibleScope = asStringArray(qb.visibleScope);
+  const questions = asStringArray(qb.questions);
+  const assumptions = asStringArray(qb.assumptions);
 
-  if (showPricing) {
-    lines.push(`Price: ${pricing.label || "—"}`);
-    if (safeTrim(qb.confidence)) lines.push(`Confidence: ${safeTrim(qb.confidence)}`);
-    if (qb.inspectionRequired === true) lines.push("Inspection required");
-    lines.push("");
-  }
+  const blocks: string[] = [];
 
-  if (showSummary && safeTrim(qb.summary)) {
-    lines.push("Summary:");
-    lines.push(toLines(qb.summary));
-    lines.push("");
-  }
+  if (brandName || brandTagline) blocks.push([brandName, brandTagline].filter(Boolean).join(" — "));
+  blocks.push(safeTrim(args.headline));
+  blocks.push(toLines(args.intro));
 
-  if (showScope && Array.isArray(qb.visibleScope) && qb.visibleScope.length) {
-    lines.push("Visible scope:");
-    for (const x of qb.visibleScope) lines.push(`- ${safeTrim(x)}`);
-    lines.push("");
-  }
+  if (showPricing) blocks.push(`${pricing.title}: ${pricing.detail}`);
+  if (showSummary && summary) blocks.push(`Summary:\n${toLines(summary)}`);
+  if (showScope && visibleScope.length) blocks.push(`Visible scope:\n- ${visibleScope.join("\n- ")}`);
+  if (showQuestions && questions.length) blocks.push(`Questions (optional):\n- ${questions.join("\n- ")}`);
+  if (showAssumptions && assumptions.length) blocks.push(`Assumptions:\n- ${assumptions.join("\n- ")}`);
 
-  if (showQuestions && Array.isArray(qb.questions) && qb.questions.length) {
-    lines.push("Questions:");
-    for (const x of qb.questions) lines.push(`- ${safeTrim(x)}`);
-    lines.push("");
-  }
+  blocks.push(toLines(args.closing));
 
-  if (showAssumptions && Array.isArray(qb.assumptions) && qb.assumptions.length) {
-    lines.push("Assumptions:");
-    for (const x of qb.assumptions) lines.push(`- ${safeTrim(x)}`);
-    lines.push("");
-  }
-
-  lines.push(toLines(args.closing));
-
-  return lines.join("\n").trim();
+  return blocks.filter(Boolean).join("\n\n").trim();
 }

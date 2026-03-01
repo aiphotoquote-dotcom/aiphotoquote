@@ -157,7 +157,7 @@ export default function QuoteEmailComposeClient(props: {
   initialSelectedRenderIds: string[];
   initialSelectedPhotoKeys: string[];
 
-  // ✅ brand props from server
+  // brand props from server (optional)
   brandName?: string;
   brandLogoUrl?: string;
   brandTagline?: string;
@@ -253,13 +253,14 @@ export default function QuoteEmailComposeClient(props: {
         ? assessment.inspectionRequired
         : null;
 
-  // ✅ editable blocks (initialize from AI, then allow edits)
+  // editable blocks
   const [summary, setSummary] = useState(safeTrim(assessment?.summary ?? ""));
   const [questions, setQuestions] = useState<string[]>(asStringArray(assessment?.questions));
   const [assumptions, setAssumptions] = useState<string[]>(asStringArray(assessment?.assumptions));
-  const [visibleScope, setVisibleScope] = useState<string[]>(asStringArray(assessment?.visible_scope ?? assessment?.visibleScope));
+  const [visibleScope, setVisibleScope] = useState<string[]>(
+    asStringArray(assessment?.visible_scope ?? assessment?.visibleScope)
+  );
 
-  // When version changes, refresh defaults (but don't clobber if already edited)
   useEffect(() => {
     setSummary(safeTrim(assessment?.summary ?? ""));
     setQuestions(asStringArray(assessment?.questions));
@@ -274,7 +275,6 @@ export default function QuoteEmailComposeClient(props: {
   const [rangeLow, setRangeLow] = useState<string>("");
   const [rangeHigh, setRangeHigh] = useState<string>("");
 
-  // Initialize pricing fields from AI estimate whenever version changes
   useEffect(() => {
     const a = assessment ?? {};
     const low =
@@ -354,7 +354,12 @@ export default function QuoteEmailComposeClient(props: {
   const [intro, setIntro] = useState(
     `Hi ${defaultName || "there"},\n\nThanks for reaching out. We reviewed your photos and put together a quote package below.\n\nIf you'd like to move forward, reply to this email and we'll get you scheduled.`
   );
-  const [closing, setClosing] = useState("Thanks,\n— " + (safeTrim(brandName) || safeTrim(lead?.shopName) || "Your Shop"));
+
+  const computedBrandName = safeTrim(brandName) || safeTrim(lead?.shopName) || "Your Shop Name";
+  const computedBrandLogoUrl = safeTrim(brandLogoUrl);
+  const computedBrandTagline = safeTrim(brandTagline) || "Quote ready to review";
+
+  const [closing, setClosing] = useState("Thanks,\n— " + computedBrandName);
 
   /* ------------------------------ section toggles ------------------------------ */
   const [showPricing, setShowPricing] = useState(true);
@@ -422,9 +427,9 @@ export default function QuoteEmailComposeClient(props: {
       bcc,
       subject,
 
-      brandName: safeTrim(brandName) || safeTrim(lead?.shopName) || "Your Shop Name",
-      brandLogoUrl: safeTrim(brandLogoUrl),
-      brandTagline: safeTrim(brandTagline) || "Quote ready to review",
+      brandName: computedBrandName,
+      brandLogoUrl: computedBrandLogoUrl,
+      brandTagline: computedBrandTagline,
 
       headline,
       intro,
@@ -470,10 +475,9 @@ export default function QuoteEmailComposeClient(props: {
     cc,
     bcc,
     subject,
-    brandName,
-    brandLogoUrl,
-    brandTagline,
-    lead,
+    computedBrandName,
+    computedBrandLogoUrl,
+    computedBrandTagline,
     headline,
     intro,
     closing,
@@ -499,18 +503,10 @@ export default function QuoteEmailComposeClient(props: {
 
   /* ------------------------------ media drawer ------------------------------ */
   const [mediaOpen, setMediaOpen] = useState(false);
-  function openMedia() {
-    setMediaOpen(true);
-  }
   function closeMedia() {
     setMediaOpen(false);
   }
-  function clearMedia() {
-    setSelectedRenderIds([]);
-    setSelectedPhotoKeys([]);
-  }
 
-  // First-run “guide”: if nothing is selected, open the drawer once.
   const [didAutopromptMedia, setDidAutopromptMedia] = useState(false);
   useEffect(() => {
     if (didAutopromptMedia) return;
@@ -610,34 +606,40 @@ export default function QuoteEmailComposeClient(props: {
         bcc: bccList,
         subject: safeTrim(subject),
 
-        // copy
         headline: safeTrim(headline),
         intro,
         closing,
 
-        // ✅ include editable blocks
+        // ✅ include editable blocks + IMPORTANT: estimateText
         quoteBlocks: {
           showPricing,
           showSummary,
           showScope,
           showQuestions,
           showAssumptions,
+
+          estimateText: safeTrim(aiEstimateText),
+
           summary,
           visibleScope,
           questions,
           assumptions,
+
           pricingMode,
           fixedPrice,
           rangeLow,
           rangeHigh,
         },
 
-        // ✅ include branding (server can ignore now, but useful for final HTML)
+        // ✅ send the SAME branding the preview shows (not the possibly-empty props)
         brand: {
-          name: safeTrim(brandName),
-          logoUrl: safeTrim(brandLogoUrl),
-          tagline: safeTrim(brandTagline),
+          name: safeTrim(previewModel.brandName),
+          logoUrl: safeTrim(previewModel.brandLogoUrl),
+          tagline: safeTrim(previewModel.brandTagline),
         },
+
+        // optional hint (template will use if present)
+        fromHint: safeTrim(previewModel.brandName),
 
         shareUrl: safeTrim(shareUrl),
       };
@@ -650,10 +652,7 @@ export default function QuoteEmailComposeClient(props: {
 
       const j: any = await r.json().catch(() => ({}));
       if (!r.ok || j?.ok === false) {
-        const msg =
-          safeTrim(j?.message) ||
-          safeTrim(j?.error) ||
-          (r.status ? `Send failed (${r.status})` : "Send failed");
+        const msg = safeTrim(j?.message) || safeTrim(j?.error) || (r.status ? `Send failed (${r.status})` : "Send failed");
         throw new Error(msg);
       }
 
@@ -726,11 +725,7 @@ export default function QuoteEmailComposeClient(props: {
                 <button type="button" onClick={() => setShowQuestions((v) => !v)} className={toggleBtn(showQuestions)}>
                   Questions
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setShowAssumptions((v) => !v)}
-                  className={toggleBtn(showAssumptions)}
-                >
+                <button type="button" onClick={() => setShowAssumptions((v) => !v)} className={toggleBtn(showAssumptions)}>
                   Assumptions
                 </button>
                 <button type="button" onClick={() => setShowScope((v) => !v)} className={toggleBtn(showScope)}>
