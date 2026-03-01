@@ -1,7 +1,7 @@
 // src/components/admin/quoteEmail/QuoteEmailComposeClient.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import QuoteEmailPreview, { type QuoteEmailPreviewModel } from "./QuoteEmailPreview";
 
 function safeTrim(v: any) {
@@ -60,17 +60,15 @@ function chip(text: string) {
 }
 
 function joinCsv(xs: string[]) {
-  return xs.map((x) => safeTrim(x)).filter(Boolean).join(",");
+  return xs
+    .map((x) => safeTrim(x))
+    .filter(Boolean)
+    .join(",");
 }
 
 /* ------------------- Version output parsing (best effort) ------------------- */
 function pickAiAssessmentFromAny(outAny: any) {
   const o = outAny ?? {};
-  // common shapes we’ve seen:
-  // - output.ai_assessment
-  // - output.output.ai_assessment
-  // - ai_assessment at top-level
-  // - assessment at top-level
   const candidates = [
     o?.ai_assessment,
     o?.output?.ai_assessment,
@@ -267,9 +265,9 @@ export default function QuoteEmailComposeClient(props: {
   /* ------------------------------ section toggles ------------------------------ */
   const [showPricing, setShowPricing] = useState(true);
   const [showSummary, setShowSummary] = useState(true);
-  const [showScope, setShowScope] = useState(false); // off by default (can be long)
+  const [showScope, setShowScope] = useState(false);
   const [showQuestions, setShowQuestions] = useState(true);
-  const [showAssumptions, setShowAssumptions] = useState(false); // off by default
+  const [showAssumptions, setShowAssumptions] = useState(false);
 
   function toggleRender(id: string) {
     setSelectedRenderIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -337,7 +335,6 @@ export default function QuoteEmailComposeClient(props: {
       featuredImage: featured ? { url: featured.url, label: featured.label } : null,
       galleryImages: gallery.map((x) => ({ url: x.url, label: x.label })),
 
-      // Quote blocks (new)
       quoteBlocks: {
         showPricing,
         showSummary,
@@ -402,6 +399,16 @@ export default function QuoteEmailComposeClient(props: {
     setSelectedPhotoKeys([]);
   }
 
+  // First-run “guide”: if nothing is selected, open the drawer once.
+  const [didAutopromptMedia, setDidAutopromptMedia] = useState(false);
+  useEffect(() => {
+    if (didAutopromptMedia) return;
+    if (totalSelectedImages === 0) {
+      setMediaOpen(true);
+      setDidAutopromptMedia(true);
+    }
+  }, [didAutopromptMedia, totalSelectedImages]);
+
   const shareUrl = useMemo(() => {
     const sp = new URLSearchParams();
     sp.set("template", templateKey);
@@ -410,6 +417,18 @@ export default function QuoteEmailComposeClient(props: {
     if (selectedPhotoKeys.length) sp.set("photos", joinCsv(selectedPhotoKeys));
     return `/admin/quotes/${encodeURIComponent(quoteId)}/email/compose?${sp.toString()}`;
   }, [templateKey, selectedVersionNumber, selectedRenderIds, selectedPhotoKeys, quoteId]);
+
+  const [copied, setCopied] = useState(false);
+  async function copyShareUrl() {
+    try {
+      const full = typeof window !== "undefined" ? new URL(shareUrl, window.location.origin).toString() : shareUrl;
+      await navigator.clipboard.writeText(full);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // swallow
+    }
+  }
 
   function toggleBtn(active: boolean) {
     return (
@@ -420,6 +439,8 @@ export default function QuoteEmailComposeClient(props: {
     );
   }
 
+  const canSend = Boolean(safeTrim(to)) && totalSelectedImages > 0 && Boolean(safeTrim(subject));
+
   return (
     <div className="space-y-6">
       {/* Sticky builder bar */}
@@ -428,7 +449,7 @@ export default function QuoteEmailComposeClient(props: {
           <div className="flex flex-wrap items-center gap-2">
             {/* Version */}
             <div className="flex items-center gap-2">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Version</div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">1) Version</div>
               <select
                 value={selectedVersionNumber}
                 onChange={(e) => setSelectedVersionNumber(e.target.value)}
@@ -448,7 +469,7 @@ export default function QuoteEmailComposeClient(props: {
 
             {/* Template */}
             <div className="ml-1 flex items-center gap-2">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Template</div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">2) Template</div>
               <div className="flex flex-wrap gap-2">
                 {(["standard", "before_after", "visual_first"] as TemplateKey[]).map((k) => {
                   const active = k === templateKey;
@@ -469,7 +490,7 @@ export default function QuoteEmailComposeClient(props: {
 
             {/* Sections */}
             <div className="ml-1 flex items-center gap-2">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Sections</div>
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">3) Sections</div>
               <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={() => setShowPricing((v) => !v)} className={toggleBtn(showPricing)}>
                   Pricing
@@ -480,7 +501,11 @@ export default function QuoteEmailComposeClient(props: {
                 <button type="button" onClick={() => setShowQuestions((v) => !v)} className={toggleBtn(showQuestions)}>
                   Questions
                 </button>
-                <button type="button" onClick={() => setShowAssumptions((v) => !v)} className={toggleBtn(showAssumptions)}>
+                <button
+                  type="button"
+                  onClick={() => setShowAssumptions((v) => !v)}
+                  className={toggleBtn(showAssumptions)}
+                >
                   Assumptions
                 </button>
                 <button type="button" onClick={() => setShowScope((v) => !v)} className={toggleBtn(showScope)}>
@@ -517,9 +542,27 @@ export default function QuoteEmailComposeClient(props: {
 
             <button
               type="button"
+              onClick={copyShareUrl}
+              className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
+              title="Copy shareable builder URL"
+            >
+              {copied ? "Copied!" : "Copy link"}
+            </button>
+
+            <button
+              type="button"
               disabled
-              className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white opacity-50 dark:bg-white dark:text-black"
-              title="Send will be wired after Preview + API route"
+              className={
+                "rounded-lg px-4 py-2 text-sm font-semibold " +
+                (canSend
+                  ? "bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
+                  : "bg-black text-white opacity-50 dark:bg-white dark:text-black")
+              }
+              title={
+                canSend
+                  ? "Send will be wired next"
+                  : "To send: add To + select at least 1 image (Send wiring comes next)"
+              }
             >
               Send (next)
             </button>
@@ -546,7 +589,7 @@ export default function QuoteEmailComposeClient(props: {
               value={cc}
               onChange={(e) => setCc(e.target.value)}
               placeholder="optional"
-              className="mt-2 w-full rounded-lg border bordergray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+              className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
           </div>
 
@@ -743,7 +786,7 @@ export default function QuoteEmailComposeClient(props: {
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
                 <div className="font-semibold">Tip</div>
                 <div className="mt-1">
-                  The preview chooses a “featured” image automatically based on template, then builds a clean gallery.
+                  The preview chooses a featured image automatically based on the template, then builds a clean gallery.
                 </div>
               </div>
             </div>
