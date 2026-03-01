@@ -469,7 +469,12 @@ export default function QuoteEmailComposeClient(props: {
   const bccOk = bccList.every(looksLikeEmail);
 
   const canSend =
-    toOk && totalSelectedImages > 0 && Boolean(safeTrim(subject)) && Boolean(safeTrim(selectedVersionNumber)) && ccOk && bccOk;
+    toOk &&
+    totalSelectedImages > 0 &&
+    Boolean(safeTrim(subject)) &&
+    Boolean(safeTrim(selectedVersionNumber)) &&
+    ccOk &&
+    bccOk;
 
   /* ------------------------------ send wiring (new engine) ------------------------------ */
   const [sending, setSending] = useState(false);
@@ -507,6 +512,16 @@ export default function QuoteEmailComposeClient(props: {
       return;
     }
 
+    // Hard requirement for server-side template building:
+    // Send actual image URLs (not only ids/keys).
+    const featuredImage = previewModel.featuredImage ?? null;
+    const galleryImages = Array.isArray(previewModel.galleryImages) ? previewModel.galleryImages : [];
+
+    if (!featuredImage && galleryImages.length === 0) {
+      setSendError("No images available to send. Select at least one image.");
+      return;
+    }
+
     setSending(true);
     try {
       // New send engine endpoint (does NOT touch existing /quote/submit email paths)
@@ -516,11 +531,18 @@ export default function QuoteEmailComposeClient(props: {
         tenantId,
         quoteId,
 
-        // “package” selectors
+        // “package” selectors (useful for telemetry / future server-side re-hydration)
         templateKey,
         versionNumber: safeTrim(selectedVersionNumber),
         renderIds: [...selectedRenderIds],
         photoKeys: [...selectedPhotoKeys],
+
+        // ✅ Actual images needed to build email HTML without DB:
+        featuredImage,
+        galleryImages,
+
+        // ✅ Optional: complete list (route supports selectedImages too)
+        selectedImages: selectedImages.map((x) => ({ url: x.url, label: x.label })),
 
         // addressing + copy overrides
         to: safeTrim(to),
@@ -532,7 +554,7 @@ export default function QuoteEmailComposeClient(props: {
         intro,
         closing,
 
-        // blocks/toggles
+        // blocks/toggles (kept for future template variants; route may ignore today)
         quoteBlocks: {
           showPricing,
           showSummary,
