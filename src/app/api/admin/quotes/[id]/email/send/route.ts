@@ -12,11 +12,9 @@ function buildPlatformFrom(): string | null {
   const fallback = safeTrim(process.env.RESEND_FALLBACK_FROM) || safeTrim(process.env.PLATFORM_FROM_EMAIL);
   if (!fallback) return null;
 
-  // If RESEND_FALLBACK_FROM already includes a display-name, keep it.
-  // Otherwise optionally add PLATFORM_FROM_NAME.
+  // If already has display-name, keep it. Otherwise optionally add PLATFORM_FROM_NAME.
   const name = safeTrim(process.env.PLATFORM_FROM_NAME);
   if (fallback.includes("<") && fallback.includes(">")) return fallback;
-
   return name ? `${name} <${fallback}>` : fallback;
 }
 
@@ -31,7 +29,7 @@ function asOptionalStringArray(v: any): string[] | undefined {
   return xs.length ? xs : undefined;
 }
 
-// NOTE: label is REQUIRED by template typing (can be empty string)
+// NOTE: label is REQUIRED because buildQuoteCanvasEmailHtml expects it.
 type Img = { url: string; label: string };
 
 function normalizeImg(v: any): Img | null {
@@ -48,9 +46,9 @@ function normalizeImgs(v: any): Img[] {
 
 /**
  * Accept a few possible client payloads:
- * 1) { featuredImage, galleryImages }
- * 2) { selectedImages: [{url,label}] } (we auto-pick first as featured)
- * 3) { images: [...] }
+ * 1) { featuredImage, galleryImages } (preferred)
+ * 2) { selectedImages: [{url,label,kind}] } (fallback)
+ * 3) { images: [...] } (generic)
  */
 function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Img[] } {
   const featured = normalizeImg(body?.featuredImage);
@@ -66,6 +64,22 @@ function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Im
   }
 
   return { featuredImage: null, galleryImages: [] };
+}
+
+function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: string } | undefined {
+  // Preferred shape: body.brand = { name, logoUrl, tagline }
+  const b = body?.brand ?? null;
+  const name = safeTrim(b?.name ?? body?.shopName ?? "");
+  const logoUrl = safeTrim(b?.logoUrl ?? body?.shopLogoUrl ?? "");
+  const tagline = safeTrim(b?.tagline ?? body?.brandSubtitle ?? body?.brandTagline ?? "");
+
+  const out = {
+    ...(name ? { name } : {}),
+    ...(logoUrl ? { logoUrl } : {}),
+    ...(tagline ? { tagline } : {}),
+  };
+
+  return Object.keys(out).length ? out : undefined;
 }
 
 export async function POST(req: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -91,53 +105,50 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     }
 
     const headline = safeTrim(body?.headline);
-    const intro = String(body?.intro ?? "");
-    const closing = String(body?.closing ?? "");
+    const intro = safeTrim(body?.intro);
+    const closing = safeTrim(body?.closing);
 
-    // Branding (from preview payload)
-    const shopName = safeTrim(body?.shopName ?? body?.brand?.shopName ?? body?.lead?.shopName ?? "");
-    const shopLogoUrl = safeTrim(body?.shopLogoUrl ?? body?.brand?.shopLogoUrl ?? body?.logoUrl ?? "");
-    const brandSubtitle = safeTrim(body?.brandSubtitle ?? "");
-
-    // Images
     const { featuredImage, galleryImages } = deriveImages(body);
-
-    // Quote blocks payload (forwarded)
-    const qb = body?.quoteBlocks && typeof body.quoteBlocks === "object" ? body.quoteBlocks : null;
-
-    // Template HTML/Text (now supports brand + quoteBlocks)
-    const html = buildQuoteCanvasEmailHtml({
-      headline: headline || subject,
-      intro,
-      closing,
-      subject,
-      shopName: shopName || null,
-      shopLogoUrl: shopLogoUrl || null,
-      brandSubtitle: brandSubtitle || null,
-      featuredImage,
-      galleryImages,
-      quoteBlocks: qb,
-    });
-
-    const text = buildQuoteCanvasText({
-      headline: headline || subject,
-      intro,
-      closing,
-      shopName: shopName || null,
-      quoteBlocks: qb,
-    });
 
     // Ensure From exists (providers require it)
     const from = safeTrim(body?.from) || buildPlatformFrom() || null;
     if (!from) {
       return NextResponse.json(
-        { ok: false, error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured" },
+        {
+          ok: false,
+          error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured",
+        },
         { status: 400 }
       );
     }
 
     const cc = asOptionalStringArray(body?.cc);
     const bcc = asOptionalStringArray(body?.bcc);
+
+    const brand = deriveBrand(body);
+    const quoteBlocks = body?.quoteBlocks ?? undefined;
+
+    // Template HTML/Text
+    const html = buildQuoteCanvasEmailHtml({
+      headline,
+      intro,
+      closing,
+      subject,
+      featuredImage,
+      galleryImages,
+      brand,
+      quoteBlocks,
+      // ✅ make the “Approved” button clickable via mailto
+      replyToEmail: from,
+    });
+
+    const text = buildQuoteCanvasText({
+      headline,
+      intro,
+      closing,
+      brand,
+      quoteBlocks,
+    });
 
     const result = await sendComposerEmail({
       tenantId,
