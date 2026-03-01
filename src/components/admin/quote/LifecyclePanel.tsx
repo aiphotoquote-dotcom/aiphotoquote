@@ -3,6 +3,7 @@ import React from "react";
 
 import QuoteNotesComposer from "@/components/admin/QuoteNotesComposer";
 import RenderGallery from "@/components/admin/quote/RenderGallery";
+import RenderProgressBar from "@/components/admin/quote/RenderProgressBar";
 import { chip } from "@/components/admin/quote/ui";
 import { extractEstimate, pickAiAssessmentFromAny } from "@/lib/admin/quotes/normalize";
 import { formatUSD, humanWhen, safeTrim, tryJson } from "@/lib/admin/quotes/utils";
@@ -80,6 +81,11 @@ export default function LifecyclePanel(props: {
   const rendersCount = renderRows?.length ?? 0;
 
   const defaultRenderVersionNumber = pickDefaultRenderVersionNumber(versionRows, activeVersion);
+
+  // ✅ progress bar state (simple + stable)
+  const queuedCount = (renderRows ?? []).filter((r: any) => String(r?.status ?? "").toLowerCase() === "queued").length;
+  const runningCount = (renderRows ?? []).filter((r: any) => String(r?.status ?? "").toLowerCase() === "running").length;
+  const renderingActive = queuedCount + runningCount > 0;
 
   return (
     <section
@@ -280,7 +286,11 @@ export default function LifecyclePanel(props: {
                             <input type="hidden" name="quote_id" value={quoteId} />
                             <input type="hidden" name="version_id" value={v.id} />
                             <input type="hidden" name="version_number" value={String(vnum)} />
-                            <input type="hidden" name="active_version" value={activeVersion != null ? String(activeVersion) : ""} />
+                            <input
+                              type="hidden"
+                              name="active_version"
+                              value={activeVersion != null ? String(activeVersion) : ""}
+                            />
 
                             <button
                               type="submit"
@@ -291,7 +301,11 @@ export default function LifecyclePanel(props: {
                                   ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500 cursor-not-allowed"
                                   : "border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30")
                               }
-                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version (and its renders + linked notes)"}
+                              title={
+                                isActive
+                                  ? "Cannot delete the ACTIVE version"
+                                  : "Delete this version (and its renders + linked notes)"
+                              }
                             >
                               Delete
                             </button>
@@ -404,12 +418,17 @@ export default function LifecyclePanel(props: {
             {rendersCount ? chip("Attempts", "gray") : chip("Empty", "gray")}
           </div>
 
+          {/* ✅ Progress bar restored */}
+          <RenderProgressBar active={renderingActive} queuedCount={queuedCount} runningCount={runningCount} />
+
           {/* ✅ New render control */}
           <div className="mt-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">Queues a render attempt for the selected version.</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                  Queues a render attempt for the selected version.
+                </div>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 Default: <span className="font-mono">{defaultRenderVersionNumber || "—"}</span>
@@ -469,7 +488,7 @@ export default function LifecyclePanel(props: {
           </div>
 
           <div className="mt-4">
-<RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
+            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
           </div>
         </div>
       </div>
