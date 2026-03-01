@@ -43,7 +43,7 @@ function pill(active: boolean) {
 export default function RenderGallery(props: {
   quoteId: string;
   renderRows: RenderRow[];
-  deleteRenderAction?: any; // ✅ server action (optional)
+  deleteRenderAction?: any; // ✅ exported server action from /actions.ts
 }) {
   const { quoteId, renderRows, deleteRenderAction } = props;
 
@@ -98,9 +98,7 @@ export default function RenderGallery(props: {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Render gallery</h3>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Click to preview. Select tiles to include them in an email.
-          </p>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Click to preview. Select tiles to include them in an email.</p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -146,9 +144,7 @@ export default function RenderGallery(props: {
             <div className="h-full w-full animate-pulse bg-blue-500/70 dark:bg-blue-300/60" />
           </div>
 
-          <div className="mt-2 text-[11px] text-blue-900/70 dark:text-blue-200/70">
-            Tip: this panel updates on refresh. (Next improvement: live polling.)
-          </div>
+          <div className="mt-2 text-[11px] text-blue-900/70 dark:text-blue-200/70">Tip: refresh to see updates (next: polling).</div>
         </div>
       ) : null}
 
@@ -230,7 +226,7 @@ export default function RenderGallery(props: {
                             : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-gray-950 dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
                         }
                         title="Toggle selection"
-                        disabled={!isRendered} // keep compose clean: only rendered images selectable
+                        disabled={!isRendered}
                       >
                         {active ? "Selected" : "Select"}
                       </button>
@@ -249,7 +245,7 @@ export default function RenderGallery(props: {
                       )}
                     </div>
 
-                    {/* ✅ Delete / Archive control (server action) */}
+                    {/* ✅ Delete attempt (server action) */}
                     {deleteRenderAction ? (
                       <div className="mt-2">
                         <form
@@ -258,6 +254,7 @@ export default function RenderGallery(props: {
                             if (!window.confirm("Delete this render attempt? This cannot be undone.")) e.preventDefault();
                           }}
                         >
+                          <input type="hidden" name="quote_id" value={quoteId} />
                           <input type="hidden" name="render_id" value={id} />
                           <button
                             type="submit"

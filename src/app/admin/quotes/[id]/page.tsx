@@ -16,7 +16,7 @@ import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
 
 import { db } from "@/lib/db/client";
-import { quoteLogs, quoteNotes, quoteRenders, quoteVersions, tenantMembers } from "@/lib/db/schema";
+import { quoteNotes, quoteRenders, quoteVersions, tenantMembers, quoteLogs } from "@/lib/db/schema";
 
 import { resolveActiveTenantId } from "@/lib/admin/quotes/getActiveTenant";
 import { findRedirectTenantForQuote, getAdminQuoteRow } from "@/lib/admin/quotes/getQuote";
@@ -40,6 +40,9 @@ import {
 
 import { adminReassessQuote } from "@/lib/quotes/adminReassess";
 import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
+
+// ✅ IMPORTED ACTIONS (safe to pass into Client Components)
+import { deleteNoteAction, deleteRenderAction, deleteVersionAction } from "./actions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,11 +70,6 @@ function safeTrimLocal(v: unknown) {
   return s ? s : "";
 }
 
-/**
- * ✅ Free Vercel pattern:
- * We can’t rely on scheduled cron, so we “kick” the worker immediately
- * after enqueue by calling /api/cron/render?max=1 with CRON_SECRET.
- */
 function getBaseUrlFromEnv() {
   const envBase = safeTrimLocal(process.env.NEXT_PUBLIC_APP_URL) || safeTrimLocal(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
@@ -79,7 +77,6 @@ function getBaseUrlFromEnv() {
   const vercel = safeTrimLocal(process.env.VERCEL_URL);
   if (vercel) return `https://${vercel.replace(/\/+$/, "")}`;
 
-  // local dev fallback
   return "http://localhost:3000";
 }
 
@@ -134,19 +131,9 @@ async function tryKickRenderCronNow(): Promise<
   }
 }
 
-/**
- * ✅ Ensure we always have a “v0” so lifecycle renders can attach to something.
- * This makes “original quote = version0” true.
- */
-async function ensureVersion0(args: {
-  tenantId: string;
-  quoteLogId: string;
-  actorUserId: string;
-  quoteOutput: any;
-}) {
+async function ensureVersion0(args: { tenantId: string; quoteLogId: string; actorUserId: string; quoteOutput: any }) {
   const { tenantId, quoteLogId, quoteOutput } = args;
 
-  // If any version exists, do nothing.
   const existing = await db
     .select({ id: quoteVersions.id, version: quoteVersions.version })
     .from(quoteVersions)
@@ -157,8 +144,6 @@ async function ensureVersion0(args: {
 
   if (existing?.id) return { created: false as const, versionId: String(existing.id), version: Number(existing.version ?? 0) };
 
-  // Try to create v0 with raw SQL so we don’t get blocked by schema typing drift.
-  // We only reference columns we *know* exist from your cron loader: (id, tenant_id, quote_log_id, version, output, ai_mode).
   const inserted = await db.execute(sql`
     insert into quote_versions (
       id,
@@ -184,7 +169,6 @@ async function ensureVersion0(args: {
   const versionId = (inserted as any)?.rows?.[0]?.id ? String((inserted as any).rows[0].id) : null;
   if (!versionId) return { created: false as const, versionId: null as any, version: null as any };
 
-  // Best-effort: mark current_version=0 on quote_logs (helps the “ACTIVE” concept)
   try {
     await db.execute(sql`
       update quote_logs
@@ -259,10 +243,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   let isRead = Boolean(rowSnap.isRead);
 
   if (!skipAutoRead && !isRead) {
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     isRead = true;
   }
 
@@ -303,18 +284,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions)
-    ? aiAssessment.questions.map((x: any) => String(x))
-    : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
-    ? aiAssessment.assumptions.map((x: any) => String(x))
-    : [];
-  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
-    ? aiAssessment.visible_scope.map((x: any) => String(x))
-    : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
+  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope) ? aiAssessment.visible_scope.map((x: any) => String(x)) : [];
 
-  const pricingBasis: any =
-    aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
+  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
   const inputAny: any = rowSnap.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
@@ -329,24 +303,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
-  const activeVersion =
-    typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
+  const activeVersion = typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
-  // ✅ Only rendered attempts (for email builder)
-  const renderedRenders = (renderRows ?? []).filter(
-    (r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl)
-  );
+  const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
 
   async function ensureActiveMembership(actorUserId: string, tenantIdNow: string) {
     const membership = await db
       .select({ ok: sql<number>`1` })
       .from(tenantMembers)
       .where(
-        and(
-          eq(tenantMembers.tenantId, tenantIdNow),
-          eq(tenantMembers.clerkUserId, actorUserId),
-          eq(tenantMembers.status, "active")
-        )
+        and(eq(tenantMembers.tenantId, tenantIdNow), eq(tenantMembers.clerkUserId, actorUserId), eq(tenantMembers.status, "active"))
       )
       .limit(1)
       .then((r) => r[0] ?? null);
@@ -357,7 +323,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   /* -------------------- server actions -------------------- */
   async function setStage(formData: FormData) {
     "use server";
-
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
@@ -365,37 +330,25 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     const allowed = new Set((await import("@/lib/admin/quotes/normalize")).STAGES.map((s) => s.key));
     if (!allowed.has(next as any)) redirect(`/admin/quotes/${encodeURIComponent(id)}`);
 
-    await db
-      .update(quoteLogs)
-      .set({ stage: next } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
-
+    await db.update(quoteLogs).set({ stage: next } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
   async function markUnread() {
     "use server";
-
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
-    await db
-      .update(quoteLogs)
-      .set({ isRead: false } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: false } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}?skipAutoRead=1`);
   }
 
   async function markRead() {
     "use server";
-
     const session = await auth();
     if (!session.userId) redirect("/sign-in");
 
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
+    await db.update(quoteLogs).set({ isRead: true } as any).where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -415,29 +368,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     if (noteBody) {
       const inserted = await db
         .insert(quoteNotes)
-        .values({
-          tenantId,
-          quoteLogId: id,
-          quoteVersionId: null,
-          createdBy: actorUserId,
-          body: noteBody,
-        } as any)
+        .values({ tenantId, quoteLogId: id, quoteVersionId: null, createdBy: actorUserId, body: noteBody } as any)
         .returning({ id: quoteNotes.id })
         .then((r) => r[0] ?? null);
 
       createdNoteId = inserted?.id ? String(inserted.id) : null;
     }
 
-    const engine: AdminReassessEngine =
-      engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
+    const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
-    const quoteLog: QuoteLogRow = {
-      id,
-      tenant_id: tenantId,
-      input: rowSnap.input ?? {},
-      qa: (rowSnap as any).qa ?? {},
-      output: rowSnap.output ?? {},
-    };
+    const quoteLog: QuoteLogRow = { id, tenant_id: tenantId, input: rowSnap.input ?? {}, qa: (rowSnap as any).qa ?? {}, output: rowSnap.output ?? {} };
 
     const result = await adminReassessQuote({
       quoteLog,
@@ -449,14 +389,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     });
 
     if (createdNoteId) {
-      await db
-        .update(quoteNotes)
-        .set({ quoteVersionId: result.versionId } as any)
-        .where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
+      await db.update(quoteNotes).set({ quoteVersionId: result.versionId } as any).where(and(eq(quoteNotes.id, createdNoteId), eq(quoteNotes.tenantId, tenantId)));
     }
 
     void aiMode;
-
     redirect(`/admin/quotes/${encodeURIComponent(id)}`);
   }
 
@@ -475,9 +411,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const updated = await db.execute(sql`
       with picked as (
-        select
-          v.output as output,
-          v.version as version
+        select v.output as output, v.version as version
         from quote_versions v
         where v.id = ${versionId}::uuid
           and v.tenant_id = ${tenantId}::uuid
@@ -485,9 +419,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         limit 1
       )
       update quote_logs q
-      set
-        output = picked.output,
-        current_version = picked.version
+      set output = picked.output, current_version = picked.version
       from picked
       where q.id = ${id}::uuid
         and q.tenant_id = ${tenantId}::uuid
@@ -517,14 +449,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const shopNotes = safeTrim(formData.get("shop_notes"));
 
-    // ✅ Ensure we have version0 at least (original quote snapshot)
     try {
-      await ensureVersion0({
-        tenantId: tenantIdNow,
-        quoteLogId: id,
-        actorUserId,
-        quoteOutput: rowSnap.output ?? {},
-      });
+      await ensureVersion0({ tenantId: tenantIdNow, quoteLogId: id, actorUserId, quoteOutput: rowSnap.output ?? {} });
     } catch {
       // ignore
     }
@@ -540,9 +466,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       const hit = await db
         .select({ id: quoteVersions.id, version: quoteVersions.version })
         .from(quoteVersions)
-        .where(
-          and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.id, candidate))
-        )
+        .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.id, candidate)))
         .limit(1)
         .then((r) => r[0] ?? null);
 
@@ -553,13 +477,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
     }
 
     if (!resolvedVersionId) {
-      const vnum = parsePositiveInt(candidate) ?? 0; // ✅ allow v0
+      const vnum = parsePositiveInt(candidate) ?? 0;
       const picked = await db
         .select({ id: quoteVersions.id, version: quoteVersions.version })
         .from(quoteVersions)
-        .where(
-          and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.version, vnum))
-        )
+        .where(and(eq(quoteVersions.tenantId, tenantIdNow), eq(quoteVersions.quoteLogId, id), eq(quoteVersions.version, vnum)))
         .orderBy(desc(quoteVersions.createdAt))
         .limit(1)
         .then((r) => r[0] ?? null);
@@ -583,9 +505,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         redirect(
           `/admin/quotes/${encodeURIComponent(id)}?renderError=version_number_not_found&version_number=${encodeURIComponent(
             String(vnum)
-          )}&available_versions=${encodeURIComponent(availableVersions.join(","))}&activeTenant=${encodeURIComponent(
-            tenantIdNow
-          )}#renders`
+          )}&available_versions=${encodeURIComponent(availableVersions.join(","))}&activeTenant=${encodeURIComponent(tenantIdNow)}#renders`
         );
       }
     }
@@ -601,132 +521,21 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
     const inserted = await db
       .insert(quoteRenders)
-      .values({
-        tenantId: tenantIdNow,
-        quoteLogId: id,
-        quoteVersionId: resolvedVersionId!,
-        attempt: nextAttempt,
-        status: "queued" as any,
-        shopNotes: shopNotes || null,
-      } as any)
+      .values({ tenantId: tenantIdNow, quoteLogId: id, quoteVersionId: resolvedVersionId!, attempt: nextAttempt, status: "queued" as any, shopNotes: shopNotes || null } as any)
       .returning({ id: quoteRenders.id })
       .then((r) => r[0] ?? null);
 
     const ok = Boolean(inserted?.id);
     if (!ok) {
-      redirect(
-        `/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed&activeTenant=${encodeURIComponent(
-          tenantIdNow
-        )}&version=${encodeURIComponent(String(resolvedVersionNumber ?? ""))}#renders`
-      );
+      redirect(`/admin/quotes/${encodeURIComponent(id)}?renderError=insert_failed&activeTenant=${encodeURIComponent(tenantIdNow)}&version=${encodeURIComponent(String(resolvedVersionNumber ?? ""))}#renders`);
     }
 
-    // ✅ Immediately kick the worker
     const kick = await tryKickRenderCronNow();
     if (kick.attempted && !kick.ok) {
-      redirect(
-        `/admin/quotes/${encodeURIComponent(id)}?renderWarn=cron_kick_failed&kick_reason=${encodeURIComponent(
-          kick.reason
-        )}&kick_status=${encodeURIComponent(String((kick as any).status ?? ""))}#renders`
-      );
+      redirect(`/admin/quotes/${encodeURIComponent(id)}?renderWarn=cron_kick_failed&kick_reason=${encodeURIComponent(kick.reason)}&kick_status=${encodeURIComponent(String((kick as any).status ?? ""))}#renders`);
     }
 
     redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
-  }
-
-  // ✅ Delete note (hard delete)
-  async function deleteNote(formData: FormData) {
-    "use server";
-
-    const session = await auth();
-    const actorUserId = session.userId;
-    if (!actorUserId) redirect("/sign-in");
-
-    const okMember = await ensureActiveMembership(actorUserId, tenantId);
-    if (!okMember) redirect(`/admin/quotes/${encodeURIComponent(id)}?deleteError=forbidden#lifecycle`);
-
-    const noteId = safeTrim(formData.get("note_id"));
-    if (!noteId) redirect(`/admin/quotes/${encodeURIComponent(id)}#lifecycle`);
-
-    await db.execute(sql`
-      delete from quote_notes
-      where id = ${noteId}::uuid
-        and tenant_id = ${tenantId}::uuid
-        and quote_log_id = ${id}::uuid
-    `);
-
-    redirect(`/admin/quotes/${encodeURIComponent(id)}#lifecycle`);
-  }
-
-  // ✅ Delete render attempt (hard delete)
-  async function deleteRender(formData: FormData) {
-    "use server";
-
-    const session = await auth();
-    const actorUserId = session.userId;
-    if (!actorUserId) redirect("/sign-in");
-
-    const okMember = await ensureActiveMembership(actorUserId, tenantId);
-    if (!okMember) redirect(`/admin/quotes/${encodeURIComponent(id)}?deleteError=forbidden#renders`);
-
-    const renderId = safeTrim(formData.get("render_id"));
-    if (!renderId) redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
-
-    await db.execute(sql`
-      delete from quote_renders
-      where id = ${renderId}::uuid
-        and tenant_id = ${tenantId}::uuid
-        and quote_log_id = ${id}::uuid
-    `);
-
-    redirect(`/admin/quotes/${encodeURIComponent(id)}#renders`);
-  }
-
-  // ✅ Delete version (hard delete) — also deletes its renders + linked notes first
-  async function deleteVersion(formData: FormData) {
-    "use server";
-
-    const session = await auth();
-    const actorUserId = session.userId;
-    if (!actorUserId) redirect("/sign-in");
-
-    const okMember = await ensureActiveMembership(actorUserId, tenantId);
-    if (!okMember) redirect(`/admin/quotes/${encodeURIComponent(id)}?deleteError=forbidden#lifecycle`);
-
-    const versionId = safeTrim(formData.get("version_id"));
-    const versionNumber = safeTrim(formData.get("version_number"));
-    if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(id)}#lifecycle`);
-
-    // Don’t allow deleting ACTIVE version (prevents confusing UI state)
-    if (activeVersion != null && versionNumber && Number(versionNumber) === Number(activeVersion)) {
-      redirect(`/admin/quotes/${encodeURIComponent(id)}?deleteError=cannot_delete_active_version#lifecycle`);
-    }
-
-    // Delete renders attached to this version
-    await db.execute(sql`
-      delete from quote_renders
-      where tenant_id = ${tenantId}::uuid
-        and quote_log_id = ${id}::uuid
-        and quote_version_id = ${versionId}::uuid
-    `);
-
-    // Delete notes linked to this version
-    await db.execute(sql`
-      delete from quote_notes
-      where tenant_id = ${tenantId}::uuid
-        and quote_log_id = ${id}::uuid
-        and quote_version_id = ${versionId}::uuid
-    `);
-
-    // Delete the version itself
-    await db.execute(sql`
-      delete from quote_versions
-      where id = ${versionId}::uuid
-        and tenant_id = ${tenantId}::uuid
-        and quote_log_id = ${id}::uuid
-    `);
-
-    redirect(`/admin/quotes/${encodeURIComponent(id)}#lifecycle`);
   }
 
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
@@ -747,12 +556,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         markReadAction={markRead}
       />
 
-      {/* ✅ Single-column stacked layout (v1) */}
       <div className="space-y-6">
         <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStage} />
-
         <CustomerNotesCard notes={notes} />
-
         <QuotePhotoGallery photos={photos} />
 
         <DetailsPanel
@@ -773,7 +579,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           rawOutput={rowSnap.output ?? null}
         />
 
-        {/* ✅ The “wow” step */}
         <EmailBuilderPanel
           quoteId={id}
           activeVersion={activeVersion}
@@ -782,7 +587,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           customerPhotos={(photos as any[]) ?? []}
         />
 
-        {/* Anchor for “#renders” */}
         <div id="renders" />
 
         <LifecyclePanel
@@ -795,9 +599,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           createNewVersionAction={createNewVersion}
           restoreVersionAction={restoreVersion}
           requestRenderAction={requestRender}
-          deleteVersionAction={deleteVersion}
-          deleteNoteAction={deleteNote}
-          deleteRenderAction={deleteRender}
+          deleteVersionAction={deleteVersionAction}
+          deleteNoteAction={deleteNoteAction}
+          deleteRenderAction={deleteRenderAction}
         />
 
         <LegacyRenderPanel
@@ -809,7 +613,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         />
       </div>
 
-      {/* ✅ Debug moved out of the way */}
       <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
         <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
           Debug / raw payload
@@ -820,7 +623,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         </div>
       </details>
 
-      {/* Anchor for lifecycle */}
       <div id="lifecycle" />
     </div>
   );
