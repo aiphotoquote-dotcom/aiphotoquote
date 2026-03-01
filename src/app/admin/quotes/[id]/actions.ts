@@ -13,6 +13,7 @@ import { resolveActiveTenantId } from "@/lib/admin/quotes/getActiveTenant";
 import { adminReassessQuote } from "@/lib/quotes/adminReassess";
 import { normalizeAiMode, normalizeEngine, type AdminReassessEngine, type QuoteLogRow } from "@/lib/admin/quotes/pageCompat";
 import { safeTrim } from "@/lib/admin/quotes/utils";
+import { STAGES } from "@/lib/admin/quotes/normalize";
 
 /* -------------------- helpers -------------------- */
 
@@ -66,6 +67,14 @@ async function resolveTenantOrRedirect(actorUserId: string) {
   if (!okMember) redirect("/admin/quotes");
 
   return tenantId;
+}
+
+function requireQuoteId(formData: FormData): string {
+  const quoteId = safeTrim(formData.get("quote_id"));
+  if (!quoteId) redirect("/admin/quotes");
+  // allow non-uuid ids only if you truly support them; in this app it’s uuid
+  if (!looksUuid(quoteId)) redirect("/admin/quotes");
+  return quoteId;
 }
 
 async function tryKickRenderCronNow(): Promise<
@@ -157,15 +166,74 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
 }
 
 /* -------------------- exported server actions -------------------- */
+/**
+ * IMPORTANT:
+ * These MUST be module exports (not closures in page.tsx),
+ * because they are passed into Client Components via <form action={...}>.
+ */
+
+export async function setStageAction(formData: FormData) {
+  const session = await auth();
+  const actorUserId = session.userId;
+  if (!actorUserId) redirect("/sign-in");
+
+  const quoteId = requireQuoteId(formData);
+  const tenantId = await resolveTenantOrRedirect(actorUserId);
+
+  const next = safeTrimLocal(formData.get("stage")).toLowerCase();
+
+  const allowed = new Set(STAGES.map((s) => s.key));
+  if (!allowed.has(next)) {
+    redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?stageError=invalid#lifecycle`);
+  }
+
+  await db
+    .update(quoteLogs)
+    .set({ stage: next } as any)
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+
+  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
+}
+
+export async function markReadAction(formData: FormData) {
+  const session = await auth();
+  const actorUserId = session.userId;
+  if (!actorUserId) redirect("/sign-in");
+
+  const quoteId = requireQuoteId(formData);
+  const tenantId = await resolveTenantOrRedirect(actorUserId);
+
+  await db
+    .update(quoteLogs)
+    .set({ isRead: true } as any)
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+
+  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}`);
+}
+
+export async function markUnreadAction(formData: FormData) {
+  const session = await auth();
+  const actorUserId = session.userId;
+  if (!actorUserId) redirect("/sign-in");
+
+  const quoteId = requireQuoteId(formData);
+  const tenantId = await resolveTenantOrRedirect(actorUserId);
+
+  await db
+    .update(quoteLogs)
+    .set({ isRead: false } as any)
+    .where(and(eq(quoteLogs.id, quoteId), eq(quoteLogs.tenantId, tenantId)));
+
+  // preserve your existing behavior
+  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?skipAutoRead=1`);
+}
 
 export async function createNewVersionAction(formData: FormData) {
   const session = await auth();
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = safeTrim(formData.get("quote_id"));
-  if (!quoteId) redirect("/admin/quotes");
-
+  const quoteId = requireQuoteId(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const engineUi = normalizeEngine(formData.get("engine"));
@@ -173,7 +241,6 @@ export async function createNewVersionAction(formData: FormData) {
   const reason = safeTrim(formData.get("reason"));
   const noteBody = safeTrim(formData.get("note_body"));
 
-  // Load quote log for reassess input/output context
   const q = await db
     .select({
       id: quoteLogs.id,
@@ -187,7 +254,7 @@ export async function createNewVersionAction(formData: FormData) {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  if (!q?.id) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?reassessError=not_found`);
+  if (!q?.id) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?reassessError=not_found#lifecycle`);
 
   let createdNoteId: string | null = null;
   if (noteBody) {
@@ -227,7 +294,7 @@ export async function createNewVersionAction(formData: FormData) {
   }
 
   void aiMode;
-  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}`);
+  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 }
 
 export async function restoreVersionAction(formData: FormData) {
@@ -235,9 +302,9 @@ export async function restoreVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = safeTrim(formData.get("quote_id"));
+  const quoteId = requireQuoteId(formData);
   const versionId = safeTrim(formData.get("version_id"));
-  if (!quoteId || !versionId) redirect("/admin/quotes");
+  if (!versionId || !looksUuid(versionId)) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?restoreError=bad_version#lifecycle`);
 
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
@@ -259,9 +326,9 @@ export async function restoreVersionAction(formData: FormData) {
   `);
 
   const ok = Boolean((updated as any)?.rows?.[0]?.id);
-  if (!ok) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?restoreError=1`);
+  if (!ok) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?restoreError=1#lifecycle`);
 
-  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}`);
+  redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 }
 
 export async function requestRenderAction(formData: FormData) {
@@ -269,14 +336,11 @@ export async function requestRenderAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = safeTrim(formData.get("quote_id"));
-  if (!quoteId) redirect("/admin/quotes");
-
+  const quoteId = requireQuoteId(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const shopNotes = safeTrim(formData.get("shop_notes"));
 
-  // Get quote output for version0 creation if needed
   const q = await db
     .select({ output: quoteLogs.output })
     .from(quoteLogs)
@@ -369,13 +433,12 @@ export async function deleteVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = safeTrim(formData.get("quote_id"));
+  const quoteId = requireQuoteId(formData);
   const versionId = safeTrim(formData.get("version_id"));
-  if (!quoteId || !versionId) redirect("/admin/quotes");
+  if (!versionId || !looksUuid(versionId)) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?deleteError=bad_version#lifecycle`);
 
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
-  // Safety: do not delete v0
   const v = await db
     .select({ version: quoteVersions.version })
     .from(quoteVersions)
@@ -387,9 +450,8 @@ export async function deleteVersionAction(formData: FormData) {
     redirect(`/admin/quotes/${encodeURIComponent(quoteId)}?deleteError=cannot_delete_v0#lifecycle`);
   }
 
-  // Delete renders tied to this version first (FK safety)
   await db.delete(quoteRenders).where(and(eq(quoteRenders.tenantId, tenantId), eq(quoteRenders.quoteVersionId, versionId as any)));
-  // Detach notes referencing this version (keep notes but unhook)
+
   await db
     .update(quoteNotes)
     .set({ quoteVersionId: null } as any)
@@ -405,9 +467,9 @@ export async function deleteNoteAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = safeTrim(formData.get("quote_id"));
+  const quoteId = requireQuoteId(formData);
   const noteId = safeTrim(formData.get("note_id"));
-  if (!quoteId || !noteId) redirect("/admin/quotes");
+  if (!noteId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
@@ -420,9 +482,9 @@ export async function deleteRenderAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = safeTrim(formData.get("quote_id"));
+  const quoteId = requireQuoteId(formData);
   const renderId = safeTrim(formData.get("render_id"));
-  if (!quoteId || !renderId) redirect("/admin/quotes");
+  if (!renderId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#renders`);
 
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 

@@ -14,6 +14,8 @@ export default function QuoteHeader(props: {
   confidence: any;
   inspectionRequired: boolean | null;
   activeVersion: number | null;
+
+  // Server actions (must be exported from a module; page must NOT pass closures)
   markUnreadAction: any;
   markReadAction: any;
 }) {
@@ -87,6 +89,7 @@ export default function QuoteHeader(props: {
             <div className="flex flex-wrap items-center gap-2">
               {isRead ? (
                 <form action={markUnreadAction}>
+                  <input type="hidden" name="quote_id" value={quoteId} />
                   <button
                     type="submit"
                     className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
@@ -96,6 +99,7 @@ export default function QuoteHeader(props: {
                 </form>
               ) : (
                 <form action={markReadAction}>
+                  <input type="hidden" name="quote_id" value={quoteId} />
                   <button
                     type="submit"
                     className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"

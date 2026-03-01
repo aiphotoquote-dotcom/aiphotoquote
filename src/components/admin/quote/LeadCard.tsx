@@ -5,11 +5,12 @@ import { digitsOnly } from "@/lib/admin/quotes/utils";
 import { STAGES } from "@/lib/admin/quotes/normalize";
 
 export default function LeadCard(props: {
+  quoteId: string;
   lead: { name: string; phone: string | null; phoneDigits: string | null; email: string | null };
   stageNorm: string;
   setStageAction: any;
 }) {
-  const { lead, stageNorm, setStageAction } = props;
+  const { quoteId, lead, stageNorm, setStageAction } = props;
 
   return (
     <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -48,6 +49,8 @@ export default function LeadCard(props: {
             <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">Stage is separate from read/unread.</p>
 
             <form action={setStageAction} className="mt-4 flex items-center gap-2">
+              <input type="hidden" name="quote_id" value={quoteId} />
+
               <select
                 name="stage"
                 defaultValue={stageNorm === "read" ? "new" : (stageNorm as any)}

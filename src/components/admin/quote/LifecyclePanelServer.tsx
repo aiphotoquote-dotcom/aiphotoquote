@@ -4,7 +4,8 @@ import React from "react";
 import LifecyclePanel from "@/components/admin/quote/LifecyclePanel";
 import type { QuoteNoteRow, QuoteRenderRow, QuoteVersionRow } from "@/lib/admin/quotes/getLifecycle";
 
-// ✅ IMPORTANT: import server actions here (server component file)
+// ✅ Server actions MUST be imported from a "use server" module.
+// ✅ Passing these into a Client Component is allowed (they serialize as Server Actions).
 import {
   createNewVersionAction,
   restoreVersionAction,
@@ -12,7 +13,7 @@ import {
   deleteVersionAction,
   deleteNoteAction,
   deleteRenderAction,
-} from "@/app/admin/quotes/[id]/actions"; // <-- adjust path to wherever your actions live
+} from "@/app/admin/quotes/[id]/actions";
 
 export default function LifecyclePanelServer(props: {
   quoteId: string;
@@ -22,14 +23,16 @@ export default function LifecyclePanelServer(props: {
   lifecycleReadError: string | null;
   activeVersion: number | null;
 }) {
+  const { quoteId, versionRows, noteRows, renderRows, lifecycleReadError, activeVersion } = props;
+
   return (
     <LifecyclePanel
-      quoteId={props.quoteId}
-      versionRows={props.versionRows}
-      noteRows={props.noteRows}
-      renderRows={props.renderRows}
-      lifecycleReadError={props.lifecycleReadError}
-      activeVersion={props.activeVersion}
+      quoteId={quoteId}
+      versionRows={versionRows}
+      noteRows={noteRows}
+      renderRows={renderRows}
+      lifecycleReadError={lifecycleReadError}
+      activeVersion={activeVersion}
       createNewVersionAction={createNewVersionAction}
       restoreVersionAction={restoreVersionAction}
       requestRenderAction={requestRenderAction}
