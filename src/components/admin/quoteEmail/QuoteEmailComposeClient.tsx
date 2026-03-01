@@ -66,6 +66,29 @@ function joinCsv(xs: string[]) {
     .join(",");
 }
 
+function parseEmailList(input: string): string[] {
+  const s = safeTrim(input);
+  if (!s) return [];
+  // split on commas/semicolons/newlines
+  return s
+    .split(/[,;\n]+/g)
+    .map((x) => safeTrim(x))
+    .filter(Boolean);
+}
+
+function looksLikeEmail(email: string): boolean {
+  // lightweight sanity check (not RFC-perfect, but good UX)
+  const s = safeTrim(email);
+  if (!s) return false;
+  if (s.includes(" ")) return false;
+  const at = s.indexOf("@");
+  if (at <= 0) return false;
+  const dot = s.lastIndexOf(".");
+  if (dot < at + 2) return false;
+  if (dot >= s.length - 1) return false;
+  return true;
+}
+
 /* ------------------- Version output parsing (best effort) ------------------- */
 function pickAiAssessmentFromAny(outAny: any) {
   const o = outAny ?? {};
@@ -439,7 +462,113 @@ export default function QuoteEmailComposeClient(props: {
     );
   }
 
-  const canSend = Boolean(safeTrim(to)) && totalSelectedImages > 0 && Boolean(safeTrim(subject));
+  const toOk = Boolean(safeTrim(to)) && looksLikeEmail(safeTrim(to));
+  const ccList = useMemo(() => parseEmailList(cc), [cc]);
+  const bccList = useMemo(() => parseEmailList(bcc), [bcc]);
+  const ccOk = ccList.every(looksLikeEmail);
+  const bccOk = bccList.every(looksLikeEmail);
+
+  const canSend =
+    toOk && totalSelectedImages > 0 && Boolean(safeTrim(subject)) && Boolean(safeTrim(selectedVersionNumber)) && ccOk && bccOk;
+
+  /* ------------------------------ send wiring (new engine) ------------------------------ */
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendOk, setSendOk] = useState<string | null>(null);
+
+  async function doSend() {
+    if (sending) return;
+    setSendError(null);
+    setSendOk(null);
+
+    // UX guardrails (don’t rely on backend validation)
+    if (!toOk) {
+      setSendError("Please enter a valid customer email in To.");
+      return;
+    }
+    if (!safeTrim(subject)) {
+      setSendError("Subject is required.");
+      return;
+    }
+    if (!safeTrim(selectedVersionNumber)) {
+      setSendError("Select a version to send.");
+      return;
+    }
+    if (!ccOk) {
+      setSendError("One or more CC addresses look invalid.");
+      return;
+    }
+    if (!bccOk) {
+      setSendError("One or more BCC addresses look invalid.");
+      return;
+    }
+    if (totalSelectedImages <= 0) {
+      setSendError("Select at least one image to send.");
+      return;
+    }
+
+    setSending(true);
+    try {
+      // New send engine endpoint (does NOT touch existing /quote/submit email paths)
+      const url = `/api/admin/quotes/${encodeURIComponent(quoteId)}/email/send`;
+
+      const payload = {
+        tenantId,
+        quoteId,
+
+        // “package” selectors
+        templateKey,
+        versionNumber: safeTrim(selectedVersionNumber),
+        renderIds: [...selectedRenderIds],
+        photoKeys: [...selectedPhotoKeys],
+
+        // addressing + copy overrides
+        to: safeTrim(to),
+        cc: ccList,
+        bcc: bccList,
+        subject: safeTrim(subject),
+
+        headline: safeTrim(headline),
+        intro,
+        closing,
+
+        // blocks/toggles
+        quoteBlocks: {
+          showPricing,
+          showSummary,
+          showScope,
+          showQuestions,
+          showAssumptions,
+        },
+
+        // optional context (helpful for server logs)
+        shareUrl: safeTrim(shareUrl),
+      };
+
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const j: any = await r.json().catch(() => ({}));
+      if (!r.ok || j?.ok === false) {
+        const msg =
+          safeTrim(j?.message) ||
+          safeTrim(j?.error) ||
+          (r.status ? `Send failed (${r.status})` : "Send failed");
+        throw new Error(msg);
+      }
+
+      // normalize common return shapes
+      const messageId = safeTrim(j?.providerMessageId || j?.messageId || j?.id || "");
+      setSendOk(messageId ? `Sent! (id: ${messageId})` : "Sent!");
+    } catch (e: any) {
+      setSendError(e?.message ?? String(e));
+    } finally {
+      setSending(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -551,23 +680,53 @@ export default function QuoteEmailComposeClient(props: {
 
             <button
               type="button"
-              disabled
+              onClick={doSend}
+              disabled={!canSend || sending}
               className={
                 "rounded-lg px-4 py-2 text-sm font-semibold " +
-                (canSend
+                (canSend && !sending
                   ? "bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
                   : "bg-black text-white opacity-50 dark:bg-white dark:text-black")
               }
               title={
                 canSend
-                  ? "Send will be wired next"
-                  : "To send: add To + select at least 1 image (Send wiring comes next)"
+                  ? "Send this email"
+                  : !toOk
+                    ? "Enter a valid To email"
+                    : !safeTrim(selectedVersionNumber)
+                      ? "Select a version"
+                      : totalSelectedImages <= 0
+                        ? "Select at least 1 image"
+                        : !safeTrim(subject)
+                          ? "Subject required"
+                          : !ccOk
+                            ? "Fix CC emails"
+                            : !bccOk
+                              ? "Fix BCC emails"
+                              : "Not ready to send"
               }
             >
-              Send (next)
+              {sending ? "Sending…" : "Send"}
             </button>
           </div>
         </div>
+
+        {(sendError || sendOk) && (
+          <div className="mt-3">
+            {sendError ? (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+                <div className="font-semibold">Send failed</div>
+                <div className="mt-1">{sendError}</div>
+              </div>
+            ) : null}
+            {sendOk ? (
+              <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900 dark:border-green-900/40 dark:bg-green-950/30 dark:text-green-200">
+                <div className="font-semibold">Success</div>
+                <div className="mt-1">{sendOk}</div>
+              </div>
+            ) : null}
+          </div>
+        )}
       </div>
 
       {/* Address row */}
@@ -581,6 +740,9 @@ export default function QuoteEmailComposeClient(props: {
               placeholder="customer@email.com"
               className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
+            {!toOk && safeTrim(to) ? (
+              <div className="mt-2 text-xs font-semibold text-red-700 dark:text-red-200">Please enter a valid email.</div>
+            ) : null}
           </div>
 
           <div className="lg:col-span-3">
@@ -591,6 +753,11 @@ export default function QuoteEmailComposeClient(props: {
               placeholder="optional"
               className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
+            {!ccOk && safeTrim(cc) ? (
+              <div className="mt-2 text-xs font-semibold text-red-700 dark:text-red-200">
+                One or more CC addresses look invalid.
+              </div>
+            ) : null}
           </div>
 
           <div className="lg:col-span-4">
@@ -601,6 +768,11 @@ export default function QuoteEmailComposeClient(props: {
               placeholder="optional"
               className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
+            {!bccOk && safeTrim(bcc) ? (
+              <div className="mt-2 text-xs font-semibold text-red-700 dark:text-red-200">
+                One or more BCC addresses look invalid.
+              </div>
+            ) : null}
           </div>
         </div>
 
