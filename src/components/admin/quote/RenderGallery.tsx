@@ -16,6 +16,7 @@ type RenderRow = {
   createdAt?: any;
   attempt?: number | null;
   quoteVersionId?: string | null;
+  shopNotes?: string | null;
 };
 
 type FilterKey = "all" | "rendered" | "queued" | "running" | "failed" | "other";
@@ -42,7 +43,7 @@ function pill(active: boolean) {
 export default function RenderGallery(props: {
   quoteId: string;
   renderRows: RenderRow[];
-  deleteRenderAction?: any; // ✅ optional server action (form action)
+  deleteRenderAction?: any; // ✅ server action (optional)
 }) {
   const { quoteId, renderRows, deleteRenderAction } = props;
 
@@ -53,6 +54,8 @@ export default function RenderGallery(props: {
     for (const r of rows) c[normStatus(r.status)]++;
     return c;
   }, [rows]);
+
+  const inProgress = (counts.queued ?? 0) + (counts.running ?? 0);
 
   const [filter, setFilter] = useState<FilterKey>("rendered");
   const [selected, setSelected] = useState<string[]>([]);
@@ -82,16 +85,10 @@ export default function RenderGallery(props: {
     return `/admin/quotes/${encodeURIComponent(quoteId)}/email/compose${qp}`;
   }, [quoteId, selected]);
 
-  // If user is filtering to non-rendered statuses, selection still works, but compose is meant for rendered images.
   const selectedRenderedCount = useMemo(() => {
     const set = new Set(selected);
     return renderedOnly.filter((r) => set.has(String(r.id))).length;
   }, [selected, renderedOnly]);
-
-  function confirmDelete(attemptLabel: string) {
-    // client-side confirm only; server action enforces authorization + tenant checks
-    return window.confirm(`Delete ${attemptLabel}? This cannot be undone.`);
-  }
 
   return (
     <section
@@ -102,7 +99,7 @@ export default function RenderGallery(props: {
         <div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Render gallery</h3>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Click to preview. Shift-select isn’t needed — just click tiles to multi-select.
+            Click to preview. Select tiles to include them in an email.
           </p>
         </div>
 
@@ -133,6 +130,27 @@ export default function RenderGallery(props: {
           </Link>
         </div>
       </div>
+
+      {/* ✅ Progress bar (indeterminate) when queued/running exist */}
+      {inProgress > 0 ? (
+        <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900/40 dark:bg-blue-950/30">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-blue-900 dark:text-blue-200">Rendering in progress…</div>
+            <div className="text-xs text-blue-800/80 dark:text-blue-200/70">
+              Running: <span className="font-semibold">{counts.running}</span> · Queued:{" "}
+              <span className="font-semibold">{counts.queued}</span>
+            </div>
+          </div>
+
+          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-blue-200/70 dark:bg-blue-900/30">
+            <div className="h-full w-full animate-pulse bg-blue-500/70 dark:bg-blue-300/60" />
+          </div>
+
+          <div className="mt-2 text-[11px] text-blue-900/70 dark:text-blue-200/70">
+            Tip: this panel updates on refresh. (Next improvement: live polling.)
+          </div>
+        </div>
+      ) : null}
 
       {/* Filters */}
       <div className="mt-4 flex flex-wrap gap-2">
@@ -165,8 +183,7 @@ export default function RenderGallery(props: {
               const url = safeTrim(r.imageUrl);
               const isRendered = normStatus(r.status) === "rendered" && !!url;
               const active = selected.includes(id);
-
-              const attemptLabel = `Attempt ${r.attempt != null ? `#${Number(r.attempt)}` : ""}`.trim() || "Attempt";
+              const status = safeTrim(r.status) || "unknown";
 
               return (
                 <div
@@ -196,10 +213,10 @@ export default function RenderGallery(props: {
 
                   <div className="p-3">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">{attemptLabel}</div>
-                      <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">
-                        {safeTrim(r.status) || "unknown"}
-                      </span>
+                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+                        Attempt {r.attempt != null ? `#${Number(r.attempt)}` : ""}
+                      </div>
+                      <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">{status}</span>
                     </div>
 
                     <div className="mt-2 flex items-center justify-between gap-2">
@@ -232,35 +249,26 @@ export default function RenderGallery(props: {
                       )}
                     </div>
 
-                    {/* ✅ Delete / archive control */}
-                    <div className="mt-2 flex items-center justify-end">
-                      {deleteRenderAction ? (
+                    {/* ✅ Delete / Archive control (server action) */}
+                    {deleteRenderAction ? (
+                      <div className="mt-2">
                         <form
                           action={deleteRenderAction}
                           onSubmit={(e) => {
-                            if (!confirmDelete(attemptLabel)) e.preventDefault();
+                            if (!window.confirm("Delete this render attempt? This cannot be undone.")) e.preventDefault();
                           }}
                         >
                           <input type="hidden" name="render_id" value={id} />
                           <button
                             type="submit"
-                            className="rounded-lg border border-red-200 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
+                            className="w-full rounded-lg border border-red-200 px-3 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
                             title="Delete this render attempt"
                           >
-                            Delete
+                            Delete attempt
                           </button>
                         </form>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled
-                          className="rounded-lg border border-gray-200 px-2.5 py-1 text-[11px] font-semibold text-gray-400 dark:border-gray-800 dark:text-gray-500"
-                          title="Delete action not wired yet"
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               );
