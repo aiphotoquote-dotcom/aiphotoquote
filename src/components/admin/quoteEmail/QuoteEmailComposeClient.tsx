@@ -157,10 +157,10 @@ export default function QuoteEmailComposeClient(props: {
   initialSelectedRenderIds: string[];
   initialSelectedPhotoKeys: string[];
 
-  // ✅ NEW: branding passed from server page (preferred)
-  brandName?: string | null;
-  brandLogoUrl?: string | null;
-  brandTagline?: string | null;
+  // ✅ brand props from server
+  brandName?: string;
+  brandLogoUrl?: string;
+  brandTagline?: string;
 }) {
   const {
     quoteId,
@@ -228,7 +228,7 @@ export default function QuoteEmailComposeClient(props: {
     return pickAiAssessmentFromAny(out);
   }, [selectedVersionRow]);
 
-  const estimateText = useMemo(() => {
+  const aiEstimateText = useMemo(() => {
     if (!assessment) return "";
     const low =
       assessment?.estimate_low ??
@@ -253,10 +253,75 @@ export default function QuoteEmailComposeClient(props: {
         ? assessment.inspectionRequired
         : null;
 
-  const summary = safeTrim(assessment?.summary ?? "");
-  const questions = asStringArray(assessment?.questions);
-  const assumptions = asStringArray(assessment?.assumptions);
-  const visibleScope = asStringArray(assessment?.visible_scope ?? assessment?.visibleScope);
+  // ✅ editable blocks (initialize from AI, then allow edits)
+  const [summary, setSummary] = useState(safeTrim(assessment?.summary ?? ""));
+  const [questions, setQuestions] = useState<string[]>(asStringArray(assessment?.questions));
+  const [assumptions, setAssumptions] = useState<string[]>(asStringArray(assessment?.assumptions));
+  const [visibleScope, setVisibleScope] = useState<string[]>(asStringArray(assessment?.visible_scope ?? assessment?.visibleScope));
+
+  // When version changes, refresh defaults (but don't clobber if already edited)
+  useEffect(() => {
+    setSummary(safeTrim(assessment?.summary ?? ""));
+    setQuestions(asStringArray(assessment?.questions));
+    setAssumptions(asStringArray(assessment?.assumptions));
+    setVisibleScope(asStringArray(assessment?.visible_scope ?? assessment?.visibleScope));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVersionNumber]);
+
+  /* ------------------------------ pricing override ------------------------------ */
+  const [pricingMode, setPricingMode] = useState<"fixed" | "range">("fixed");
+  const [fixedPrice, setFixedPrice] = useState<string>("");
+  const [rangeLow, setRangeLow] = useState<string>("");
+  const [rangeHigh, setRangeHigh] = useState<string>("");
+
+  // Initialize pricing fields from AI estimate whenever version changes
+  useEffect(() => {
+    const a = assessment ?? {};
+    const low =
+      a?.estimate_low ??
+      a?.estimateLow ??
+      a?.estimate?.low ??
+      a?.estimate?.estimate_low ??
+      null;
+    const high =
+      a?.estimate_high ??
+      a?.estimateHigh ??
+      a?.estimate?.high ??
+      a?.estimate?.estimate_high ??
+      null;
+
+    const lo = money(low);
+    const hi = money(high);
+
+    if (lo != null && hi != null) {
+      setPricingMode("range");
+      setRangeLow(String(Math.round(lo)));
+      setRangeHigh(String(Math.round(hi)));
+      setFixedPrice("");
+      return;
+    }
+
+    if (lo != null) {
+      setPricingMode("fixed");
+      setFixedPrice(String(Math.round(lo)));
+      setRangeLow("");
+      setRangeHigh("");
+      return;
+    }
+
+    if (hi != null) {
+      setPricingMode("fixed");
+      setFixedPrice(String(Math.round(hi)));
+      setRangeLow("");
+      setRangeHigh("");
+      return;
+    }
+
+    setPricingMode("fixed");
+    setFixedPrice("");
+    setRangeLow("");
+    setRangeHigh("");
+  }, [selectedVersionNumber, assessment]);
 
   /* ------------------------------ selection state ------------------------------ */
   const [selectedRenderIds, setSelectedRenderIds] = useState<string[]>(
@@ -289,9 +354,7 @@ export default function QuoteEmailComposeClient(props: {
   const [intro, setIntro] = useState(
     `Hi ${defaultName || "there"},\n\nThanks for reaching out. We reviewed your photos and put together a quote package below.\n\nIf you'd like to move forward, reply to this email and we'll get you scheduled.`
   );
-
-  // use lead shopName only for closing fallback (signature)
-  const [closing, setClosing] = useState("Thanks,\n— " + (safeTrim(lead?.shopName) || "Your Shop"));
+  const [closing, setClosing] = useState("Thanks,\n— " + (safeTrim(brandName) || safeTrim(lead?.shopName) || "Your Shop"));
 
   /* ------------------------------ section toggles ------------------------------ */
   const [showPricing, setShowPricing] = useState(true);
@@ -340,33 +403,6 @@ export default function QuoteEmailComposeClient(props: {
 
   const totalSelectedImages = selectedImages.length;
 
-  // ✅ BRAND: prefer server-provided branding props, then lead fallbacks.
-  const brand = useMemo(() => {
-    const name =
-      safeTrim(brandName) ||
-      safeTrim(lead?.shopName) ||
-      safeTrim(lead?.shop?.name) ||
-      safeTrim(lead?.tenantName) ||
-      safeTrim(lead?.tenant?.name) ||
-      "Your Shop Name";
-
-    const logoUrl =
-      safeTrim(brandLogoUrl) ||
-      safeTrim(lead?.shopLogoUrl) ||
-      safeTrim(lead?.shop?.logoUrl) ||
-      safeTrim(lead?.shop?.logo_url) ||
-      safeTrim(lead?.logoUrl) ||
-      "";
-
-    const tagline = safeTrim(brandTagline) || "Quote ready to review";
-
-    return {
-      name,
-      logoUrl: logoUrl || null,
-      tagline,
-    };
-  }, [brandName, brandLogoUrl, brandTagline, lead]);
-
   const previewModel: QuoteEmailPreviewModel = useMemo(() => {
     const featured =
       templateKey === "before_after"
@@ -386,14 +422,16 @@ export default function QuoteEmailComposeClient(props: {
       bcc,
       subject,
 
+      brandName: safeTrim(brandName) || safeTrim(lead?.shopName) || "Your Shop Name",
+      brandLogoUrl: safeTrim(brandLogoUrl),
+      brandTagline: safeTrim(brandTagline) || "Quote ready to review",
+
       headline,
       intro,
       closing,
 
       featuredImage: featured ? { url: featured.url, label: featured.label } : null,
       galleryImages: gallery.map((x) => ({ url: x.url, label: x.label })),
-
-      brand,
 
       quoteBlocks: {
         showPricing,
@@ -402,9 +440,14 @@ export default function QuoteEmailComposeClient(props: {
         showQuestions,
         showAssumptions,
 
-        estimateText: safeTrim(estimateText),
+        estimateText: safeTrim(aiEstimateText),
         confidence: safeTrim(confidence),
         inspectionRequired,
+
+        pricingMode,
+        fixedPrice,
+        rangeLow,
+        rangeHigh,
 
         summary: safeTrim(summary),
         visibleScope,
@@ -427,6 +470,10 @@ export default function QuoteEmailComposeClient(props: {
     cc,
     bcc,
     subject,
+    brandName,
+    brandLogoUrl,
+    brandTagline,
+    lead,
     headline,
     intro,
     closing,
@@ -437,14 +484,17 @@ export default function QuoteEmailComposeClient(props: {
     showScope,
     showQuestions,
     showAssumptions,
-    estimateText,
+    aiEstimateText,
     confidence,
     inspectionRequired,
+    pricingMode,
+    fixedPrice,
+    rangeLow,
+    rangeHigh,
     summary,
     visibleScope,
     questions,
     assumptions,
-    brand,
   ]);
 
   /* ------------------------------ media drawer ------------------------------ */
@@ -460,6 +510,7 @@ export default function QuoteEmailComposeClient(props: {
     setSelectedPhotoKeys([]);
   }
 
+  // First-run “guide”: if nothing is selected, open the drawer once.
   const [didAutopromptMedia, setDidAutopromptMedia] = useState(false);
   useEffect(() => {
     if (didAutopromptMedia) return;
@@ -485,7 +536,9 @@ export default function QuoteEmailComposeClient(props: {
       await navigator.clipboard.writeText(full);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    } catch {}
+    } catch {
+      // swallow
+    }
   }
 
   function toggleBtn(active: boolean) {
@@ -511,7 +564,7 @@ export default function QuoteEmailComposeClient(props: {
     ccOk &&
     bccOk;
 
-  /* ------------------------------ send wiring (new engine) ------------------------------ */
+  /* ------------------------------ send wiring ------------------------------ */
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sendOk, setSendOk] = useState<string | null>(null);
@@ -530,7 +583,10 @@ export default function QuoteEmailComposeClient(props: {
 
     const featuredImage = previewModel.featuredImage ?? null;
     const galleryImages = Array.isArray(previewModel.galleryImages) ? previewModel.galleryImages : [];
-    if (!featuredImage && galleryImages.length === 0) return setSendError("No images available to send. Select at least one image.");
+
+    if (!featuredImage && galleryImages.length === 0) {
+      return setSendError("No images available to send. Select at least one image.");
+    }
 
     setSending(true);
     try {
@@ -554,14 +610,34 @@ export default function QuoteEmailComposeClient(props: {
         bcc: bccList,
         subject: safeTrim(subject),
 
+        // copy
         headline: safeTrim(headline),
         intro,
         closing,
 
-        quoteBlocks: { showPricing, showSummary, showScope, showQuestions, showAssumptions },
+        // ✅ include editable blocks
+        quoteBlocks: {
+          showPricing,
+          showSummary,
+          showScope,
+          showQuestions,
+          showAssumptions,
+          summary,
+          visibleScope,
+          questions,
+          assumptions,
+          pricingMode,
+          fixedPrice,
+          rangeLow,
+          rangeHigh,
+        },
 
-        // ✅ send brand too so the final HTML can match
-        brand,
+        // ✅ include branding (server can ignore now, but useful for final HTML)
+        brand: {
+          name: safeTrim(brandName),
+          logoUrl: safeTrim(brandLogoUrl),
+          tagline: safeTrim(brandTagline),
+        },
 
         shareUrl: safeTrim(shareUrl),
       };
@@ -574,7 +650,10 @@ export default function QuoteEmailComposeClient(props: {
 
       const j: any = await r.json().catch(() => ({}));
       if (!r.ok || j?.ok === false) {
-        const msg = safeTrim(j?.message) || safeTrim(j?.error) || (r.status ? `Send failed (${r.status})` : "Send failed");
+        const msg =
+          safeTrim(j?.message) ||
+          safeTrim(j?.error) ||
+          (r.status ? `Send failed (${r.status})` : "Send failed");
         throw new Error(msg);
       }
 
@@ -593,6 +672,7 @@ export default function QuoteEmailComposeClient(props: {
       <div className="sticky top-0 z-30 -mx-6 border-b border-gray-200 bg-white/80 px-6 py-3 backdrop-blur dark:border-gray-800 dark:bg-black/60">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex flex-wrap items-center gap-2">
+            {/* Version */}
             <div className="flex items-center gap-2">
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">1) Version</div>
               <select
@@ -612,13 +692,20 @@ export default function QuoteEmailComposeClient(props: {
               </select>
             </div>
 
+            {/* Template */}
             <div className="ml-1 flex items-center gap-2">
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">2) Template</div>
               <div className="flex flex-wrap gap-2">
                 {(["standard", "before_after", "visual_first"] as TemplateKey[]).map((k) => {
                   const active = k === templateKey;
                   return (
-                    <button key={k} type="button" onClick={() => setTemplateKey(k)} className={toggleBtn(active)} title={templateDesc(k)}>
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setTemplateKey(k)}
+                      className={toggleBtn(active)}
+                      title={templateDesc(k)}
+                    >
                       {templateLabel(k)}
                     </button>
                   );
@@ -626,6 +713,7 @@ export default function QuoteEmailComposeClient(props: {
               </div>
             </div>
 
+            {/* Sections */}
             <div className="ml-1 flex items-center gap-2">
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">3) Sections</div>
               <div className="flex flex-wrap gap-2">
@@ -638,7 +726,11 @@ export default function QuoteEmailComposeClient(props: {
                 <button type="button" onClick={() => setShowQuestions((v) => !v)} className={toggleBtn(showQuestions)}>
                   Questions
                 </button>
-                <button type="button" onClick={() => setShowAssumptions((v) => !v)} className={toggleBtn(showAssumptions)}>
+                <button
+                  type="button"
+                  onClick={() => setShowAssumptions((v) => !v)}
+                  className={toggleBtn(showAssumptions)}
+                >
                   Assumptions
                 </button>
                 <button type="button" onClick={() => setShowScope((v) => !v)} className={toggleBtn(showScope)}>
@@ -647,17 +739,18 @@ export default function QuoteEmailComposeClient(props: {
               </div>
             </div>
 
+            {/* Chips */}
             <div className="ml-1 flex flex-wrap gap-2">
               {chip(`${totalSelectedImages} selected`)}
               {safeTrim(selectedVersionNumber) ? chip(`v${safeTrim(selectedVersionNumber)}`) : chip("v—")}
-              {estimateText ? chip(estimateText) : chip("estimate —")}
+              {aiEstimateText ? chip(aiEstimateText) : chip("estimate —")}
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={openMedia}
+              onClick={() => setMediaOpen(true)}
               className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:hover:bg-gray-900"
             >
               Select images
@@ -665,7 +758,10 @@ export default function QuoteEmailComposeClient(props: {
 
             <button
               type="button"
-              onClick={clearMedia}
+              onClick={() => {
+                setSelectedRenderIds([]);
+                setSelectedPhotoKeys([]);
+              }}
               className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
               title="Clear all selected images"
             >
@@ -739,9 +835,6 @@ export default function QuoteEmailComposeClient(props: {
               placeholder="optional"
               className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
-            {!ccOk && safeTrim(cc) ? (
-              <div className="mt-2 text-xs font-semibold text-red-700 dark:text-red-200">One or more CC addresses look invalid.</div>
-            ) : null}
           </div>
 
           <div className="lg:col-span-4">
@@ -752,9 +845,6 @@ export default function QuoteEmailComposeClient(props: {
               placeholder="optional"
               className="mt-2 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
             />
-            {!bccOk && safeTrim(bcc) ? (
-              <div className="mt-2 text-xs font-semibold text-red-700 dark:text-red-200">One or more BCC addresses look invalid.</div>
-            ) : null}
           </div>
         </div>
 
@@ -792,12 +882,22 @@ export default function QuoteEmailComposeClient(props: {
               setHeadline,
               setIntro,
               setClosing,
+
+              setPricingMode,
+              setFixedPrice,
+              setRangeLow,
+              setRangeHigh,
+
+              setSummary,
+              setVisibleScope,
+              setQuestions,
+              setAssumptions,
             }}
           />
         </div>
       </section>
 
-      {/* Media drawer (unchanged) */}
+      {/* Media drawer */}
       {mediaOpen ? (
         <div className="fixed inset-0 z-40">
           <div className="absolute inset-0 bg-black/40" onClick={closeMedia} />

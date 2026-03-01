@@ -15,6 +15,11 @@ export type QuoteEmailPreviewModel = {
 
   subject: string;
 
+  // ✅ brand bar
+  brandName?: string;
+  brandLogoUrl?: string;
+  brandTagline?: string;
+
   headline: string;
   intro: string;
   closing: string;
@@ -24,13 +29,6 @@ export type QuoteEmailPreviewModel = {
 
   badges: string[];
 
-  // ✅ NEW: branding
-  brand?: {
-    name: string;
-    logoUrl?: string | null;
-    tagline?: string | null;
-  };
-
   quoteBlocks: {
     showPricing: boolean;
     showSummary: boolean;
@@ -38,17 +36,21 @@ export type QuoteEmailPreviewModel = {
     showQuestions: boolean;
     showAssumptions: boolean;
 
+    // AI baseline (informational)
     estimateText: string;
     confidence: string;
     inspectionRequired: boolean | null;
+
+    // ✅ pricing override UI state (editable)
+    pricingMode: "fixed" | "range";
+    fixedPrice: string; // numeric string
+    rangeLow: string; // numeric string
+    rangeHigh: string; // numeric string;
 
     summary: string;
     visibleScope: string[];
     questions: string[];
     assumptions: string[];
-
-    // ✅ optional pricing override payload (if you added it)
-    pricing?: any;
   };
 };
 
@@ -90,13 +92,47 @@ function editableClass() {
   ].join(" ");
 }
 
+function moneyStrToNumber(s: string): number | null {
+  const n = Number(String(s ?? "").replace(/[,$\s]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatMoney(n: number) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+  } catch {
+    return `$${Math.round(n)}`;
+  }
+}
+
+function computeOverrideEstimateText(qb: QuoteEmailPreviewModel["quoteBlocks"]): string {
+  if (qb.pricingMode === "fixed") {
+    const n = moneyStrToNumber(qb.fixedPrice);
+    return n != null ? formatMoney(n) : "";
+  }
+  const lo = moneyStrToNumber(qb.rangeLow);
+  const hi = moneyStrToNumber(qb.rangeHigh);
+  if (lo != null && hi != null) return `${formatMoney(lo)} — ${formatMoney(hi)}`;
+  if (lo != null) return `${formatMoney(lo)}+`;
+  if (hi != null) return `Up to ${formatMoney(hi)}`;
+  return "";
+}
+
 function initials(name: string) {
-  const n = safeTrim(name);
-  if (!n) return "S";
-  const parts = n.split(/\s+/g).filter(Boolean);
-  const a = parts[0]?.[0] ?? "S";
+  const s = safeTrim(name);
+  if (!s) return "Y";
+  const parts = s.split(/\s+/g).filter(Boolean);
+  const a = parts[0]?.[0] ?? "Y";
   const b = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
   return (a + b).toUpperCase();
+}
+
+function parseEditableList(text: string): string[] {
+  return String(text ?? "")
+    .split("\n")
+    .map((x) => x.replace(/\r/g, "").trim())
+    .map((x) => x.replace(/^[-•\u2022]\s*/g, "").trim())
+    .filter(Boolean);
 }
 
 export default function QuoteEmailPreview(props: {
@@ -106,14 +142,17 @@ export default function QuoteEmailPreview(props: {
     setIntro: (v: string) => void;
     setClosing: (v: string) => void;
 
-    // optional block editors (if your compose client passes them)
-    setSummary?: (v: string) => void;
-    setVisibleScope?: (xs: string[]) => void;
-    setQuestions?: (xs: string[]) => void;
-    setAssumptions?: (xs: string[]) => void;
+    // ✅ pricing edits
+    setPricingMode: (v: "fixed" | "range") => void;
+    setFixedPrice: (v: string) => void;
+    setRangeLow: (v: string) => void;
+    setRangeHigh: (v: string) => void;
 
-    // optional pricing editor
-    setPricing?: (p: any) => void;
+    // ✅ block edits
+    setSummary: (v: string) => void;
+    setVisibleScope: (v: string[]) => void;
+    setQuestions: (v: string[]) => void;
+    setAssumptions: (v: string[]) => void;
   };
 }) {
   const { model, onEdit } = props;
@@ -121,6 +160,11 @@ export default function QuoteEmailPreview(props: {
   const headlineRef = useRef<HTMLDivElement | null>(null);
   const introRef = useRef<HTMLDivElement | null>(null);
   const closingRef = useRef<HTMLDivElement | null>(null);
+
+  const summaryRef = useRef<HTMLDivElement | null>(null);
+  const scopeRef = useRef<HTMLDivElement | null>(null);
+  const questionsRef = useRef<HTMLDivElement | null>(null);
+  const assumptionsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (headlineRef.current && headlineRef.current.innerText !== model.headline) {
@@ -133,6 +177,24 @@ export default function QuoteEmailPreview(props: {
       closingRef.current.innerText = toLines(model.closing);
     }
   }, [model.headline, model.intro, model.closing]);
+
+  useEffect(() => {
+    if (summaryRef.current && summaryRef.current.innerText !== toLines(model.quoteBlocks.summary || "")) {
+      summaryRef.current.innerText = toLines(model.quoteBlocks.summary || "");
+    }
+    if (scopeRef.current) {
+      const want = (model.quoteBlocks.visibleScope || []).join("\n");
+      if (scopeRef.current.innerText !== want) scopeRef.current.innerText = want;
+    }
+    if (questionsRef.current) {
+      const want = (model.quoteBlocks.questions || []).join("\n");
+      if (questionsRef.current.innerText !== want) questionsRef.current.innerText = want;
+    }
+    if (assumptionsRef.current) {
+      const want = (model.quoteBlocks.assumptions || []).join("\n");
+      if (assumptionsRef.current.innerText !== want) assumptionsRef.current.innerText = want;
+    }
+  }, [model.quoteBlocks.summary, model.quoteBlocks.visibleScope, model.quoteBlocks.questions, model.quoteBlocks.assumptions]);
 
   const frameTitle = useMemo(() => {
     if (model.templateKey === "before_after") return "Before / After";
@@ -159,13 +221,16 @@ export default function QuoteEmailPreview(props: {
 
   const showBadges = Array.isArray(model.badges) && model.badges.length > 0;
 
-  const brandName = safeTrim(model.brand?.name) || "Your Shop Name";
-  const brandTagline = safeTrim(model.brand?.tagline) || "Quote ready to review";
-  const brandLogoUrl = safeTrim(model.brand?.logoUrl);
+  const brandName = safeTrim(model.brandName) || "Your Shop Name";
+  const brandLogoUrl = safeTrim(model.brandLogoUrl);
+  const brandTagline = safeTrim(model.brandTagline) || "Quote ready to review";
+
+  const overrideEstimateText = computeOverrideEstimateText(qb);
+  const displayEstimate = safeTrim(overrideEstimateText) || safeTrim(qb.estimateText);
 
   return (
     <div className="space-y-4">
-      {/* App chrome */}
+      {/* App chrome (like a mail preview panel) */}
       <div className="rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-black">
         <div className="flex items-center justify-between px-5 py-3">
           <div className="flex items-center gap-3">
@@ -186,11 +251,13 @@ export default function QuoteEmailPreview(props: {
 
       {/* Canvas background */}
       <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-        {/* Email paper */}
+        {/* Email “paper” */}
         <div className="mx-auto max-w-[720px] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-black">
           {/* Header rows */}
           <div className="border-b border-gray-200 dark:border-gray-800 px-6 py-4">
-            <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400 uppercase">Subject</div>
+            <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400 uppercase">
+              Subject
+            </div>
             <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{model.subject}</div>
 
             {toLine ? (
@@ -204,7 +271,7 @@ export default function QuoteEmailPreview(props: {
 
           {/* Body */}
           <div className="px-6 py-7">
-            {/* ✅ Brand bar */}
+            {/* Brand bar */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 {brandLogoUrl ? (
@@ -219,13 +286,11 @@ export default function QuoteEmailPreview(props: {
                     <div className="text-xs font-bold text-white dark:text-black">{initials(brandName)}</div>
                   </div>
                 )}
-
                 <div>
                   <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{brandName}</div>
                   <div className="text-xs text-gray-600 dark:text-gray-300">{brandTagline}</div>
                 </div>
               </div>
-
               <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">
                 {versionLabel} · {quoteShort}…
               </div>
@@ -270,7 +335,7 @@ export default function QuoteEmailPreview(props: {
 
             {/* Pills */}
             <div className="mt-5 flex flex-wrap gap-2">
-              {qb.showPricing && qb.estimateText ? pill(`Estimate: ${qb.estimateText}`) : null}
+              {qb.showPricing && displayEstimate ? pill(`Estimate: ${displayEstimate}`) : null}
               {qb.confidence ? pill(`Confidence: ${qb.confidence}`) : null}
               {qb.inspectionRequired === true ? pill("Inspection required") : null}
               {showBadges ? model.badges.map((b, i) => <React.Fragment key={`${b}-${i}`}>{pill(b)}</React.Fragment>) : null}
@@ -280,11 +345,86 @@ export default function QuoteEmailPreview(props: {
             <div className="mt-6 space-y-3">
               {qb.showPricing ? (
                 <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote at a glance</div>
-                  <div className="mt-2 text-xl font-semibold text-gray-900 dark:text-gray-100">
-                    {qb.estimateText ? qb.estimateText : "Estimate pending"}
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote at a glance</div>
+                      <div className="mt-2 text-xl font-semibold text-gray-900 dark:text-gray-100">
+                        {displayEstimate ? displayEstimate : "Estimate pending"}
+                      </div>
+                    </div>
+
+                    {/* Pricing mode toggle + inputs */}
+                    <div className="min-w-[240px]">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => onEdit.setPricingMode("fixed")}
+                          className={
+                            "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
+                            (qb.pricingMode === "fixed"
+                              ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-black dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+                          }
+                        >
+                          Fixed
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onEdit.setPricingMode("range")}
+                          className={
+                            "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
+                            (qb.pricingMode === "range"
+                              ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-black dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+                          }
+                        >
+                          Range
+                        </button>
+                      </div>
+
+                      {qb.pricingMode === "fixed" ? (
+                        <div className="mt-3">
+                          <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300 text-right">Price</div>
+                          <input
+                            value={qb.fixedPrice}
+                            onChange={(e) => onEdit.setFixedPrice(e.target.value)}
+                            placeholder="1500"
+                            className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                            inputMode="numeric"
+                          />
+                        </div>
+                      ) : (
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">Low</div>
+                            <input
+                              value={qb.rangeLow}
+                              onChange={(e) => onEdit.setRangeLow(e.target.value)}
+                              placeholder="1200"
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                              inputMode="numeric"
+                            />
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">High</div>
+                            <input
+                              value={qb.rangeHigh}
+                              onChange={(e) => onEdit.setRangeHigh(e.target.value)}
+                              placeholder="1800"
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                              inputMode="numeric"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 text-right">
+                        Editable — overrides AI estimate for this email.
+                      </div>
+                    </div>
                   </div>
-                  <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+
+                  <div className="mt-4 text-sm text-gray-700 dark:text-gray-200">
                     Reply to approve and we’ll schedule the job. If anything looks off, tell us what to adjust.
                   </div>
                   <div className="mt-4 rounded-xl bg-gray-900 px-4 py-3 text-center text-sm font-semibold text-white dark:bg-white dark:text-black">
@@ -296,38 +436,75 @@ export default function QuoteEmailPreview(props: {
                 </div>
               ) : null}
 
-              {qb.showSummary && qb.summary ? sectionCard("Summary", <div className="whitespace-pre-wrap">{qb.summary}</div>) : null}
+              {qb.showSummary ? (
+                sectionCard(
+                  "Summary",
+                  <div
+                    ref={summaryRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const v = toLines(summaryRef.current?.innerText || "");
+                      onEdit.setSummary(v);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {qb.summary || ""}
+                  </div>
+                )
+              ) : null}
 
-              {qb.showScope && qb.visibleScope?.length ? (
+              {qb.showScope ? (
                 sectionCard(
                   "Visible scope",
-                  <ul className="list-disc pl-5 space-y-1">
-                    {qb.visibleScope.map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
+                  <div
+                    ref={scopeRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const xs = parseEditableList(scopeRef.current?.innerText || "");
+                      onEdit.setVisibleScope(xs);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {(qb.visibleScope || []).join("\n")}
+                  </div>
                 )
               ) : null}
 
-              {qb.showQuestions && qb.questions?.length ? (
+              {qb.showQuestions ? (
                 sectionCard(
                   "A few quick questions (optional)",
-                  <ul className="list-disc pl-5 space-y-1">
-                    {qb.questions.map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
+                  <div
+                    ref={questionsRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const xs = parseEditableList(questionsRef.current?.innerText || "");
+                      onEdit.setQuestions(xs);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {(qb.questions || []).join("\n")}
+                  </div>
                 )
               ) : null}
 
-              {qb.showAssumptions && qb.assumptions?.length ? (
+              {qb.showAssumptions ? (
                 sectionCard(
                   "Assumptions",
-                  <ul className="list-disc pl-5 space-y-1">
-                    {qb.assumptions.map((x, i) => (
-                      <li key={i}>{x}</li>
-                    ))}
-                  </ul>
+                  <div
+                    ref={assumptionsRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const xs = parseEditableList(assumptionsRef.current?.innerText || "");
+                      onEdit.setAssumptions(xs);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {(qb.assumptions || []).join("\n")}
+                  </div>
                 )
               ) : null}
             </div>
@@ -358,7 +535,10 @@ export default function QuoteEmailPreview(props: {
                 <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Included images</div>
                 <div className={"mt-3 grid gap-3 " + (galleryCols === 3 ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2")}>
                   {model.galleryImages.map((img, idx) => (
-                    <div key={`${img.url}-${idx}`} className="overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                    <div
+                      key={`${img.url}-${idx}`}
+                      className="overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800"
+                    >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img src={img.url} alt={img.label} className="h-40 w-full object-cover bg-black/5" />
                       <div className="px-3 py-2 text-[11px] text-gray-600 dark:text-gray-300 flex items-center justify-between">
@@ -387,7 +567,7 @@ export default function QuoteEmailPreview(props: {
 
             {/* Footer */}
             <div className="mt-8 border-t border-gray-200 dark:border-gray-800 pt-4 text-[11px] text-gray-500 dark:text-gray-400">
-              Live preview canvas. Next: wire “Send” + generate final HTML.
+              Live preview canvas. Next: wire final HTML send (already mostly done).
             </div>
           </div>
         </div>
