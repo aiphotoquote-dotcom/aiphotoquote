@@ -15,9 +15,9 @@ export default function QuoteHeader(props: {
   inspectionRequired: boolean | null;
   activeVersion: number | null;
 
-  // Server actions (must be exported from a module; page must NOT pass closures)
-  markUnreadAction: any;
-  markReadAction: any;
+  // ✅ Must be exported server actions (NOT page closures)
+  markUnreadAction: (formData: FormData) => Promise<void>;
+  markReadAction: (formData: FormData) => Promise<void>;
 }) {
   const {
     quoteId,
