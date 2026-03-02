@@ -11,12 +11,7 @@ import { quoteLogs, quoteNotes, quoteRenders, quoteVersions, tenantMembers } fro
 
 import { resolveActiveTenantId } from "@/lib/admin/quotes/getActiveTenant";
 import { adminReassessQuote } from "@/lib/quotes/adminReassess";
-import {
-  normalizeAiMode,
-  normalizeEngine,
-  type AdminReassessEngine,
-  type QuoteLogRow,
-} from "@/lib/admin/quotes/pageCompat";
+import { normalizeAiMode, normalizeEngine, type AdminReassessEngine, type QuoteLogRow } from "@/lib/admin/quotes/pageCompat";
 import { safeTrim } from "@/lib/admin/quotes/utils";
 
 /* -------------------- helpers -------------------- */
@@ -48,8 +43,13 @@ function getBaseUrlFromEnv() {
   return "http://localhost:3000";
 }
 
-function inferQuoteIdFromReferer(): string | null {
-  const ref = safeTrimLocal(headers().get("referer"));
+/**
+ * Next.js 16+ may type headers() as async (Promise<ReadonlyHeaders>), so we await it.
+ * We only use referer as a fallback if quote_id isn't present in formData.
+ */
+async function inferQuoteIdFromReferer(): Promise<string | null> {
+  const h = await headers();
+  const ref = safeTrimLocal(h.get("referer"));
   if (!ref) return null;
 
   // matches: /admin/quotes/<id> or /admin/quotes/<id>?x=y or /admin/quotes/<id>#hash
@@ -63,11 +63,11 @@ function inferQuoteIdFromReferer(): string | null {
   }
 }
 
-function resolveQuoteIdOrRedirect(formData: FormData): string {
+async function resolveQuoteIdOrRedirect(formData: FormData): Promise<string> {
   const q1 = safeTrim(formData.get("quote_id"));
   if (q1) return q1;
 
-  const q2 = inferQuoteIdFromReferer();
+  const q2 = await inferQuoteIdFromReferer();
   if (q2) return q2;
 
   redirect("/admin/quotes");
@@ -91,6 +91,7 @@ async function ensureActiveMembership(actorUserId: string, tenantIdNow: string) 
 }
 
 async function resolveTenantOrRedirect(actorUserId: string) {
+  // NOTE: cookies() may also be typed async in newer Next; awaiting is safe either way.
   const jar = await cookies();
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId: actorUserId });
   if (!tenantIdMaybe) redirect("/admin/quotes");
@@ -200,7 +201,7 @@ export async function setStageAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const nextRaw = String(formData.get("stage") ?? "").trim().toLowerCase();
@@ -229,7 +230,7 @@ export async function markReadAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   await db
@@ -245,7 +246,7 @@ export async function markUnreadAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   await db
@@ -261,7 +262,7 @@ export async function createNewVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const engineUi = normalizeEngine(formData.get("engine"));
@@ -295,8 +296,7 @@ export async function createNewVersionAction(formData: FormData) {
     createdNoteId = inserted?.id ? String(inserted.id) : null;
   }
 
-  const engine: AdminReassessEngine =
-    engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
+  const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
   const quoteLog: QuoteLogRow = {
     id: quoteId,
@@ -331,7 +331,7 @@ export async function restoreVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const versionId = safeTrim(formData.get("version_id"));
   if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
@@ -365,7 +365,7 @@ export async function requestRenderAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const shopNotes = safeTrim(formData.get("shop_notes"));
@@ -458,7 +458,7 @@ export async function deleteVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const versionId = safeTrim(formData.get("version_id"));
   if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
@@ -467,7 +467,9 @@ export async function deleteVersionAction(formData: FormData) {
   const v = await db
     .select({ version: quoteVersions.version })
     .from(quoteVersions)
-    .where(and(eq(quoteVersions.id, versionId as any), eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.quoteLogId, quoteId)))
+    .where(
+      and(eq(quoteVersions.id, versionId as any), eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.quoteLogId, quoteId))
+    )
     .limit(1)
     .then((r) => r[0] ?? null);
 
@@ -482,7 +484,13 @@ export async function deleteVersionAction(formData: FormData) {
   await db
     .update(quoteNotes)
     .set({ quoteVersionId: null } as any)
-    .where(and(eq(quoteNotes.tenantId, tenantId), eq(quoteNotes.quoteLogId, quoteId), eq(quoteNotes.quoteVersionId, versionId as any)));
+    .where(
+      and(
+        eq(quoteNotes.tenantId, tenantId),
+        eq(quoteNotes.quoteLogId, quoteId),
+        eq(quoteNotes.quoteVersionId, versionId as any)
+      )
+    );
 
   await db.delete(quoteVersions).where(and(eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.id, versionId as any)));
 
@@ -494,7 +502,7 @@ export async function deleteNoteAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const noteId = safeTrim(formData.get("note_id"));
   if (!noteId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
@@ -509,7 +517,7 @@ export async function deleteRenderAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = resolveQuoteIdOrRedirect(formData);
+  const quoteId = await resolveQuoteIdOrRedirect(formData);
   const renderId = safeTrim(formData.get("render_id"));
   if (!renderId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#renders`);
 
