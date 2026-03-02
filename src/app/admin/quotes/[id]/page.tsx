@@ -1,6 +1,7 @@
 // src/app/admin/quotes/[id]/page.tsx
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
+import { and, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import QuotePhotoGallery from "@/components/admin/QuotePhotoGallery";
@@ -33,7 +34,7 @@ import {
   pickPhotos,
 } from "@/lib/admin/quotes/pageCompat";
 
-import { safeMoney, safeTrim } from "@/lib/admin/quotes/utils";
+import { safeMoney } from "@/lib/admin/quotes/utils";
 
 // ✅ IMPORT EXPORTED SERVER ACTIONS (module exports only; never page closures)
 import { markReadAction, markUnreadAction, setStageAction } from "./actions";
@@ -65,9 +66,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId });
   if (!tenantIdMaybe) redirect("/admin/quotes");
-  const tenantId: string = tenantIdMaybe;
+  const tenantId: string = String(tenantIdMaybe);
 
-  let row = await getAdminQuoteRow({ id, tenantId });
+  const row = await getAdminQuoteRow({ id, tenantId });
 
   if (!row) {
     const redirectTenantId = await findRedirectTenantForQuote({ id, userId });
@@ -107,20 +108,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   let isRead = Boolean(rowSnap.isRead);
 
-  // Keep your auto-mark-read behavior server-side
+  // ✅ keep your auto-mark-read behavior server-side (and keep it SIMPLE)
   if (!skipAutoRead && !isRead) {
     await db
       .update(quoteLogs)
       .set({ isRead: true } as any)
-      .where((quoteLogs as any).id ? ((quoteLogs as any).id as any) : (undefined as any));
-    // ^ If your schema object typing blocks `.where(and(eq...))`, keep your existing pattern here.
-    // But since you already had it working: restore your prior where() line below:
-
-    await db
-      .update(quoteLogs)
-      .set({ isRead: true } as any)
-      // @ts-ignore
-      .where((await import("drizzle-orm")).and((await import("drizzle-orm")).eq(quoteLogs.id, id), (await import("drizzle-orm")).eq(quoteLogs.tenantId, tenantId)));
+      .where(and(eq(quoteLogs.id, id), eq(quoteLogs.tenantId, tenantId)));
 
     isRead = true;
   }
@@ -164,9 +157,15 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
-  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope) ? aiAssessment.visible_scope.map((x: any) => String(x)) : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions)
+    ? aiAssessment.questions.map((x: any) => String(x))
+    : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
+    ? aiAssessment.assumptions.map((x: any) => String(x))
+    : [];
+  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
+    ? aiAssessment.visible_scope.map((x: any) => String(x))
+    : [];
 
   const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
@@ -183,9 +182,12 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
-  const activeVersion = typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
+  const activeVersion =
+    typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
-  const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
+  const renderedRenders = (renderRows ?? []).filter(
+    (r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl)
+  );
 
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
@@ -207,8 +209,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       />
 
       <div className="space-y-6">
-        {/* ✅ LeadCard gets exported module action, NOT a page closure */}
-        <LeadCard lead={lead} stageNorm={String(stageNorm)} setStageAction={setStageAction as any} />
+        {/* ✅ FIX: LeadCard now requires quoteId */}
+        <LeadCard quoteId={id} lead={lead} stageNorm={String(stageNorm)} setStageAction={setStageAction as any} />
 
         <CustomerNotesCard notes={notes} />
         <QuotePhotoGallery photos={photos} />
