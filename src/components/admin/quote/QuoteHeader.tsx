@@ -1,23 +1,14 @@
-// src/components/admin/quote/QuoteHeader.tsx
 import Link from "next/link";
 import React from "react";
 
 import { chip, renderChip } from "@/components/admin/quote/ui";
 
-type StageMeta = { key: string; label: string };
-
-export default function QuoteHeader(props: {
+export default async function QuoteHeader(props: {
   quoteId: string;
   submittedAtLabel: string;
   isRead: boolean;
   stageLabel: string;
   stageNorm: string;
-
-  // for the progress UI
-  stages: StageMeta[];
-  stageIndex: number;
-  stagePct: number;
-
   renderStatus: any;
   confidence: any;
   inspectionRequired: boolean | null;
@@ -33,9 +24,6 @@ export default function QuoteHeader(props: {
     isRead,
     stageLabel,
     stageNorm,
-    stages,
-    stageIndex,
-    stagePct,
     renderStatus,
     confidence,
     inspectionRequired,
@@ -45,6 +33,13 @@ export default function QuoteHeader(props: {
   } = props;
 
   const composeHref = `/admin/quotes/${encodeURIComponent(quoteId)}/email/compose`;
+
+  // ✅ Bring back progress bar + stage chips by reading the shared STAGES list
+  const normalizeMod = await import("@/lib/admin/quotes/normalize");
+  const STAGES = (normalizeMod as any).STAGES as Array<{ key: string; label: string }>;
+
+  const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === String(stageNorm)));
+  const stagePct = STAGES.length > 1 ? Math.round((stageIndex / (STAGES.length - 1)) * 100) : 0;
 
   return (
     <header className="space-y-4">
@@ -64,8 +59,7 @@ export default function QuoteHeader(props: {
 
       {/* Primary action + guidance */}
       <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-        <div className="space-y-4">
-          {/* status chips */}
+        <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-2">
             {isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
             {chip(`Stage: ${stageLabel}`, stageNorm === "new" ? "blue" : "gray")}
@@ -75,19 +69,19 @@ export default function QuoteHeader(props: {
             {activeVersion != null ? chip(`Active: v${activeVersion}`, "green") : chip("Active: —", "gray")}
           </div>
 
-          {/* ✅ Progress bar (restored) */}
-          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+          {/* ✅ Progress bar restored */}
+          <div className="pt-1">
             <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-300">
               <div className="font-semibold">Progress</div>
-              <div className="font-mono">{Number.isFinite(stagePct) ? `${stagePct}%` : "—"}</div>
+              <div className="font-mono">{stagePct}%</div>
             </div>
 
             <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-900">
-              <div className="h-full bg-black dark:bg-white" style={{ width: `${Math.max(0, Math.min(100, stagePct))}%` }} />
+              <div className="h-full bg-black dark:bg-white" style={{ width: `${stagePct}%` }} />
             </div>
 
             <div className="mt-3 flex flex-wrap gap-2">
-              {(stages ?? []).slice(0, 8).map((s, idx) => {
+              {STAGES.slice(0, 8).map((s, idx) => {
                 const isDone = idx < stageIndex;
                 const isActive = idx === stageIndex;
                 const tone: any = isActive ? "blue" : isDone ? "green" : "gray";

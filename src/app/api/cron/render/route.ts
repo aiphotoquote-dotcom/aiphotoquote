@@ -167,10 +167,11 @@ async function requireCronSecret(req: Request) {
 
 /**
  * ✅ Ensure v0 exists for a quote (used for legacy queue migration).
+ * IMPORTANT: keep columns aligned to actual schema (minimal insert).
  */
 async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quoteOutput: any }) {
   const existing = await db.execute(sql`
-    select id::text as id
+    select id::text as id, version
     from quote_versions
     where tenant_id = ${args.tenantId}::uuid
       and quote_log_id = ${args.quoteLogId}::uuid
@@ -189,9 +190,6 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
       version,
       output,
       ai_mode,
-      source,
-      created_by,
-      meta,
       created_at
     )
     values (
@@ -201,9 +199,6 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
       0,
       ${JSON.stringify(args.quoteOutput ?? {})}::jsonb,
       'unknown',
-      'system',
-      'system',
-      '{}'::jsonb,
       now()
     )
     returning id::text as id
@@ -264,17 +259,27 @@ async function claimRenderJobs(max: number): Promise<RenderJob[]> {
 /**
  * ✅ Legacy queue drain:
  * - claim quote_logs where render_status='queued'
+ * - ALSO re-claim stale legacy 'running' jobs (created_at older than 10 minutes, still no image)
  * - ensure v0
  * - insert into quote_renders (attempt 1) if not exists
  * - claim it immediately as running and return it as a normal render job
  */
 async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
-  // 1) Claim legacy quote_logs rows
   const claimedLegacy = await db.execute(sql`
     with picked as (
       select id, tenant_id, output
       from quote_logs
-      where render_status = 'queued'
+      where
+        (
+          render_status = 'queued'
+          or (
+            render_status = 'running'
+            and render_image_url is null
+            and rendered_at is null
+            and coalesce(render_error,'') = ''
+            and created_at < (now() - interval '10 minutes')
+          )
+        )
       order by created_at asc
       limit ${max}
       for update skip locked
@@ -300,10 +305,8 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
     const quoteLogId = String(row.quote_log_id);
     const quoteOutput = safeJsonParse(row.quote_output) ?? row.quote_output ?? {};
 
-    // 2) Ensure v0 exists
     const v0 = await ensureVersion0({ tenantId, quoteLogId, quoteOutput });
     if (!v0.versionId) {
-      // fail legacy job (can't proceed)
       await db.execute(sql`
         update quote_logs
         set render_status = 'failed',
@@ -314,7 +317,6 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
       continue;
     }
 
-    // 3) Insert a render row if none exists for this version (attempt 1)
     await db.execute(sql`
       insert into quote_renders (
         id,
@@ -340,10 +342,8 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
     jobs.push({ tenantId, quoteLogId, quoteVersionId: v0.versionId });
   }
 
-  // 4) Now claim from quote_renders (the newly created rows will be picked)
   const claimed = await claimRenderJobs(max);
 
-  // Tag these as migrated (for visibility)
   const migratedSet = new Set(jobs.map((j) => `${j.tenantId}:${j.quoteLogId}:${j.quoteVersionId}`));
   return claimed.map((j) => ({
     ...j,
@@ -527,7 +527,7 @@ async function bumpGraceUsedIfGraceTier(tenantId: string) {
         and lower(coalesce(plan_tier,'')) in ('tier0','tier1','tier2')
     `);
   } catch {
-    // ignore
+    // ignore (column might not exist in older schemas)
   }
 }
 
@@ -685,15 +685,12 @@ async function handleCron(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  // ✅ Claim from BOTH queues (prevents legacy/quoteform starvation):
-  // 1) claim lifecycle jobs from quote_renders
+  // ✅ 1) claim lifecycle jobs first
   let claimed: RenderJob[] = await claimRenderJobs(max);
 
-  // 2) fill remaining capacity from legacy queue by migrating to quote_renders and claiming
-  if (claimed.length < max) {
-    const remaining = Math.max(0, max - claimed.length);
-    const legacy = remaining > 0 ? await claimLegacyJobsAsRenderJobs(remaining) : [];
-    claimed = [...claimed, ...legacy];
+  // ✅ 2) if none, drain legacy queue by migrating to quote_renders (also reclaims stale legacy running jobs)
+  if (!claimed.length) {
+    claimed = await claimLegacyJobsAsRenderJobs(max);
   }
 
   if (!claimed.length) {
@@ -1052,7 +1049,8 @@ async function handleCron(req: Request) {
 
       const bytes = Buffer.from(b64, "base64");
 
-      const key = `renders/${tenantSlug}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
+      const tenantSlugSafe = tenantSlug || "tenant";
+      const key = `renders/${tenantSlugSafe}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
       const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
@@ -1095,10 +1093,10 @@ async function handleCron(req: Request) {
 
         const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
         const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
-        const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
+        const summaryEmail = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
         const baseUrl = getBaseUrl(req);
-        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
+        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlugSafe)}` : null;
         const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(job.quoteLogId)}` : null;
 
         const renderEmailResult: any = {
@@ -1115,14 +1113,14 @@ async function handleCron(req: Request) {
               brandLogoUrl,
               brandLogoVariant,
               quoteLogId: job.quoteLogId,
-              tenantSlug,
+              tenantSlug: tenantSlugSafe,
               customerName,
               customerEmail,
               customerPhone,
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary,
+              summary: summaryEmail,
               adminQuoteUrl,
             });
 
@@ -1159,7 +1157,7 @@ async function handleCron(req: Request) {
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary,
+              summary: summaryEmail,
               publicQuoteUrl,
               replyToEmail: cfg.leadToEmail ?? null,
             });
@@ -1206,8 +1204,6 @@ async function handleCron(req: Request) {
         ok: true,
         imageUrl,
         renderModel,
-        industryKey: industryKey || null,
-        industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
         sourceQueue: job.sourceQueue,
