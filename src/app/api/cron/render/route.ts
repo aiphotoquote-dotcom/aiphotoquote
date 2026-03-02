@@ -685,12 +685,15 @@ async function handleCron(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  // ✅ 1) claim lifecycle jobs first
+  // ✅ Claim from BOTH queues (prevents legacy/quoteform starvation):
+  // 1) claim lifecycle jobs from quote_renders
   let claimed: RenderJob[] = await claimRenderJobs(max);
 
-  // ✅ 2) if none, drain legacy queue by migrating to quote_renders
-  if (!claimed.length) {
-    claimed = await claimLegacyJobsAsRenderJobs(max);
+  // 2) fill remaining capacity from legacy queue by migrating to quote_renders and claiming
+  if (claimed.length < max) {
+    const remaining = Math.max(0, max - claimed.length);
+    const legacy = remaining > 0 ? await claimLegacyJobsAsRenderJobs(remaining) : [];
+    claimed = [...claimed, ...legacy];
   }
 
   if (!claimed.length) {
