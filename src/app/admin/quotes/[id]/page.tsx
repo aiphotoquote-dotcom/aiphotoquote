@@ -108,7 +108,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   let isRead = Boolean(rowSnap.isRead);
 
-  // ✅ keep your auto-mark-read behavior server-side (and keep it SIMPLE)
+  // Keep your auto-mark-read behavior server-side
   if (!skipAutoRead && !isRead) {
     await db
       .update(quoteLogs)
@@ -129,6 +129,10 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const stageMeta = STAGES.find((s) => s.key === stageNorm) ?? null;
   const stageLabel = stageNorm === "read" ? "Read (legacy)" : stageMeta?.label ?? "New";
+
+  // ✅ Restore progress computation (this is what we lost visually)
+  const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === stageNorm));
+  const stagePct = STAGES.length > 1 ? Math.round((stageIndex / (STAGES.length - 1)) * 100) : 0;
 
   const outAny: any = rowSnap.output ?? null;
   const aiAssessment = pickAiAssessmentFromAny(outAny);
@@ -157,15 +161,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const summary = String(aiAssessment?.summary ?? "").trim();
 
-  const questions: string[] = Array.isArray(aiAssessment?.questions)
-    ? aiAssessment.questions.map((x: any) => String(x))
-    : [];
-  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions)
-    ? aiAssessment.assumptions.map((x: any) => String(x))
-    : [];
-  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope)
-    ? aiAssessment.visible_scope.map((x: any) => String(x))
-    : [];
+  const questions: string[] = Array.isArray(aiAssessment?.questions) ? aiAssessment.questions.map((x: any) => String(x)) : [];
+  const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
+  const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope) ? aiAssessment.visible_scope.map((x: any) => String(x)) : [];
 
   const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
 
@@ -182,24 +180,23 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
-  const activeVersion =
-    typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
+  const activeVersion = typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
-  const renderedRenders = (renderRows ?? []).filter(
-    (r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl)
-  );
+  const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
 
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-      {/* ✅ Header uses exported module actions */}
       <QuoteHeader
         quoteId={id}
         submittedAtLabel={submittedAtLabel}
         isRead={isRead}
         stageLabel={stageLabel}
         stageNorm={String(stageNorm)}
+        stages={STAGES.map((s) => ({ key: s.key, label: s.label }))}
+        stageIndex={stageIndex}
+        stagePct={stagePct}
         renderStatus={rowSnap.renderStatus}
         confidence={confidence}
         inspectionRequired={inspectionRequired}
@@ -209,7 +206,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       />
 
       <div className="space-y-6">
-        {/* ✅ FIX: LeadCard now requires quoteId */}
         <LeadCard quoteId={id} lead={lead} stageNorm={String(stageNorm)} setStageAction={setStageAction as any} />
 
         <CustomerNotesCard notes={notes} />
@@ -243,7 +239,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
         <div id="renders" />
 
-        {/* ✅ This server wrapper is the ONLY place actions cross into LifecyclePanel */}
         <LifecyclePanelServer
           quoteId={id}
           versionRows={versionRows}
