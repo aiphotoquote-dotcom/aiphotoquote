@@ -1,5 +1,6 @@
 // src/components/admin/quote/QuoteIntakeCard.tsx
 import React from "react";
+import QuotePhotoGallery from "@/components/admin/QuotePhotoGallery";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -12,26 +13,6 @@ function pickFirstString(obj: any, keys: string[]) {
     if (v) return v;
   }
   return "";
-}
-
-function normalizePhotos(photos: any): Array<{ url: string; label?: string }> {
-  const xs = Array.isArray(photos) ? photos : [];
-  const out: Array<{ url: string; label?: string }> = [];
-
-  for (const p of xs) {
-    const url =
-      safeTrim(p?.url) ||
-      safeTrim(p?.publicUrl) ||
-      safeTrim(p?.blobUrl) ||
-      safeTrim(p?.imageUrl) ||
-      safeTrim(p);
-    if (!url) continue;
-
-    const label = safeTrim(p?.label) || safeTrim(p?.name) || "";
-    out.push({ url, label: label || undefined });
-  }
-
-  return out;
 }
 
 export default function QuoteIntakeCard(props: {
@@ -59,7 +40,6 @@ export default function QuoteIntakeCard(props: {
   const phone = pickFirstString(leadAny, ["phone", "phoneNumber", "customerPhone", "leadPhone"]);
 
   const notes = safeTrim(props.notes) || "—";
-  const photos = normalizePhotos(props.photos);
 
   const estimate = safeTrim(props.estimateDisplay) || "—";
   const confidence = props.confidence == null || props.confidence === "" ? null : String(props.confidence);
@@ -174,42 +154,15 @@ export default function QuoteIntakeCard(props: {
         </div>
       </div>
 
+      {/* ✅ Nicer browse/zoom experience (existing component) */}
       <div className="mt-5">
         <div className="flex items-center justify-between">
           <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Photos</div>
-          <div className="text-xs font-semibold text-gray-500 dark:text-gray-400">{photos.length} total</div>
         </div>
 
-        {photos.length ? (
-          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {photos.map((p, idx) => (
-              <a
-                key={`${p.url}-${idx}`}
-                href={p.url}
-                target="_blank"
-                rel="noreferrer"
-                className="group overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950/10"
-                title={p.label || "Open image"}
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={p.url}
-                  alt={p.label || `Photo ${idx + 1}`}
-                  className="h-44 w-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
-                />
-                {p.label ? (
-                  <div className="truncate border-t border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 dark:border-gray-800 dark:text-gray-300">
-                    {p.label}
-                  </div>
-                ) : null}
-              </a>
-            ))}
-          </div>
-        ) : (
-          <div className="mt-3 rounded-xl border border-dashed border-gray-200 p-4 text-xs text-gray-600 dark:border-gray-800 dark:text-gray-400">
-            No photos submitted.
-          </div>
-        )}
+        <div className="mt-3">
+          <QuotePhotoGallery photos={props.photos} />
+        </div>
       </div>
 
       <div className="mt-6 rounded-xl border border-gray-200 p-4 dark:border-gray-800">

@@ -12,6 +12,9 @@ import EmailHistoryCard, { type EmailHistoryRow } from "@/components/admin/quote
 import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 
+import RenderProgressBar from "@/components/admin/quote/RenderProgressBar";
+import RenderAutoFocus from "@/components/admin/quote/RenderAutoFocus";
+
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
 
@@ -195,6 +198,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
 
+  // ✅ rendering activity signals (for progress + auto-focus)
+  const queuedCount = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "queued").length;
+  const runningCount = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "running").length;
+  const renderingActive = queuedCount + runningCount > 0;
+
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
   // Email history (best-effort; table may not exist everywhere yet)
@@ -248,8 +256,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         visibleScope={visibleScope}
       />
 
+      {/* ✅ If rendering is active, auto-focus the renders section once */}
+      <RenderAutoFocus active={renderingActive} targetId="renders" />
+
       {/* SECTION 2: Renders */}
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
+      <div id="renders" className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Renders</div>
@@ -258,6 +269,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             </div>
           </div>
         </div>
+
+        {/* ✅ Your render progress bar (focused + sticky-feeling) */}
+        <RenderProgressBar active={renderingActive} queuedCount={queuedCount} runningCount={runningCount} />
 
         <div className="mt-4">
           <LifecyclePanelServer
