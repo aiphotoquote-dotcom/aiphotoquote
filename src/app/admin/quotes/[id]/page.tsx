@@ -15,6 +15,7 @@ import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
 import LifecyclePanelServer from "@/components/admin/quote/LifecyclePanelServer";
 import SentEmailsCard from "@/components/admin/quote/SentEmailsCard";
+import RenderProgressBar from "@/components/admin/quote/RenderProgressBar";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
@@ -131,7 +132,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const stageMeta = STAGES.find((s) => s.key === stageNorm) ?? null;
   const stageLabel = stageNorm === "read" ? "Read (legacy)" : stageMeta?.label ?? "New";
 
-  // ✅ Restore progress computation
+  // (this is stage progress; harmless even if you don't care about it)
   const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === stageNorm));
   const stagePct = STAGES.length > 1 ? Math.round((stageIndex / (STAGES.length - 1)) * 100) : 0;
 
@@ -185,6 +186,11 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
 
+  // ✅ rendering progress counts (this is the bar you care about)
+  const queuedCount = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "queued").length;
+  const runningCount = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "running").length;
+  const renderActive = queuedCount + runningCount > 0;
+
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
   return (
@@ -205,6 +211,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         markUnreadAction={markUnreadAction}
         markReadAction={markReadAction}
       />
+
+      {/* ✅ The rendering progress bar (auto-focuses itself when active) */}
+      <RenderProgressBar active={renderActive} queuedCount={queuedCount} runningCount={runningCount} refreshMs={2500} />
 
       <div className="space-y-6">
         <LeadCard quoteId={id} lead={lead} stageNorm={String(stageNorm)} setStageAction={setStageAction as any} />
@@ -238,7 +247,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           customerPhotos={(photos as any[]) ?? []}
         />
 
-        {/* ✅ Sent emails card (composer history) */}
         <SentEmailsCard tenantId={tenantId} quoteId={id} />
 
         <div id="renders" />
