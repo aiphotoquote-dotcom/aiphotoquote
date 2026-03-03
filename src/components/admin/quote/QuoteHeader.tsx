@@ -14,7 +14,7 @@ export default function QuoteHeader(props: {
   stageLabel: string;
   stageNorm: string;
 
-  // ✅ kept for back-compat (page still passes these), but intentionally unused
+  // (kept for back-compat; intentionally not rendered)
   stages?: Array<{ key: string; label: string }>;
   stageIndex?: number;
   stagePct?: number;

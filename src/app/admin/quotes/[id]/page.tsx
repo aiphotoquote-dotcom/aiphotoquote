@@ -4,17 +4,13 @@ import { auth } from "@clerk/nextjs/server";
 import { and, eq, sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
-import QuotePhotoGallery from "@/components/admin/QuotePhotoGallery";
-
 import QuoteHeader from "@/components/admin/quote/QuoteHeader";
-import LeadCard from "@/components/admin/quote/LeadCard";
-import CustomerNotesCard from "@/components/admin/quote/CustomerNotesCard";
-import DetailsPanel from "@/components/admin/quote/DetailsPanel";
-import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
-import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
-import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
+import QuoteIntakeCard from "@/components/admin/quote/QuoteIntakeCard";
 import LifecyclePanelServer from "@/components/admin/quote/LifecyclePanelServer";
+import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
 import EmailHistoryCard, { type EmailHistoryRow } from "@/components/admin/quote/EmailHistoryCard";
+import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
+import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
@@ -37,7 +33,7 @@ import {
 
 import { safeMoney } from "@/lib/admin/quotes/utils";
 
-// ✅ IMPORT EXPORTED SERVER ACTIONS (module exports only; never page closures)
+// ✅ server actions (module exports only)
 import { markReadAction, markUnreadAction, setStageAction } from "./actions";
 
 export const runtime = "nodejs";
@@ -124,7 +120,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   let isRead = Boolean(rowSnap.isRead);
 
-  // Keep your auto-mark-read behavior server-side
   if (!skipAutoRead && !isRead) {
     await db
       .update(quoteLogs)
@@ -177,15 +172,8 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const assumptions: string[] = Array.isArray(aiAssessment?.assumptions) ? aiAssessment.assumptions.map((x: any) => String(x)) : [];
   const visibleScope: string[] = Array.isArray(aiAssessment?.visible_scope) ? aiAssessment.visible_scope.map((x: any) => String(x)) : [];
 
-  const pricingBasis: any = aiAssessment?.pricing_basis ?? outAny?.pricing_basis ?? outAny?.output?.pricing_basis ?? null;
-
   const inputAny: any = rowSnap.input ?? {};
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
-  const pricingConfigSnap: any = inputAny?.pricing_config_snapshot ?? null;
-  const pricingRulesSnap: any = inputAny?.pricing_rules_snapshot ?? null;
-
-  const industryKeySnap = pickIndustryKeySnapshot(inputAny);
-  const llmKeySource = pickLlmKeySource(inputAny);
 
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
   const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
@@ -198,7 +186,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
 
-  // ✅ Email history (best-effort; table might not exist in some environments yet)
+  // Email history (best-effort; table may not exist everywhere yet)
   let emailRows: EmailHistoryRow[] = [];
   try {
     const r = await db.execute(sql`
@@ -232,71 +220,95 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         markReadAction={markReadAction}
       />
 
-      <div className="space-y-6">
-        <LeadCard quoteId={id} lead={lead} stageNorm={String(stageNorm)} setStageAction={setStageAction as any} />
+      {/* SECTION 1: Intake */}
+      <QuoteIntakeCard
+        quoteId={id}
+        lead={lead}
+        notes={notes}
+        photos={photos}
+        stageNorm={String(stageNorm)}
+        setStageAction={setStageAction as any}
+        estimateDisplay={estimateDisplay}
+        confidence={confidence}
+        inspectionRequired={inspectionRequired}
+        summary={summary}
+        questions={questions}
+        assumptions={assumptions}
+        visibleScope={visibleScope}
+      />
 
-        <CustomerNotesCard notes={notes} />
-        <QuotePhotoGallery photos={photos} />
+      {/* SECTION 2: Renders */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Renders</div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+              Request new renders, preview results, and multi-select for email.
+            </div>
+          </div>
+        </div>
 
-        <DetailsPanel
-          renderOptIn={Boolean(rowSnap.renderOptIn)}
-          estimateDisplay={estimateDisplay}
-          confidence={confidence}
-          inspectionRequired={inspectionRequired}
-          summary={summary}
-          questions={questions}
-          assumptions={assumptions}
-          visibleScope={visibleScope}
-          pricingBasis={pricingBasis}
-          pricingPolicySnap={pricingPolicySnap}
-          pricingConfigSnap={pricingConfigSnap}
-          pricingRulesSnap={pricingRulesSnap}
-          industryKeySnap={industryKeySnap}
-          llmKeySource={llmKeySource}
-          rawOutput={rowSnap.output ?? null}
-        />
-
-        <div id="renders" />
-
-        <LifecyclePanelServer
-          quoteId={id}
-          versionRows={versionRows}
-          noteRows={noteRows}
-          renderRows={renderRows}
-          lifecycleReadError={lifecycleReadError}
-          activeVersion={activeVersion}
-        />
-
-        <EmailHistoryCard emails={emailRows} />
-
-        <EmailBuilderPanel
-          quoteId={id}
-          activeVersion={activeVersion}
-          versionRows={versionRows as any}
-          renderedRenders={renderedRenders as any}
-          customerPhotos={(photos as any[]) ?? []}
-        />
-
-        <LegacyRenderPanel
-          renderStatus={rowSnap.renderStatus}
-          renderedAt={rowSnap.renderedAt}
-          renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
-          renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
-          renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
-        />
+        <div className="mt-4">
+          <LifecyclePanelServer
+            quoteId={id}
+            versionRows={versionRows}
+            noteRows={noteRows}
+            renderRows={renderRows}
+            lifecycleReadError={lifecycleReadError}
+            activeVersion={activeVersion}
+          />
+        </div>
       </div>
 
+      {/* SECTION 3: Sent emails */}
+      <EmailHistoryCard emails={emailRows} />
+
+      {/* SECTION 4: Compose */}
+      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Compose</div>
+            <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+              Build an email using selected renders, then send when you’re ready.
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <EmailBuilderPanel
+            quoteId={id}
+            activeVersion={activeVersion}
+            versionRows={versionRows as any}
+            renderedRenders={renderedRenders as any}
+            customerPhotos={(Array.isArray(photos) ? (photos as any[]) : []) ?? []}
+          />
+        </div>
+      </div>
+
+      {/* Advanced */}
       <details className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
         <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
-          Debug / raw payload
+          Advanced / debug
           <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">(collapsed by default)</span>
         </summary>
-        <div className="mt-4">
-          <RawPayloadPanel input={rowSnap.input ?? {}} />
+
+        <div className="mt-4 space-y-6">
+          <LegacyRenderPanel
+            renderStatus={rowSnap.renderStatus}
+            renderedAt={rowSnap.renderedAt}
+            renderImageUrl={rowSnap.renderImageUrl ? String(rowSnap.renderImageUrl) : null}
+            renderError={rowSnap.renderError ? String(rowSnap.renderError) : null}
+            renderPrompt={rowSnap.renderPrompt ? String(rowSnap.renderPrompt) : null}
+          />
+
+          <div>
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              Raw payload
+            </div>
+            <RawPayloadPanel input={rowSnap.input ?? {}} />
+          </div>
         </div>
       </details>
-
-      <div id="lifecycle" />
     </div>
   );
 }
