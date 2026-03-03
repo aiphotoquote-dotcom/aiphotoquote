@@ -166,7 +166,8 @@ async function requireCronSecret(req: Request) {
 }
 
 /**
- * ✅ Ensure v0 exists for a quote (used for legacy queue migration).
+ * ✅ Ensure a version row exists for a quote.
+ * NOTE: despite the name, this returns the most recent version id if any exist.
  */
 async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quoteOutput: any }) {
   const existing = await db.execute(sql`
@@ -215,7 +216,7 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
 
 /**
  * Claim jobs safely from quote_renders.
- * ✅ Also re-claim stale running jobs:
+ * ✅ Also re-claim stale running jobs (prevents “stuck forever”):
  * - if status='running' and started_at older than 10 minutes => treat as stale and retry
  */
 async function claimRenderJobs(max: number): Promise<RenderJob[]> {
@@ -262,26 +263,29 @@ async function claimRenderJobs(max: number): Promise<RenderJob[]> {
 }
 
 /**
- * ✅ Legacy queue drain (FIXED):
+ * ✅ Legacy queue drain:
  * - claim quote_logs where render_status='queued'
- * - ALSO reclaim stale legacy 'running' jobs that never completed
+ * - ALSO re-claim stale 'running' legacy jobs that never produced an image
  *   (quote_logs has no started_at/updated_at in your schema, so we use created_at as a safe fallback)
- * - ensure v0
+ * - ensure version exists
  * - insert into quote_renders (attempt 1) if not exists
  * - claim it immediately as running and return it as a normal render job
  */
 async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
+  // 1) Claim legacy quote_logs rows
   const claimedLegacy = await db.execute(sql`
     with picked as (
       select id, tenant_id, output
       from quote_logs
       where
-        render_status = 'queued'
-        or (
-          render_status = 'running'
-          and render_image_url is null
-          and rendered_at is null
-          and created_at < (now() - interval '10 minutes')
+        (
+          render_status = 'queued'
+          or (
+            render_status = 'running'
+            and render_image_url is null
+            and rendered_at is null
+            and created_at < (now() - interval '10 minutes')
+          )
         )
       order by created_at asc
       limit ${max}
@@ -308,18 +312,20 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
     const quoteLogId = String(row.quote_log_id);
     const quoteOutput = safeJsonParse(row.quote_output) ?? row.quote_output ?? {};
 
+    // 2) Ensure a version exists
     const v0 = await ensureVersion0({ tenantId, quoteLogId, quoteOutput });
     if (!v0.versionId) {
       await db.execute(sql`
         update quote_logs
         set render_status = 'failed',
-            render_error = 'Failed to create/resolve version0 for legacy render job.'
+            render_error = 'Failed to create/resolve a quote version for legacy render job.'
         where id = ${quoteLogId}::uuid
           and tenant_id = ${tenantId}::uuid
       `);
       continue;
     }
 
+    // 3) Insert a render row if none exists for this version (attempt 1)
     await db.execute(sql`
       insert into quote_renders (
         id,
@@ -345,8 +351,10 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
     jobs.push({ tenantId, quoteLogId, quoteVersionId: v0.versionId });
   }
 
+  // 4) Now claim from quote_renders (the newly created rows will be picked)
   const claimed = await claimRenderJobs(max);
 
+  // Tag these as migrated (for visibility)
   const migratedSet = new Set(jobs.map((j) => `${j.tenantId}:${j.quoteLogId}:${j.quoteVersionId}`));
   return claimed.map((j) => ({
     ...j,
@@ -524,7 +532,8 @@ async function bumpGraceUsedIfGraceTier(tenantId: string) {
   try {
     await db.execute(sql`
       update tenant_settings
-      set activation_grace_used = coalesce(activation_grace_used, 0) + 1
+      set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
+          updated_at = now()
       where tenant_id = ${tenantId}::uuid
         and lower(coalesce(plan_tier,'')) in ('tier0','tier1','tier2')
     `);
@@ -565,7 +574,7 @@ function collapseBlankLines(s: string) {
   return s
     .split("\n")
     .map((l) => l.trimEnd())
-    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
+    .filter((line, idx, arr) => !(line.trim() === "" && arr[idx - 1]?.trim() === ""))
     .join("\n")
     .trim();
 }
@@ -687,7 +696,10 @@ async function handleCron(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
+  // ✅ 1) claim lifecycle jobs first
   let claimed: RenderJob[] = await claimRenderJobs(max);
+
+  // ✅ 2) if none, drain legacy queue by migrating to quote_renders
   if (!claimed.length) {
     claimed = await claimLegacyJobsAsRenderJobs(max);
   }
@@ -1002,7 +1014,9 @@ async function handleCron(req: Request) {
             tenantRenderNotes,
             images,
           }),
-          queue: { sourceQueue: job.sourceQueue },
+          queue: {
+            sourceQueue: job.sourceQueue,
+          },
         };
 
         try {
