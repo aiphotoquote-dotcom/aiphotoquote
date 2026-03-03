@@ -167,11 +167,10 @@ async function requireCronSecret(req: Request) {
 
 /**
  * ✅ Ensure v0 exists for a quote (used for legacy queue migration).
- * IMPORTANT: keep columns aligned to actual schema (minimal insert).
  */
 async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quoteOutput: any }) {
   const existing = await db.execute(sql`
-    select id::text as id, version
+    select id::text as id
     from quote_versions
     where tenant_id = ${args.tenantId}::uuid
       and quote_log_id = ${args.quoteLogId}::uuid
@@ -190,6 +189,9 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
       version,
       output,
       ai_mode,
+      source,
+      created_by,
+      meta,
       created_at
     )
     values (
@@ -199,6 +201,9 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
       0,
       ${JSON.stringify(args.quoteOutput ?? {})}::jsonb,
       'unknown',
+      'system',
+      'system',
+      '{}'::jsonb,
       now()
     )
     returning id::text as id
@@ -210,7 +215,7 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
 
 /**
  * Claim jobs safely from quote_renders.
- * ✅ Also re-claim stale running jobs (prevents “stuck forever”):
+ * ✅ Also re-claim stale running jobs:
  * - if status='running' and started_at older than 10 minutes => treat as stale and retry
  */
 async function claimRenderJobs(max: number): Promise<RenderJob[]> {
@@ -257,9 +262,10 @@ async function claimRenderJobs(max: number): Promise<RenderJob[]> {
 }
 
 /**
- * ✅ Legacy queue drain:
+ * ✅ Legacy queue drain (FIXED):
  * - claim quote_logs where render_status='queued'
- * - ALSO re-claim stale legacy 'running' jobs (created_at older than 10 minutes, still no image)
+ * - ALSO reclaim stale legacy 'running' jobs that never completed
+ *   (quote_logs has no started_at/updated_at in your schema, so we use created_at as a safe fallback)
  * - ensure v0
  * - insert into quote_renders (attempt 1) if not exists
  * - claim it immediately as running and return it as a normal render job
@@ -270,15 +276,12 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
       select id, tenant_id, output
       from quote_logs
       where
-        (
-          render_status = 'queued'
-          or (
-            render_status = 'running'
-            and render_image_url is null
-            and rendered_at is null
-            and coalesce(render_error,'') = ''
-            and created_at < (now() - interval '10 minutes')
-          )
+        render_status = 'queued'
+        or (
+          render_status = 'running'
+          and render_image_url is null
+          and rendered_at is null
+          and created_at < (now() - interval '10 minutes')
         )
       order by created_at asc
       limit ${max}
@@ -521,13 +524,12 @@ async function bumpGraceUsedIfGraceTier(tenantId: string) {
   try {
     await db.execute(sql`
       update tenant_settings
-      set activation_grace_used = coalesce(activation_grace_used, 0) + 1,
-          updated_at = now()
+      set activation_grace_used = coalesce(activation_grace_used, 0) + 1
       where tenant_id = ${tenantId}::uuid
         and lower(coalesce(plan_tier,'')) in ('tier0','tier1','tier2')
     `);
   } catch {
-    // ignore (column might not exist in older schemas)
+    // ignore
   }
 }
 
@@ -685,10 +687,7 @@ async function handleCron(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  // ✅ 1) claim lifecycle jobs first
   let claimed: RenderJob[] = await claimRenderJobs(max);
-
-  // ✅ 2) if none, drain legacy queue by migrating to quote_renders (also reclaims stale legacy running jobs)
   if (!claimed.length) {
     claimed = await claimLegacyJobsAsRenderJobs(max);
   }
@@ -1003,9 +1002,7 @@ async function handleCron(req: Request) {
             tenantRenderNotes,
             images,
           }),
-          queue: {
-            sourceQueue: job.sourceQueue,
-          },
+          queue: { sourceQueue: job.sourceQueue },
         };
 
         try {
@@ -1049,8 +1046,7 @@ async function handleCron(req: Request) {
 
       const bytes = Buffer.from(b64, "base64");
 
-      const tenantSlugSafe = tenantSlug || "tenant";
-      const key = `renders/${tenantSlugSafe}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
+      const key = `renders/${tenantSlug}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
       const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
@@ -1093,10 +1089,10 @@ async function handleCron(req: Request) {
 
         const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
         const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
-        const summaryEmail = typeof outputAny?.summary === "string" ? outputAny.summary : "";
+        const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
         const baseUrl = getBaseUrl(req);
-        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlugSafe)}` : null;
+        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
         const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(job.quoteLogId)}` : null;
 
         const renderEmailResult: any = {
@@ -1113,14 +1109,14 @@ async function handleCron(req: Request) {
               brandLogoUrl,
               brandLogoVariant,
               quoteLogId: job.quoteLogId,
-              tenantSlug: tenantSlugSafe,
+              tenantSlug,
               customerName,
               customerEmail,
               customerPhone,
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary: summaryEmail,
+              summary,
               adminQuoteUrl,
             });
 
@@ -1157,7 +1153,7 @@ async function handleCron(req: Request) {
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary: summaryEmail,
+              summary,
               publicQuoteUrl,
               replyToEmail: cfg.leadToEmail ?? null,
             });
@@ -1204,6 +1200,8 @@ async function handleCron(req: Request) {
         ok: true,
         imageUrl,
         renderModel,
+        industryKey: industryKey || null,
+        industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
         sourceQueue: job.sourceQueue,
