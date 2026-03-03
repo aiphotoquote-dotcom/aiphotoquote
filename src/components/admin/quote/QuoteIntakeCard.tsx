@@ -107,7 +107,6 @@ export default function QuoteIntakeCard(props: {
         </div>
       </div>
 
-      {/* Lead + Stage */}
       <div className="mt-5 grid gap-4 lg:grid-cols-3">
         <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
           <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Lead</div>
@@ -133,9 +132,7 @@ export default function QuoteIntakeCard(props: {
 
         <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
           <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Stage</div>
-          <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">
-            Stage is separate from read/unread.
-          </div>
+          <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Stage is separate from read/unread.</div>
 
           <form action={props.setStageAction} className="mt-3 flex items-center gap-2">
             <input type="hidden" name="quoteId" value={safeTrim(props.quoteId)} />
@@ -177,7 +174,6 @@ export default function QuoteIntakeCard(props: {
         </div>
       </div>
 
-      {/* Photos */}
       <div className="mt-5">
         <div className="flex items-center justify-between">
           <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Photos</div>
@@ -216,7 +212,6 @@ export default function QuoteIntakeCard(props: {
         )}
       </div>
 
-      {/* Assessment */}
       <div className="mt-6 rounded-xl border border-gray-200 p-4 dark:border-gray-800">
         <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">AI assessment</div>
 

@@ -25,9 +25,7 @@ import {
   normalizeStage,
   pickAiAssessmentFromAny,
   pickCustomerNotes,
-  pickIndustryKeySnapshot,
   pickLead,
-  pickLlmKeySource,
   pickPhotos,
 } from "@/lib/admin/quotes/pageCompat";
 
@@ -59,6 +57,17 @@ function normalizeEmailRows(rows: any[]): EmailHistoryRow[] {
     error: r?.error != null ? String(r.error) : null,
     createdAt: r?.created_at ?? null,
   }));
+}
+
+function safeEstimateDisplayText(v: any): string {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object") {
+    const t = String((v as any).text ?? "").trim();
+    if (t) return t;
+    const l = String((v as any).label ?? "").trim();
+    if (l) return l;
+  }
+  return "—";
 }
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
@@ -176,11 +185,13 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const pricingPolicySnap: any = inputAny?.pricing_policy_snapshot ?? null;
 
   const normalizedPolicy = normalizePricingPolicy(pricingPolicySnap ?? null);
-  const estimateDisplay = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
+  const estimateDisplayAny = formatEstimateForPolicy({ estLow, estHigh, policy: normalizedPolicy });
+  const estimateDisplayText = safeEstimateDisplayText(estimateDisplayAny);
 
   const { versionRows, noteRows, renderRows, lifecycleReadError } = await getQuoteLifecycle({ id, tenantId });
 
-  const activeVersion = typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
+  const activeVersion =
+    typeof (rowSnap as any).currentVersion === "number" ? Number((rowSnap as any).currentVersion) : null;
 
   const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
 
@@ -228,7 +239,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         photos={photos}
         stageNorm={String(stageNorm)}
         setStageAction={setStageAction as any}
-        estimateDisplay={estimateDisplay}
+        estimateDisplay={estimateDisplayText}
         confidence={confidence}
         inspectionRequired={inspectionRequired}
         summary={summary}
@@ -302,9 +313,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           />
 
           <div>
-            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-              Raw payload
-            </div>
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Raw payload</div>
             <RawPayloadPanel input={rowSnap.input ?? {}} />
           </div>
         </div>
