@@ -2,6 +2,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { sendComposerEmail } from "@/lib/emailComposer/sendComposerEmail";
 import { buildQuoteCanvasEmailHtml, buildQuoteCanvasText } from "@/lib/emailComposer/templates/quoteCanvas";
+import { db } from "@/lib/db/client";
+import { sql } from "drizzle-orm";
 
 function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
@@ -12,7 +14,6 @@ function buildPlatformFrom(): string | null {
   const fallback = safeTrim(process.env.RESEND_FALLBACK_FROM) || safeTrim(process.env.PLATFORM_FROM_EMAIL);
   if (!fallback) return null;
 
-  // If already has display-name, keep it. Otherwise optionally add PLATFORM_FROM_NAME.
   const name = safeTrim(process.env.PLATFORM_FROM_NAME);
   if (fallback.includes("<") && fallback.includes(">")) return fallback;
   return name ? `${name} <${fallback}>` : fallback;
@@ -67,7 +68,6 @@ function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Im
 }
 
 function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: string } | undefined {
-  // Preferred shape: body.brand = { name, logoUrl, tagline }
   const b = body?.brand ?? null;
   const name = safeTrim(b?.name ?? body?.shopName ?? "");
   const logoUrl = safeTrim(b?.logoUrl ?? body?.shopLogoUrl ?? "");
@@ -82,10 +82,53 @@ function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: st
   return Object.keys(out).length ? out : undefined;
 }
 
+async function logQuoteEmailSend(args: {
+  tenantId: string;
+  quoteLogId: string;
+  kind: string;
+  to: string[];
+  subject: string;
+  result: { ok: boolean; provider?: string; providerMessageId?: string | null; error?: string | null };
+}) {
+  try {
+    await db.execute(sql`
+      insert into quote_email_sends (
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        to_emails,
+        subject,
+        provider,
+        provider_message_id,
+        ok,
+        error,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${args.tenantId}::uuid,
+        ${args.quoteLogId}::uuid,
+        ${args.kind},
+        ${JSON.stringify(args.to)}::jsonb,
+        ${args.subject},
+        ${String(args.result.provider ?? "") || null},
+        ${args.result.providerMessageId ?? null},
+        ${Boolean(args.result.ok)},
+        ${args.result.ok ? null : (args.result.error ?? "UNKNOWN_EMAIL_ERROR")},
+        now()
+      )
+    `);
+  } catch {
+    // logging should never break the send response
+  }
+}
+
 export async function POST(req: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
     const quoteId = safeTrim(id);
+    if (!quoteId) return NextResponse.json({ ok: false, error: "Missing quote id" }, { status: 400 });
 
     const body: any = await req.json().catch(() => ({}));
 
@@ -114,10 +157,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     const from = safeTrim(body?.from) || buildPlatformFrom() || null;
     if (!from) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured",
-        },
+        { ok: false, error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured" },
         { status: 400 }
       );
     }
@@ -152,7 +192,6 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 
     const result = await sendComposerEmail({
       tenantId,
-      quoteLogId: quoteId || undefined, // ✅ key piece for the Sent Emails card
       message: {
         from,
         to,
@@ -165,6 +204,21 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
           "X-APQ-Composer": "1",
           ...(quoteId ? { "X-APQ-QuoteId": quoteId } : {}),
         },
+      },
+    });
+
+    // ✅ log send (best-effort)
+    await logQuoteEmailSend({
+      tenantId,
+      quoteLogId: quoteId,
+      kind: "composer",
+      to,
+      subject,
+      result: {
+        ok: Boolean((result as any)?.ok),
+        provider: (result as any)?.provider,
+        providerMessageId: (result as any)?.providerMessageId ?? null,
+        error: (result as any)?.error ?? null,
       },
     });
 

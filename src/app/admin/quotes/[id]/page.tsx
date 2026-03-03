@@ -1,7 +1,7 @@
 // src/app/admin/quotes/[id]/page.tsx
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import QuotePhotoGallery from "@/components/admin/QuotePhotoGallery";
@@ -14,8 +14,7 @@ import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
 import LifecyclePanelServer from "@/components/admin/quote/LifecyclePanelServer";
-import SentEmailsCard from "@/components/admin/quote/SentEmailsCard";
-import RenderProgressBar from "@/components/admin/quote/RenderProgressBar";
+import EmailHistoryCard, { type EmailHistoryRow } from "@/components/admin/quote/EmailHistoryCard";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
@@ -50,6 +49,21 @@ type PageProps = {
     | Promise<Record<string, string | string[] | undefined>>
     | Record<string, string | string[] | undefined>;
 };
+
+function normalizeEmailRows(rows: any[]): EmailHistoryRow[] {
+  const xs = Array.isArray(rows) ? rows : [];
+  return xs.map((r: any) => ({
+    id: String(r?.id ?? ""),
+    kind: String(r?.kind ?? "composer"),
+    toEmails: Array.isArray(r?.to_emails) ? r.to_emails.map((x: any) => String(x)) : [],
+    subject: r?.subject != null ? String(r.subject) : null,
+    provider: r?.provider != null ? String(r.provider) : null,
+    providerMessageId: r?.provider_message_id != null ? String(r.provider_message_id) : null,
+    ok: Boolean(r?.ok),
+    error: r?.error != null ? String(r.error) : null,
+    createdAt: r?.created_at ?? null,
+  }));
+}
 
 export default async function QuoteReviewPage({ params, searchParams }: PageProps) {
   const session = await auth();
@@ -132,10 +146,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const stageMeta = STAGES.find((s) => s.key === stageNorm) ?? null;
   const stageLabel = stageNorm === "read" ? "Read (legacy)" : stageMeta?.label ?? "New";
 
-  // (this is stage progress; harmless even if you don't care about it)
-  const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === stageNorm));
-  const stagePct = STAGES.length > 1 ? Math.round((stageIndex / (STAGES.length - 1)) * 100) : 0;
-
   const outAny: any = rowSnap.output ?? null;
   const aiAssessment = pickAiAssessmentFromAny(outAny);
 
@@ -186,12 +196,25 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
 
   const renderedRenders = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "rendered" && Boolean(r.imageUrl));
 
-  // ✅ rendering progress counts (this is the bar you care about)
-  const queuedCount = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "queued").length;
-  const runningCount = (renderRows ?? []).filter((r: any) => String(r.status ?? "") === "running").length;
-  const renderActive = queuedCount + runningCount > 0;
-
   const submittedAtLabel = rowSnap.createdAt ? new Date(rowSnap.createdAt).toLocaleString() : "—";
+
+  // ✅ Email history (best-effort; table might not exist in some environments yet)
+  let emailRows: EmailHistoryRow[] = [];
+  try {
+    const r = await db.execute(sql`
+      select id, kind, to_emails, subject, provider, provider_message_id, ok, error, created_at
+      from quote_email_sends
+      where tenant_id = ${tenantId}::uuid
+        and quote_log_id = ${id}::uuid
+      order by created_at desc
+      limit 50
+    `);
+
+    const rowsAny: any[] = (r as any)?.rows ?? (Array.isArray(r) ? (r as any) : []);
+    emailRows = normalizeEmailRows(rowsAny);
+  } catch {
+    emailRows = [];
+  }
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
@@ -201,9 +224,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         isRead={isRead}
         stageLabel={stageLabel}
         stageNorm={String(stageNorm)}
-        stages={STAGES.map((s) => ({ key: s.key, label: s.label }))}
-        stageIndex={stageIndex}
-        stagePct={stagePct}
         renderStatus={rowSnap.renderStatus}
         confidence={confidence}
         inspectionRequired={inspectionRequired}
@@ -211,9 +231,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
         markUnreadAction={markUnreadAction}
         markReadAction={markReadAction}
       />
-
-      {/* ✅ The rendering progress bar (auto-focuses itself when active) */}
-      <RenderProgressBar active={renderActive} queuedCount={queuedCount} runningCount={runningCount} refreshMs={2500} />
 
       <div className="space-y-6">
         <LeadCard quoteId={id} lead={lead} stageNorm={String(stageNorm)} setStageAction={setStageAction as any} />
@@ -239,16 +256,6 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           rawOutput={rowSnap.output ?? null}
         />
 
-        <EmailBuilderPanel
-          quoteId={id}
-          activeVersion={activeVersion}
-          versionRows={versionRows as any}
-          renderedRenders={renderedRenders as any}
-          customerPhotos={(photos as any[]) ?? []}
-        />
-
-        <SentEmailsCard tenantId={tenantId} quoteId={id} />
-
         <div id="renders" />
 
         <LifecyclePanelServer
@@ -258,6 +265,16 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           renderRows={renderRows}
           lifecycleReadError={lifecycleReadError}
           activeVersion={activeVersion}
+        />
+
+        <EmailHistoryCard emails={emailRows} />
+
+        <EmailBuilderPanel
+          quoteId={id}
+          activeVersion={activeVersion}
+          versionRows={versionRows as any}
+          renderedRenders={renderedRenders as any}
+          customerPhotos={(photos as any[]) ?? []}
         />
 
         <LegacyRenderPanel

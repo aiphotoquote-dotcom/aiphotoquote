@@ -14,7 +14,7 @@ export default function QuoteHeader(props: {
   stageLabel: string;
   stageNorm: string;
 
-  // ✅ optional progress bar inputs
+  // ✅ kept for back-compat (page still passes these), but intentionally unused
   stages?: Array<{ key: string; label: string }>;
   stageIndex?: number;
   stagePct?: number;
@@ -31,18 +31,13 @@ export default function QuoteHeader(props: {
   const submittedAtLabel = safeTrim(props.submittedAtLabel) || "—";
 
   const stageLabel = safeTrim(props.stageLabel) || "—";
-  const stagePct = Number.isFinite(props.stagePct as any) ? Math.max(0, Math.min(100, Number(props.stagePct))) : null;
 
   const renderStatus = safeTrim(props.renderStatus) || "—";
-  const confidence =
-    props.confidence == null || props.confidence === "" ? null : String(props.confidence);
-  const inspectionRequired =
-    typeof props.inspectionRequired === "boolean" ? props.inspectionRequired : null;
+  const confidence = props.confidence == null || props.confidence === "" ? null : String(props.confidence);
+  const inspectionRequired = typeof props.inspectionRequired === "boolean" ? props.inspectionRequired : null;
 
   const activeVersion =
-    typeof props.activeVersion === "number" && Number.isFinite(props.activeVersion)
-      ? props.activeVersion
-      : null;
+    typeof props.activeVersion === "number" && Number.isFinite(props.activeVersion) ? props.activeVersion : null;
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
@@ -88,44 +83,6 @@ export default function QuoteHeader(props: {
           ) : null}
         </div>
       </div>
-
-      {/* ✅ Progress bar restored (only if stagePct is provided) */}
-      {stagePct != null ? (
-        <div className="mt-4">
-          <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-            <span className="font-semibold">Progress</span>
-            <span className="font-mono">{stagePct}%</span>
-          </div>
-
-          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
-            <div
-              className="h-full rounded-full bg-black dark:bg-white"
-              style={{ width: `${stagePct}%` }}
-            />
-          </div>
-
-          {Array.isArray(props.stages) && props.stages.length ? (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {props.stages.map((s) => {
-                const isActive = safeTrim(s.key) === safeTrim(props.stageNorm);
-                return (
-                  <span
-                    key={s.key}
-                    className={
-                      "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold " +
-                      (isActive
-                        ? "bg-black text-white dark:bg-white dark:text-black"
-                        : "bg-gray-100 text-gray-700 dark:bg-gray-900/40 dark:text-gray-300")
-                    }
-                  >
-                    {s.label}
-                  </span>
-                );
-              })}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       <div className="mt-4 flex flex-wrap gap-2">
         {props.isRead ? (
