@@ -152,6 +152,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 
     const result = await sendComposerEmail({
       tenantId,
+      quoteLogId: quoteId || undefined, // ✅ key piece for the Sent Emails card
       message: {
         from,
         to,

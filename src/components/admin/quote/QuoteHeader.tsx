@@ -1,134 +1,154 @@
+// src/components/admin/quote/QuoteHeader.tsx
 import React from "react";
 
-type StageItem = {
-  key: string;
-  label: string;
-};
-
-function chip(text: string, tone: "gray" | "blue" | "green" | "red" = "gray") {
-  const base =
-    "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold " +
-    "dark:border-gray-800";
-
-  const toneCls =
-    tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/40 dark:bg-blue-950/40 dark:text-blue-200"
-      : tone === "green"
-        ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/40 dark:bg-green-950/40 dark:text-green-200"
-        : tone === "red"
-          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/40 dark:bg-red-950/40 dark:text-red-200"
-          : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-black dark:text-gray-200";
-
-  return <span className={base + " " + toneCls}>{text}</span>;
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
 }
 
 export default function QuoteHeader(props: {
   quoteId: string;
   submittedAtLabel: string;
-  isRead: boolean;
 
+  isRead: boolean;
   stageLabel: string;
   stageNorm: string;
 
-  // ✅ for progress bar + chips
-  stages: StageItem[];
-  stageIndex: number;
-  stagePct: number;
+  // ✅ optional progress bar inputs
+  stages?: Array<{ key: string; label: string }>;
+  stageIndex?: number;
+  stagePct?: number;
 
   renderStatus: any;
   confidence: any;
   inspectionRequired: boolean | null;
   activeVersion: number | null;
 
-  // server actions (module exports)
   markUnreadAction: any;
   markReadAction: any;
 }) {
-  const {
-    quoteId,
-    submittedAtLabel,
-    isRead,
-    stageLabel,
-    stageNorm,
-    stages,
-    stageIndex,
-    stagePct,
-    activeVersion,
-    markUnreadAction,
-    markReadAction,
-  } = props;
+  const quoteId = safeTrim(props.quoteId);
+  const submittedAtLabel = safeTrim(props.submittedAtLabel) || "—";
+
+  const stageLabel = safeTrim(props.stageLabel) || "—";
+  const stagePct = Number.isFinite(props.stagePct as any) ? Math.max(0, Math.min(100, Number(props.stagePct))) : null;
+
+  const renderStatus = safeTrim(props.renderStatus) || "—";
+  const confidence =
+    props.confidence == null || props.confidence === "" ? null : String(props.confidence);
+  const inspectionRequired =
+    typeof props.inspectionRequired === "boolean" ? props.inspectionRequired : null;
+
+  const activeVersion =
+    typeof props.activeVersion === "number" && Number.isFinite(props.activeVersion)
+      ? props.activeVersion
+      : null;
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-2">
-          <a href="/admin/quotes" className="text-sm font-semibold text-gray-600 hover:underline dark:text-gray-300">
-            ← Back to quotes
-          </a>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Quote</h1>
-
-            {chip(stageLabel, "blue")}
-            {activeVersion != null ? chip(`active v${activeVersion}`, "green") : chip("no active version", "gray")}
-            {isRead ? chip("READ", "gray") : chip("UNREAD", "red")}
-          </div>
-
-          <div className="text-xs text-gray-600 dark:text-gray-300">
-            <span className="font-mono break-all">{quoteId}</span>
-            <span className="mx-2 opacity-60">·</span>
-            Submitted: <span className="font-mono">{submittedAtLabel}</span>
-            <span className="mx-2 opacity-60">·</span>
-            Stage key: <span className="font-mono">{String(stageNorm)}</span>
-          </div>
+    <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-[240px]">
+          <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Quote</div>
+          <div className="mt-1 font-mono text-xs text-gray-500 dark:text-gray-400">{quoteId}</div>
+          <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Submitted: {submittedAtLabel}</div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <form action={markUnreadAction}>
-            <input type="hidden" name="quote_id" value={quoteId} />
+          <span className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-extrabold text-gray-900 dark:bg-gray-900/40 dark:text-gray-100">
+            Stage: {stageLabel}
+          </span>
+
+          <span className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-extrabold text-gray-900 dark:bg-gray-900/40 dark:text-gray-100">
+            Render: {renderStatus}
+          </span>
+
+          {activeVersion != null ? (
+            <span className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-extrabold text-gray-900 dark:bg-gray-900/40 dark:text-gray-100">
+              Active v{activeVersion}
+            </span>
+          ) : null}
+
+          {confidence != null && confidence !== "" ? (
+            <span className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-extrabold text-gray-900 dark:bg-gray-900/40 dark:text-gray-100">
+              Confidence: {confidence}
+            </span>
+          ) : null}
+
+          {inspectionRequired != null ? (
+            <span
+              className={
+                "inline-flex items-center rounded-full px-3 py-1 text-xs font-extrabold " +
+                (inspectionRequired
+                  ? "bg-yellow-100 text-yellow-900 dark:bg-yellow-900/30 dark:text-yellow-200"
+                  : "bg-emerald-100 text-emerald-900 dark:bg-emerald-900/30 dark:text-emerald-200")
+              }
+            >
+              {inspectionRequired ? "Inspection required" : "No inspection"}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {/* ✅ Progress bar restored (only if stagePct is provided) */}
+      {stagePct != null ? (
+        <div className="mt-4">
+          <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+            <span className="font-semibold">Progress</span>
+            <span className="font-mono">{stagePct}%</span>
+          </div>
+
+          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-800">
+            <div
+              className="h-full rounded-full bg-black dark:bg-white"
+              style={{ width: `${stagePct}%` }}
+            />
+          </div>
+
+          {Array.isArray(props.stages) && props.stages.length ? (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {props.stages.map((s) => {
+                const isActive = safeTrim(s.key) === safeTrim(props.stageNorm);
+                return (
+                  <span
+                    key={s.key}
+                    className={
+                      "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold " +
+                      (isActive
+                        ? "bg-black text-white dark:bg-white dark:text-black"
+                        : "bg-gray-100 text-gray-700 dark:bg-gray-900/40 dark:text-gray-300")
+                    }
+                  >
+                    {s.label}
+                  </span>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {props.isRead ? (
+          <form action={props.markUnreadAction}>
+            <input type="hidden" name="quoteId" value={quoteId} />
             <button
+              className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-extrabold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950/20 dark:text-gray-100 dark:hover:bg-gray-900/30"
               type="submit"
-              className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
             >
               Mark unread
             </button>
           </form>
-
-          <form action={markReadAction}>
-            <input type="hidden" name="quote_id" value={quoteId} />
+        ) : (
+          <form action={props.markReadAction}>
+            <input type="hidden" name="quoteId" value={quoteId} />
             <button
+              className="inline-flex items-center rounded-lg bg-black px-3 py-2 text-xs font-extrabold text-white hover:opacity-90 dark:bg-white dark:text-black"
               type="submit"
-              className="rounded-lg bg-black px-3 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
             >
               Mark read
             </button>
           </form>
-        </div>
-      </div>
-
-      {/* ✅ Progress bar + stage chips */}
-      <div className="mt-5">
-        <div className="flex items-center justify-between text-xs text-gray-600 dark:text-gray-300">
-          <div className="font-semibold">Progress</div>
-          <div className="font-mono">{Number.isFinite(stagePct) ? `${stagePct}%` : "—"}</div>
-        </div>
-
-        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-900">
-          <div className="h-full bg-black dark:bg-white" style={{ width: `${Math.max(0, Math.min(100, stagePct))}%` }} />
-        </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          {(stages ?? []).slice(0, 8).map((s, idx) => {
-            const isDone = idx < stageIndex;
-            const isActive = idx === stageIndex;
-            const tone: any = isActive ? "blue" : isDone ? "green" : "gray";
-            return (
-              <span key={s.key}>
-                {chip(s.label, tone)}
-              </span>
-            );
-          })}
-        </div>
+        )}
       </div>
     </div>
   );

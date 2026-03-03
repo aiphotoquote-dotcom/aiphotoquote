@@ -14,6 +14,7 @@ import LegacyRenderPanel from "@/components/admin/quote/LegacyRenderPanel";
 import RawPayloadPanel from "@/components/admin/quote/RawPayloadPanel";
 import EmailBuilderPanel from "@/components/admin/quote/EmailBuilderPanel";
 import LifecyclePanelServer from "@/components/admin/quote/LifecyclePanelServer";
+import SentEmailsCard from "@/components/admin/quote/SentEmailsCard";
 
 import { db } from "@/lib/db/client";
 import { quoteLogs } from "@/lib/db/schema";
@@ -130,7 +131,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
   const stageMeta = STAGES.find((s) => s.key === stageNorm) ?? null;
   const stageLabel = stageNorm === "read" ? "Read (legacy)" : stageMeta?.label ?? "New";
 
-  // ✅ Restore progress computation (this is what we lost visually)
+  // ✅ Restore progress computation
   const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === stageNorm));
   const stagePct = STAGES.length > 1 ? Math.round((stageIndex / (STAGES.length - 1)) * 100) : 0;
 
@@ -236,6 +237,9 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
           renderedRenders={renderedRenders as any}
           customerPhotos={(photos as any[]) ?? []}
         />
+
+        {/* ✅ Sent emails card (composer history) */}
+        <SentEmailsCard tenantId={tenantId} quoteId={id} />
 
         <div id="renders" />
 
