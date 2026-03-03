@@ -138,6 +138,7 @@ function buildAuthDebug(req: Request) {
       VERCEL_URL: safeTrim(process.env.VERCEL_URL) || null,
       NEXT_PUBLIC_APP_URL: safeTrim(process.env.NEXT_PUBLIC_APP_URL) || null,
       APP_URL: safeTrim(process.env.APP_URL) || null,
+      ALLOW_CRON_IN_PREVIEW: safeTrim(process.env.ALLOW_CRON_IN_PREVIEW) || null,
     },
     request: {
       url: req.url,
@@ -151,9 +152,24 @@ function buildAuthDebug(req: Request) {
 
 /**
  * CRON protection.
+ *
+ * ✅ Prod stays protected with CRON_SECRET.
+ * ✅ Preview/dev can be optionally enabled WITHOUT a secret by setting:
+ *    ALLOW_CRON_IN_PREVIEW=1
  */
 async function requireCronSecret(req: Request) {
   const configured = safeTrim(process.env.CRON_SECRET);
+
+  // Optional escape hatch for preview/dev (explicit opt-in)
+  const env = safeTrim(process.env.VERCEL_ENV).toLowerCase();
+  const allowPreview = safeTrim(process.env.ALLOW_CRON_IN_PREVIEW) === "1";
+  if (!configured && (env === "preview" || env === "development")) {
+    return { ok: true as const, mode: "no_secret_configured" as const };
+  }
+  if (configured && allowPreview && (env === "preview" || env === "development")) {
+    return { ok: true as const, mode: "preview_allow" as const };
+  }
+
   if (!configured) return { ok: true as const, mode: "no_secret_configured" as const };
 
   const headerToken = getTokenFromAuthHeader(req);
@@ -166,8 +182,7 @@ async function requireCronSecret(req: Request) {
 }
 
 /**
- * ✅ Ensure a version row exists for a quote.
- * NOTE: despite the name, this returns the most recent version id if any exist.
+ * ✅ Ensure v0 exists for a quote (used for legacy queue migration).
  */
 async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quoteOutput: any }) {
   const existing = await db.execute(sql`
@@ -216,8 +231,8 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
 
 /**
  * Claim jobs safely from quote_renders.
- * ✅ Also re-claim stale running jobs (prevents “stuck forever”):
- * - if status='running' and started_at older than 10 minutes => treat as stale and retry
+ * ✅ Also re-claim stale running jobs:
+ * - status='running' and started_at older than 10 minutes => retry
  */
 async function claimRenderJobs(max: number): Promise<RenderJob[]> {
   const r = await db.execute(sql`
@@ -265,28 +280,16 @@ async function claimRenderJobs(max: number): Promise<RenderJob[]> {
 /**
  * ✅ Legacy queue drain:
  * - claim quote_logs where render_status='queued'
- * - ALSO re-claim stale 'running' legacy jobs that never produced an image
- *   (quote_logs has no started_at/updated_at in your schema, so we use created_at as a safe fallback)
- * - ensure version exists
+ * - ensure v0
  * - insert into quote_renders (attempt 1) if not exists
- * - claim it immediately as running and return it as a normal render job
+ * - claim it immediately and return as normal render jobs
  */
 async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
-  // 1) Claim legacy quote_logs rows
   const claimedLegacy = await db.execute(sql`
     with picked as (
       select id, tenant_id, output
       from quote_logs
-      where
-        (
-          render_status = 'queued'
-          or (
-            render_status = 'running'
-            and render_image_url is null
-            and rendered_at is null
-            and created_at < (now() - interval '10 minutes')
-          )
-        )
+      where render_status = 'queued'
       order by created_at asc
       limit ${max}
       for update skip locked
@@ -312,20 +315,18 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
     const quoteLogId = String(row.quote_log_id);
     const quoteOutput = safeJsonParse(row.quote_output) ?? row.quote_output ?? {};
 
-    // 2) Ensure a version exists
     const v0 = await ensureVersion0({ tenantId, quoteLogId, quoteOutput });
     if (!v0.versionId) {
       await db.execute(sql`
         update quote_logs
         set render_status = 'failed',
-            render_error = 'Failed to create/resolve a quote version for legacy render job.'
+            render_error = 'Failed to create/resolve version0 for legacy render job.'
         where id = ${quoteLogId}::uuid
           and tenant_id = ${tenantId}::uuid
       `);
       continue;
     }
 
-    // 3) Insert a render row if none exists for this version (attempt 1)
     await db.execute(sql`
       insert into quote_renders (
         id,
@@ -351,10 +352,8 @@ async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
     jobs.push({ tenantId, quoteLogId, quoteVersionId: v0.versionId });
   }
 
-  // 4) Now claim from quote_renders (the newly created rows will be picked)
   const claimed = await claimRenderJobs(max);
 
-  // Tag these as migrated (for visibility)
   const migratedSet = new Set(jobs.map((j) => `${j.tenantId}:${j.quoteLogId}:${j.quoteVersionId}`));
   return claimed.map((j) => ({
     ...j,
@@ -574,7 +573,7 @@ function collapseBlankLines(s: string) {
   return s
     .split("\n")
     .map((l) => l.trimEnd())
-    .filter((line, idx, arr) => !(line.trim() === "" && arr[idx - 1]?.trim() === ""))
+    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
     .join("\n")
     .trim();
 }
@@ -696,10 +695,7 @@ async function handleCron(req: Request) {
 
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-  // ✅ 1) claim lifecycle jobs first
   let claimed: RenderJob[] = await claimRenderJobs(max);
-
-  // ✅ 2) if none, drain legacy queue by migrating to quote_renders
   if (!claimed.length) {
     claimed = await claimLegacyJobsAsRenderJobs(max);
   }
@@ -915,8 +911,7 @@ async function handleCron(req: Request) {
           ? safeTrim(presets.custom)
           : safeTrim(presets.photoreal);
 
-      const styleText =
-        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
       const serviceTypeLine = safeLine(
         "Service type",
@@ -1103,7 +1098,7 @@ async function handleCron(req: Request) {
 
         const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
         const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
-        const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
+        const summary2 = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
         const baseUrl = getBaseUrl(req);
         const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
@@ -1130,7 +1125,7 @@ async function handleCron(req: Request) {
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary,
+              summary: summary2,
               adminQuoteUrl,
             });
 
@@ -1167,7 +1162,7 @@ async function handleCron(req: Request) {
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary,
+              summary: summary2,
               publicQuoteUrl,
               replyToEmail: cfg.leadToEmail ?? null,
             });
@@ -1214,8 +1209,6 @@ async function handleCron(req: Request) {
         ok: true,
         imageUrl,
         renderModel,
-        industryKey: industryKey || null,
-        industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
         sourceQueue: job.sourceQueue,
