@@ -23,7 +23,6 @@ type RenderJob = {
 
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
-  // Make responses non-cacheable; cron endpoints should never be cached.
   res.headers.set("cache-control", "no-store");
   if (debugId) res.headers.set("x-debug-id", debugId);
   return res;
@@ -152,13 +151,9 @@ async function requireCronSecret(req: Request) {
 
 /**
  * Lazy-load modules that can cause import-time crashes on Vercel.
- * This is the #1 reason you see "POST 500" with no logs.
  */
 async function loadDeps() {
-  const [{ db }, { decryptSecret }] = await Promise.all([
-    import("@/lib/db/client"),
-    import("@/lib/crypto"),
-  ]);
+  const [{ db }, { decryptSecret }] = await Promise.all([import("@/lib/db/client"), import("@/lib/crypto")]);
 
   const { put } = await import("@vercel/blob");
 
@@ -293,9 +288,17 @@ async function claimRenderJobs(db: any, max: number): Promise<RenderJob[]> {
 }
 
 /**
- * ✅ Legacy queue drain -> migrate quote_logs.render_status='queued' to quote_renders
+ * ✅ Legacy queue drain:
+ * - claim quote_logs where render_status='queued'
+ * - ensure v0
+ * - insert into quote_renders attempt 1 (portable: WHERE NOT EXISTS, no ON CONFLICT requirement)
+ * - claim it immediately as running and return it
+ *
+ * IMPORTANT: if we fail to insert the quote_renders row, we MUST un-stick quote_logs (set back to queued/failed),
+ * otherwise UI will hang at 92% forever.
  */
 async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<RenderJob[]> {
+  // 1) Claim legacy quote_logs rows (we do mark them running here, but we will revert on failure)
   const claimedLegacy = await db.execute(sql`
     with picked as (
       select id, tenant_id, output
@@ -326,6 +329,7 @@ async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<Render
     const quoteLogId = String(row.quote_log_id);
     const quoteOutput = safeJsonParse(row.quote_output) ?? row.quote_output ?? {};
 
+    // 2) Ensure v0 exists
     const v0 = await ensureVersion0(db, { tenantId, quoteLogId, quoteOutput });
     if (!v0.versionId) {
       await db.execute(sql`
@@ -338,32 +342,56 @@ async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<Render
       continue;
     }
 
-    await db.execute(sql`
-      insert into quote_renders (
-        id,
-        tenant_id,
-        quote_log_id,
-        quote_version_id,
-        attempt,
-        status,
-        created_at
-      )
-      values (
-        gen_random_uuid(),
-        ${tenantId}::uuid,
-        ${quoteLogId}::uuid,
-        ${v0.versionId}::uuid,
-        1,
-        'queued',
-        now()
-      )
-      on conflict (quote_version_id, attempt) do nothing
-    `);
+    // 3) Insert attempt 1 WITHOUT ON CONFLICT (portable across DBs)
+    try {
+      await db.execute(sql`
+        insert into quote_renders (
+          id,
+          tenant_id,
+          quote_log_id,
+          quote_version_id,
+          attempt,
+          status,
+          created_at
+        )
+        select
+          gen_random_uuid(),
+          ${tenantId}::uuid,
+          ${quoteLogId}::uuid,
+          ${v0.versionId}::uuid,
+          1,
+          'queued',
+          now()
+        where not exists (
+          select 1
+          from quote_renders r
+          where r.quote_version_id = ${v0.versionId}::uuid
+            and r.attempt = 1
+        )
+      `);
+    } catch (e: any) {
+      const msg = safeErr(e);
+
+      // 🔥 Critical: do NOT leave it "running" if we didn't enqueue.
+      await db.execute(sql`
+        update quote_logs
+        set render_status = 'queued',
+            render_error = ${`legacy_migration_enqueue_failed: ${msg}`.slice(0, 1800)}
+        where id = ${quoteLogId}::uuid
+          and tenant_id = ${tenantId}::uuid
+          and render_image_url is null
+      `);
+
+      // Continue other jobs; do NOT crash the whole cron run.
+      continue;
+    }
 
     jobs.push({ tenantId, quoteLogId, quoteVersionId: v0.versionId });
   }
 
+  // 4) Now claim from quote_renders (the newly created rows will be picked)
   const claimed = await claimRenderJobs(db, max);
+
   const migratedSet = new Set(jobs.map((j) => `${j.tenantId}:${j.quoteLogId}:${j.quoteVersionId}`));
   return claimed.map((j) => ({
     ...j,
@@ -689,7 +717,6 @@ async function handleCron(req: Request) {
   const url = new URL(req.url);
   const wantDebug = url.searchParams.get("debug") === "1";
 
-  // Make sure we can always return JSON even if something blows up.
   try {
     const auth = await requireCronSecret(req);
     if (!auth.ok) {
@@ -700,19 +727,13 @@ async function handleCron(req: Request) {
       );
     }
 
-    // Lazy deps (prevents import-time crash)
     const deps = await loadDeps();
     const db = deps.db;
 
     const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-    // 1) claim lifecycle jobs first
     let claimed: RenderJob[] = await claimRenderJobs(db, max);
-
-    // 2) if none, drain legacy queue by migrating to quote_renders
-    if (!claimed.length) {
-      claimed = await claimLegacyJobsAsRenderJobs(db, max);
-    }
+    if (!claimed.length) claimed = await claimLegacyJobsAsRenderJobs(db, max);
 
     if (!claimed.length) {
       return json(
@@ -763,14 +784,7 @@ async function handleCron(req: Request) {
         const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolved.tenant.tenantRenderEnabled);
         if (tenantRenderEnabled === false) {
           const msg = "Rendering disabled by tenant settings.";
-
-          await updateQuoteFailedLegacyIfNotRendered(db, {
-            tenantId: job.tenantId,
-            quoteLogId: job.quoteLogId,
-            prompt: msg,
-            error: msg,
-          });
-
+          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: msg, error: msg });
           await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
           processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
           continue;
@@ -778,26 +792,11 @@ async function handleCron(req: Request) {
 
         const maxPerDay = normalizeMaxPerDay(ctx.rendering_max_per_day);
         const rate = await isRateLimitedNow(db, { tenantId: job.tenantId, maxPerDay });
-
         if (rate.limited) {
           const msg = `Renderings are disabled by rate limit (max per day = ${rate.maxPerDay}).`;
-
-          await updateQuoteFailedLegacyIfNotRendered(db, {
-            tenantId: job.tenantId,
-            quoteLogId: job.quoteLogId,
-            prompt: msg,
-            error: msg,
-          });
-
+          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: msg, error: msg });
           await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
-          processed.push({
-            renderId: job.id,
-            quoteLogId: job.quoteLogId,
-            ok: false,
-            error: "RATE_LIMITED",
-            maxPerDay: rate.maxPerDay,
-            usedToday: (rate as any).usedToday ?? null,
-          });
+          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "RATE_LIMITED" });
           continue;
         }
 
@@ -821,14 +820,7 @@ async function handleCron(req: Request) {
         const images = Array.isArray(quoteInputAny?.images) ? quoteInputAny.images : [];
         if (!images.length) {
           const msg = "No images stored on quote.";
-
-          await updateQuoteFailedLegacyIfNotRendered(db, {
-            tenantId: job.tenantId,
-            quoteLogId: job.quoteLogId,
-            prompt: msg,
-            error: msg,
-          });
-
+          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: msg, error: msg });
           await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
           processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
           continue;
@@ -840,8 +832,6 @@ async function handleCron(req: Request) {
         const hasPlatformKey = Boolean(platformKey);
 
         const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
-        const graceRemainingCount = grace.eligibleTier ? Number(grace.remaining ?? 0) : 0;
-
         const canUsePlatformGrace = !hasTenantKey && grace.inGrace && hasPlatformKey;
 
         if (!hasTenantKey && !canUsePlatformGrace) {
@@ -852,25 +842,9 @@ async function handleCron(req: Request) {
               ? "Grace exhausted for rendering."
               : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
 
-          await updateQuoteFailedLegacyIfNotRendered(db, {
-            tenantId: job.tenantId,
-            quoteLogId: job.quoteLogId,
-            prompt: why,
-            error: why,
-          });
-
+          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: why, error: why });
           await markRenderRowDone(db, { renderId: job.id, status: "failed", error: why, prompt: null });
-          processed.push({
-            renderId: job.id,
-            quoteLogId: job.quoteLogId,
-            ok: false,
-            error: "KEY_POLICY_BLOCK",
-            planTier: safeTrim(ctx.plan_tier) || null,
-            graceEligibleTier: grace.eligibleTier,
-            graceRemaining: grace.eligibleTier ? graceRemainingCount : null,
-            hasTenantKey,
-            hasPlatformKey,
-          });
+          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "KEY_POLICY_BLOCK" });
           continue;
         }
 
@@ -881,7 +855,6 @@ async function handleCron(req: Request) {
           safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
 
         let industrySource: "db" | "platform_fallback" | "none" = "none";
-        let industryVersion: number | null = null;
         let industryAddendum = "";
         let industryNegative = "";
 
@@ -894,7 +867,6 @@ async function handleCron(req: Request) {
 
             if (industryAddendum || industryNegative) {
               industrySource = "db";
-              industryVersion = typeof got?.meta?.version === "number" ? got.meta.version : null;
             } else {
               const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
               const fb = extractIndustryRenderFields(fallbackPack);
@@ -930,9 +902,7 @@ async function handleCron(req: Request) {
 
         const serviceTypeLine = safeLine(
           "Service type",
-          safeTrim(quoteInputAny?.customer_context?.service_type) ||
-            safeTrim(quoteInputAny?.customer_context?.category) ||
-            ""
+          safeTrim(quoteInputAny?.customer_context?.service_type) || safeTrim(quoteInputAny?.customer_context?.category) || ""
         );
 
         const summaryLine = safeLine("Estimate summary", typeof outputAny?.summary === "string" ? outputAny.summary : "");
@@ -960,9 +930,7 @@ async function handleCron(req: Request) {
           : "";
 
         const versionNum =
-          typeof ctx.quote_version_num === "number"
-            ? Number(ctx.quote_version_num)
-            : Number(ctx.quote_version_num ?? 0) || null;
+          typeof ctx.quote_version_num === "number" ? Number(ctx.quote_version_num) : Number(ctx.quote_version_num ?? 0) || null;
 
         const templateVars = {
           renderPromptPreamble,
@@ -1013,14 +981,9 @@ async function handleCron(req: Request) {
               tenantStyleKey,
               styleText,
               renderPromptPreamble,
-              renderPromptTemplate: platformRenderTemplate
-                ? "(platform) renderPromptTemplate applied"
-                : "(fallback) no renderPromptTemplate configured",
+              renderPromptTemplate: platformRenderTemplate ? "(platform) template applied" : "(fallback) no template configured",
               finalPrompt,
-              serviceType:
-                safeTrim(quoteInputAny?.customer_context?.service_type) ||
-                safeTrim(quoteInputAny?.customer_context?.category) ||
-                "",
+              serviceType: safeTrim(quoteInputAny?.customer_context?.service_type) || safeTrim(quoteInputAny?.customer_context?.category) || "",
               summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
               customerNotes: String(quoteInputAny?.customer_context?.notes ?? "").trim(),
               tenantRenderNotes,
@@ -1036,11 +999,7 @@ async function handleCron(req: Request) {
           }
         }
 
-        const openai = new deps.OpenAI({
-          apiKey,
-          timeout: 90_000,
-          maxRetries: 1,
-        } as any);
+        const openai = new deps.OpenAI({ apiKey, timeout: 90_000, maxRetries: 1 } as any);
 
         const inputUrl = pickFirstImageUrl(images);
         const inputFile = await fetchImageAsFile(deps.toFile, inputUrl);
@@ -1054,7 +1013,6 @@ async function handleCron(req: Request) {
             prompt: finalPrompt,
             size: "1024x1024",
           });
-
           b64 = editResp?.data?.[0]?.b64_json;
         } else {
           const genResp: any = await openai.images.generate({
@@ -1062,7 +1020,6 @@ async function handleCron(req: Request) {
             prompt: finalPrompt,
             size: "1024x1024",
           });
-
           b64 = genResp?.data?.[0]?.b64_json;
         }
 
@@ -1075,22 +1032,11 @@ async function handleCron(req: Request) {
         const imageUrl = (blob as any)?.url;
         if (!imageUrl) throw new Error("Blob upload returned no url.");
 
-        await markRenderRowDone(db, {
-          renderId: job.id,
-          status: "rendered",
-          imageUrl,
-          prompt: finalPrompt,
-          error: null,
-        });
+        await markRenderRowDone(db, { renderId: job.id, status: "rendered", imageUrl, prompt: finalPrompt, error: null });
 
         await selectThisAttempt(db, { tenantId: job.tenantId, quoteVersionId: job.quoteVersionId, renderId: job.id });
 
-        await updateQuoteRenderedLegacyFirstOnly(db, {
-          tenantId: job.tenantId,
-          quoteLogId: job.quoteLogId,
-          imageUrl,
-          prompt: finalPrompt,
-        });
+        await updateQuoteRenderedLegacyFirstOnly(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
 
         if (!hasTenantKey && canUsePlatformGrace) {
           await bumpGraceUsedIfGraceTier(db, job.tenantId);
@@ -1202,12 +1148,7 @@ async function handleCron(req: Request) {
           }
 
           try {
-            await deps.setRenderEmailResult({
-              db: db as any,
-              quoteLogId: job.quoteLogId,
-              tenantId: job.tenantId,
-              emailResult: renderEmailResult,
-            });
+            await deps.setRenderEmailResult({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, emailResult: renderEmailResult });
           } catch {
             // ignore
           }
@@ -1225,7 +1166,6 @@ async function handleCron(req: Request) {
           renderModel,
           industryKey: industryKey || null,
           industrySource,
-          industryVersion,
           usedKey: hasTenantKey ? "tenant" : "platform_grace",
           anchoredToInputImage: Boolean(inputFile?.file),
           sourceQueue: job.sourceQueue,
@@ -1234,12 +1174,7 @@ async function handleCron(req: Request) {
         const msg = safeErr(e);
 
         try {
-          await updateQuoteFailedLegacyIfNotRendered(db, {
-            tenantId: job.tenantId,
-            quoteLogId: job.quoteLogId,
-            prompt: "render_failed",
-            error: msg,
-          });
+          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: "render_failed", error: msg });
         } catch {
           // ignore
         }
@@ -1267,9 +1202,7 @@ async function handleCron(req: Request) {
       debugId
     );
   } catch (e: any) {
-    // Last-resort: always return JSON even if deps fail to import
     const msg = safeErr(e);
-    // Also print to console to show in Vercel runtime logs (if visible)
     // eslint-disable-next-line no-console
     console.error("[cron/render] fatal:", msg);
 
