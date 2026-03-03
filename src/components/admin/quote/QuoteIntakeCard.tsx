@@ -15,6 +15,15 @@ function pickFirstString(obj: any, keys: string[]) {
   return "";
 }
 
+function digitsOnlyPhone(raw: string) {
+  const s = safeTrim(raw);
+  if (!s) return "";
+  // Keep + if present; otherwise just digits
+  const plus = s.trim().startsWith("+") ? "+" : "";
+  const digits = s.replace(/[^\d]/g, "");
+  return digits ? `${plus}${digits}` : "";
+}
+
 export default function QuoteIntakeCard(props: {
   quoteId: string;
 
@@ -39,7 +48,11 @@ export default function QuoteIntakeCard(props: {
   const email = pickFirstString(leadAny, ["email", "customerEmail", "leadEmail"]);
   const phone = pickFirstString(leadAny, ["phone", "phoneNumber", "customerPhone", "leadPhone"]);
 
-  const notes = safeTrim(props.notes) || "—";
+  const phoneDial = digitsOnlyPhone(phone);
+  const emailHref = email ? `mailto:${encodeURIComponent(email)}` : "";
+
+  const notesRaw = safeTrim(props.notes);
+  const notes = notesRaw || "—";
 
   const estimate = safeTrim(props.estimateDisplay) || "—";
   const confidence = props.confidence == null || props.confidence === "" ? null : String(props.confidence);
@@ -53,11 +66,12 @@ export default function QuoteIntakeCard(props: {
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
+      {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-[260px]">
           <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Customer inputs & assessment</div>
           <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-            Everything the customer submitted + your AI baseline assessment in one place.
+            Customer info, notes, photos, and the baseline AI assessment.
           </div>
         </div>
 
@@ -87,32 +101,47 @@ export default function QuoteIntakeCard(props: {
         </div>
       </div>
 
-      <div className="mt-5 grid gap-4 lg:grid-cols-3">
-        <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
-          <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Lead</div>
+      {/* Lead + compact Stage */}
+      <div className="mt-5 grid gap-4 lg:grid-cols-12">
+        {/* Lead (big / primary) */}
+        <div className="lg:col-span-8 rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Lead</div>
+              <div className="mt-2 text-lg font-extrabold text-gray-900 dark:text-gray-100">{name || "—"}</div>
+              <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Tap to call/email</div>
+            </div>
 
-          <div className="mt-2 space-y-2 text-sm">
-            <div className="font-semibold text-gray-900 dark:text-gray-100">{name || "—"}</div>
-
-            <div className="flex flex-wrap gap-2">
-              {phone ? (
-                <span className="inline-flex items-center rounded-lg bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
+            <div className="flex flex-wrap items-center gap-2">
+              {phoneDial ? (
+                <a
+                  href={`tel:${phoneDial}`}
+                  className="inline-flex items-center rounded-lg bg-black px-3 py-2 text-xs font-extrabold text-white hover:opacity-90 dark:bg-white dark:text-black"
+                >
+                  Call {phone}
+                </a>
+              ) : phone ? (
+                <span className="inline-flex items-center rounded-lg bg-gray-100 px-3 py-2 text-xs font-semibold text-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
                   {phone}
                 </span>
               ) : null}
 
               {email ? (
-                <span className="inline-flex items-center rounded-lg bg-gray-100 px-2 py-1 text-xs font-semibold text-gray-800 dark:bg-gray-900/40 dark:text-gray-200">
-                  {email}
-                </span>
+                <a
+                  href={emailHref}
+                  className="inline-flex items-center rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-extrabold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-gray-950/20 dark:text-gray-100 dark:hover:bg-gray-900/30"
+                >
+                  Email {email}
+                </a>
               ) : null}
             </div>
           </div>
         </div>
 
-        <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+        {/* Stage (small / compact) */}
+        <div className="lg:col-span-4 rounded-xl border border-gray-200 p-4 dark:border-gray-800">
           <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Stage</div>
-          <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Stage is separate from read/unread.</div>
+          <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Quick update (doesn’t affect read/unread).</div>
 
           <form action={props.setStageAction} className="mt-3 flex items-center gap-2">
             <input type="hidden" name="quoteId" value={safeTrim(props.quoteId)} />
@@ -133,38 +162,35 @@ export default function QuoteIntakeCard(props: {
 
             <button
               type="submit"
-              className="h-10 rounded-lg bg-black px-4 text-sm font-extrabold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              className="h-10 shrink-0 rounded-lg bg-black px-4 text-sm font-extrabold text-white hover:opacity-90 dark:bg-white dark:text-black"
             >
               Save
             </button>
           </form>
 
           <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Stage: <span className="font-mono">{safeTrim(props.stageNorm) || "new"}</span>
+            Current: <span className="font-mono">{safeTrim(props.stageNorm) || "new"}</span>
           </div>
         </div>
 
-        <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
-          <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            Customer notes
-          </div>
-          <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50 p-3 text-sm text-gray-900 dark:border-gray-900/50 dark:bg-gray-950/30 dark:text-gray-100">
+        {/* Customer notes (bigger / full width) */}
+        <div className="lg:col-span-12 rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+          <div className="text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">Customer notes</div>
+          <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50 p-4 text-sm text-gray-900 dark:border-gray-900/50 dark:bg-gray-950/30 dark:text-gray-100 whitespace-pre-wrap">
             {notes}
           </div>
         </div>
       </div>
 
-      {/* ✅ Nicer browse/zoom experience (existing component) */}
+      {/* Photos */}
       <div className="mt-5">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Photos</div>
-        </div>
-
+        <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Photos</div>
         <div className="mt-3">
           <QuotePhotoGallery photos={props.photos} />
         </div>
       </div>
 
+      {/* AI assessment */}
       <div className="mt-6 rounded-xl border border-gray-200 p-4 dark:border-gray-800">
         <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">AI assessment</div>
 
