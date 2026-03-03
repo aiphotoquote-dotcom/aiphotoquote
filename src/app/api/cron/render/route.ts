@@ -2,6 +2,23 @@
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
+import OpenAI, { toFile } from "openai";
+import { put } from "@vercel/blob";
+
+import { db } from "@/lib/db/client";
+import { decryptSecret } from "@/lib/crypto";
+
+import { sendEmail } from "@/lib/email";
+import { getTenantEmailConfig } from "@/lib/email/tenantEmail";
+import { renderCustomerRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteCustomer";
+import { renderLeadRenderCompleteEmailHTML } from "@/lib/email/templates/renderCompleteLead";
+
+import { loadPlatformLlmConfig } from "@/lib/pcc/llm/store";
+import { resolveTenantLlm } from "@/lib/pcc/llm/resolveTenant";
+import { getIndustryLlmPackWithMeta } from "@/lib/pcc/llm/industryStore";
+
+import { isRenderDebugEnabled, buildRenderDebugPayload } from "@/lib/pcc/render/debug";
+import { setRenderDebug, setRenderEmailResult } from "@/lib/pcc/render/output";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,20 +34,20 @@ type RenderJob = {
   attempt: number;
   promptStored: string;
   shopNotes: string;
+  meta: any;
   createdAt: any;
   sourceQueue: RenderQueueSource;
 };
 
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
-  res.headers.set("cache-control", "no-store");
   if (debugId) res.headers.set("x-debug-id", debugId);
   return res;
 }
 
 function safeErr(e: unknown) {
-  const msg = e instanceof Error ? `${e.message}\n${e.stack ?? ""}` : String(e ?? "Unknown error");
-  return msg.slice(0, 4000);
+  const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
+  return msg.slice(0, 2000);
 }
 
 function safeJsonParse(v: any) {
@@ -150,52 +167,9 @@ async function requireCronSecret(req: Request) {
 }
 
 /**
- * Lazy-load modules that can cause import-time crashes on Vercel.
- */
-async function loadDeps() {
-  const [{ db }, { decryptSecret }] = await Promise.all([import("@/lib/db/client"), import("@/lib/crypto")]);
-
-  const { put } = await import("@vercel/blob");
-
-  const OpenAI = (await import("openai")).default;
-  const { toFile } = await import("openai");
-
-  const { sendEmail } = await import("@/lib/email");
-  const { getTenantEmailConfig } = await import("@/lib/email/tenantEmail");
-  const { renderCustomerRenderCompleteEmailHTML } = await import("@/lib/email/templates/renderCompleteCustomer");
-  const { renderLeadRenderCompleteEmailHTML } = await import("@/lib/email/templates/renderCompleteLead");
-
-  const { loadPlatformLlmConfig } = await import("@/lib/pcc/llm/store");
-  const { resolveTenantLlm } = await import("@/lib/pcc/llm/resolveTenant");
-  const { getIndustryLlmPackWithMeta } = await import("@/lib/pcc/llm/industryStore");
-
-  const { isRenderDebugEnabled, buildRenderDebugPayload } = await import("@/lib/pcc/render/debug");
-  const { setRenderDebug, setRenderEmailResult } = await import("@/lib/pcc/render/output");
-
-  return {
-    db,
-    decryptSecret,
-    put,
-    OpenAI,
-    toFile,
-    sendEmail,
-    getTenantEmailConfig,
-    renderCustomerRenderCompleteEmailHTML,
-    renderLeadRenderCompleteEmailHTML,
-    loadPlatformLlmConfig,
-    resolveTenantLlm,
-    getIndustryLlmPackWithMeta,
-    isRenderDebugEnabled,
-    buildRenderDebugPayload,
-    setRenderDebug,
-    setRenderEmailResult,
-  };
-}
-
-/**
  * ✅ Ensure v0 exists for a quote (used for legacy queue migration).
  */
-async function ensureVersion0(db: any, args: { tenantId: string; quoteLogId: string; quoteOutput: any }) {
+async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quoteOutput: any }) {
   const existing = await db.execute(sql`
     select id::text as id
     from quote_versions
@@ -242,9 +216,10 @@ async function ensureVersion0(db: any, args: { tenantId: string; quoteLogId: str
 
 /**
  * Claim jobs safely from quote_renders.
- * ✅ Also re-claim stale running jobs (prevents “stuck forever”).
+ * ✅ Also re-claim stale running jobs (prevents “stuck forever”):
+ * - if status='running' and started_at older than 10 minutes => treat as stale and retry
  */
-async function claimRenderJobs(db: any, max: number): Promise<RenderJob[]> {
+async function claimRenderJobs(max: number): Promise<RenderJob[]> {
   const r = await db.execute(sql`
     with picked as (
       select id
@@ -270,6 +245,7 @@ async function claimRenderJobs(db: any, max: number): Promise<RenderJob[]> {
       r.attempt,
       r.prompt,
       r.shop_notes,
+      r.meta,
       r.created_at
   `);
 
@@ -282,6 +258,7 @@ async function claimRenderJobs(db: any, max: number): Promise<RenderJob[]> {
     attempt: Number(x.attempt ?? 1),
     promptStored: String(x.prompt ?? ""),
     shopNotes: String(x.shop_notes ?? ""),
+    meta: safeJsonParse(x.meta) ?? x.meta ?? {},
     createdAt: x.created_at,
     sourceQueue: "quote_renders",
   }));
@@ -291,14 +268,10 @@ async function claimRenderJobs(db: any, max: number): Promise<RenderJob[]> {
  * ✅ Legacy queue drain:
  * - claim quote_logs where render_status='queued'
  * - ensure v0
- * - insert into quote_renders attempt 1 (portable: WHERE NOT EXISTS, no ON CONFLICT requirement)
- * - claim it immediately as running and return it
- *
- * IMPORTANT: if we fail to insert the quote_renders row, we MUST un-stick quote_logs (set back to queued/failed),
- * otherwise UI will hang at 92% forever.
+ * - insert into quote_renders (attempt 1) if not exists
+ * - claim it immediately as running and return it as a normal render job
  */
-async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<RenderJob[]> {
-  // 1) Claim legacy quote_logs rows (we do mark them running here, but we will revert on failure)
+async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
   const claimedLegacy = await db.execute(sql`
     with picked as (
       select id, tenant_id, output
@@ -329,8 +302,7 @@ async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<Render
     const quoteLogId = String(row.quote_log_id);
     const quoteOutput = safeJsonParse(row.quote_output) ?? row.quote_output ?? {};
 
-    // 2) Ensure v0 exists
-    const v0 = await ensureVersion0(db, { tenantId, quoteLogId, quoteOutput });
+    const v0 = await ensureVersion0({ tenantId, quoteLogId, quoteOutput });
     if (!v0.versionId) {
       await db.execute(sql`
         update quote_logs
@@ -342,55 +314,34 @@ async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<Render
       continue;
     }
 
-    // 3) Insert attempt 1 WITHOUT ON CONFLICT (portable across DBs)
-    try {
-      await db.execute(sql`
-        insert into quote_renders (
-          id,
-          tenant_id,
-          quote_log_id,
-          quote_version_id,
-          attempt,
-          status,
-          created_at
-        )
-        select
-          gen_random_uuid(),
-          ${tenantId}::uuid,
-          ${quoteLogId}::uuid,
-          ${v0.versionId}::uuid,
-          1,
-          'queued',
-          now()
-        where not exists (
-          select 1
-          from quote_renders r
-          where r.quote_version_id = ${v0.versionId}::uuid
-            and r.attempt = 1
-        )
-      `);
-    } catch (e: any) {
-      const msg = safeErr(e);
-
-      // 🔥 Critical: do NOT leave it "running" if we didn't enqueue.
-      await db.execute(sql`
-        update quote_logs
-        set render_status = 'queued',
-            render_error = ${`legacy_migration_enqueue_failed: ${msg}`.slice(0, 1800)}
-        where id = ${quoteLogId}::uuid
-          and tenant_id = ${tenantId}::uuid
-          and render_image_url is null
-      `);
-
-      // Continue other jobs; do NOT crash the whole cron run.
-      continue;
-    }
+    await db.execute(sql`
+      insert into quote_renders (
+        id,
+        tenant_id,
+        quote_log_id,
+        quote_version_id,
+        attempt,
+        status,
+        meta,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${tenantId}::uuid,
+        ${quoteLogId}::uuid,
+        ${v0.versionId}::uuid,
+        1,
+        'queued',
+        '{}'::jsonb,
+        now()
+      )
+      on conflict (quote_version_id, attempt) do nothing
+    `);
 
     jobs.push({ tenantId, quoteLogId, quoteVersionId: v0.versionId });
   }
 
-  // 4) Now claim from quote_renders (the newly created rows will be picked)
-  const claimed = await claimRenderJobs(db, max);
+  const claimed = await claimRenderJobs(max);
 
   const migratedSet = new Set(jobs.map((j) => `${j.tenantId}:${j.quoteLogId}:${j.quoteVersionId}`));
   return claimed.map((j) => ({
@@ -399,10 +350,13 @@ async function claimLegacyJobsAsRenderJobs(db: any, max: number): Promise<Render
   }));
 }
 
-async function markRenderRowDone(
-  db: any,
-  args: { renderId: string; status: "rendered" | "failed"; imageUrl?: string | null; prompt?: string | null; error?: string | null }
-) {
+async function markRenderRowDone(args: {
+  renderId: string;
+  status: "rendered" | "failed";
+  imageUrl?: string | null;
+  prompt?: string | null;
+  error?: string | null;
+}) {
   await db.execute(sql`
     update quote_renders
     set
@@ -415,7 +369,7 @@ async function markRenderRowDone(
   `);
 }
 
-async function selectThisAttempt(db: any, args: { tenantId: string; quoteVersionId: string; renderId: string }) {
+async function selectThisAttempt(args: { tenantId: string; quoteVersionId: string; renderId: string }) {
   await db.execute(sql`
     update quote_renders
     set is_selected = false
@@ -432,7 +386,7 @@ async function selectThisAttempt(db: any, args: { tenantId: string; quoteVersion
   `);
 }
 
-async function loadRenderContext(db: any, args: { tenantId: string; quoteLogId: string; quoteVersionId: string }) {
+async function loadRenderContext(args: { tenantId: string; quoteLogId: string; quoteVersionId: string }) {
   const r = await db.execute(sql`
     select
       t.id as tenant_id,
@@ -489,7 +443,8 @@ async function loadRenderContext(db: any, args: { tenantId: string; quoteLogId: 
   return row ?? null;
 }
 
-async function markQuoteRunningLegacyIfNotRendered(db: any, args: { tenantId: string; quoteLogId: string }) {
+// ---- legacy quote_logs helpers (customer-facing) ----
+async function markQuoteRunningLegacyIfNotRendered(args: { tenantId: string; quoteLogId: string }) {
   await db.execute(sql`
     update quote_logs
     set
@@ -502,7 +457,12 @@ async function markQuoteRunningLegacyIfNotRendered(db: any, args: { tenantId: st
   `);
 }
 
-async function updateQuoteRenderedLegacyFirstOnly(db: any, args: { tenantId: string; quoteLogId: string; imageUrl: string; prompt: string }) {
+async function updateQuoteRenderedLegacyFirstOnly(args: {
+  tenantId: string;
+  quoteLogId: string;
+  imageUrl: string;
+  prompt: string;
+}) {
   await db.execute(sql`
     update quote_logs
     set
@@ -517,10 +477,7 @@ async function updateQuoteRenderedLegacyFirstOnly(db: any, args: { tenantId: str
   `);
 }
 
-async function updateQuoteFailedLegacyIfNotRendered(
-  db: any,
-  args: { tenantId: string; quoteLogId: string; prompt: string; error: string }
-) {
+async function updateQuoteFailedLegacyIfNotRendered(args: { tenantId: string; quoteLogId: string; prompt: string; error: string }) {
   await db.execute(sql`
     update quote_logs
     set
@@ -560,7 +517,7 @@ function graceRemaining(planTierRaw: unknown, graceTotalRaw: unknown, graceUsedR
   return { plan, eligibleTier, remaining, inGrace: remaining > 0 };
 }
 
-async function bumpGraceUsedIfGraceTier(db: any, tenantId: string) {
+async function bumpGraceUsedIfGraceTier(tenantId: string) {
   try {
     await db.execute(sql`
       update tenant_settings
@@ -580,7 +537,7 @@ function normalizeMaxPerDay(v: unknown): number {
   return Math.trunc(n);
 }
 
-async function isRateLimitedNow(db: any, args: { tenantId: string; maxPerDay: number }) {
+async function isRateLimitedNow(args: { tenantId: string; maxPerDay: number }) {
   const { tenantId, maxPerDay } = args;
 
   if (maxPerDay <= 0) {
@@ -629,7 +586,7 @@ function pickFirstImageUrl(images: any[]): string {
   return "";
 }
 
-async function fetchImageAsFile(toFile: any, url: string) {
+async function fetchImageAsFile(url: string) {
   const u = safeTrim(url);
   if (!u) return null;
 
@@ -717,166 +674,224 @@ async function handleCron(req: Request) {
   const url = new URL(req.url);
   const wantDebug = url.searchParams.get("debug") === "1";
 
-  try {
-    const auth = await requireCronSecret(req);
-    if (!auth.ok) {
-      return json(
-        { ok: false, error: "UNAUTHORIZED", ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}) },
-        401,
-        debugId
-      );
-    }
+  const auth = await requireCronSecret(req);
+  if (!auth.ok) {
+    return json(
+      { ok: false, error: "UNAUTHORIZED", ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}) },
+      401,
+      debugId
+    );
+  }
 
-    const deps = await loadDeps();
-    const db = deps.db;
+  const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
-    const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
+  let claimed: RenderJob[] = await claimRenderJobs(max);
+  if (!claimed.length) claimed = await claimLegacyJobsAsRenderJobs(max);
 
-    let claimed: RenderJob[] = await claimRenderJobs(db, max);
-    if (!claimed.length) claimed = await claimLegacyJobsAsRenderJobs(db, max);
+  if (!claimed.length) {
+    return json(
+      {
+        ok: true,
+        authMode: auth.mode,
+        claimed: 0,
+        processed: [],
+        durationMs: Date.now() - startedAt,
+        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
+      },
+      200,
+      debugId
+    );
+  }
 
-    if (!claimed.length) {
-      return json(
-        {
-          ok: true,
-          authMode: auth.mode,
-          claimed: 0,
-          processed: [],
-          durationMs: Date.now() - startedAt,
-          ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
-        },
-        200,
-        debugId
-      );
-    }
+  const processed: any[] = [];
+  const debugEnabled = isRenderDebugEnabled();
 
-    const processed: any[] = [];
-    const debugEnabled = deps.isRenderDebugEnabled();
+  const pcc = await loadPlatformLlmConfig();
+  const platformRenderPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
+  const platformRenderTemplate = safeTrim((pcc as any)?.prompts?.renderPromptTemplate) || "";
 
-    const pcc = await deps.loadPlatformLlmConfig();
-    const platformRenderPreamble = safeTrim((pcc as any)?.prompts?.renderPromptPreamble) || "";
-    const platformRenderTemplate = safeTrim((pcc as any)?.prompts?.renderPromptTemplate) || "";
+  for (const job of claimed) {
+    const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
 
-    for (const job of claimed) {
-      const jobDebugId = `${debugId}_${job.id.slice(0, 6)}`;
+    // meta flags
+    const meta = safeJsonParse(job.meta) ?? job.meta ?? {};
+    const forceRender = Boolean(meta?.forceRender === true);
+    const suppressEmails = Boolean(meta?.suppressEmails === true);
+    const suppressLegacy = Boolean(meta?.suppressLegacy === true);
 
-      try {
+    try {
+      // ✅ only touch customer-facing quote_logs state if NOT suppressed
+      if (!suppressLegacy) {
         try {
-          await markQuoteRunningLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId });
+          await markQuoteRunningLegacyIfNotRendered({ tenantId: job.tenantId, quoteLogId: job.quoteLogId });
         } catch {
           // ignore
         }
+      }
 
-        const ctx = await loadRenderContext(db, {
-          tenantId: job.tenantId,
+      const ctx = await loadRenderContext({
+        tenantId: job.tenantId,
+        quoteLogId: job.quoteLogId,
+        quoteVersionId: job.quoteVersionId,
+      });
+      if (!ctx) throw new Error("Missing tenant/quote context for render attempt.");
+      if (!ctx.quote_version_id) throw new Error("Missing quote_version context (bad quoteVersionId).");
+
+      const tenantSlug = String(ctx.tenant_slug ?? "");
+      const tenantName = String(ctx.tenant_name ?? "Your Business");
+
+      const resolved = await resolveTenantLlm(job.tenantId);
+      const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
+
+      // ✅ Tenant can disable customer renders BUT tenant-initiated render must still work:
+      const tenantCustomerRenderingEnabled = coalesceTenantRenderEnabled(ctx, resolved.tenant.tenantRenderEnabled);
+      if (tenantCustomerRenderingEnabled === false && !forceRender) {
+        const msg = "Rendering disabled by tenant settings.";
+
+        if (!suppressLegacy) {
+          await updateQuoteFailedLegacyIfNotRendered({
+            tenantId: job.tenantId,
+            quoteLogId: job.quoteLogId,
+            prompt: msg,
+            error: msg,
+          });
+        }
+
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
+        processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
+        continue;
+      }
+
+      const maxPerDay = normalizeMaxPerDay(ctx.rendering_max_per_day);
+      const rate = await isRateLimitedNow({ tenantId: job.tenantId, maxPerDay });
+
+      if (rate.limited) {
+        const msg = `Renderings are disabled by rate limit (max per day = ${rate.maxPerDay}).`;
+
+        if (!suppressLegacy) {
+          await updateQuoteFailedLegacyIfNotRendered({
+            tenantId: job.tenantId,
+            quoteLogId: job.quoteLogId,
+            prompt: msg,
+            error: msg,
+          });
+        }
+
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
+        processed.push({
+          renderId: job.id,
           quoteLogId: job.quoteLogId,
-          quoteVersionId: job.quoteVersionId,
+          ok: false,
+          error: "RATE_LIMITED",
+          maxPerDay: rate.maxPerDay,
+          usedToday: (rate as any).usedToday ?? null,
         });
-        if (!ctx) throw new Error("Missing tenant/quote context for render attempt.");
-        if (!ctx.quote_version_id) throw new Error("Missing quote_version context (bad quoteVersionId).");
+        continue;
+      }
 
-        const tenantSlug = String(ctx.tenant_slug ?? "");
-        const tenantName = String(ctx.tenant_name ?? "Your Business");
+      const quoteInputAny: any = safeJsonParse(ctx.quote_input) ?? {};
+      const quoteOutputAny: any = safeJsonParse(ctx.quote_output) ?? {};
+      const versionOutputAny: any = safeJsonParse(ctx.version_output) ?? null;
+      const outputAny: any = versionOutputAny ?? quoteOutputAny ?? {};
 
-        const resolved = await deps.resolveTenantLlm(job.tenantId);
-        const renderModel = safeTrim(resolved.models.renderModel) || "gpt-image-1";
+      // ✅ opt-in gate bypass for tenant-initiated renders
+      const optIn =
+        forceRender ||
+        Boolean(ctx.render_opt_in) ||
+        Boolean(quoteInputAny?.render_opt_in) ||
+        Boolean(quoteInputAny?.customer_context?.render_opt_in);
 
-        const tenantRenderEnabled = coalesceTenantRenderEnabled(ctx, resolved.tenant.tenantRenderEnabled);
-        if (tenantRenderEnabled === false) {
-          const msg = "Rendering disabled by tenant settings.";
-          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: msg, error: msg });
-          await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
-          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "TENANT_RENDERING_DISABLED" });
-          continue;
+      if (!optIn) {
+        const msg = "Customer did not opt-in to rendering.";
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
+
+        // IMPORTANT: do not mark legacy failed here — this is “expected” for customer path
+        processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
+        continue;
+      }
+
+      const images = Array.isArray(quoteInputAny?.images) ? quoteInputAny.images : [];
+      if (!images.length) {
+        const msg = "No images stored on quote.";
+
+        if (!suppressLegacy) {
+          await updateQuoteFailedLegacyIfNotRendered({
+            tenantId: job.tenantId,
+            quoteLogId: job.quoteLogId,
+            prompt: msg,
+            error: msg,
+          });
         }
 
-        const maxPerDay = normalizeMaxPerDay(ctx.rendering_max_per_day);
-        const rate = await isRateLimitedNow(db, { tenantId: job.tenantId, maxPerDay });
-        if (rate.limited) {
-          const msg = `Renderings are disabled by rate limit (max per day = ${rate.maxPerDay}).`;
-          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: msg, error: msg });
-          await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
-          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "RATE_LIMITED" });
-          continue;
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: msg, prompt: null });
+        processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
+        continue;
+      }
+
+      const enc = ctx.openai_key_enc;
+      const hasTenantKey = Boolean(enc);
+      const platformKey = safeTrim(process.env.OPENAI_API_KEY);
+      const hasPlatformKey = Boolean(platformKey);
+
+      const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
+      const graceRemainingCount = grace.eligibleTier ? Number(grace.remaining ?? 0) : 0;
+
+      const canUsePlatformGrace = !hasTenantKey && grace.inGrace && hasPlatformKey;
+
+      if (!hasTenantKey && !canUsePlatformGrace) {
+        const why =
+          !hasPlatformKey
+            ? "Missing platform OpenAI key (OPENAI_API_KEY)."
+            : grace.eligibleTier
+            ? "Grace exhausted for rendering."
+            : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
+
+        if (!suppressLegacy) {
+          await updateQuoteFailedLegacyIfNotRendered({
+            tenantId: job.tenantId,
+            quoteLogId: job.quoteLogId,
+            prompt: why,
+            error: why,
+          });
         }
 
-        const quoteInputAny: any = safeJsonParse(ctx.quote_input) ?? {};
-        const quoteOutputAny: any = safeJsonParse(ctx.quote_output) ?? {};
-        const versionOutputAny: any = safeJsonParse(ctx.version_output) ?? null;
-        const outputAny: any = versionOutputAny ?? quoteOutputAny ?? {};
+        await markRenderRowDone({ renderId: job.id, status: "failed", error: why, prompt: null });
+        processed.push({
+          renderId: job.id,
+          quoteLogId: job.quoteLogId,
+          ok: false,
+          error: "KEY_POLICY_BLOCK",
+          planTier: safeTrim(ctx.plan_tier) || null,
+          graceEligibleTier: grace.eligibleTier,
+          graceRemaining: grace.eligibleTier ? graceRemainingCount : null,
+          hasTenantKey,
+          hasPlatformKey,
+        });
+        continue;
+      }
 
-        const optIn =
-          Boolean(ctx.render_opt_in) ||
-          Boolean(quoteInputAny?.render_opt_in) ||
-          Boolean(quoteInputAny?.customer_context?.render_opt_in);
+      const apiKey = hasTenantKey ? decryptSecret(String(enc)) : platformKey;
+      if (!apiKey) throw new Error(hasTenantKey ? "Unable to decrypt tenant OpenAI key." : "Missing platform OpenAI key.");
 
-        if (!optIn) {
-          const msg = "Customer did not opt-in to rendering.";
-          await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
-          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: true, skipped: true, reason: "not_opted_in" });
-          continue;
-        }
+      const industryKey =
+        safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
 
-        const images = Array.isArray(quoteInputAny?.images) ? quoteInputAny.images : [];
-        if (!images.length) {
-          const msg = "No images stored on quote.";
-          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: msg, error: msg });
-          await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
-          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "NO_IMAGES" });
-          continue;
-        }
+      let industrySource: "db" | "platform_fallback" | "none" = "none";
+      let industryVersion: number | null = null;
+      let industryAddendum = "";
+      let industryNegative = "";
 
-        const enc = ctx.openai_key_enc;
-        const hasTenantKey = Boolean(enc);
-        const platformKey = safeTrim(process.env.OPENAI_API_KEY);
-        const hasPlatformKey = Boolean(platformKey);
+      if (industryKey) {
+        try {
+          const got = await getIndustryLlmPackWithMeta(industryKey);
+          const fields = extractIndustryRenderFields(got?.pack);
+          industryAddendum = fields.addendum;
+          industryNegative = fields.negative;
 
-        const grace = graceRemaining(ctx.plan_tier, ctx.activation_grace_credits, ctx.activation_grace_used);
-        const canUsePlatformGrace = !hasTenantKey && grace.inGrace && hasPlatformKey;
-
-        if (!hasTenantKey && !canUsePlatformGrace) {
-          const why =
-            !hasPlatformKey
-              ? "Missing platform OpenAI key (OPENAI_API_KEY)."
-              : grace.eligibleTier
-              ? "Grace exhausted for rendering."
-              : "Missing tenant OpenAI key (tenant_secrets.openai_key_enc).";
-
-          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: why, error: why });
-          await markRenderRowDone(db, { renderId: job.id, status: "failed", error: why, prompt: null });
-          processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: "KEY_POLICY_BLOCK" });
-          continue;
-        }
-
-        const apiKey = hasTenantKey ? deps.decryptSecret(String(enc)) : platformKey;
-        if (!apiKey) throw new Error(hasTenantKey ? "Unable to decrypt tenant OpenAI key." : "Missing platform OpenAI key.");
-
-        const industryKey =
-          safeTrim(ctx.industry_key).toLowerCase() || safeTrim(resolved?.meta?.industryKey).toLowerCase() || "";
-
-        let industrySource: "db" | "platform_fallback" | "none" = "none";
-        let industryAddendum = "";
-        let industryNegative = "";
-
-        if (industryKey) {
-          try {
-            const got = await deps.getIndustryLlmPackWithMeta(industryKey);
-            const fields = extractIndustryRenderFields(got?.pack);
-            industryAddendum = fields.addendum;
-            industryNegative = fields.negative;
-
-            if (industryAddendum || industryNegative) {
-              industrySource = "db";
-            } else {
-              const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
-              const fb = extractIndustryRenderFields(fallbackPack);
-              if (fb.addendum || fb.negative) {
-                industryAddendum = fb.addendum;
-                industryNegative = fb.negative;
-                industrySource = "platform_fallback";
-              }
-            }
-          } catch {
+          if (industryAddendum || industryNegative) {
+            industrySource = "db";
+            industryVersion = typeof got?.meta?.version === "number" ? got.meta.version : null;
+          } else {
             const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
             const fb = extractIndustryRenderFields(fallbackPack);
             if (fb.addendum || fb.negative) {
@@ -885,171 +900,215 @@ async function handleCron(req: Request) {
               industrySource = "platform_fallback";
             }
           }
+        } catch {
+          const fallbackPack: any = (pcc as any)?.prompts?.industryPromptPacks?.[industryKey] ?? null;
+          const fb = extractIndustryRenderFields(fallbackPack);
+          if (fb.addendum || fb.negative) {
+            industryAddendum = fb.addendum;
+            industryNegative = fb.negative;
+            industrySource = "platform_fallback";
+          }
         }
+      }
 
-        const { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative } = extractTenantRenderFields(ctx, resolved);
+      const { tenantStyleKey, tenantRenderNotes, tenantAddendum, tenantNegative } = extractTenantRenderFields(ctx, resolved);
 
-        const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
-        const presetText =
-          tenantStyleKey === "clean_oem"
-            ? safeTrim(presets.clean_oem)
-            : tenantStyleKey === "custom"
-            ? safeTrim(presets.custom)
-            : safeTrim(presets.photoreal);
+      const presets = ((pcc as any)?.prompts?.renderStylePresets ?? {}) as any;
+      const presetText =
+        tenantStyleKey === "clean_oem"
+          ? safeTrim(presets.clean_oem)
+          : tenantStyleKey === "custom"
+          ? safeTrim(presets.custom)
+          : safeTrim(presets.photoreal);
 
-        const styleText =
-          presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      const styleText =
+        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
-        const serviceTypeLine = safeLine(
-          "Service type",
-          safeTrim(quoteInputAny?.customer_context?.service_type) || safeTrim(quoteInputAny?.customer_context?.category) || ""
-        );
+      const serviceTypeLine = safeLine(
+        "Service type",
+        safeTrim(quoteInputAny?.customer_context?.service_type) || safeTrim(quoteInputAny?.customer_context?.category) || ""
+      );
 
-        const summaryLine = safeLine("Estimate summary", typeof outputAny?.summary === "string" ? outputAny.summary : "");
-        const customerNotesLine = safeLine("Customer notes", String(quoteInputAny?.customer_context?.notes ?? "").trim());
-        const tenantRenderNotesLine = safeLine("Tenant render notes", tenantRenderNotes);
-        const shopNotesLine = safeLine("Shop notes", safeTrim(job.shopNotes));
+      const summaryLine = safeLine("Estimate summary", typeof outputAny?.summary === "string" ? outputAny.summary : "");
+      const customerNotesLine = safeLine("Customer notes", String(quoteInputAny?.customer_context?.notes ?? "").trim());
+      const tenantRenderNotesLine = safeLine("Tenant render notes", tenantRenderNotes);
+      const shopNotesLine = safeLine("Shop notes", safeTrim(job.shopNotes));
 
-        const renderPromptPreamble = collapseBlankLines(
-          [
-            platformRenderPreamble,
-            industryKey ? `Industry key: ${industryKey}` : "",
-            industryAddendum ? `Industry addendum:\n${industryAddendum}` : "",
-            tenantAddendum ? `Tenant addendum:\n${tenantAddendum}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n\n")
-        );
+      const renderPromptPreamble = collapseBlankLines(
+        [
+          platformRenderPreamble,
+          industryKey ? `Industry key: ${industryKey}` : "",
+          industryAddendum ? `Industry addendum:\n${industryAddendum}` : "",
+          tenantAddendum ? `Tenant addendum:\n${tenantAddendum}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      );
 
-        const negativeParts: string[] = [];
-        if (industryNegative) negativeParts.push(`Industry negatives:\n${industryNegative}`);
-        if (tenantNegative) negativeParts.push(`Tenant negatives:\n${tenantNegative}`);
+      const negativeParts: string[] = [];
+      if (industryNegative) negativeParts.push(`Industry negatives:\n${industryNegative}`);
+      if (tenantNegative) negativeParts.push(`Tenant negatives:\n${tenantNegative}`);
 
-        const negativeBlock = negativeParts.length
-          ? collapseBlankLines(["Hard negatives (must avoid):", ...negativeParts].join("\n\n"))
-          : "";
+      const negativeBlock = negativeParts.length
+        ? collapseBlankLines(["Hard negatives (must avoid):", ...negativeParts].join("\n\n"))
+        : "";
 
-        const versionNum =
-          typeof ctx.quote_version_num === "number" ? Number(ctx.quote_version_num) : Number(ctx.quote_version_num ?? 0) || null;
+      const versionNum =
+        typeof ctx.quote_version_num === "number"
+          ? Number(ctx.quote_version_num)
+          : Number(ctx.quote_version_num ?? 0) || null;
 
-        const templateVars = {
+      const templateVars = {
+        renderPromptPreamble,
+        style: styleText,
+        serviceTypeLine,
+        summaryLine,
+        customerNotesLine,
+        tenantRenderNotesLine,
+        shopNotesLine,
+      };
+
+      const templatedBodyRaw = platformRenderTemplate ? renderTemplate(platformRenderTemplate, templateVars) : "";
+      const templatedBody = collapseBlankLines(templatedBodyRaw);
+
+      const fallbackBody = collapseBlankLines(
+        [
           renderPromptPreamble,
-          style: styleText,
+          `Style: ${styleText}`,
           serviceTypeLine,
           summaryLine,
           customerNotesLine,
           tenantRenderNotesLine,
           shopNotesLine,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+
+      const coreBody = templatedBody || fallbackBody;
+      const jobContext = buildJobContext({ shopNotes: job.shopNotes, quoteId: job.quoteLogId, versionNum });
+
+      const finalPrompt = collapseBlankLines(
+        [
+          coreBody,
+          negativeBlock,
+          jobContext ? `Job context:\n${jobContext}` : "",
+          "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      );
+
+      if (debugEnabled) {
+        const renderDebug: any = {
+          ...buildRenderDebugPayload({
+            debugId: jobDebugId,
+            renderModel,
+            tenantStyleKey,
+            styleText,
+            renderPromptPreamble,
+            renderPromptTemplate: platformRenderTemplate
+              ? "(platform) renderPromptTemplate applied"
+              : "(fallback) no renderPromptTemplate configured",
+            finalPrompt,
+            serviceType:
+              safeTrim(quoteInputAny?.customer_context?.service_type) ||
+              safeTrim(quoteInputAny?.customer_context?.category) ||
+              "",
+            summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
+            customerNotes: String(quoteInputAny?.customer_context?.notes ?? "").trim(),
+            tenantRenderNotes,
+            images,
+          }),
+          queue: {
+            sourceQueue: job.sourceQueue,
+            forceRender,
+            suppressEmails,
+            suppressLegacy,
+            source: safeTrim(meta?.source) || null,
+          },
         };
 
-        const templatedBodyRaw = platformRenderTemplate ? renderTemplate(platformRenderTemplate, templateVars) : "";
-        const templatedBody = collapseBlankLines(templatedBodyRaw);
-
-        const fallbackBody = collapseBlankLines(
-          [
-            renderPromptPreamble,
-            `Style: ${styleText}`,
-            serviceTypeLine,
-            summaryLine,
-            customerNotesLine,
-            tenantRenderNotesLine,
-            shopNotesLine,
-          ]
-            .filter(Boolean)
-            .join("\n")
-        );
-
-        const coreBody = templatedBody || fallbackBody;
-        const jobContext = buildJobContext({ shopNotes: job.shopNotes, quoteId: job.quoteLogId, versionNum });
-
-        const finalPrompt = collapseBlankLines(
-          [
-            coreBody,
-            negativeBlock,
-            jobContext ? `Job context:\n${jobContext}` : "",
-            "Output: one high-quality image. No text, no watermarks, no logos, no UI overlays.",
-          ]
-            .filter(Boolean)
-            .join("\n\n")
-        );
-
-        if (debugEnabled) {
-          const renderDebug: any = {
-            ...deps.buildRenderDebugPayload({
-              debugId: jobDebugId,
-              renderModel,
-              tenantStyleKey,
-              styleText,
-              renderPromptPreamble,
-              renderPromptTemplate: platformRenderTemplate ? "(platform) template applied" : "(fallback) no template configured",
-              finalPrompt,
-              serviceType: safeTrim(quoteInputAny?.customer_context?.service_type) || safeTrim(quoteInputAny?.customer_context?.category) || "",
-              summary: typeof outputAny?.summary === "string" ? outputAny.summary : "",
-              customerNotes: String(quoteInputAny?.customer_context?.notes ?? "").trim(),
-              tenantRenderNotes,
-              images,
-            }),
-            queue: { sourceQueue: job.sourceQueue },
-          };
-
-          try {
-            await deps.setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
-          } catch {
-            // ignore
-          }
-        }
-
-        const openai = new deps.OpenAI({ apiKey, timeout: 90_000, maxRetries: 1 } as any);
-
-        const inputUrl = pickFirstImageUrl(images);
-        const inputFile = await fetchImageAsFile(deps.toFile, inputUrl);
-
-        let b64: string | undefined;
-
-        if (inputFile?.file) {
-          const editResp: any = await openai.images.edit({
-            model: renderModel,
-            image: inputFile.file,
-            prompt: finalPrompt,
-            size: "1024x1024",
-          });
-          b64 = editResp?.data?.[0]?.b64_json;
-        } else {
-          const genResp: any = await openai.images.generate({
-            model: renderModel,
-            prompt: finalPrompt,
-            size: "1024x1024",
-          });
-          b64 = genResp?.data?.[0]?.b64_json;
-        }
-
-        if (!b64) throw new Error("Image generation returned no b64_json.");
-
-        const bytes = Buffer.from(b64, "base64");
-
-        const key = `renders/${tenantSlug}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
-        const blob = await deps.put(key, bytes, { access: "public", contentType: "image/png" });
-        const imageUrl = (blob as any)?.url;
-        if (!imageUrl) throw new Error("Blob upload returned no url.");
-
-        await markRenderRowDone(db, { renderId: job.id, status: "rendered", imageUrl, prompt: finalPrompt, error: null });
-
-        await selectThisAttempt(db, { tenantId: job.tenantId, quoteVersionId: job.quoteVersionId, renderId: job.id });
-
-        await updateQuoteRenderedLegacyFirstOnly(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, imageUrl, prompt: finalPrompt });
-
-        if (!hasTenantKey && canUsePlatformGrace) {
-          await bumpGraceUsedIfGraceTier(db, job.tenantId);
-        }
-
-        // Emails best-effort (unchanged)
         try {
-          const cfg = await deps.getTenantEmailConfig(job.tenantId);
+          await setRenderDebug({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, debug: renderDebug });
+        } catch {
+          // ignore
+        }
+      }
+
+      const openai = new OpenAI({
+        apiKey,
+        timeout: 90_000,
+        maxRetries: 1,
+      } as any);
+
+      const inputUrl = pickFirstImageUrl(images);
+      const inputFile = await fetchImageAsFile(inputUrl);
+
+      let b64: string | undefined;
+
+      if (inputFile?.file) {
+        const editResp: any = await openai.images.edit({
+          model: renderModel,
+          image: inputFile.file,
+          prompt: finalPrompt,
+          size: "1024x1024",
+        });
+
+        b64 = editResp?.data?.[0]?.b64_json;
+      } else {
+        const genResp: any = await openai.images.generate({
+          model: renderModel,
+          prompt: finalPrompt,
+          size: "1024x1024",
+        });
+
+        b64 = genResp?.data?.[0]?.b64_json;
+      }
+
+      if (!b64) throw new Error("Image generation returned no b64_json.");
+
+      const bytes = Buffer.from(b64, "base64");
+
+      const key = `renders/${tenantSlug}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
+      const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
+      const imageUrl = blob?.url;
+      if (!imageUrl) throw new Error("Blob upload returned no url.");
+
+      await markRenderRowDone({
+        renderId: job.id,
+        status: "rendered",
+        imageUrl,
+        prompt: finalPrompt,
+        error: null,
+      });
+
+      await selectThisAttempt({ tenantId: job.tenantId, quoteVersionId: job.quoteVersionId, renderId: job.id });
+
+      // ✅ only update legacy quote_logs render fields for customer-facing render paths
+      if (!suppressLegacy) {
+        await updateQuoteRenderedLegacyFirstOnly({
+          tenantId: job.tenantId,
+          quoteLogId: job.quoteLogId,
+          imageUrl,
+          prompt: finalPrompt,
+        });
+      }
+
+      if (!hasTenantKey && canUsePlatformGrace) {
+        await bumpGraceUsedIfGraceTier(job.tenantId);
+      }
+
+      // ✅ Emails: only when NOT suppressed
+      if (!suppressEmails) {
+        try {
+          const cfg = await getTenantEmailConfig(job.tenantId);
           const businessName = (cfg.businessName || ctx.business_name || tenantName || "Your Business").trim();
           const brandLogoUrl = ctx.brand_logo_url ?? null;
 
           const brandLogoVariantRaw = String((ctx as any)?.brand_logo_variant ?? "").trim().toLowerCase();
-          const brandLogoVariant = brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
+          const brandLogoVariant =
+            brandLogoVariantRaw === "light" ? "light" : brandLogoVariantRaw === "dark" ? "dark" : null;
 
           const customer = quoteInputAny?.customer ?? quoteInputAny?.contact ?? null;
           const customerName = String(customer?.name ?? "Customer").trim();
@@ -1058,7 +1117,7 @@ async function handleCron(req: Request) {
 
           const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
           const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
-          const summaryTxt = typeof outputAny?.summary === "string" ? outputAny.summary : "";
+          const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
           const baseUrl = getBaseUrl(req);
           const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
@@ -1073,7 +1132,7 @@ async function handleCron(req: Request) {
             try {
               renderEmailResult.lead_render.attempted = true;
 
-              const htmlLead = deps.renderLeadRenderCompleteEmailHTML({
+              const htmlLead = renderLeadRenderCompleteEmailHTML({
                 businessName,
                 brandLogoUrl,
                 brandLogoVariant,
@@ -1085,11 +1144,11 @@ async function handleCron(req: Request) {
                 renderImageUrl: imageUrl,
                 estimateLow,
                 estimateHigh,
-                summary: summaryTxt,
+                summary,
                 adminQuoteUrl,
               });
 
-              const r1 = await deps.sendEmail({
+              const r1 = await sendEmail({
                 tenantId: job.tenantId,
                 context: { type: "lead_render_complete", quoteLogId: job.quoteLogId },
                 message: {
@@ -1113,7 +1172,7 @@ async function handleCron(req: Request) {
             try {
               renderEmailResult.customer_render.attempted = true;
 
-              const htmlCust = deps.renderCustomerRenderCompleteEmailHTML({
+              const htmlCust = renderCustomerRenderCompleteEmailHTML({
                 businessName,
                 brandLogoUrl,
                 brandLogoVariant,
@@ -1122,12 +1181,12 @@ async function handleCron(req: Request) {
                 renderImageUrl: imageUrl,
                 estimateLow,
                 estimateHigh,
-                summary: summaryTxt,
+                summary,
                 publicQuoteUrl,
                 replyToEmail: cfg.leadToEmail ?? null,
               });
 
-              const r2 = await deps.sendEmail({
+              const r2 = await sendEmail({
                 tenantId: job.tenantId,
                 context: { type: "customer_render_complete", quoteLogId: job.quoteLogId },
                 message: {
@@ -1148,76 +1207,89 @@ async function handleCron(req: Request) {
           }
 
           try {
-            await deps.setRenderEmailResult({ db: db as any, quoteLogId: job.quoteLogId, tenantId: job.tenantId, emailResult: renderEmailResult });
+            await setRenderEmailResult({
+              db: db as any,
+              quoteLogId: job.quoteLogId,
+              tenantId: job.tenantId,
+              emailResult: renderEmailResult,
+            });
           } catch {
             // ignore
           }
         } catch {
           // ignore
         }
-
-        processed.push({
-          renderId: job.id,
-          quoteLogId: job.quoteLogId,
-          quoteVersionId: job.quoteVersionId,
-          attempt: job.attempt,
-          ok: true,
-          imageUrl,
-          renderModel,
-          industryKey: industryKey || null,
-          industrySource,
-          usedKey: hasTenantKey ? "tenant" : "platform_grace",
-          anchoredToInputImage: Boolean(inputFile?.file),
-          sourceQueue: job.sourceQueue,
-        });
-      } catch (e: any) {
-        const msg = safeErr(e);
-
-        try {
-          await updateQuoteFailedLegacyIfNotRendered(db, { tenantId: job.tenantId, quoteLogId: job.quoteLogId, prompt: "render_failed", error: msg });
-        } catch {
-          // ignore
-        }
-
-        try {
-          await markRenderRowDone(db, { renderId: job.id, status: "failed", error: msg, prompt: null });
-        } catch {
-          // ignore
-        }
-
-        processed.push({ renderId: job.id, quoteLogId: job.quoteLogId, ok: false, error: msg, sourceQueue: job.sourceQueue });
       }
-    }
 
-    return json(
-      {
+      processed.push({
+        renderId: job.id,
+        quoteLogId: job.quoteLogId,
+        quoteVersionId: job.quoteVersionId,
+        attempt: job.attempt,
         ok: true,
-        authMode: auth.mode,
-        claimed: claimed.length,
-        processed,
-        durationMs: Date.now() - startedAt,
-        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
-      },
-      200,
-      debugId
-    );
-  } catch (e: any) {
-    const msg = safeErr(e);
-    // eslint-disable-next-line no-console
-    console.error("[cron/render] fatal:", msg);
+        imageUrl,
+        renderModel,
+        industryKey: industryKey || null,
+        industrySource,
+        usedKey: hasTenantKey ? "tenant" : "platform_grace",
+        anchoredToInputImage: Boolean(inputFile?.file),
+        sourceQueue: job.sourceQueue,
+        forceRender,
+        suppressEmails,
+        suppressLegacy,
+      });
+    } catch (e: any) {
+      const msg = safeErr(e);
 
-    return json(
-      {
+      if (!suppressLegacy) {
+        try {
+          await updateQuoteFailedLegacyIfNotRendered({
+            tenantId: job.tenantId,
+            quoteLogId: job.quoteLogId,
+            prompt: "render_failed",
+            error: msg,
+          });
+        } catch {
+          // ignore
+        }
+      }
+
+      try {
+        await markRenderRowDone({
+          renderId: job.id,
+          status: "failed",
+          error: msg,
+          prompt: null,
+        });
+      } catch {
+        // ignore
+      }
+
+      processed.push({
+        renderId: job.id,
+        quoteLogId: job.quoteLogId,
         ok: false,
-        error: "CRON_FATAL",
-        message: msg.split("\n")[0],
-        ...(wantDebug ? { fatal: msg } : {}),
-        durationMs: Date.now() - startedAt,
-      },
-      500,
-      debugId
-    );
+        error: msg,
+        sourceQueue: job.sourceQueue,
+        forceRender,
+        suppressEmails,
+        suppressLegacy,
+      });
+    }
   }
+
+  return json(
+    {
+      ok: true,
+      authMode: auth.mode,
+      claimed: claimed.length,
+      processed,
+      durationMs: Date.now() - startedAt,
+      ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
+    },
+    200,
+    debugId
+  );
 }
 
 export async function GET(req: Request) {

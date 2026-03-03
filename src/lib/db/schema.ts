@@ -497,6 +497,9 @@ export const quoteRenders = pgTable(
     prompt: text("prompt"),
     shopNotes: text("shop_notes"),
 
+    // ✅ NEW: per-attempt flags (admin override, source, etc.)
+    meta: jsonb("meta").$type<any>().notNull().default({}),
+
     // Output
     imageUrl: text("image_url"),
     error: text("error"),
