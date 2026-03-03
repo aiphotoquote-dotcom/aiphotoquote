@@ -11,7 +11,12 @@ import { quoteLogs, quoteNotes, quoteRenders, quoteVersions, tenantMembers } fro
 
 import { resolveActiveTenantId } from "@/lib/admin/quotes/getActiveTenant";
 import { adminReassessQuote } from "@/lib/quotes/adminReassess";
-import { normalizeAiMode, normalizeEngine, type AdminReassessEngine, type QuoteLogRow } from "@/lib/admin/quotes/pageCompat";
+import {
+  normalizeAiMode,
+  normalizeEngine,
+  type AdminReassessEngine,
+  type QuoteLogRow,
+} from "@/lib/admin/quotes/pageCompat";
 import { safeTrim } from "@/lib/admin/quotes/utils";
 
 /* -------------------- helpers -------------------- */
@@ -26,8 +31,24 @@ function looksUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 }
 
+/**
+ * Accepts:
+ * - "1"
+ * - 1
+ * - "v1" / "V2"
+ * - "version 3"
+ */
 function parsePositiveInt(v: string) {
-  const n = Number(String(v ?? "").trim());
+  const raw = String(v ?? "").trim();
+  if (!raw) return null;
+
+  // normalize common UI formats
+  // "v1" -> "1"
+  // "version 12" -> "12"
+  const m = raw.match(/^\s*(?:v|version)?\s*(\d+)\s*$/i);
+  const cleaned = m?.[1] ?? raw;
+
+  const n = Number(cleaned);
   if (!Number.isFinite(n)) return null;
   const i = Math.trunc(n);
   return i >= 0 ? i : null;
@@ -43,13 +64,8 @@ function getBaseUrlFromEnv() {
   return "http://localhost:3000";
 }
 
-/**
- * Next.js 16+ may type headers() as async (Promise<ReadonlyHeaders>), so we await it.
- * We only use referer as a fallback if quote_id isn't present in formData.
- */
-async function inferQuoteIdFromReferer(): Promise<string | null> {
-  const h = await headers();
-  const ref = safeTrimLocal(h.get("referer"));
+function inferQuoteIdFromReferer(): string | null {
+  const ref = safeTrimLocal(headers().get("referer"));
   if (!ref) return null;
 
   // matches: /admin/quotes/<id> or /admin/quotes/<id>?x=y or /admin/quotes/<id>#hash
@@ -63,11 +79,11 @@ async function inferQuoteIdFromReferer(): Promise<string | null> {
   }
 }
 
-async function resolveQuoteIdOrRedirect(formData: FormData): Promise<string> {
+function resolveQuoteIdOrRedirect(formData: FormData): string {
   const q1 = safeTrim(formData.get("quote_id"));
   if (q1) return q1;
 
-  const q2 = await inferQuoteIdFromReferer();
+  const q2 = inferQuoteIdFromReferer();
   if (q2) return q2;
 
   redirect("/admin/quotes");
@@ -91,7 +107,6 @@ async function ensureActiveMembership(actorUserId: string, tenantIdNow: string) 
 }
 
 async function resolveTenantOrRedirect(actorUserId: string) {
-  // NOTE: cookies() may also be typed async in newer Next; awaiting is safe either way.
   const jar = await cookies();
   const tenantIdMaybe = await resolveActiveTenantId({ jar, userId: actorUserId });
   if (!tenantIdMaybe) redirect("/admin/quotes");
@@ -201,7 +216,7 @@ export async function setStageAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const nextRaw = String(formData.get("stage") ?? "").trim().toLowerCase();
@@ -230,7 +245,7 @@ export async function markReadAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   await db
@@ -246,7 +261,7 @@ export async function markUnreadAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   await db
@@ -262,7 +277,7 @@ export async function createNewVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const engineUi = normalizeEngine(formData.get("engine"));
@@ -296,7 +311,8 @@ export async function createNewVersionAction(formData: FormData) {
     createdNoteId = inserted?.id ? String(inserted.id) : null;
   }
 
-  const engine: AdminReassessEngine = engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
+  const engine: AdminReassessEngine =
+    engineUi === "full_ai_reassessment" ? "openai_assessment" : "deterministic_only";
 
   const quoteLog: QuoteLogRow = {
     id: quoteId,
@@ -331,7 +347,7 @@ export async function restoreVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const versionId = safeTrim(formData.get("version_id"));
   if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
@@ -365,7 +381,7 @@ export async function requestRenderAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const tenantId = await resolveTenantOrRedirect(actorUserId);
 
   const shopNotes = safeTrim(formData.get("shop_notes"));
@@ -387,7 +403,13 @@ export async function requestRenderAction(formData: FormData) {
 
   const rawA = safeTrim(formData.get("version_id"));
   const rawB = safeTrim(formData.get("version_number"));
-  const candidate = rawA || rawB;
+
+  // Normalize UI "v1" etc early
+  const candidateRaw = safeTrim(rawA || rawB);
+  const candidate =
+    candidateRaw && !looksUuid(candidateRaw)
+      ? (candidateRaw.match(/^\s*v\s*(\d+)\s*$/i)?.[1] ?? candidateRaw)
+      : candidateRaw;
 
   let resolvedVersionId: string | null = null;
 
@@ -404,6 +426,7 @@ export async function requestRenderAction(formData: FormData) {
 
   if (!resolvedVersionId) {
     const vnum = parsePositiveInt(candidate) ?? 0;
+
     const picked = await db
       .select({ id: quoteVersions.id })
       .from(quoteVersions)
@@ -458,7 +481,7 @@ export async function deleteVersionAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const versionId = safeTrim(formData.get("version_id"));
   if (!versionId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
@@ -467,9 +490,7 @@ export async function deleteVersionAction(formData: FormData) {
   const v = await db
     .select({ version: quoteVersions.version })
     .from(quoteVersions)
-    .where(
-      and(eq(quoteVersions.id, versionId as any), eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.quoteLogId, quoteId))
-    )
+    .where(and(eq(quoteVersions.id, versionId as any), eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.quoteLogId, quoteId)))
     .limit(1)
     .then((r) => r[0] ?? null);
 
@@ -484,13 +505,7 @@ export async function deleteVersionAction(formData: FormData) {
   await db
     .update(quoteNotes)
     .set({ quoteVersionId: null } as any)
-    .where(
-      and(
-        eq(quoteNotes.tenantId, tenantId),
-        eq(quoteNotes.quoteLogId, quoteId),
-        eq(quoteNotes.quoteVersionId, versionId as any)
-      )
-    );
+    .where(and(eq(quoteNotes.tenantId, tenantId), eq(quoteNotes.quoteLogId, quoteId), eq(quoteNotes.quoteVersionId, versionId as any)));
 
   await db.delete(quoteVersions).where(and(eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.id, versionId as any)));
 
@@ -502,7 +517,7 @@ export async function deleteNoteAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const noteId = safeTrim(formData.get("note_id"));
   if (!noteId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#lifecycle`);
 
@@ -517,7 +532,7 @@ export async function deleteRenderAction(formData: FormData) {
   const actorUserId = session.userId;
   if (!actorUserId) redirect("/sign-in");
 
-  const quoteId = await resolveQuoteIdOrRedirect(formData);
+  const quoteId = resolveQuoteIdOrRedirect(formData);
   const renderId = safeTrim(formData.get("render_id"));
   if (!renderId) redirect(`/admin/quotes/${encodeURIComponent(quoteId)}#renders`);
 
