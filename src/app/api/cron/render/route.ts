@@ -40,13 +40,14 @@ type RenderJob = {
 
 function json(data: any, status = 200, debugId?: string) {
   const res = NextResponse.json(debugId ? { debugId, ...data } : data, { status });
+  res.headers.set("cache-control", "no-store");
   if (debugId) res.headers.set("x-debug-id", debugId);
   return res;
 }
 
 function safeErr(e: unknown) {
   const msg = e instanceof Error ? e.message : String(e ?? "Unknown error");
-  return msg.slice(0, 2000);
+  return msg.slice(0, 4000);
 }
 
 function safeJsonParse(v: any) {
@@ -138,7 +139,6 @@ function buildAuthDebug(req: Request) {
       VERCEL_URL: safeTrim(process.env.VERCEL_URL) || null,
       NEXT_PUBLIC_APP_URL: safeTrim(process.env.NEXT_PUBLIC_APP_URL) || null,
       APP_URL: safeTrim(process.env.APP_URL) || null,
-      ALLOW_CRON_IN_PREVIEW: safeTrim(process.env.ALLOW_CRON_IN_PREVIEW) || null,
     },
     request: {
       url: req.url,
@@ -152,24 +152,9 @@ function buildAuthDebug(req: Request) {
 
 /**
  * CRON protection.
- *
- * ✅ Prod stays protected with CRON_SECRET.
- * ✅ Preview/dev can be optionally enabled WITHOUT a secret by setting:
- *    ALLOW_CRON_IN_PREVIEW=1
  */
 async function requireCronSecret(req: Request) {
   const configured = safeTrim(process.env.CRON_SECRET);
-
-  // Optional escape hatch for preview/dev (explicit opt-in)
-  const env = safeTrim(process.env.VERCEL_ENV).toLowerCase();
-  const allowPreview = safeTrim(process.env.ALLOW_CRON_IN_PREVIEW) === "1";
-  if (!configured && (env === "preview" || env === "development")) {
-    return { ok: true as const, mode: "no_secret_configured" as const };
-  }
-  if (configured && allowPreview && (env === "preview" || env === "development")) {
-    return { ok: true as const, mode: "preview_allow" as const };
-  }
-
   if (!configured) return { ok: true as const, mode: "no_secret_configured" as const };
 
   const headerToken = getTokenFromAuthHeader(req);
@@ -231,8 +216,8 @@ async function ensureVersion0(args: { tenantId: string; quoteLogId: string; quot
 
 /**
  * Claim jobs safely from quote_renders.
- * ✅ Also re-claim stale running jobs:
- * - status='running' and started_at older than 10 minutes => retry
+ * ✅ Also re-claim stale running jobs (prevents “stuck forever”):
+ * - if status='running' and started_at older than 10 minutes => treat as stale and retry
  */
 async function claimRenderJobs(max: number): Promise<RenderJob[]> {
   const r = await db.execute(sql`
@@ -280,16 +265,27 @@ async function claimRenderJobs(max: number): Promise<RenderJob[]> {
 /**
  * ✅ Legacy queue drain:
  * - claim quote_logs where render_status='queued'
+ * - ALSO reclaim stale 'running' (quote_logs has no started_at/updated_at; use created_at heuristic)
  * - ensure v0
  * - insert into quote_renders (attempt 1) if not exists
- * - claim it immediately and return as normal render jobs
+ * - claim it immediately as running and return it as a normal render job
+ *
+ * NOTE: The "stale running" heuristic is intentionally conservative.
+ * If render_status='running' with no rendered_at/image_url for > 30 minutes, it is almost certainly stuck.
  */
 async function claimLegacyJobsAsRenderJobs(max: number): Promise<RenderJob[]> {
   const claimedLegacy = await db.execute(sql`
     with picked as (
       select id, tenant_id, output
       from quote_logs
-      where render_status = 'queued'
+      where
+        render_status = 'queued'
+        or (
+          render_status = 'running'
+          and render_image_url is null
+          and rendered_at is null
+          and created_at < (now() - interval '30 minutes')
+        )
       order by created_at asc
       limit ${max}
       for update skip locked
@@ -573,7 +569,7 @@ function collapseBlankLines(s: string) {
   return s
     .split("\n")
     .map((l) => l.trimEnd())
-    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim() === "")))
+    .filter((line, idx, arr) => !(line.trim() === "" && (arr[idx - 1]?.trim?.() === "")))
     .join("\n")
     .trim();
 }
@@ -677,8 +673,7 @@ function buildJobContext(args: { shopNotes: string; quoteId: string; versionNum?
   return collapseBlankLines(parts.join("\n\n"));
 }
 
-async function handleCron(req: Request) {
-  const debugId = crypto.randomBytes(6).toString("hex");
+async function handleCronImpl(req: Request, debugId: string) {
   const startedAt = Date.now();
 
   const url = new URL(req.url);
@@ -696,6 +691,7 @@ async function handleCron(req: Request) {
   const max = Math.max(1, Math.min(10, Number(url.searchParams.get("max") ?? "1") || 1));
 
   let claimed: RenderJob[] = await claimRenderJobs(max);
+
   if (!claimed.length) {
     claimed = await claimLegacyJobsAsRenderJobs(max);
   }
@@ -911,7 +907,8 @@ async function handleCron(req: Request) {
           ? safeTrim(presets.custom)
           : safeTrim(presets.photoreal);
 
-      const styleText = presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
+      const styleText =
+        presetText || "photorealistic, natural colors, clean lighting, product photography look, high detail";
 
       const serviceTypeLine = safeLine(
         "Service type",
@@ -1055,7 +1052,8 @@ async function handleCron(req: Request) {
 
       const bytes = Buffer.from(b64, "base64");
 
-      const key = `renders/${tenantSlug}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
+      const tenantSlugSafe = tenantSlug || "tenant";
+      const key = `renders/${tenantSlugSafe}/${job.quoteLogId}-${job.quoteVersionId}-${job.attempt}-${Date.now()}.png`;
       const blob = await put(key, bytes, { access: "public", contentType: "image/png" });
       const imageUrl = blob?.url;
       if (!imageUrl) throw new Error("Blob upload returned no url.");
@@ -1098,10 +1096,10 @@ async function handleCron(req: Request) {
 
         const estimateLow = typeof outputAny?.estimate_low === "number" ? outputAny.estimate_low : null;
         const estimateHigh = typeof outputAny?.estimate_high === "number" ? outputAny.estimate_high : null;
-        const summary2 = typeof outputAny?.summary === "string" ? outputAny.summary : "";
+        const summary = typeof outputAny?.summary === "string" ? outputAny.summary : "";
 
         const baseUrl = getBaseUrl(req);
-        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlug)}` : null;
+        const publicQuoteUrl = baseUrl ? `${baseUrl}/q/${encodeURIComponent(tenantSlugSafe)}` : null;
         const adminQuoteUrl = baseUrl ? `${baseUrl}/admin/quotes/${encodeURIComponent(job.quoteLogId)}` : null;
 
         const renderEmailResult: any = {
@@ -1118,14 +1116,14 @@ async function handleCron(req: Request) {
               brandLogoUrl,
               brandLogoVariant,
               quoteLogId: job.quoteLogId,
-              tenantSlug,
+              tenantSlug: tenantSlugSafe,
               customerName,
               customerEmail,
               customerPhone,
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary: summary2,
+              summary,
               adminQuoteUrl,
             });
 
@@ -1162,7 +1160,7 @@ async function handleCron(req: Request) {
               renderImageUrl: imageUrl,
               estimateLow,
               estimateHigh,
-              summary: summary2,
+              summary,
               publicQuoteUrl,
               replyToEmail: cfg.leadToEmail ?? null,
             });
@@ -1209,6 +1207,8 @@ async function handleCron(req: Request) {
         ok: true,
         imageUrl,
         renderModel,
+        industryKey: industryKey || null,
+        industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
         sourceQueue: job.sourceQueue,
@@ -1256,10 +1256,32 @@ async function handleCron(req: Request) {
   );
 }
 
+async function handleCronSafe(req: Request) {
+  const debugId = crypto.randomBytes(6).toString("hex");
+  const url = new URL(req.url);
+  const wantDebug = url.searchParams.get("debug") === "1";
+
+  try {
+    return await handleCronImpl(req, debugId);
+  } catch (e: any) {
+    // ✅ critical: never return empty 500 again
+    return json(
+      {
+        ok: false,
+        error: "INTERNAL_ERROR",
+        message: safeErr(e),
+        ...(wantDebug ? { debug: { auth: buildAuthDebug(req) } } : {}),
+      },
+      500,
+      debugId
+    );
+  }
+}
+
 export async function GET(req: Request) {
-  return handleCron(req);
+  return handleCronSafe(req);
 }
 
 export async function POST(req: Request) {
-  return handleCron(req);
+  return handleCronSafe(req);
 }
