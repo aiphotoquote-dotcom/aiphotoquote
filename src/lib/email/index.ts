@@ -7,7 +7,9 @@ import { sql } from "drizzle-orm";
 
 type EmailSendMode = "standard" | "enterprise";
 
-async function getTenantEmailMode(tenantId: string): Promise<{
+async function getTenantEmailMode(
+  tenantId: string
+): Promise<{
   mode: EmailSendMode;
   emailIdentityId: string | null;
 }> {
@@ -31,7 +33,9 @@ async function getTenantEmailMode(tenantId: string): Promise<{
   }
 }
 
-async function getGmailIdentity(emailIdentityId: string): Promise<{
+async function getGmailIdentity(
+  emailIdentityId: string
+): Promise<{
   refreshTokenEnc: string;
   mailboxEmail: string;
 }> {
@@ -71,6 +75,73 @@ function safeJsonParse(v: unknown): any | null {
     return null;
   } catch {
     return null;
+  }
+}
+
+function normalizeToList(v: any): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map((x) => safeTrim(x)).filter(Boolean);
+  return [safeTrim(v)].filter(Boolean);
+}
+
+async function logEmailToDb(args: {
+  tenantId: string;
+  quoteLogId?: string;
+  contextType: EmailContextType;
+  source: "sendEmail";
+  message: EmailMessage;
+  result: EmailSendResult;
+  metaExtra?: Record<string, any>;
+}) {
+  try {
+    const quoteLogId = safeTrim(args.quoteLogId);
+    const fromEmail = safeTrim((args.message as any)?.from);
+    const toEmails = normalizeToList((args.message as any)?.to);
+    const subject = safeTrim((args.message as any)?.subject);
+
+    const metaMerged =
+      args.metaExtra || (args.result as any)?.meta
+        ? { ...(args.metaExtra || {}), ...(((args.result as any)?.meta as any) || {}) }
+        : {};
+
+    await db.execute(sql`
+      insert into quote_email_logs (
+        id,
+        tenant_id,
+        quote_log_id,
+        quote_version_id,
+        context_type,
+        source,
+        from_email,
+        to_emails,
+        subject,
+        provider,
+        provider_message_id,
+        ok,
+        error,
+        meta,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${args.tenantId}::uuid,
+        ${quoteLogId ? sql`${quoteLogId}::uuid` : sql`null`},
+        null,
+        ${String(args.contextType)},
+        ${args.source},
+        ${fromEmail || null},
+        ${JSON.stringify(toEmails)}::jsonb,
+        ${subject || null},
+        ${String(args.result.provider ?? "") || null},
+        ${args.result.providerMessageId ?? null},
+        ${Boolean(args.result.ok)},
+        ${args.result.error ?? null},
+        ${JSON.stringify(metaMerged ?? {})}::jsonb,
+        now()
+      )
+    `);
+  } catch {
+    // never block email delivery on logging
   }
 }
 
@@ -136,10 +207,7 @@ function normalizeResendNoMessageId(res: EmailSendResult): EmailSendResult {
     safeTrim(metaObj?.data?.messageId) ||
     safeTrim(metaObj?.messageId);
 
-  const metaError =
-    safeTrim(metaObj?.error?.message) ||
-    safeTrim(metaObj?.error) ||
-    null;
+  const metaError = safeTrim(metaObj?.error?.message) || safeTrim(metaObj?.error) || null;
 
   // If Resend said error: null and we have an id, treat as success.
   if (id && !metaError) {
@@ -185,7 +253,7 @@ export async function sendEmail(args: {
 
     // Success: attach useful meta for debugging
     if (first.ok) {
-      return {
+      const out: EmailSendResult = {
         ...first,
         meta: {
           ...(first.meta || {}),
@@ -195,6 +263,17 @@ export async function sendEmail(args: {
           fallbackUsed: false,
         },
       };
+
+      await logEmailToDb({
+        tenantId: args.tenantId,
+        quoteLogId: args.context.quoteLogId,
+        contextType: args.context.type,
+        source: "sendEmail",
+        message: args.message,
+        result: out,
+      });
+
+      return out;
     }
 
     // If Resend rejected the tenant domain/sender, retry with platform From
@@ -203,7 +282,7 @@ export async function sendEmail(args: {
 
       // If platform fallback isn't configured, return the original failure + meta
       if (!platformFrom) {
-        return {
+        const out: EmailSendResult = {
           ...first,
           meta: {
             ...(first.meta || {}),
@@ -214,6 +293,17 @@ export async function sendEmail(args: {
             fallbackReason: "PLATFORM_FROM_EMAIL_NOT_SET",
           },
         };
+
+        await logEmailToDb({
+          tenantId: args.tenantId,
+          quoteLogId: args.context.quoteLogId,
+          contextType: args.context.type,
+          source: "sendEmail",
+          message: args.message,
+          result: out,
+        });
+
+        return out;
       }
 
       const secondRaw = await provider.send({
@@ -229,7 +319,7 @@ export async function sendEmail(args: {
       const second = normalizeResendNoMessageId(secondRaw);
 
       // Return the retry result but preserve the original failure for visibility
-      return {
+      const out: EmailSendResult = {
         ...second,
         meta: {
           ...(second.meta || {}),
@@ -242,10 +332,21 @@ export async function sendEmail(args: {
           originalError: first.error ?? null,
         },
       };
+
+      await logEmailToDb({
+        tenantId: args.tenantId,
+        quoteLogId: args.context.quoteLogId,
+        contextType: args.context.type,
+        source: "sendEmail",
+        message: args.message,
+        result: out,
+      });
+
+      return out;
     }
 
     // Non-fallback failure: return as-is with meta
-    return {
+    const out: EmailSendResult = {
       ...first,
       meta: {
         ...(first.meta || {}),
@@ -255,19 +356,41 @@ export async function sendEmail(args: {
         fallbackUsed: false,
       },
     };
+
+    await logEmailToDb({
+      tenantId: args.tenantId,
+      quoteLogId: args.context.quoteLogId,
+      contextType: args.context.type,
+      source: "sendEmail",
+      message: args.message,
+      result: out,
+    });
+
+    return out;
   }
 
   // -----------------
   // ENTERPRISE (Gmail)
   // -----------------
   if (!emailIdentityId) {
-    return {
+    const out: EmailSendResult = {
       ok: false,
       provider: "gmail_oauth",
       providerMessageId: null,
       error: "MISSING_EMAIL_IDENTITY",
       meta: { mode },
     };
+
+    await logEmailToDb({
+      tenantId: args.tenantId,
+      quoteLogId: args.context.quoteLogId,
+      contextType: args.context.type,
+      source: "sendEmail",
+      message: args.message,
+      result: out,
+    });
+
+    return out;
   }
 
   try {
@@ -285,7 +408,7 @@ export async function sendEmail(args: {
       message: args.message,
     });
 
-    return {
+    const out: EmailSendResult = {
       ...res,
       meta: {
         ...(res.meta || {}),
@@ -295,13 +418,35 @@ export async function sendEmail(args: {
         fromActual: identity.mailboxEmail,
       },
     };
+
+    await logEmailToDb({
+      tenantId: args.tenantId,
+      quoteLogId: args.context.quoteLogId,
+      contextType: args.context.type,
+      source: "sendEmail",
+      message: args.message,
+      result: out,
+    });
+
+    return out;
   } catch (e: any) {
-    return {
+    const out: EmailSendResult = {
       ok: false,
       provider: "gmail_oauth",
       providerMessageId: null,
       error: e?.message ?? String(e),
       meta: { mode, emailIdentityId },
     };
+
+    await logEmailToDb({
+      tenantId: args.tenantId,
+      quoteLogId: args.context.quoteLogId,
+      contextType: args.context.type,
+      source: "sendEmail",
+      message: args.message,
+      result: out,
+    });
+
+    return out;
   }
 }
