@@ -408,13 +408,77 @@ export default function QuoteEmailComposeClient(props: {
 
   const totalSelectedImages = selectedImages.length;
 
+  /* ------------------------------ BEFORE/AFTER assignment ------------------------------ */
+  const [beforeAfterBeforeId, setBeforeAfterBeforeId] = useState<string>("");
+  const [beforeAfterAfterId, setBeforeAfterAfterId] = useState<string>("");
+
+  // Keep assignments valid as selection/template changes.
+  useEffect(() => {
+    if (templateKey !== "before_after") return;
+
+    const ids = selectedImages.map((x) => x.id);
+    const has = (id: string) => id && ids.includes(id);
+
+    let before = has(beforeAfterBeforeId) ? beforeAfterBeforeId : "";
+    let after = has(beforeAfterAfterId) ? beforeAfterAfterId : "";
+
+    // If both missing, pick defaults from first two selected (stable / predictable).
+    if (!before && ids.length >= 1) before = ids[0];
+    if (!after && ids.length >= 2) after = ids[1];
+
+    // If they collide, fix by choosing a different second.
+    if (before && after && before === after) {
+      const alt = ids.find((x) => x !== before) || "";
+      after = alt;
+    }
+
+    // If we have <2 selected, clear second.
+    if (ids.length < 2) after = "";
+
+    if (before !== beforeAfterBeforeId) setBeforeAfterBeforeId(before);
+    if (after !== beforeAfterAfterId) setBeforeAfterAfterId(after);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templateKey, selectedImages]);
+
+  function swapBeforeAfter() {
+    setBeforeAfterBeforeId((prevBefore) => {
+      const b = prevBefore;
+      const a = beforeAfterAfterId;
+      setBeforeAfterAfterId(b);
+      return a;
+    });
+  }
+
+  const beforeAfterOptions = useMemo(() => {
+    // Only show options when you have at least 1 selected image.
+    return selectedImages.map((x) => ({
+      id: x.id,
+      label: x.label,
+      kind: x.kind,
+    }));
+  }, [selectedImages]);
+
   const previewModel: QuoteEmailPreviewModel = useMemo(() => {
-    const featured =
+    // Default featured selection rules
+    let featured =
       templateKey === "before_after"
         ? selectedImages.find((x) => x.kind === "photo") || selectedImages[0] || null
         : selectedImages.find((x) => x.kind === "render") || selectedImages[0] || null;
 
-    const gallery = featured ? selectedImages.filter((x) => x.url !== featured.url) : selectedImages;
+    let gallery = featured ? selectedImages.filter((x) => x.url !== featured.url) : selectedImages;
+
+    // ✅ Override with explicit BEFORE/AFTER mapping when on before_after template
+    if (templateKey === "before_after" && selectedImages.length) {
+      const byId = new Map(selectedImages.map((x) => [x.id, x] as const));
+      const before = beforeAfterBeforeId ? byId.get(beforeAfterBeforeId) ?? null : null;
+      const after = beforeAfterAfterId ? byId.get(beforeAfterAfterId) ?? null : null;
+
+      // We want: featured = BEFORE, gallery[0] = AFTER, rest after that.
+      if (before) featured = before;
+
+      const rest = selectedImages.filter((x) => x.id !== (before?.id ?? "") && x.id !== (after?.id ?? ""));
+      gallery = after ? [after, ...rest] : rest;
+    }
 
     return {
       templateKey,
@@ -499,6 +563,8 @@ export default function QuoteEmailComposeClient(props: {
     visibleScope,
     questions,
     assumptions,
+    beforeAfterBeforeId,
+    beforeAfterAfterId,
   ]);
 
   /* ------------------------------ media drawer ------------------------------ */
@@ -522,8 +588,23 @@ export default function QuoteEmailComposeClient(props: {
     if (safeTrim(selectedVersionNumber)) sp.set("version", safeTrim(selectedVersionNumber));
     if (selectedRenderIds.length) sp.set("renders", joinCsv(selectedRenderIds));
     if (selectedPhotoKeys.length) sp.set("photos", joinCsv(selectedPhotoKeys));
+
+    // ✅ include before/after assignment in the URL for shareability
+    if (templateKey === "before_after") {
+      if (safeTrim(beforeAfterBeforeId)) sp.set("before", safeTrim(beforeAfterBeforeId));
+      if (safeTrim(beforeAfterAfterId)) sp.set("after", safeTrim(beforeAfterAfterId));
+    }
+
     return `/admin/quotes/${encodeURIComponent(quoteId)}/email/compose?${sp.toString()}`;
-  }, [templateKey, selectedVersionNumber, selectedRenderIds, selectedPhotoKeys, quoteId]);
+  }, [
+    templateKey,
+    selectedVersionNumber,
+    selectedRenderIds,
+    selectedPhotoKeys,
+    quoteId,
+    beforeAfterBeforeId,
+    beforeAfterAfterId,
+  ]);
 
   const [copied, setCopied] = useState(false);
   async function copyShareUrl() {
@@ -599,7 +680,10 @@ export default function QuoteEmailComposeClient(props: {
 
         featuredImage,
         galleryImages,
-        selectedImages: selectedImages.map((x) => ({ url: x.url, label: x.label })),
+        selectedImages: [
+          ...(featuredImage ? [{ url: featuredImage.url, label: featuredImage.label }] : []),
+          ...galleryImages.map((x) => ({ url: x.url, label: x.label })),
+        ],
 
         to: safeTrim(to),
         cc: ccList,
@@ -631,16 +715,14 @@ export default function QuoteEmailComposeClient(props: {
           rangeHigh,
         },
 
-        // ✅ send the SAME branding the preview shows (not the possibly-empty props)
+        // ✅ send the SAME branding the preview shows
         brand: {
           name: safeTrim(previewModel.brandName),
           logoUrl: safeTrim(previewModel.brandLogoUrl),
           tagline: safeTrim(previewModel.brandTagline),
         },
 
-        // optional hint (template will use if present)
         fromHint: safeTrim(previewModel.brandName),
-
         shareUrl: safeTrim(shareUrl),
       };
 
@@ -664,6 +746,8 @@ export default function QuoteEmailComposeClient(props: {
       setSending(false);
     }
   }
+
+  const showBeforeAfterControls = templateKey === "before_after" && beforeAfterOptions.length >= 2;
 
   return (
     <div className="space-y-6">
@@ -734,6 +818,66 @@ export default function QuoteEmailComposeClient(props: {
               </div>
             </div>
 
+            {/* BEFORE/AFTER controls */}
+            {showBeforeAfterControls ? (
+              <div className="ml-1 flex flex-wrap items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Before/After</div>
+
+                <div className="flex items-center gap-2">
+                  <div className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">Before</div>
+                  <select
+                    value={beforeAfterBeforeId}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setBeforeAfterBeforeId(next);
+                      if (next && next === beforeAfterAfterId) {
+                        const alt = beforeAfterOptions.find((x) => x.id !== next)?.id || "";
+                        setBeforeAfterAfterId(alt);
+                      }
+                    }}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs dark:border-gray-800 dark:bg-black"
+                  >
+                    {beforeAfterOptions.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={swapBeforeAfter}
+                  className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-900"
+                  title="Swap before/after"
+                >
+                  Swap
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <div className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">After</div>
+                  <select
+                    value={beforeAfterAfterId}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setBeforeAfterAfterId(next);
+                      if (next && next === beforeAfterBeforeId) {
+                        const alt = beforeAfterOptions.find((x) => x.id !== next)?.id || "";
+                        setBeforeAfterBeforeId(alt);
+                      }
+                    }}
+                    className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs dark:border-gray-800 dark:bg-black"
+                  >
+                    {beforeAfterOptions.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            ) : null}
+
             {/* Chips */}
             <div className="ml-1 flex flex-wrap gap-2">
               {chip(`${totalSelectedImages} selected`)}
@@ -756,6 +900,8 @@ export default function QuoteEmailComposeClient(props: {
               onClick={() => {
                 setSelectedRenderIds([]);
                 setSelectedPhotoKeys([]);
+                setBeforeAfterBeforeId("");
+                setBeforeAfterAfterId("");
               }}
               className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:text-gray-200 dark:hover:bg-gray-900"
               title="Clear all selected images"
@@ -865,7 +1011,9 @@ export default function QuoteEmailComposeClient(props: {
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Email preview</h2>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">This is the customer-facing email. Click into text to edit.</p>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
+              This is the customer-facing email. Click into text to edit.
+            </p>
           </div>
           <div className="flex flex-wrap gap-2">{previewModel.badges.map((b) => chip(b))}</div>
         </div>
@@ -1032,7 +1180,10 @@ export default function QuoteEmailComposeClient(props: {
 
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
                 <div className="font-semibold">Tip</div>
-                <div className="mt-1">The preview chooses a featured image automatically based on the template, then builds a clean gallery.</div>
+                <div className="mt-1">
+                  For <span className="font-semibold">Before / After</span>, pick at least 2 images — then use the{" "}
+                  <span className="font-mono">Before/After</span> controls in the top bar to assign + swap.
+                </div>
               </div>
             </div>
           </div>
