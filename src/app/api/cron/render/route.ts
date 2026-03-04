@@ -544,7 +544,13 @@ async function isRateLimitedNow(args: { tenantId: string; maxPerDay: number }) {
     return { limited: false as const, maxPerDay };
   }
 
-  // ✅ Use quote_renders.completed_at (actual schema) instead of quote_logs.rendered_at
+  /**
+   * ✅ IMPORTANT:
+   * quote_renders DOES NOT have rendered_at in your DB.
+   * The durable “completion time” is quote_renders.completed_at.
+   *
+   * If this query throws, cron render can fail and the UI will appear stuck (e.g. 92%).
+   */
   const r = await db.execute(sql`
     select count(*)::int as n
     from quote_renders
