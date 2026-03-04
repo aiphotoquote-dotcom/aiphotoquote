@@ -83,18 +83,65 @@ function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: st
 }
 
 /**
- * Best-effort email send logging.
- * IMPORTANT: We cannot assume every environment already has the “rich” columns.
- * So we attempt a rich insert first, then fall back to the minimal insert shape.
+ * Existing "summary" logging (for table list in the quote page).
+ * Keep this — it's cheap, and never breaks the send.
  */
 async function logQuoteEmailSend(args: {
   tenantId: string;
   quoteLogId: string;
+  kind: string;
+  to: string[];
+  subject: string;
+  result: { ok: boolean; provider?: string; providerMessageId?: string | null; error?: string | null };
+}) {
+  try {
+    await db.execute(sql`
+      insert into quote_email_sends (
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        to_emails,
+        subject,
+        provider,
+        provider_message_id,
+        ok,
+        error,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${args.tenantId}::uuid,
+        ${args.quoteLogId}::uuid,
+        ${args.kind},
+        ${JSON.stringify(args.to)}::jsonb,
+        ${args.subject},
+        ${String(args.result.provider ?? "") || null},
+        ${args.result.providerMessageId ?? null},
+        ${Boolean(args.result.ok)},
+        ${args.result.ok ? null : (args.result.error ?? "UNKNOWN_EMAIL_ERROR")},
+        now()
+      )
+    `);
+  } catch {
+    // logging should never break the send response
+  }
+}
 
-  kind: string; // "composer" etc.
+/**
+ * ✅ NEW: store the actual sent email contents for read-only viewing.
+ * This is what your /emails/[emailId] page expects.
+ *
+ * If the table doesn't exist in a given environment, we swallow errors.
+ */
+async function storeQuoteEmail(args: {
+  tenantId: string;
+  quoteLogId: string;
+
+  kind: string;
   initiatedBy: "tenant" | "system";
 
-  from: string;
+  fromEmail: string;
   to: string[];
   cc?: string[] | undefined;
   bcc?: string[] | undefined;
@@ -103,56 +150,23 @@ async function logQuoteEmailSend(args: {
   html: string;
   text: string;
 
-  result: {
-    ok: boolean;
-    provider?: string;
-    providerMessageId?: string | null;
-    error?: string | null;
-    meta?: any;
-  };
-}) {
-  // Normalize for logging
-  const provider = String(args.result.provider ?? "") || null;
-  const providerMessageId = args.result.providerMessageId ?? null;
-  const ok = Boolean(args.result.ok);
-  const error = ok ? null : (args.result.error ?? "UNKNOWN_EMAIL_ERROR");
-
-  // Meta is safe even if we later choose to not store html/text columns (viewer can use it later)
-  const metaObj = {
-    initiatedBy: args.initiatedBy,
-    // store recipients + payload for later read-only viewing
-    message: {
-      from: args.from,
-      to: args.to,
-      cc: args.cc ?? [],
-      bcc: args.bcc ?? [],
-      subject: args.subject,
-    },
-    content: {
-      html: args.html,
-      text: args.text,
-    },
-    providerResult: args.result.meta ?? null,
-  };
-
-  // Attempt 1: rich schema (if columns exist)
+  result: any; // EmailSendResult (provider/providerMessageId/meta/etc)
+}): Promise<string | null> {
   try {
-    await db.execute(sql`
-      insert into quote_email_sends (
+    const r = await db.execute(sql`
+      insert into quote_emails (
         id,
         tenant_id,
         quote_log_id,
         kind,
         initiated_by,
-        from_email,
-        to_emails,
-        cc_emails,
-        bcc_emails,
-        subject,
         provider,
         provider_message_id,
-        ok,
-        error,
+        from_email,
+        to_json,
+        cc_json,
+        bcc_json,
+        subject,
         html,
         text,
         meta,
@@ -164,59 +178,26 @@ async function logQuoteEmailSend(args: {
         ${args.quoteLogId}::uuid,
         ${args.kind},
         ${args.initiatedBy},
-        ${args.from},
+        ${String(args.result?.provider ?? "") || null},
+        ${args.result?.providerMessageId ?? null},
+        ${args.fromEmail},
         ${JSON.stringify(args.to)}::jsonb,
         ${JSON.stringify(args.cc ?? [])}::jsonb,
         ${JSON.stringify(args.bcc ?? [])}::jsonb,
         ${args.subject},
-        ${provider},
-        ${providerMessageId},
-        ${ok},
-        ${error},
         ${args.html},
         ${args.text},
-        ${JSON.stringify(metaObj)}::jsonb,
+        ${JSON.stringify((args.result && (args.result.meta ?? args.result)) ?? {})}::jsonb,
         now()
       )
+      returning id
     `);
 
-    return; // success
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const id = safeTrim(row?.id);
+    return id || null;
   } catch {
-    // fall through
-  }
-
-  // Attempt 2: minimal schema (what you already had)
-  try {
-    await db.execute(sql`
-      insert into quote_email_sends (
-        id,
-        tenant_id,
-        quote_log_id,
-        kind,
-        to_emails,
-        subject,
-        provider,
-        provider_message_id,
-        ok,
-        error,
-        created_at
-      )
-      values (
-        gen_random_uuid(),
-        ${args.tenantId}::uuid,
-        ${args.quoteLogId}::uuid,
-        ${args.kind},
-        ${JSON.stringify(args.to)}::jsonb,
-        ${args.subject},
-        ${provider},
-        ${providerMessageId},
-        ${ok},
-        ${error},
-        now()
-      )
-    `);
-  } catch {
-    // logging should never break the send response
+    return null;
   }
 }
 
@@ -303,29 +284,39 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
       },
     });
 
-    // ✅ log send (best-effort)
-    await logQuoteEmailSend({
+    // ✅ store full email payload for view page
+    const storedEmailId = await storeQuoteEmail({
       tenantId,
       quoteLogId: quoteId,
       kind: "composer",
       initiatedBy: "tenant",
-      from,
+      fromEmail: from,
       to,
       cc,
       bcc,
       subject,
       html,
       text,
+      result,
+    });
+
+    // ✅ existing list log (best-effort)
+    await logQuoteEmailSend({
+      tenantId,
+      quoteLogId: quoteId,
+      kind: "composer",
+      to,
+      subject,
       result: {
         ok: Boolean((result as any)?.ok),
         provider: (result as any)?.provider,
         providerMessageId: (result as any)?.providerMessageId ?? null,
         error: (result as any)?.error ?? null,
-        meta: (result as any)?.meta ?? null,
       },
     });
 
-    return NextResponse.json(result);
+    // Return the provider result, plus storedEmailId so the UI can deep-link if needed
+    return NextResponse.json({ ...(result as any), storedEmailId });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
   }
