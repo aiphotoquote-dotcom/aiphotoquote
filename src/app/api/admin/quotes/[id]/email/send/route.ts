@@ -82,14 +82,110 @@ function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: st
   return Object.keys(out).length ? out : undefined;
 }
 
+/**
+ * Best-effort email send logging.
+ * IMPORTANT: We cannot assume every environment already has the “rich” columns.
+ * So we attempt a rich insert first, then fall back to the minimal insert shape.
+ */
 async function logQuoteEmailSend(args: {
   tenantId: string;
   quoteLogId: string;
-  kind: string;
+
+  kind: string; // "composer" etc.
+  initiatedBy: "tenant" | "system";
+
+  from: string;
   to: string[];
+  cc?: string[] | undefined;
+  bcc?: string[] | undefined;
+
   subject: string;
-  result: { ok: boolean; provider?: string; providerMessageId?: string | null; error?: string | null };
+  html: string;
+  text: string;
+
+  result: {
+    ok: boolean;
+    provider?: string;
+    providerMessageId?: string | null;
+    error?: string | null;
+    meta?: any;
+  };
 }) {
+  // Normalize for logging
+  const provider = String(args.result.provider ?? "") || null;
+  const providerMessageId = args.result.providerMessageId ?? null;
+  const ok = Boolean(args.result.ok);
+  const error = ok ? null : (args.result.error ?? "UNKNOWN_EMAIL_ERROR");
+
+  // Meta is safe even if we later choose to not store html/text columns (viewer can use it later)
+  const metaObj = {
+    initiatedBy: args.initiatedBy,
+    // store recipients + payload for later read-only viewing
+    message: {
+      from: args.from,
+      to: args.to,
+      cc: args.cc ?? [],
+      bcc: args.bcc ?? [],
+      subject: args.subject,
+    },
+    content: {
+      html: args.html,
+      text: args.text,
+    },
+    providerResult: args.result.meta ?? null,
+  };
+
+  // Attempt 1: rich schema (if columns exist)
+  try {
+    await db.execute(sql`
+      insert into quote_email_sends (
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        initiated_by,
+        from_email,
+        to_emails,
+        cc_emails,
+        bcc_emails,
+        subject,
+        provider,
+        provider_message_id,
+        ok,
+        error,
+        html,
+        text,
+        meta,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${args.tenantId}::uuid,
+        ${args.quoteLogId}::uuid,
+        ${args.kind},
+        ${args.initiatedBy},
+        ${args.from},
+        ${JSON.stringify(args.to)}::jsonb,
+        ${JSON.stringify(args.cc ?? [])}::jsonb,
+        ${JSON.stringify(args.bcc ?? [])}::jsonb,
+        ${args.subject},
+        ${provider},
+        ${providerMessageId},
+        ${ok},
+        ${error},
+        ${args.html},
+        ${args.text},
+        ${JSON.stringify(metaObj)}::jsonb,
+        now()
+      )
+    `);
+
+    return; // success
+  } catch {
+    // fall through
+  }
+
+  // Attempt 2: minimal schema (what you already had)
   try {
     await db.execute(sql`
       insert into quote_email_sends (
@@ -112,10 +208,10 @@ async function logQuoteEmailSend(args: {
         ${args.kind},
         ${JSON.stringify(args.to)}::jsonb,
         ${args.subject},
-        ${String(args.result.provider ?? "") || null},
-        ${args.result.providerMessageId ?? null},
-        ${Boolean(args.result.ok)},
-        ${args.result.ok ? null : (args.result.error ?? "UNKNOWN_EMAIL_ERROR")},
+        ${provider},
+        ${providerMessageId},
+        ${ok},
+        ${error},
         now()
       )
     `);
@@ -212,13 +308,20 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
       tenantId,
       quoteLogId: quoteId,
       kind: "composer",
+      initiatedBy: "tenant",
+      from,
       to,
+      cc,
+      bcc,
       subject,
+      html,
+      text,
       result: {
         ok: Boolean((result as any)?.ok),
         provider: (result as any)?.provider,
         providerMessageId: (result as any)?.providerMessageId ?? null,
         error: (result as any)?.error ?? null,
+        meta: (result as any)?.meta ?? null,
       },
     });
 
