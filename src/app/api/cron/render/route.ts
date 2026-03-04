@@ -544,13 +544,14 @@ async function isRateLimitedNow(args: { tenantId: string; maxPerDay: number }) {
     return { limited: false as const, maxPerDay };
   }
 
+  // ✅ Use quote_renders.completed_at (actual schema) instead of quote_logs.rendered_at
   const r = await db.execute(sql`
     select count(*)::int as n
-    from quote_logs
+    from quote_renders
     where tenant_id = ${tenantId}::uuid
-      and render_status = 'rendered'
-      and rendered_at is not null
-      and rendered_at >= date_trunc('day', now())
+      and status = 'rendered'
+      and completed_at is not null
+      and completed_at >= date_trunc('day', now())
   `);
 
   const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
