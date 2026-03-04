@@ -286,7 +286,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
       </div>
 
       {/* SECTION 3: Sent emails */}
-      <EmailHistoryCard emails={emailRows} />
+      <EmailHistoryCard quoteId={id} emails={emailRows} />
 
       {/* SECTION 4: Compose */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
