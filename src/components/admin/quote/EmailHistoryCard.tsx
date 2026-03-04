@@ -28,8 +28,15 @@ export type EmailHistoryRow = {
   createdAt: any;
 };
 
-export default function EmailHistoryCard(props: { emails: EmailHistoryRow[] }) {
+export default function EmailHistoryCard(props: { quoteId: string; emails: EmailHistoryRow[] }) {
+  const quoteId = safeTrim(props.quoteId);
   const emails = Array.isArray(props.emails) ? props.emails : [];
+
+  function hrefForEmail(emailId: string) {
+    const eid = safeTrim(emailId);
+    if (!quoteId || !eid) return null;
+    return `/admin/quotes/${encodeURIComponent(quoteId)}/emails/${encodeURIComponent(eid)}`;
+  }
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
@@ -68,8 +75,16 @@ export default function EmailHistoryCard(props: { emails: EmailHistoryRow[] }) {
                 const ok = Boolean(e.ok);
                 const err = safeTrim(e.error);
 
+                const href = hrefForEmail(e.id);
+
                 return (
-                  <tr key={e.id} className="align-top">
+                  <tr
+                    key={e.id}
+                    className={
+                      "align-top " +
+                      (href ? "hover:bg-gray-50 dark:hover:bg-gray-900/20" : "")
+                    }
+                  >
                     <td className="whitespace-nowrap border-b border-gray-100 py-2 pr-3 text-gray-600 dark:border-gray-900/60 dark:text-gray-400">
                       {fmtWhen(e.createdAt)}
                     </td>
@@ -85,14 +100,32 @@ export default function EmailHistoryCard(props: { emails: EmailHistoryRow[] }) {
                     </td>
 
                     <td className="border-b border-gray-100 py-2 pr-3 text-gray-900 dark:border-gray-900/60 dark:text-gray-100">
-                      {subject}
+                      {href ? (
+                        <a
+                          href={href}
+                          className="font-extrabold text-gray-900 underline decoration-gray-300 underline-offset-2 hover:decoration-gray-700 dark:text-gray-100 dark:decoration-gray-700 dark:hover:decoration-gray-300"
+                          title="View sent email"
+                        >
+                          {subject}
+                        </a>
+                      ) : (
+                        subject
+                      )}
+
                       {e.providerMessageId ? (
                         <div className="mt-1 font-mono text-[11px] text-gray-500 dark:text-gray-400">
                           msgId: {safeTrim(e.providerMessageId)}
                         </div>
                       ) : null}
+
                       {!ok && err ? (
                         <div className="mt-1 text-[11px] text-red-700 dark:text-red-300">{err}</div>
+                      ) : null}
+
+                      {href ? (
+                        <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                          Click to view
+                        </div>
                       ) : null}
                     </td>
 
