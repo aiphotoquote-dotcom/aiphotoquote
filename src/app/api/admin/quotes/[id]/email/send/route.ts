@@ -45,12 +45,6 @@ function normalizeImgs(v: any): Img[] {
   return v.map(normalizeImg).filter(Boolean) as Img[];
 }
 
-/**
- * Accept a few possible client payloads:
- * 1) { featuredImage, galleryImages } (preferred)
- * 2) { selectedImages: [{url,label,kind}] } (fallback)
- * 3) { images: [...] } (generic)
- */
 function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Img[] } {
   const featured = normalizeImg(body?.featuredImage);
   const gallery = normalizeImgs(body?.galleryImages);
@@ -65,6 +59,16 @@ function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Im
   }
 
   return { featuredImage: null, galleryImages: [] };
+}
+
+function deriveBeforeAfter(body: any): { before: Img | null; after: Img | null } | null {
+  const ba = body?.beforeAfter ?? null;
+  if (!ba) return null;
+  const before = normalizeImg(ba?.before);
+  const after = normalizeImg(ba?.after);
+  if (!before?.url || !after?.url) return null;
+  if (before.url === after.url) return null;
+  return { before, after };
 }
 
 function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: string } | undefined {
@@ -82,10 +86,6 @@ function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: st
   return Object.keys(out).length ? out : undefined;
 }
 
-/**
- * Existing "summary" logging (for table list in the quote page).
- * Keep this — it's cheap, and never breaks the send.
- */
 async function logQuoteEmailSend(args: {
   tenantId: string;
   quoteLogId: string;
@@ -128,12 +128,6 @@ async function logQuoteEmailSend(args: {
   }
 }
 
-/**
- * ✅ NEW: store the actual sent email contents for read-only viewing.
- * This is what your /emails/[emailId] page expects.
- *
- * If the table doesn't exist in a given environment, we swallow errors.
- */
 async function storeQuoteEmail(args: {
   tenantId: string;
   quoteLogId: string;
@@ -150,7 +144,7 @@ async function storeQuoteEmail(args: {
   html: string;
   text: string;
 
-  result: any; // EmailSendResult (provider/providerMessageId/meta/etc)
+  result: any;
 }): Promise<string | null> {
   try {
     const r = await db.execute(sql`
@@ -228,9 +222,11 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     const intro = safeTrim(body?.intro);
     const closing = safeTrim(body?.closing);
 
+    const templateKey = safeTrim(body?.templateKey) as "standard" | "before_after" | "visual_first";
+    const beforeAfter = deriveBeforeAfter(body);
+
     const { featuredImage, galleryImages } = deriveImages(body);
 
-    // Ensure From exists (providers require it)
     const from = safeTrim(body?.from) || buildPlatformFrom() || null;
     if (!from) {
       return NextResponse.json(
@@ -245,17 +241,17 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     const brand = deriveBrand(body);
     const quoteBlocks = body?.quoteBlocks ?? undefined;
 
-    // Template HTML/Text
     const html = buildQuoteCanvasEmailHtml({
+      templateKey: templateKey === "before_after" || templateKey === "visual_first" ? templateKey : "standard",
       headline,
       intro,
       closing,
       subject,
       featuredImage,
       galleryImages,
+      beforeAfter: beforeAfter ?? undefined,
       brand,
       quoteBlocks,
-      // ✅ make the “Approved” button clickable via mailto
       replyToEmail: from,
     });
 
@@ -284,7 +280,6 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
       },
     });
 
-    // ✅ store full email payload for view page
     const storedEmailId = await storeQuoteEmail({
       tenantId,
       quoteLogId: quoteId,
@@ -300,7 +295,6 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
       result,
     });
 
-    // ✅ existing list log (best-effort)
     await logQuoteEmailSend({
       tenantId,
       quoteLogId: quoteId,
@@ -315,7 +309,6 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
       },
     });
 
-    // Return the provider result, plus storedEmailId so the UI can deep-link if needed
     return NextResponse.json({ ...(result as any), storedEmailId });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });

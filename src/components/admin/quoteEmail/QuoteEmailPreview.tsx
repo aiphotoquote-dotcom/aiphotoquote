@@ -17,15 +17,7 @@ export type QuoteEmailPreviewModel = {
 
   // ✅ brand bar
   brandName?: string;
-
-  /**
-   * Back-compat logo URL (single). We'll later expand to:
-   * - brandLogoLightUrl
-   * - brandLogoDarkUrl
-   * but keep this working now.
-   */
   brandLogoUrl?: string;
-
   brandTagline?: string;
 
   headline: string;
@@ -34,6 +26,12 @@ export type QuoteEmailPreviewModel = {
 
   featuredImage: { url: string; label: string } | null;
   galleryImages: Array<{ url: string; label: string }>;
+
+  // ✅ explicit pairing for before/after template
+  beforeAfter?: {
+    before: { url: string; label: string } | null;
+    after: { url: string; label: string } | null;
+  };
 
   badges: string[];
 
@@ -50,7 +48,7 @@ export type QuoteEmailPreviewModel = {
     inspectionRequired: boolean | null;
 
     // ✅ pricing override UI state (editable)
-    pricingMode: "fixed" | "range";
+    pricingMode: "none" | "fixed" | "range";
     fixedPrice: string; // numeric string
     rangeLow: string; // numeric string
     rangeHigh: string; // numeric string;
@@ -114,15 +112,16 @@ function formatMoney(n: number) {
 }
 
 function computeOverrideEstimateText(qb: QuoteEmailPreviewModel["quoteBlocks"]): string {
+  if (qb.pricingMode === "none") return "";
   if (qb.pricingMode === "fixed") {
     const n = moneyStrToNumber(qb.fixedPrice);
-    return n != null ? formatMoney(n) : "";
+    return n != null && n > 0 ? formatMoney(n) : "";
   }
   const lo = moneyStrToNumber(qb.rangeLow);
   const hi = moneyStrToNumber(qb.rangeHigh);
-  if (lo != null && hi != null) return `${formatMoney(lo)} — ${formatMoney(hi)}`;
-  if (lo != null) return `${formatMoney(lo)}+`;
-  if (hi != null) return `Up to ${formatMoney(hi)}`;
+  if (lo != null && hi != null && lo > 0 && hi > 0) return `${formatMoney(lo)} — ${formatMoney(hi)}`;
+  if (lo != null && lo > 0) return `${formatMoney(lo)}+`;
+  if (hi != null && hi > 0) return `Up to ${formatMoney(hi)}`;
   return "";
 }
 
@@ -143,48 +142,19 @@ function parseEditableList(text: string): string[] {
     .filter(Boolean);
 }
 
-function labelTag(text: string) {
+function labelChip(text: string, tone: "light" | "dark" = "light") {
   return (
-    <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2.5 py-1 text-[11px] font-extrabold tracking-wide text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+    <span
+      className={
+        "inline-flex items-center rounded-full px-3 py-1 text-[11px] font-extrabold tracking-wide " +
+        (tone === "dark"
+          ? "bg-black text-white dark:bg-white dark:text-black"
+          : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200")
+      }
+    >
       {text}
     </span>
   );
-}
-
-function pickBeforeAfterPair(model: QuoteEmailPreviewModel) {
-  // Goal: show two images side-by-side with strong "before / after" meaning.
-  // Convention:
-  // - Prefer "Customer photo" as BEFORE if present in gallery (common case)
-  // - Prefer featuredImage as AFTER (usually a render)
-  // Fallbacks:
-  // - If only featured exists, use it as AFTER and no BEFORE
-  // - If 2+ gallery and no featured, use first two
-  const featured = model.featuredImage ?? null;
-  const gallery = Array.isArray(model.galleryImages) ? model.galleryImages : [];
-
-  const findBy = (pred: (x: { url: string; label: string }) => boolean) => {
-    const hit = gallery.find(pred);
-    return hit ?? null;
-  };
-
-  const beforeFromGallery =
-    findBy((x) => safeTrim(x.label).toLowerCase().includes("customer")) ||
-    findBy((x) => safeTrim(x.label).toLowerCase().includes("before")) ||
-    (gallery[0] ?? null);
-
-  const afterFromFeatured = featured;
-
-  // Avoid same URL in both columns
-  const before =
-    beforeFromGallery && afterFromFeatured && safeTrim(beforeFromGallery.url) === safeTrim(afterFromFeatured.url)
-      ? (gallery.find((x) => safeTrim(x.url) && safeTrim(x.url) !== safeTrim(afterFromFeatured.url)) ?? null)
-      : beforeFromGallery;
-
-  const after =
-    afterFromFeatured ??
-    (before ? gallery.find((x) => safeTrim(x.url) && safeTrim(x.url) !== safeTrim(before.url)) ?? null : gallery[0] ?? null);
-
-  return { before, after };
 }
 
 export default function QuoteEmailPreview(props: {
@@ -195,7 +165,7 @@ export default function QuoteEmailPreview(props: {
     setClosing: (v: string) => void;
 
     // ✅ pricing edits
-    setPricingMode: (v: "fixed" | "range") => void;
+    setPricingMode: (v: "none" | "fixed" | "range") => void;
     setFixedPrice: (v: string) => void;
     setRangeLow: (v: string) => void;
     setRangeHigh: (v: string) => void;
@@ -254,6 +224,7 @@ export default function QuoteEmailPreview(props: {
     return "Standard";
   }, [model.templateKey]);
 
+  const galleryCols = model.templateKey === "visual_first" ? 3 : 2;
   const qb = model.quoteBlocks;
 
   const versionLabel = safeTrim(model.selectedVersionNumber) ? `v${safeTrim(model.selectedVersionNumber)}` : "v—";
@@ -279,10 +250,12 @@ export default function QuoteEmailPreview(props: {
   const overrideEstimateText = computeOverrideEstimateText(qb);
   const displayEstimate = safeTrim(overrideEstimateText) || safeTrim(qb.estimateText);
 
-  const beforeAfter = useMemo(() => pickBeforeAfterPair(model), [model]);
+  const showPricingEffective = qb.showPricing && qb.pricingMode !== "none";
 
-  // Gallery cols for standard/visual_first only
-  const galleryCols = model.templateKey === "visual_first" ? 3 : 2;
+  const baBefore = model.beforeAfter?.before ?? null;
+  const baAfter = model.beforeAfter?.after ?? null;
+  const showBeforeAfterBlock =
+    model.templateKey === "before_after" && baBefore?.url && baAfter?.url && baBefore.url !== baAfter.url;
 
   return (
     <div className="space-y-4">
@@ -328,32 +301,26 @@ export default function QuoteEmailPreview(props: {
           {/* Body */}
           <div className="px-6 py-7">
             {/* Brand bar */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                {/* ✅ LOGO: fit correctly (no forced square), fallback to initials */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
                 {brandLogoUrl ? (
-                  <div className="h-10 flex items-center">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={brandLogoUrl}
-                      alt={brandName}
-                      className="max-h-8 w-auto object-contain"
-                      style={{ display: "block" }}
-                    />
-                  </div>
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={brandLogoUrl}
+                    alt={brandName}
+                    className="h-10 w-auto max-w-[180px] rounded-lg object-contain border border-gray-200 dark:border-gray-800 bg-white px-2"
+                  />
                 ) : (
-                  <div className="h-9 w-9 rounded-xl bg-gray-900 dark:bg-white flex items-center justify-center shrink-0">
+                  <div className="h-9 w-9 rounded-xl bg-gray-900 dark:bg-white flex items-center justify-center">
                     <div className="text-xs font-bold text-white dark:text-black">{initials(brandName)}</div>
                   </div>
                 )}
-
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 truncate">{brandName}</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300 truncate">{brandTagline}</div>
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{brandName}</div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">{brandTagline}</div>
                 </div>
               </div>
-
-              <div className="text-xs text-gray-500 dark:text-gray-400 font-mono shrink-0">
+              <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">
                 {versionLabel} · {quoteShort}…
               </div>
             </div>
@@ -397,7 +364,7 @@ export default function QuoteEmailPreview(props: {
 
             {/* Pills */}
             <div className="mt-5 flex flex-wrap gap-2">
-              {qb.showPricing && displayEstimate ? pill(`Estimate: ${displayEstimate}`) : null}
+              {showPricingEffective && displayEstimate ? pill(`Estimate: ${displayEstimate}`) : null}
               {qb.confidence ? pill(`Confidence: ${qb.confidence}`) : null}
               {qb.inspectionRequired === true ? pill("Inspection required") : null}
               {showBadges ? model.badges.map((b, i) => <React.Fragment key={`${b}-${i}`}>{pill(b)}</React.Fragment>) : null}
@@ -405,7 +372,7 @@ export default function QuoteEmailPreview(props: {
 
             {/* Quote blocks */}
             <div className="mt-6 space-y-3">
-              {qb.showPricing ? (
+              {showPricingEffective ? (
                 <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -416,8 +383,23 @@ export default function QuoteEmailPreview(props: {
                     </div>
 
                     {/* Pricing mode toggle + inputs */}
-                    <div className="min-w-[240px]">
+                    <div className="min-w-[280px]">
                       <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onEdit.setPricingMode("none");
+                          }}
+                          className={
+                            "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
+                            (qb.pricingMode === "none"
+                              ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-black dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+                          }
+                        >
+                          None
+                        </button>
+
                         <button
                           type="button"
                           onClick={() => onEdit.setPricingMode("fixed")}
@@ -430,6 +412,7 @@ export default function QuoteEmailPreview(props: {
                         >
                           Fixed
                         </button>
+
                         <button
                           type="button"
                           onClick={() => onEdit.setPricingMode("range")}
@@ -446,7 +429,9 @@ export default function QuoteEmailPreview(props: {
 
                       {qb.pricingMode === "fixed" ? (
                         <div className="mt-3">
-                          <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300 text-right">Price</div>
+                          <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300 text-right">
+                            Price (required &gt; 0)
+                          </div>
                           <input
                             value={qb.fixedPrice}
                             onChange={(e) => onEdit.setFixedPrice(e.target.value)}
@@ -455,10 +440,10 @@ export default function QuoteEmailPreview(props: {
                             inputMode="numeric"
                           />
                         </div>
-                      ) : (
+                      ) : qb.pricingMode === "range" ? (
                         <div className="mt-3 grid grid-cols-2 gap-2">
                           <div>
-                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">Low</div>
+                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">Low (&gt; 0)</div>
                             <input
                               value={qb.rangeLow}
                               onChange={(e) => onEdit.setRangeLow(e.target.value)}
@@ -468,7 +453,7 @@ export default function QuoteEmailPreview(props: {
                             />
                           </div>
                           <div>
-                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">High</div>
+                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">High (&gt; 0)</div>
                             <input
                               value={qb.rangeHigh}
                               onChange={(e) => onEdit.setRangeHigh(e.target.value)}
@@ -477,6 +462,10 @@ export default function QuoteEmailPreview(props: {
                               inputMode="numeric"
                             />
                           </div>
+                        </div>
+                      ) : (
+                        <div className="mt-3 text-[11px] text-gray-600 dark:text-gray-300 text-right">
+                          Pricing hidden for this email.
                         </div>
                       )}
 
@@ -571,139 +560,92 @@ export default function QuoteEmailPreview(props: {
               ) : null}
             </div>
 
-            {/* ------------------------------ TEMPLATE MEDIA ------------------------------ */}
-
-            {/* ✅ BEFORE/AFTER: side-by-side block (mobile stacks) */}
-            {model.templateKey === "before_after" ? (
-              beforeAfter.before || beforeAfter.after ? (
-                <div className="mt-6 rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden">
-                  <div className="px-4 py-3 bg-gray-50 dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Before → After</div>
-                      <div className="flex items-center gap-2">
-                        {labelTag("BEFORE")}
-                        <span className="text-xs text-gray-400">→</span>
-                        {labelTag("AFTER")}
-                      </div>
-                    </div>
+            {/* BEFORE/AFTER block (preferred for before_after template) */}
+            {showBeforeAfterBlock ? (
+              <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                <div className="border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Before → After</div>
                     <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
                       Side-by-side makes the transformation obvious (stacks cleanly on mobile).
                     </div>
                   </div>
+                  <div className="flex items-center gap-2">
+                    {labelChip("BEFORE")}
+                    <span className="text-gray-400">→</span>
+                    {labelChip("AFTER", "dark")}
+                  </div>
+                </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2">
-                    {/* BEFORE */}
-                    <div className="border-b md:border-b-0 md:border-r border-gray-200 dark:border-gray-800">
-                      <div className="px-4 py-3 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          {labelTag("BEFORE")}
-                          <span className="text-xs text-gray-500 dark:text-gray-400">
-                            {safeTrim(beforeAfter.before?.label) || "Customer photo"}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400 font-mono">left</div>
-                      </div>
-
-                      {beforeAfter.before?.url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={beforeAfter.before.url}
-                          alt={beforeAfter.before.label}
-                          className="w-full object-cover bg-black/5 max-h-[420px]"
-                        />
-                      ) : (
-                        <div className="px-4 pb-4">
-                          <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                            No BEFORE image selected yet.
-                          </div>
-                        </div>
-                      )}
+                <div className="grid grid-cols-1 sm:grid-cols-2">
+                  <div className="relative">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={baBefore!.url} alt={baBefore!.label || "Before"} className="h-[320px] w-full object-cover bg-black/5" />
+                    <div className="absolute left-3 top-3">{labelChip("BEFORE")}</div>
+                    <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                      <div className="font-semibold">{baBefore!.label || "Before"}</div>
+                      <div className="font-mono opacity-70">left</div>
                     </div>
+                  </div>
 
-                    {/* AFTER */}
-                    <div>
-                      <div className="px-4 py-3 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          {labelTag("AFTER")}
-                          <span className="text-xs text-gray-500 dark:text-gray-400">
-                            {safeTrim(beforeAfter.after?.label) || "Render"}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-gray-500 dark:text-gray-400 font-mono">right</div>
-                      </div>
-
-                      {beforeAfter.after?.url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={beforeAfter.after.url}
-                          alt={beforeAfter.after.label}
-                          className="w-full object-cover bg-black/5 max-h-[420px]"
-                        />
-                      ) : (
-                        <div className="px-4 pb-4">
-                          <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                            No AFTER image selected yet.
-                          </div>
-                        </div>
-                      )}
+                  <div className="relative border-t border-gray-200 dark:border-gray-800 sm:border-t-0 sm:border-l">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={baAfter!.url} alt={baAfter!.label || "After"} className="h-[320px] w-full object-cover bg-black/5" />
+                    <div className="absolute left-3 top-3">{labelChip("AFTER", "dark")}</div>
+                    <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                      <div className="font-semibold">{baAfter!.label || "After"}</div>
+                      <div className="font-mono opacity-70">right</div>
                     </div>
+                  </div>
+                </div>
+
+                <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
+                  Tip: reply with changes if anything isn’t exactly what you want — we’ll revise the quote.
+                </div>
+              </div>
+            ) : (
+              // fallback: featured image
+              model.featuredImage ? (
+                <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={model.featuredImage.url}
+                    alt={model.featuredImage.label}
+                    className="w-full object-cover max-h-[460px] bg-black/5"
+                  />
+                  <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                    <div className="font-semibold">{model.featuredImage.label}</div>
+                    <div className="font-mono opacity-70">featured</div>
                   </div>
                 </div>
               ) : (
                 <div className="mt-6 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                  Select at least one image to see the Before / After layout.
+                  Select at least one image to see the layout come alive.
                 </div>
               )
-            ) : (
-              <>
-                {/* Featured image (standard/visual_first) */}
-                {model.featuredImage ? (
-                  <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={model.featuredImage.url}
-                      alt={model.featuredImage.label}
-                      className="w-full object-cover max-h-[460px] bg-black/5"
-                    />
-                    <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                      <div className="font-semibold">{model.featuredImage.label}</div>
-                      <div className="font-mono opacity-70">featured</div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-6 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                    Select at least one image to see the layout come alive.
-                  </div>
-                )}
-
-                {/* Gallery (standard/visual_first) */}
-                {model.galleryImages?.length ? (
-                  <div className="mt-6">
-                    <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Included images</div>
-                    <div
-                      className={
-                        "mt-3 grid gap-3 " +
-                        (galleryCols === 3 ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2")
-                      }
-                    >
-                      {model.galleryImages.map((img, idx) => (
-                        <div
-                          key={`${img.url}-${idx}`}
-                          className="overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800"
-                        >
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={img.url} alt={img.label} className="h-40 w-full object-cover bg-black/5" />
-                          <div className="px-3 py-2 text-[11px] text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                            <div className="font-semibold">{img.label}</div>
-                            <div className="font-mono opacity-70">#{idx + 1}</div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </>
             )}
+
+            {/* Gallery */}
+            {model.galleryImages?.length ? (
+              <div className="mt-6">
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Included images</div>
+                <div className={"mt-3 grid gap-3 " + (galleryCols === 3 ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2")}>
+                  {model.galleryImages.map((img, idx) => (
+                    <div
+                      key={`${img.url}-${idx}`}
+                      className="overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={img.url} alt={img.label} className="h-40 w-full object-cover bg-black/5" />
+                      <div className="px-3 py-2 text-[11px] text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                        <div className="font-semibold">{img.label}</div>
+                        <div className="font-mono opacity-70">#{idx + 1}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             {/* Closing */}
             <div
@@ -714,16 +656,14 @@ export default function QuoteEmailPreview(props: {
                 const v = toLines(closingRef.current?.innerText || "");
                 onEdit.setClosing(v);
               }}
-              className={[editableClass(), "mt-7 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-200 py-2"].join(
-                " "
-              )}
+              className={[editableClass(), "mt-7 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-200 py-2"].join(" ")}
             >
               {toLines(model.closing)}
             </div>
 
             {/* Footer */}
             <div className="mt-8 border-t border-gray-200 dark:border-gray-800 pt-4 text-[11px] text-gray-500 dark:text-gray-400">
-              Live preview canvas. Next: mirror these same layout rules in the server-side HTML email renderer.
+              Live preview canvas. Next: wire final HTML send (already mostly done).
             </div>
           </div>
         </div>

@@ -10,7 +10,8 @@ type QuoteBlocks = {
   showAssumptions?: boolean;
 
   estimateText?: string;
-  pricingMode?: "fixed" | "range";
+
+  pricingMode?: "none" | "fixed" | "range";
   fixedPrice?: string;
   rangeLow?: string;
   rangeHigh?: string;
@@ -23,15 +24,7 @@ type QuoteBlocks = {
 
 type Brand = {
   name?: string;
-
-  // ✅ Back-compat
   logoUrl?: string;
-
-  // ✅ Optional future-proofing (won't break current callers)
-  // If provided, we’ll prefer these using a <picture> (best-effort in email clients).
-  logoUrlLight?: string;
-  logoUrlDark?: string;
-
   tagline?: string;
 };
 
@@ -87,24 +80,25 @@ function renderList(items: string[]) {
 function computePricingDisplay(qb: QuoteBlocks | undefined): { title: string; detail: string } {
   const estimateText = safeTrim(qb?.estimateText);
 
-  const mode = qb?.pricingMode === "range" ? "range" : "fixed";
+  const mode = qb?.pricingMode === "range" ? "range" : qb?.pricingMode === "none" ? "none" : "fixed";
+  if (mode === "none") return { title: "Quote at a glance", detail: "" };
+
   const fixed = moneyFromString(qb?.fixedPrice);
   const low = moneyFromString(qb?.rangeLow);
   const high = moneyFromString(qb?.rangeHigh);
 
-  if (mode === "range" && low != null && high != null) {
+  if (mode === "range" && low != null && high != null && low > 0 && high > 0) {
     return { title: "Quote at a glance", detail: `${formatMoney(low)} — ${formatMoney(high)}` };
   }
-  if (mode === "fixed" && fixed != null) {
+  if (mode === "fixed" && fixed != null && fixed > 0) {
     return { title: "Quote at a glance", detail: `${formatMoney(fixed)}` };
   }
 
-  // ✅ fallback to AI estimate text (now sent in payload)
   if (estimateText) {
     return { title: "Quote at a glance", detail: estimateText };
   }
 
-  return { title: "Quote at a glance", detail: "Estimate pending" };
+  return { title: "Quote at a glance", detail: "" };
 }
 
 function emailFromDisplay(fromLike: string): string {
@@ -115,216 +109,44 @@ function emailFromDisplay(fromLike: string): string {
   return s;
 }
 
-function initials(name: string) {
-  const s = safeTrim(name);
-  if (!s) return "Y";
-  const parts = s.split(/\s+/g).filter(Boolean);
-  const a = parts[0]?.[0] ?? "Y";
-  const b = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
-  return (a + b).toUpperCase();
-}
+function renderBeforeAfterBlock(before: Img, after: Img) {
+  const beforeLabel = escapeHtml(before.label || "Before");
+  const afterLabel = escapeHtml(after.label || "After");
 
-function normalizeImg(v: any): Img | null {
-  const url = safeTrim(v?.url ?? v?.publicUrl ?? v?.blobUrl ?? v);
-  if (!url) return null;
-  const label = safeTrim(v?.label ?? "");
-  return { url, label };
-}
-
-function normalizeImgs(v: any): Img[] {
-  if (!Array.isArray(v)) return [];
-  return v.map(normalizeImg).filter(Boolean) as Img[];
-}
-
-/**
- * Email-safe “image card” using tables.
- * - Border radius is best-effort (many clients support; Outlook may not)
- * - Uses max-height constraints for big images
- */
-function renderImageCard(args: {
-  url: string;
-  alt: string;
-  label?: string;
-  maxHeight?: number;
-  radius?: number;
-  showFooter?: boolean;
-  footerRight?: string;
-}) {
-  const maxH = Number(args.maxHeight ?? 460);
-  const radius = Number(args.radius ?? 16);
-  const showFooter = args.showFooter !== false;
-
-  // NOTE:
-  // - Avoid object-fit in email HTML; many clients don’t respect it.
-  // - We use width:100% and height:auto and rely on max-height.
-  // - "max-height" is best-effort; still safe if ignored.
-  const footer =
-    showFooter && (safeTrim(args.label) || safeTrim(args.footerRight))
-      ? `
-      <tr>
-        <td style="padding:10px 12px;background:#ffffff;">
-          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-            <tr>
-              <td style="font-size:12px;color:#374151;font-weight:700;">
-                ${escapeHtml(safeTrim(args.label) || "")}
-              </td>
-              <td align="right" style="font-size:12px;color:#6b7280;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace;">
-                ${escapeHtml(safeTrim(args.footerRight) || "")}
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    `
-      : "";
-
+  // Use tables for best email client support.
   return `
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;border-spacing:0;border:1px solid #e5e7eb;border-radius:${radius}px;overflow:hidden;">
-    <tr>
-      <td style="padding:0;">
-        <img
-          src="${args.url}"
-          alt="${escapeHtml(args.alt)}"
-          style="display:block;width:100%;height:auto;max-height:${maxH}px;border:0;outline:none;text-decoration:none;background:#f3f4f6;"
-        />
-      </td>
-    </tr>
-    ${footer}
-  </table>
-  `;
-}
+    <div style="margin-top:18px;">
+      <div style="font-size:16px;font-weight:900;color:#111827;">Before <span style="color:#9ca3af;">→</span> After</div>
+      <div style="margin-top:6px;font-size:13px;color:#6b7280;">A side-by-side look at your project.</div>
 
-/**
- * Email-safe 2-col Before/After layout.
- * Falls back gracefully to stacked on narrow screens / clients that don’t do media queries.
- */
-function renderBeforeAfter(args: { before: Img; after: Img; title?: string; subtitle?: string }) {
-  const title = safeTrim(args.title) || "Before / After";
-  const subtitle = safeTrim(args.subtitle) || "A side-by-side look at your project.";
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:12px;border-collapse:separate;border-spacing:0;">
+        <tr>
+          <td width="50%" valign="top" style="padding:0 6px 0 0;">
+            <div style="font-size:11px;font-weight:900;letter-spacing:0.04em;color:#111827;margin:0 0 8px 0;">
+              <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#f3f4f6;">BEFORE</span>
+            </div>
+            <img src="${before.url}" alt="${beforeLabel}" style="width:100%;border-radius:16px;display:block;" />
+            <div style="margin-top:8px;font-size:12px;color:#6b7280;">${beforeLabel}</div>
+          </td>
+          <td width="50%" valign="top" style="padding:0 0 0 6px;">
+            <div style="font-size:11px;font-weight:900;letter-spacing:0.04em;color:#ffffff;margin:0 0 8px 0;">
+              <span style="display:inline-block;padding:6px 10px;border-radius:999px;background:#111827;color:#ffffff;">AFTER</span>
+            </div>
+            <img src="${after.url}" alt="${afterLabel}" style="width:100%;border-radius:16px;display:block;" />
+            <div style="margin-top:8px;font-size:12px;color:#6b7280;">${afterLabel}</div>
+          </td>
+        </tr>
+      </table>
 
-  // Simple “labels” as pills (no CSS classes, inline only)
-  const labelPill = (txt: string, tone: "dark" | "light") => {
-    const bg = tone === "dark" ? "#111827" : "#f3f4f6";
-    const fg = tone === "dark" ? "#ffffff" : "#111827";
-    const bd = tone === "dark" ? "#111827" : "#e5e7eb";
-    return `<span style="display:inline-block;border:1px solid ${bd};background:${bg};color:${fg};border-radius:999px;padding:6px 10px;font-size:12px;font-weight:800;letter-spacing:0.02em;">${escapeHtml(
-      txt
-    )}</span>`;
-  };
-
-  const beforeCard = renderImageCard({
-    url: args.before.url,
-    alt: args.before.label || "Before",
-    label: args.before.label || "Before",
-    maxHeight: 360,
-    radius: 14,
-    showFooter: false,
-  });
-
-  const afterCard = renderImageCard({
-    url: args.after.url,
-    alt: args.after.label || "After",
-    label: args.after.label || "After",
-    maxHeight: 360,
-    radius: 14,
-    showFooter: false,
-  });
-
-  return `
-  <div style="margin-top:22px;">
-    <div style="font-size:14px;font-weight:900;color:#111827;">${escapeHtml(title)}</div>
-    <div style="margin-top:6px;font-size:13px;line-height:1.5;color:#6b7280;">${escapeHtml(subtitle)}</div>
-
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:12px;border-collapse:separate;border-spacing:0;">
-      <tr>
-        <td width="50%" valign="top" style="padding-right:8px;">
-          <div style="margin-bottom:8px;">${labelPill("BEFORE", "light")}</div>
-          ${beforeCard}
-        </td>
-        <td width="50%" valign="top" style="padding-left:8px;">
-          <div style="margin-bottom:8px;">${labelPill("AFTER", "dark")}</div>
-          ${afterCard}
-        </td>
-      </tr>
-    </table>
-
-    <div style="margin-top:10px;font-size:12px;color:#6b7280;">
-      Tip: reply with changes if anything isn’t exactly what you want — we’ll revise the quote.
+      <div style="margin-top:10px;font-size:12px;color:#6b7280;">
+        Tip: reply with changes if anything isn’t exactly what you want — we’ll revise the quote.
+      </div>
     </div>
-  </div>
-  `;
-}
-
-/**
- * Brand logo rendering:
- * - Avoid square crop. Use max-height/max-width and keep aspect ratio.
- * - If no logo, show initials badge (works for all tenants).
- * - If dark/light variants exist, use <picture> best-effort.
- */
-function renderBrandMark(args: { brandName: string; brand: Brand | undefined }) {
-  const brand = args.brand ?? {};
-  const name = safeTrim(args.brandName) || "Your Shop";
-
-  const light = safeTrim((brand as any).logoUrlLight);
-  const dark = safeTrim((brand as any).logoUrlDark);
-  const primary = safeTrim(brand.logoUrl);
-
-  const logo = light || dark || primary;
-
-  if (!logo) {
-    const init = initials(name);
-    return `
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
-        <tr>
-          <td
-            style="width:40px;height:40px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;vertical-align:middle;font-weight:900;font-size:12px;letter-spacing:0.06em;"
-          >
-            ${escapeHtml(init)}
-          </td>
-        </tr>
-      </table>
-    `;
-  }
-
-  // “Logo container” that won’t crop
-  // - White background behind logo helps both dark/light modes.
-  // - Max dims keep it from blowing up.
-  const imgTag = (src: string) => `
-    <img
-      src="${src}"
-      alt="${escapeHtml(name)}"
-      style="display:block;border:0;outline:none;text-decoration:none;width:auto;height:auto;max-width:140px;max-height:40px;"
-    />
-  `;
-
-  // Best-effort dark mode logo switching
-  if (light && dark) {
-    return `
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
-        <tr>
-          <td style="padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;">
-            <picture>
-              <source media="(prefers-color-scheme: dark)" srcset="${dark}">
-              ${imgTag(light)}
-            </picture>
-          </td>
-        </tr>
-      </table>
-    `;
-  }
-
-  return `
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
-      <tr>
-        <td style="padding:8px 10px;border:1px solid #e5e7eb;border-radius:12px;background:#ffffff;">
-          ${imgTag(logo)}
-        </td>
-      </tr>
-    </table>
   `;
 }
 
 export function buildQuoteCanvasEmailHtml(args: {
+  templateKey?: "standard" | "before_after" | "visual_first";
   headline: string;
   intro: string;
   closing: string;
@@ -333,23 +155,23 @@ export function buildQuoteCanvasEmailHtml(args: {
   featuredImage?: Img | null;
   galleryImages?: Img[];
 
+  beforeAfter?: { before: Img; after: Img };
+
   brand?: Brand;
   quoteBlocks?: QuoteBlocks;
 
-  // Optional: if you pass this later from route (e.g. the actual "from" address),
-  // the mailto button will use it.
   replyToEmail?: string;
 }) {
   const headline = escapeHtml(safeTrim(args.headline));
   const intro = escapeHtml(toLines(args.intro));
   const closing = escapeHtml(toLines(args.closing));
 
-  const brandNameRaw = safeTrim(args.brand?.name) || "Your Shop";
-  const brandName = escapeHtml(brandNameRaw);
+  const brandName = escapeHtml(safeTrim(args.brand?.name) || "Your Shop");
   const brandTagline = escapeHtml(safeTrim(args.brand?.tagline) || "Quote ready to review");
+  const brandLogoUrl = safeTrim(args.brand?.logoUrl);
 
   const qb: QuoteBlocks = args.quoteBlocks ?? {};
-  const showPricing = qb.showPricing !== false;
+  const showPricing = qb.showPricing !== false && qb.pricingMode !== "none";
   const showSummary = qb.showSummary !== false;
   const showScope = qb.showScope === true;
   const showQuestions = qb.showQuestions !== false;
@@ -362,121 +184,22 @@ export function buildQuoteCanvasEmailHtml(args: {
   const questions = asStringArray(qb.questions);
   const assumptions = asStringArray(qb.assumptions);
 
-  const featured = normalizeImg(args.featuredImage ?? null);
-  const galleryAll = normalizeImgs(args.galleryImages ?? []);
-
-  // ✅ Before/After layout heuristic:
-  // If we have a featured image and at least one other image, render a side-by-side “Before / After” section.
-  // This matches how your builder prefers to pick:
-  // - before_after template: featured = photo (before), first gallery = render (after)
-  // For other templates it still looks good as a “comparison” section.
-  const beforeAfterSection =
-    featured && galleryAll.length
-      ? renderBeforeAfter({
-          before: featured,
-          after: galleryAll[0],
-          title: "Before / After",
-          subtitle: "A side-by-side look at your project.",
-        })
-      : "";
-
-  // After the before/after “hero”, keep remaining images as “included”
-  const remainingGallery = featured && galleryAll.length ? galleryAll.slice(1) : galleryAll;
-
-  const featuredBlock =
-    featured && !galleryAll.length
-      ? `
-      <div style="margin-top:22px;">
-        ${renderImageCard({
-          url: featured.url,
-          alt: featured.label || "Featured",
-          label: safeTrim(featured.label) || "Featured",
-          maxHeight: 460,
-          radius: 16,
-          showFooter: true,
-          footerRight: "featured",
-        })}
-      </div>
-    `
-      : "";
-
-  // ✅ Gallery in 2-col tables (email-safe)
-  const galleryBlock =
-    remainingGallery.length
-      ? `
-      <div style="margin-top:20px;">
-        <div style="font-size:12px;font-weight:800;color:#6b7280;letter-spacing:0.02em;">Included images</div>
-
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:12px;border-collapse:separate;border-spacing:0;">
-          ${(() => {
-            const rows: string[] = [];
-            for (let i = 0; i < remainingGallery.length; i += 2) {
-              const a = remainingGallery[i]!;
-              const b = remainingGallery[i + 1] ?? null;
-
-              const cellA = `
-                <td width="50%" valign="top" style="padding-right:8px;">
-                  ${renderImageCard({
-                    url: a.url,
-                    alt: a.label || "Image",
-                    label: safeTrim(a.label) || "Image",
-                    maxHeight: 260,
-                    radius: 14,
-                    showFooter: true,
-                    footerRight: `#${i + 1}`,
-                  })}
-                </td>
-              `;
-
-              const cellB = b
-                ? `
-                <td width="50%" valign="top" style="padding-left:8px;">
-                  ${renderImageCard({
-                    url: b.url,
-                    alt: b.label || "Image",
-                    label: safeTrim(b.label) || "Image",
-                    maxHeight: 260,
-                    radius: 14,
-                    showFooter: true,
-                    footerRight: `#${i + 2}`,
-                  })}
-                </td>
-              `
-                : `
-                <td width="50%" valign="top" style="padding-left:8px;"></td>
-              `;
-
-              rows.push(`
-                <tr>
-                  ${cellA}
-                  ${cellB}
-                </tr>
-                <tr><td colspan="2" style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
-              `);
-            }
-            return rows.join("");
-          })()}
-        </table>
-      </div>
-    `
-      : "";
-
   const replyTo = safeTrim(args.replyToEmail);
   const replyToEmail = replyTo ? emailFromDisplay(replyTo) : "";
   const mailto =
     replyToEmail
-      ? `mailto:${encodeURIComponent(replyToEmail)}?subject=${encodeURIComponent(`Re: ${args.subject}`)}&body=${encodeURIComponent(
-          "Approved"
-        )}`
+      ? `mailto:${encodeURIComponent(replyToEmail)}?subject=${encodeURIComponent(`Re: ${args.subject}`)}&body=${encodeURIComponent("Approved")}`
       : "";
 
-  const brandMark = renderBrandMark({ brandName: brandNameRaw, brand: args.brand });
+  const brandLogo = brandLogoUrl
+    ? `<img src="${brandLogoUrl}" alt="${brandName}" style="height:40px;max-width:180px;border-radius:10px;object-fit:contain;display:block;border:1px solid #e5e7eb;background:#ffffff;padding:6px 10px;" />`
+    : `<div style="width:40px;height:40px;border-radius:10px;background:#111827;"></div>`;
 
-  const pricingBlock = showPricing
+  const pricingBlock = showPricing && safeTrim(pricing.detail)
     ? `
       <div style="margin-top:22px;border:1px solid #e5e7eb;border-radius:16px;padding:18px;background:#ffffff;">
-        <div style="font-size:14px;font-weight:900;color:#111827;">${escapeHtml(pricing.title)}</div>
-        <div style="margin-top:8px;font-size:22px;font-weight:900;color:#111827;">${escapeHtml(pricing.detail)}</div>
+        <div style="font-size:14px;font-weight:700;color:#111827;">${escapeHtml(pricing.title)}</div>
+        <div style="margin-top:8px;font-size:22px;font-weight:800;color:#111827;">${escapeHtml(pricing.detail)}</div>
         <div style="margin-top:10px;font-size:14px;line-height:1.6;color:#374151;">
           Reply to approve and we’ll schedule the job. If anything looks off, tell us what to adjust.
         </div>
@@ -484,12 +207,12 @@ export function buildQuoteCanvasEmailHtml(args: {
         ${
           mailto
             ? `
-            <a href="${mailto}" style="display:block;margin-top:14px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;padding:12px 10px;font-weight:900;font-size:14px;text-decoration:none;">
+            <a href="${mailto}" style="display:block;margin-top:14px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;padding:12px 10px;font-weight:800;font-size:14px;text-decoration:none;">
               Reply “Approved” to schedule
             </a>
           `
             : `
-            <div style="margin-top:14px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;padding:12px 10px;font-weight:900;font-size:14px;">
+            <div style="margin-top:14px;border-radius:12px;background:#111827;color:#ffffff;text-align:center;padding:12px 10px;font-weight:800;font-size:14px;">
               Reply “Approved” to schedule
             </div>
           `
@@ -506,7 +229,7 @@ export function buildQuoteCanvasEmailHtml(args: {
     showSummary && summary
       ? `
       <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
-        <div style="font-size:14px;font-weight:900;color:#111827;">Summary</div>
+        <div style="font-size:14px;font-weight:800;color:#111827;">Summary</div>
         <div style="margin-top:8px;font-size:14px;line-height:1.6;color:#374151;white-space:pre-wrap;">${escapeHtml(
           toLines(summary)
         )}</div>
@@ -518,7 +241,7 @@ export function buildQuoteCanvasEmailHtml(args: {
     showScope && visibleScope.length
       ? `
       <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
-        <div style="font-size:14px;font-weight:900;color:#111827;">Visible scope</div>
+        <div style="font-size:14px;font-weight:800;color:#111827;">Visible scope</div>
         <div style="font-size:14px;line-height:1.6;color:#374151;">${renderList(visibleScope)}</div>
       </div>
     `
@@ -528,7 +251,7 @@ export function buildQuoteCanvasEmailHtml(args: {
     showQuestions && questions.length
       ? `
       <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
-        <div style="font-size:14px;font-weight:900;color:#111827;">A few quick questions (optional)</div>
+        <div style="font-size:14px;font-weight:800;color:#111827;">A few quick questions (optional)</div>
         <div style="font-size:14px;line-height:1.6;color:#374151;">${renderList(questions)}</div>
       </div>
     `
@@ -538,37 +261,60 @@ export function buildQuoteCanvasEmailHtml(args: {
     showAssumptions && assumptions.length
       ? `
       <div style="margin-top:14px;border:1px solid #e5e7eb;border-radius:16px;padding:16px;background:#f9fafb;">
-        <div style="font-size:14px;font-weight:900;color:#111827;">Assumptions</div>
+        <div style="font-size:14px;font-weight:800;color:#111827;">Assumptions</div>
         <div style="font-size:14px;line-height:1.6;color:#374151;">${renderList(assumptions)}</div>
       </div>
     `
       : "";
 
+  // Image sections:
+  const templateKey = args.templateKey ?? "standard";
+
+  const beforeAfterHtml =
+    templateKey === "before_after" && args.beforeAfter?.before?.url && args.beforeAfter?.after?.url
+      ? renderBeforeAfterBlock(args.beforeAfter.before, args.beforeAfter.after)
+      : "";
+
+  const featuredHtml =
+    !beforeAfterHtml && args.featuredImage?.url
+      ? `
+        <div style="margin-top:22px;">
+          <img src="${args.featuredImage.url}" alt="${escapeHtml(args.featuredImage.label || "Featured")}" style="width:100%;border-radius:16px;display:block;" />
+        </div>
+      `
+      : "";
+
+  const galleryHtml =
+    args.galleryImages?.length
+      ? `
+        <div style="margin-top:16px;">
+          <div style="font-size:12px;font-weight:800;color:#6b7280;">Included images</div>
+          ${args.galleryImages
+            .map(
+              (img) => `
+              <div style="margin-top:12px;">
+                <img src="${img.url}" alt="${escapeHtml(img.label || "Image")}" style="width:100%;border-radius:12px;display:block;" />
+              </div>
+            `
+            )
+            .join("")}
+        </div>
+      `
+      : "";
+
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;background:#f3f4f6;padding:28px;">
     <div style="max-width:680px;margin:0 auto;background:#ffffff;border-radius:18px;padding:26px;border:1px solid #e5e7eb;">
-
-      <!-- Brand bar -->
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:separate;border-spacing:0;">
-        <tr>
-          <td valign="middle" style="padding:0;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
-              <tr>
-                <td valign="middle" style="padding:0 10px 0 0;">
-                  ${brandMark}
-                </td>
-                <td valign="middle" style="padding:0;">
-                  <div style="font-size:14px;font-weight:900;color:#111827;">${brandName}</div>
-                  <div style="margin-top:2px;font-size:12px;color:#6b7280;">${brandTagline}</div>
-                </td>
-              </tr>
-            </table>
-          </td>
-          <td align="right" valign="middle" style="padding:0;font-size:12px;color:#9ca3af;">
-            <!-- intentionally minimal (keeps header clean) -->
-          </td>
-        </tr>
-      </table>
+      
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="display:flex;align-items:center;gap:12px;">
+          ${brandLogo}
+          <div>
+            <div style="font-size:14px;font-weight:800;color:#111827;">${brandName}</div>
+            <div style="margin-top:2px;font-size:12px;color:#6b7280;">${brandTagline}</div>
+          </div>
+        </div>
+      </div>
 
       <h1 style="margin:18px 0 0 0;font-size:26px;line-height:1.2;color:#111827;">
         ${headline}
@@ -584,9 +330,9 @@ export function buildQuoteCanvasEmailHtml(args: {
       ${questionsBlock}
       ${assumptionsBlock}
 
-      ${beforeAfterSection}
-      ${featuredBlock}
-      ${galleryBlock}
+      ${beforeAfterHtml}
+      ${featuredHtml}
+      ${galleryHtml}
 
       <div style="margin-top:22px;white-space:pre-wrap;font-size:14px;line-height:1.7;color:#374151;">
         ${closing}
@@ -612,7 +358,7 @@ export function buildQuoteCanvasText(args: {
   const brandTagline = safeTrim(args.brand?.tagline);
 
   const qb: QuoteBlocks = args.quoteBlocks ?? {};
-  const showPricing = qb.showPricing !== false;
+  const showPricing = qb.showPricing !== false && qb.pricingMode !== "none";
   const showSummary = qb.showSummary !== false;
   const showScope = qb.showScope === true;
   const showQuestions = qb.showQuestions !== false;
@@ -631,7 +377,7 @@ export function buildQuoteCanvasText(args: {
   blocks.push(safeTrim(args.headline));
   blocks.push(toLines(args.intro));
 
-  if (showPricing) blocks.push(`${pricing.title}: ${pricing.detail}`);
+  if (showPricing && safeTrim(pricing.detail)) blocks.push(`${pricing.title}: ${pricing.detail}`);
   if (showSummary && summary) blocks.push(`Summary:\n${toLines(summary)}`);
   if (showScope && visibleScope.length) blocks.push(`Visible scope:\n- ${visibleScope.join("\n- ")}`);
   if (showQuestions && questions.length) blocks.push(`Questions (optional):\n- ${questions.join("\n- ")}`);
