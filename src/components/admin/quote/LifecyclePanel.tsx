@@ -298,7 +298,11 @@ export default function LifecyclePanel(props: {
                             <input type="hidden" name="quote_id" value={quoteId} />
                             <input type="hidden" name="version_id" value={v.id} />
                             <input type="hidden" name="version_number" value={String(vnum)} />
-                            <input type="hidden" name="active_version" value={activeVersion != null ? String(activeVersion) : ""} />
+                            <input
+                              type="hidden"
+                              name="active_version"
+                              value={activeVersion != null ? String(activeVersion) : ""}
+                            />
 
                             <button
                               type="submit"
@@ -309,7 +313,11 @@ export default function LifecyclePanel(props: {
                                   ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500 cursor-not-allowed"
                                   : "border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30")
                               }
-                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version (and its renders + linked notes)"}
+                              title={
+                                isActive
+                                  ? "Cannot delete the ACTIVE version"
+                                  : "Delete this version (and its renders + linked notes)"
+                              }
                             >
                               Delete
                             </button>
@@ -427,7 +435,7 @@ export default function LifecyclePanel(props: {
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                  Queues a render attempt for the selected version.
+                  Queues a render attempt for the selected version. Optionally base it on a prior render (“evolution”).
                 </div>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
@@ -435,7 +443,24 @@ export default function LifecyclePanel(props: {
               </div>
             </div>
 
-            <form action={requestRenderAction} className="mt-3 grid gap-3 lg:grid-cols-12">
+            {/* ✅ Base selection display (populated by RenderGallery client via DOM) */}
+            <div
+              id="apq-render-base-display"
+              className="mt-3 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300"
+            >
+              Base image: <span className="font-mono">default customer photo</span>{" "}
+              <span className="text-gray-500 dark:text-gray-400">(click “Use as base” on a rendered tile to evolve)</span>
+            </div>
+
+            <form
+              id="apq-new-render-form"
+              action={requestRenderAction}
+              className="mt-3 grid gap-3 lg:grid-cols-12"
+            >
+              {/* ✅ hidden base inputs populated by RenderGallery */}
+              <input id="apq-base-render-id" type="hidden" name="base_render_id" value="" />
+              <input id="apq-base-image-url" type="hidden" name="base_image_url" value="" />
+
               <div className="lg:col-span-4">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
                 <select

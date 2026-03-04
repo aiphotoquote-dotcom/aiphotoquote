@@ -66,6 +66,10 @@ function safeTrim(v: unknown) {
   return s ? s : "";
 }
 
+function safeLower(v: unknown) {
+  return safeTrim(v).toLowerCase();
+}
+
 /**
  * Prefer actual host over VERCEL_URL.
  */
@@ -593,6 +597,139 @@ function pickFirstImageUrl(images: any[]): string {
   return "";
 }
 
+/**
+ * ✅ Render evolution base selection (secure-ish).
+ *
+ * We NEVER trust arbitrary URLs from meta/base.
+ * Allowed sources:
+ * - customer_photo: must match one of quote_input.images[].(url|publicUrl|blobUrl)
+ * - render: must match a rendered quote_renders row for this tenant (optionally by renderId; otherwise by url match)
+ * - none: ignore
+ *
+ * If invalid, we fall back to pickFirstImageUrl(images).
+ */
+type BaseChoice =
+  | { kind: "none"; url: null; renderId: null }
+  | { kind: "customer_photo"; url: string; renderId: null }
+  | { kind: "render"; url: string; renderId: string | null };
+
+function parseBaseChoice(metaAny: any): BaseChoice {
+  const meta = safeJsonParse(metaAny) ?? metaAny ?? {};
+  const base = safeJsonParse(meta?.base) ?? meta?.base ?? null;
+
+  const kindRaw = safeLower(base?.kind);
+  const urlRaw = safeTrim(base?.url);
+  const renderIdRaw = safeTrim(base?.renderId);
+
+  if (!kindRaw || kindRaw === "none") return { kind: "none", url: null, renderId: null };
+  if (kindRaw === "customer_photo") {
+    return urlRaw ? { kind: "customer_photo", url: urlRaw, renderId: null } : { kind: "none", url: null, renderId: null };
+  }
+  if (kindRaw === "render") {
+    return urlRaw ? { kind: "render", url: urlRaw, renderId: renderIdRaw || null } : { kind: "none", url: null, renderId: null };
+  }
+  return { kind: "none", url: null, renderId: null };
+}
+
+function isHttpUrl(u: string) {
+  try {
+    const url = new URL(u);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function urlsEqualLoosely(a: string, b: string) {
+  const aa = safeTrim(a);
+  const bb = safeTrim(b);
+  if (!aa || !bb) return false;
+  // exact first
+  if (aa === bb) return true;
+  // tolerant: sometimes blob URLs may append query params
+  try {
+    const ua = new URL(aa);
+    const ub = new URL(bb);
+    return ua.origin === ub.origin && ua.pathname === ub.pathname;
+  } catch {
+    return false;
+  }
+}
+
+function quoteImagesContainUrl(images: any[], url: string) {
+  if (!Array.isArray(images) || !url) return false;
+  for (const it of images) {
+    const u = safeTrim((it as any)?.url || (it as any)?.publicUrl || (it as any)?.blobUrl);
+    if (u && urlsEqualLoosely(u, url)) return true;
+  }
+  return false;
+}
+
+async function fetchRenderedUrlByRenderId(args: { tenantId: string; renderId: string }) {
+  const r = await db.execute(sql`
+    select image_url
+    from quote_renders
+    where id = ${args.renderId}::uuid
+      and tenant_id = ${args.tenantId}::uuid
+      and status = 'rendered'
+      and image_url is not null
+    limit 1
+  `);
+  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const url = safeTrim(row?.image_url);
+  return url || null;
+}
+
+async function resolveBaseImageUrl(args: {
+  job: RenderJob;
+  metaAny: any;
+  quoteImages: any[];
+}) {
+  const base = parseBaseChoice(args.metaAny);
+
+  // nothing selected
+  if (base.kind === "none") return { url: "", base, applied: false, reason: "none" as const };
+
+  // reject non-http(s)
+  if (!isHttpUrl(base.url)) return { url: "", base, applied: false, reason: "invalid_url_scheme" as const };
+
+  if (base.kind === "customer_photo") {
+    const ok = quoteImagesContainUrl(args.quoteImages, base.url);
+    if (!ok) return { url: "", base, applied: false, reason: "customer_photo_not_in_quote" as const };
+    return { url: base.url, base, applied: true, reason: "customer_photo" as const };
+  }
+
+  // base.kind === "render"
+  // If renderId provided, use DB as source of truth (ignores client-supplied url if mismatched).
+  if (base.renderId) {
+    const dbUrl = await fetchRenderedUrlByRenderId({ tenantId: args.job.tenantId, renderId: base.renderId });
+    if (!dbUrl) return { url: "", base, applied: false, reason: "render_id_not_found" as const };
+
+    // If client url differs, we still trust DB (but note mismatch)
+    if (base.url && !urlsEqualLoosely(base.url, dbUrl)) {
+      return { url: dbUrl, base: { ...base, url: dbUrl }, applied: true, reason: "render_id_db_override" as const };
+    }
+
+    return { url: dbUrl, base: { ...base, url: dbUrl }, applied: true, reason: "render_id" as const };
+  }
+
+  // No renderId: only allow if the url matches *some* rendered row for tenant (prevents arbitrary URLs).
+  const r = await db.execute(sql`
+    select image_url
+    from quote_renders
+    where tenant_id = ${args.job.tenantId}::uuid
+      and status = 'rendered'
+      and image_url is not null
+    order by created_at desc
+    limit 50
+  `);
+  const rows: any[] = (r as any)?.rows ?? (Array.isArray(r) ? (r as any) : []);
+  const found = rows.map((x) => safeTrim(x?.image_url)).find((u) => u && urlsEqualLoosely(u, base.url));
+  if (!found) return { url: "", base, applied: false, reason: "render_url_not_owned" as const };
+
+  return { url: found, base: { ...base, url: found }, applied: true, reason: "render_url_owned" as const };
+}
+
 async function fetchImageAsFile(url: string) {
   const u = safeTrim(url);
   if (!u) return null;
@@ -1006,6 +1143,11 @@ async function handleCron(req: Request) {
           .join("\n\n")
       );
 
+      // ✅ Resolve which image we will “anchor” the edit to (render evolution)
+      const baseResolved = await resolveBaseImageUrl({ job, metaAny: meta, quoteImages: images });
+      const inputUrl = safeTrim(baseResolved.url) || pickFirstImageUrl(images);
+      const inputFile = await fetchImageAsFile(inputUrl);
+
       if (debugEnabled) {
         const renderDebug: any = {
           ...buildRenderDebugPayload({
@@ -1033,6 +1175,13 @@ async function handleCron(req: Request) {
             suppressEmails,
             suppressLegacy,
             source: safeTrim(meta?.source) || null,
+            base: {
+              requested: parseBaseChoice(meta),
+              applied: baseResolved.applied,
+              reason: baseResolved.reason,
+              inputUrlUsed: inputUrl || null,
+              anchoredToInputImage: Boolean(inputFile?.file),
+            },
           },
         };
 
@@ -1048,9 +1197,6 @@ async function handleCron(req: Request) {
         timeout: 90_000,
         maxRetries: 1,
       } as any);
-
-      const inputUrl = pickFirstImageUrl(images);
-      const inputFile = await fetchImageAsFile(inputUrl);
 
       let b64: string | undefined;
 
@@ -1240,6 +1386,9 @@ async function handleCron(req: Request) {
         industrySource,
         usedKey: hasTenantKey ? "tenant" : "platform_grace",
         anchoredToInputImage: Boolean(inputFile?.file),
+        baseApplied: baseResolved.applied,
+        baseReason: baseResolved.reason,
+        baseKind: (baseResolved as any)?.base?.kind ?? "none",
         sourceQueue: job.sourceQueue,
         forceRender,
         suppressEmails,

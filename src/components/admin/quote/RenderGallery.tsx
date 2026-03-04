@@ -42,6 +42,46 @@ function pill(active: boolean) {
   );
 }
 
+function setBaseSelection(args: {
+  baseRenderId: string;
+  baseImageUrl: string;
+  attemptLabel: string;
+}) {
+  try {
+    const hidId = document.getElementById("apq-base-render-id") as HTMLInputElement | null;
+    const hidUrl = document.getElementById("apq-base-image-url") as HTMLInputElement | null;
+    if (hidId) hidId.value = args.baseRenderId;
+    if (hidUrl) hidUrl.value = args.baseImageUrl;
+
+    const display = document.getElementById("apq-render-base-display");
+    if (display) {
+      display.innerHTML = `Base image: <span class="font-mono">render ${args.attemptLabel}</span> <span class="text-gray-500">(evolving from a prior attempt)</span>`;
+    }
+
+    // Optional scroll back up to the request form for “aha”
+    const form = document.getElementById("apq-new-render-form");
+    form?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  } catch {
+    // ignore
+  }
+}
+
+function clearBaseSelection() {
+  try {
+    const hidId = document.getElementById("apq-base-render-id") as HTMLInputElement | null;
+    const hidUrl = document.getElementById("apq-base-image-url") as HTMLInputElement | null;
+    if (hidId) hidId.value = "";
+    if (hidUrl) hidUrl.value = "";
+
+    const display = document.getElementById("apq-render-base-display");
+    if (display) {
+      display.innerHTML = `Base image: <span class="font-mono">default customer photo</span> <span class="text-gray-500">(click “Use as base” on a rendered tile to evolve)</span>`;
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export default function RenderGallery(props: { quoteId: string; renderRows: RenderRow[] }) {
   const { quoteId, renderRows } = props;
 
@@ -87,19 +127,32 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
   }, [selected, renderedOnly]);
 
   return (
-    <section id="renders" className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+    <section
+      id="renders"
+      className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950"
+    >
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Render gallery</h3>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Click to preview. Shift-select isn’t needed — just click tiles to multi-select.
+            Click to preview. Select tiles to include in email. Use “Use as base” to evolve a new render from a prior attempt.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => clearBaseSelection()}
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+            title="Clear base image selection for new renders"
+          >
+            Clear base
+          </button>
+
           <div className="text-xs text-gray-600 dark:text-gray-300">
             Selected: <span className="font-semibold">{selected.length}</span>
           </div>
+
           <button
             type="button"
             onClick={clear}
@@ -109,6 +162,7 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
           >
             Clear
           </button>
+
           <Link
             href={composeHref}
             className={
@@ -156,6 +210,8 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
               const isRendered = normStatus(r.status) === "rendered" && !!url;
               const active = selected.includes(id);
 
+              const attemptLabel = r.attempt != null ? `#${Number(r.attempt)}` : "";
+
               return (
                 <div
                   key={id}
@@ -185,14 +241,14 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                   <div className="p-3">
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
-                        Attempt {r.attempt != null ? `#${Number(r.attempt)}` : ""}
+                        Attempt {attemptLabel}
                       </div>
                       <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">
                         {safeTrim(r.status) || "unknown"}
                       </span>
                     </div>
 
-                    <div className="mt-2 flex items-center justify-between gap-2">
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                       <button
                         type="button"
                         onClick={() => toggle(id)}
@@ -209,6 +265,25 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                       </button>
 
                       <div className="flex items-center gap-2">
+                        {isRendered ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setBaseSelection({
+                                baseRenderId: id,
+                                baseImageUrl: url,
+                                attemptLabel: attemptLabel || id.slice(0, 6),
+                              })
+                            }
+                            className="text-[11px] font-semibold text-blue-700 hover:underline dark:text-blue-300"
+                            title="Use this rendered image as the base input for the next render"
+                          >
+                            Use as base
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-gray-400">—</span>
+                        )}
+
                         {url ? (
                           <a
                             href={url}
@@ -222,7 +297,7 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                           <span className="text-[11px] text-gray-400">—</span>
                         )}
 
-                        {/* ✅ Delete render attempt (archive/delete) */}
+                        {/* ✅ Delete render attempt */}
                         <form
                           action={deleteRenderAction}
                           onSubmit={(e) => {

@@ -38,6 +38,17 @@ function parsePositiveInt(v: string) {
   return i >= 0 ? i : null;
 }
 
+function isHttpUrl(u: string) {
+  const s = safeTrimLocal(u);
+  if (!s) return false;
+  try {
+    const url = new URL(s);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function getBaseUrlFromEnv() {
   const envBase = safeTrimLocal(process.env.NEXT_PUBLIC_APP_URL) || safeTrimLocal(process.env.APP_URL);
   if (envBase) return envBase.replace(/\/+$/, "");
@@ -379,6 +390,23 @@ export async function requestRenderAction(formData: FormData) {
 
   const shopNotes = safeTrim(formData.get("shop_notes"));
 
+  // ✅ NEW: render evolution base selection from admin gallery
+  const baseRenderIdRaw = safeTrim(formData.get("base_render_id"));
+  const baseImageUrlRaw = safeTrim(formData.get("base_image_url"));
+
+  const baseRenderId = baseRenderIdRaw && looksUuid(baseRenderIdRaw) ? baseRenderIdRaw : "";
+  const baseImageUrl = baseImageUrlRaw && isHttpUrl(baseImageUrlRaw) ? baseImageUrlRaw : "";
+
+  const baseMeta =
+    baseRenderId || baseImageUrl
+      ? {
+          // cron expects: meta.base.kind / url / renderId
+          kind: "render",
+          renderId: baseRenderId || null,
+          url: baseImageUrl || "",
+        }
+      : null;
+
   const q = await db
     .select({ output: quoteLogs.output })
     .from(quoteLogs)
@@ -452,6 +480,9 @@ export async function requestRenderAction(formData: FormData) {
         source: "tenant_admin",
         requestedBy: actorUserId,
         requestedAt: new Date().toISOString(),
+
+        // ✅ NEW: base selection for evolution
+        ...(baseMeta ? { base: baseMeta } : {}),
       },
     } as any)
     .returning({ id: quoteRenders.id })
