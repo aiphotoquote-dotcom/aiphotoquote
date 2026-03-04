@@ -37,14 +37,122 @@ function asEmailList(v: unknown): string[] {
   return [];
 }
 
+function fmtWhen(v: unknown) {
+  try {
+    const d = v instanceof Date ? v : new Date(String(v));
+    if (isNaN(d.getTime())) return "—";
+    return d.toLocaleString();
+  } catch {
+    return "—";
+  }
+}
+
 // basic safety hardening for preview (iframe is sandboxed anyway)
 function stripDangerous(html: string) {
   const s = String(html ?? "");
-  // remove script tags
   const noScripts = s.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
-  // remove on* handlers (onclick=, onload=, etc.)
   const noHandlers = noScripts.replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, "");
   return noHandlers;
+}
+
+type EmailRow = {
+  id: string;
+  tenant_id: string;
+  quote_log_id: string;
+
+  kind: string | null;
+  initiated_by: string | null;
+
+  provider: string | null;
+  provider_message_id: string | null;
+
+  // recipients
+  to_emails?: any; // array (preferred)
+  to_json?: any; // legacy alt
+  cc_emails?: any;
+  cc_json?: any;
+  bcc_emails?: any;
+  bcc_json?: any;
+
+  // content
+  from_email?: any;
+  from?: any;
+  subject?: any;
+
+  html?: any;
+  text?: any;
+
+  // status
+  ok?: any;
+  error?: any;
+
+  meta?: any;
+  created_at?: any;
+};
+
+async function fetchEmailRow(args: { tenantId: string; quoteId: string; emailId: string }): Promise<EmailRow | null> {
+  // 1) Try “rich” schema (has html/text/from/etc.)
+  try {
+    const r = await db.execute(sql`
+      select
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        initiated_by,
+        provider,
+        provider_message_id,
+        from_email,
+        to_emails,
+        cc_emails,
+        bcc_emails,
+        subject,
+        html,
+        text,
+        meta,
+        ok,
+        error,
+        created_at
+      from quote_email_sends
+      where id = ${args.emailId}::uuid
+        and tenant_id = ${args.tenantId}::uuid
+        and quote_log_id = ${args.quoteId}::uuid
+      limit 1
+    `);
+
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    return row ? (row as EmailRow) : null;
+  } catch {
+    // ignore and fall through
+  }
+
+  // 2) Fallback “summary” schema (what your quote page currently selects)
+  try {
+    const r = await db.execute(sql`
+      select
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        provider,
+        provider_message_id,
+        to_emails,
+        subject,
+        ok,
+        error,
+        created_at
+      from quote_email_sends
+      where id = ${args.emailId}::uuid
+        and tenant_id = ${args.tenantId}::uuid
+        and quote_log_id = ${args.quoteId}::uuid
+      limit 1
+    `);
+
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    return row ? (row as EmailRow) : null;
+  } catch {
+    return null;
+  }
 }
 
 export default async function QuoteEmailViewPage(props: {
@@ -66,32 +174,7 @@ export default async function QuoteEmailViewPage(props: {
   if (!tenantIdMaybe) redirect("/admin/quotes");
   const tenantId = String(tenantIdMaybe);
 
-  const r = await db.execute(sql`
-    select
-      id,
-      tenant_id,
-      quote_log_id,
-      kind,
-      initiated_by,
-      provider,
-      provider_message_id,
-      from_email,
-      to_json,
-      cc_json,
-      bcc_json,
-      subject,
-      html,
-      text,
-      meta,
-      created_at
-    from quote_emails
-    where id = ${emailId}::uuid
-      and tenant_id = ${tenantId}::uuid
-      and quote_log_id = ${quoteId}::uuid
-    limit 1
-  `);
-
-  const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+  const row = await fetchEmailRow({ tenantId, quoteId, emailId });
 
   if (!row) {
     return (
@@ -105,31 +188,36 @@ export default async function QuoteEmailViewPage(props: {
 
         <div className="mt-6 rounded-2xl border border-yellow-200 bg-yellow-50 p-6 text-sm text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200">
           <div className="text-base font-semibold">Email not found for this quote</div>
-          <div className="mt-2">
-            It may belong to a different tenant, or it may have been deleted.
-          </div>
+          <div className="mt-2">It may belong to a different tenant, or it may have been deleted.</div>
           <div className="mt-3 font-mono text-xs opacity-80">emailId={emailId}</div>
         </div>
       </div>
     );
   }
 
-  const subject = safeTrim(row.subject) || "—";
-  const kind = safeTrim(row.kind) || "unknown";
-  const initiatedBy = safeTrim(row.initiated_by) || "system";
+  const subject = safeTrim((row as any).subject) || "—";
+  const kind = safeTrim((row as any).kind) || "composer";
+  const initiatedBy = safeTrim((row as any).initiated_by) || "tenant";
 
-  const provider = safeTrim(row.provider) || "—";
-  const providerMessageId = safeTrim(row.provider_message_id) || "";
+  const provider = safeTrim((row as any).provider) || "—";
+  const providerMessageId = safeTrim((row as any).provider_message_id) || "";
 
-  const fromEmail = safeTrim(row.from_email) || "—";
-  const to = asEmailList(row.to_json);
-  const cc = asEmailList(row.cc_json);
-  const bcc = asEmailList(row.bcc_json);
+  const fromEmail = safeTrim((row as any).from_email ?? (row as any).from) || "—";
 
-  const createdAt = row.created_at ? new Date(row.created_at).toLocaleString() : "—";
+  const to =
+    asEmailList((row as any).to_emails) ||
+    asEmailList((row as any).to_json) ||
+    [];
+  const cc = asEmailList((row as any).cc_emails ?? (row as any).cc_json);
+  const bcc = asEmailList((row as any).bcc_emails ?? (row as any).bcc_json);
 
-  const htmlRaw = safeTrim(row.html);
-  const textRaw = safeTrim(row.text);
+  const createdAt = fmtWhen((row as any).created_at);
+
+  const ok = Boolean((row as any).ok);
+  const error = safeTrim((row as any).error);
+
+  const htmlRaw = safeTrim((row as any).html);
+  const textRaw = safeTrim((row as any).text);
 
   const previewHtml = htmlRaw ? stripDangerous(htmlRaw) : "";
 
@@ -153,12 +241,28 @@ export default async function QuoteEmailViewPage(props: {
           <span className="inline-flex items-center rounded-full bg-gray-100 px-3 py-1 text-xs font-extrabold text-gray-900 dark:bg-gray-900/40 dark:text-gray-100">
             Provider: {provider}
           </span>
+          <span
+            className={
+              "inline-flex items-center rounded-full px-3 py-1 text-xs font-extrabold " +
+              (ok
+                ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-900/30 dark:text-emerald-200"
+                : "bg-red-100 text-red-900 dark:bg-red-900/30 dark:text-red-200")
+            }
+          >
+            {ok ? "sent" : "failed"}
+          </span>
         </div>
       </div>
 
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
         <div className="text-lg font-extrabold text-gray-900 dark:text-gray-100">{subject}</div>
-        <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Sent: {createdAt}</div>
+        <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">When: {createdAt}</div>
+
+        {!ok && error ? (
+          <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+            {error}
+          </div>
+        ) : null}
 
         <div className="mt-5 grid gap-4 lg:grid-cols-2">
           <div className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
@@ -166,9 +270,7 @@ export default async function QuoteEmailViewPage(props: {
             <div className="mt-2 text-sm font-semibold text-gray-900 dark:text-gray-100">{fromEmail}</div>
 
             <div className="mt-4 text-xs font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">To</div>
-            <div className="mt-2 text-sm text-gray-900 dark:text-gray-100">
-              {to.length ? to.join(", ") : "—"}
-            </div>
+            <div className="mt-2 text-sm text-gray-900 dark:text-gray-100">{to.length ? to.join(", ") : "—"}</div>
 
             {cc.length ? (
               <>
@@ -205,7 +307,7 @@ export default async function QuoteEmailViewPage(props: {
                 Meta (debug)
               </summary>
               <pre className="mt-3 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-950/30 dark:text-gray-100">
-{JSON.stringify(safeJson(row.meta) ?? row.meta ?? {}, null, 2)}
+{JSON.stringify(safeJson((row as any).meta) ?? (row as any).meta ?? {}, null, 2)}
               </pre>
             </details>
           </div>
@@ -214,16 +316,13 @@ export default async function QuoteEmailViewPage(props: {
 
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950/40">
         <div className="text-sm font-extrabold text-gray-900 dark:text-gray-100">Email preview</div>
-        <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">
-          This is read-only. Scripts are blocked.
-        </div>
+        <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">Read-only. Scripts are blocked.</div>
 
         {previewHtml ? (
           <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-gray-800">
             <iframe
               title="Email preview"
               className="h-[820px] w-full bg-white"
-              // sandbox blocks scripts; we do NOT allow-scripts
               sandbox=""
               srcDoc={previewHtml}
             />
@@ -231,26 +330,32 @@ export default async function QuoteEmailViewPage(props: {
         ) : (
           <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-950/30 dark:text-gray-200">
             No HTML was stored for this email.
+            <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">
+              If you want preview to always work, we should store <span className="font-mono">html</span> +{" "}
+              <span className="font-mono">text</span> on send (composer + system sends).
+            </div>
           </div>
         )}
 
         <details className="mt-4">
           <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
-            Raw HTML
-          </summary>
-          <pre className="mt-3 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-950/30 dark:text-gray-100">
-{htmlRaw || "—"}
-          </pre>
-        </details>
-
-        <details className="mt-4">
-          <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
             Plain text
           </summary>
-          <pre className="mt-3 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-950/30 dark:text-gray-100">
+          <pre className="mt-3 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-950/30 dark:text-gray-100 whitespace-pre-wrap">
 {textRaw || "—"}
           </pre>
         </details>
+
+        {htmlRaw ? (
+          <details className="mt-4">
+            <summary className="cursor-pointer select-none text-sm font-semibold text-gray-700 dark:text-gray-200">
+              Raw HTML
+            </summary>
+            <pre className="mt-3 overflow-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-950/30 dark:text-gray-100 whitespace-pre-wrap">
+{htmlRaw}
+            </pre>
+          </details>
+        ) : null}
       </div>
     </div>
   );
