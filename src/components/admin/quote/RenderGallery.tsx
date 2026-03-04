@@ -12,6 +12,17 @@ function safeTrim(v: any) {
   return s ? s : "";
 }
 
+function isHttpUrl(u: string) {
+  const s = safeTrim(u);
+  if (!s) return false;
+  try {
+    const url = new URL(s);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 type RenderRow = {
   id: string;
   status?: string | null;
@@ -42,40 +53,32 @@ function pill(active: boolean) {
   );
 }
 
-function baseBtn(selected: boolean) {
-  return (
-    "rounded-lg px-2.5 py-1 text-[11px] font-semibold border transition " +
-    (selected
-      ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
-      : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-gray-950 dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
-  );
-}
+type BaseKind = "none" | "customer_photo" | "render";
 
-function writeBaseHiddenInputs(args: { kind: "" | "render" | "customer_photo"; url: string; renderId: string }) {
+type BaseSelection =
+  | { kind: "none"; key: ""; url: ""; renderId: "" }
+  | { kind: "customer_photo"; key: string; url: string; renderId: "" }
+  | { kind: "render"; key: string; url: string; renderId: string };
+
+function setBaseHiddenInputs(args: { kind: BaseKind; url: string; renderId: string }) {
   try {
     const hidKind = document.getElementById("apq-base-kind") as HTMLInputElement | null;
-    const hidUrl = document.getElementById("apq-base-url") as HTMLInputElement | null;
     const hidId = document.getElementById("apq-base-render-id") as HTMLInputElement | null;
+    const hidUrl = document.getElementById("apq-base-image-url") as HTMLInputElement | null;
 
-    if (hidKind) hidKind.value = args.kind;
-    if (hidUrl) hidUrl.value = args.url || "";
+    if (hidKind) hidKind.value = args.kind || "none";
     if (hidId) hidId.value = args.renderId || "";
+    if (hidUrl) hidUrl.value = args.url || "";
   } catch {
     // ignore
   }
 }
 
-function writeBaseDisplayHtml(html: string) {
+function setBaseDisplay(html: string) {
   try {
     const display = document.getElementById("apq-render-base-display");
     if (display) display.innerHTML = html;
-  } catch {
-    // ignore
-  }
-}
 
-function scrollToRequestForm() {
-  try {
     const form = document.getElementById("apq-new-render-form");
     form?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   } catch {
@@ -83,10 +86,32 @@ function scrollToRequestForm() {
   }
 }
 
-export default function RenderGallery(props: { quoteId: string; renderRows: RenderRow[] }) {
-  const { quoteId, renderRows } = props;
+function clearBaseSelectionDom() {
+  setBaseHiddenInputs({ kind: "none", url: "", renderId: "" });
+  setBaseDisplay(
+    `Base image: <span class="font-mono">default customer photo</span> <span class="text-gray-500">(pick a customer photo below, or click “Use as base” on a render)</span>`
+  );
+}
+
+function renderBaseButtonClass(isSelected: boolean) {
+  // ✅ obvious “selected” state
+  return (
+    "inline-flex items-center justify-center rounded-lg px-2.5 py-1 text-[11px] font-semibold border transition " +
+    (isSelected
+      ? "bg-blue-700 text-white border-blue-700 hover:opacity-90 dark:bg-blue-400 dark:text-black dark:border-blue-400"
+      : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-gray-950 dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+  );
+}
+
+export default function RenderGallery(props: {
+  quoteId: string;
+  renderRows: RenderRow[];
+  customerPhotos?: any[];
+}) {
+  const { quoteId, renderRows, customerPhotos } = props;
 
   const rows = useMemo(() => (Array.isArray(renderRows) ? renderRows : []), [renderRows]);
+  const photos = useMemo(() => (Array.isArray(customerPhotos) ? customerPhotos : []), [customerPhotos]);
 
   const counts = useMemo(() => {
     const c: Record<FilterKey, number> = { all: rows.length, rendered: 0, queued: 0, running: 0, failed: 0, other: 0 };
@@ -98,11 +123,8 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
   const [selected, setSelected] = useState<string[]>([]);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
-  // ✅ Single base selection (only one at a time)
-  // baseKey format:
-  // - render:<renderId>
-  // - customer:<url> (future-friendly, even if customer-photo UI is elsewhere)
-  const [baseKey, setBaseKey] = useState<string>("");
+  // ✅ single base selection (render OR customer photo)
+  const [base, setBase] = useState<BaseSelection>({ kind: "none", key: "", url: "", renderId: "" });
 
   const filtered = useMemo(() => {
     if (filter === "all") return rows;
@@ -118,37 +140,39 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  function clearSelection() {
+  function clearSelected() {
     setSelected([]);
   }
 
-  function clearBaseSelection() {
-    setBaseKey("");
-    writeBaseHiddenInputs({ kind: "", url: "", renderId: "" });
-    writeBaseDisplayHtml(
-      `Base image: <span class="font-mono">default customer photo</span> <span class="text-gray-500">(pick a base below)</span>`
-    );
+  function clearBase() {
+    setBase({ kind: "none", key: "", url: "", renderId: "" });
+    clearBaseSelectionDom();
   }
 
-  function toggleBaseRender(args: { renderId: string; imageUrl: string; attemptLabel: string }) {
-    const key = `render:${args.renderId}`;
-
-    // toggle off if clicking the same one
-    if (baseKey === key) {
-      clearBaseSelection();
+  function toggleBase(next: BaseSelection) {
+    // clicking the SAME base again deselects
+    if (base.key && next.key === base.key) {
+      clearBase();
       return;
     }
 
-    setBaseKey(key);
+    setBase(next);
 
-    // ✅ persist for the server action
-    writeBaseHiddenInputs({ kind: "render", url: args.imageUrl, renderId: args.renderId });
+    setBaseHiddenInputs({
+      kind: next.kind,
+      url: next.url || "",
+      renderId: next.kind === "render" ? next.renderId : "",
+    });
 
-    writeBaseDisplayHtml(
-      `Base image: <span class="font-mono">render ${args.attemptLabel}</span> <span class="text-gray-500">(evolving from a prior attempt)</span>`
-    );
-
-    scrollToRequestForm();
+    if (next.kind === "customer_photo") {
+      setBaseDisplay(
+        `Base image: <span class="font-mono">customer photo</span> <span class="text-gray-500">(anchoring the next render to a customer photo)</span>`
+      );
+    } else if (next.kind === "render") {
+      setBaseDisplay(
+        `Base image: <span class="font-mono">render ${safeTrim(next.renderId).slice(0, 6)}</span> <span class="text-gray-500">(evolving from a prior attempt)</span>`
+      );
+    }
   }
 
   const composeHref = useMemo(() => {
@@ -162,6 +186,21 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
     return renderedOnly.filter((r) => set.has(String(r.id))).length;
   }, [selected, renderedOnly]);
 
+  // ---- customer photos helpers ----
+  function photoUrl(p: any) {
+    const u = safeTrim(p?.url || p?.publicUrl || p?.blobUrl);
+    return isHttpUrl(u) ? u : "";
+  }
+
+  const photoTiles = useMemo(() => {
+    return photos
+      .map((p) => {
+        const url = photoUrl(p);
+        return url ? { url } : null;
+      })
+      .filter(Boolean) as Array<{ url: string }>;
+  }, [photos]);
+
   return (
     <section
       id="renders"
@@ -171,14 +210,14 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
         <div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Render gallery</h3>
           <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-            Click to preview. Select tiles to include in email. Pick one “Use as base” to anchor the next render.
+            Pick a base image (customer photo or prior render), preview results, and multi-select renders for email.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={clearBaseSelection}
+            onClick={clearBase}
             className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
             title="Clear base image selection for new renders"
           >
@@ -191,7 +230,7 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
 
           <button
             type="button"
-            onClick={clearSelection}
+            onClick={clearSelected}
             className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
             disabled={!selected.length}
             title="Clear selection"
@@ -211,6 +250,85 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
           >
             Compose email
           </Link>
+        </div>
+      </div>
+
+      {/* Customer photos (base selection) */}
+      <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-gray-800 dark:text-gray-200">Customer photos</div>
+          <div className="text-xs text-gray-500 dark:text-gray-400">Click “Use as base” to anchor the next render.</div>
+        </div>
+
+        <div className="mt-3">
+          {photoTiles.length ? (
+            <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
+              {photoTiles.map((p, idx) => {
+                const key = `customer_photo:${p.url}`;
+                const isSelected = base.key === key;
+
+                return (
+                  <div
+                    key={key}
+                    className={
+                      "rounded-2xl border overflow-hidden bg-white dark:bg-gray-950 transition " +
+                      (isSelected
+                        ? "border-blue-600 ring-2 ring-blue-600 dark:border-blue-400 dark:ring-blue-400"
+                        : "border-gray-200 dark:border-gray-800")
+                    }
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setLightboxUrl(p.url)}
+                      className="block w-full text-left"
+                      title="Click to preview"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={p.url} alt="Customer photo" className="h-40 w-full object-cover bg-black/5" />
+                    </button>
+
+                    <div className="p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">Photo #{idx + 1}</div>
+                        <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">customer</span>
+                      </div>
+
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            toggleBase({
+                              kind: "customer_photo",
+                              key,
+                              url: p.url,
+                              renderId: "",
+                            })
+                          }
+                          className={renderBaseButtonClass(isSelected)}
+                          title={isSelected ? "Deselect base" : "Use this customer photo as the base input"}
+                        >
+                          {isSelected ? "Base selected" : "Use as base"}
+                        </button>
+
+                        <a
+                          href={p.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] font-semibold text-gray-600 hover:underline dark:text-gray-300"
+                        >
+                          Open
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+              No customer photos on this quote.
+            </div>
+          )}
         </div>
       </div>
 
@@ -247,7 +365,8 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
               const active = selected.includes(id);
 
               const attemptLabel = r.attempt != null ? `#${Number(r.attempt)}` : "";
-              const isBaseSelected = baseKey === `render:${id}`;
+              const baseKey = `render:${id}`;
+              const baseSelected = base.key === baseKey;
 
               return (
                 <div
@@ -256,7 +375,9 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                     "rounded-2xl border overflow-hidden bg-white dark:bg-gray-950 transition " +
                     (active
                       ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
-                      : "border-gray-200 dark:border-gray-800")
+                      : baseSelected
+                        ? "border-blue-600 ring-2 ring-blue-600 dark:border-blue-400 dark:ring-blue-400"
+                        : "border-gray-200 dark:border-gray-800")
                   }
                 >
                   <button
@@ -277,9 +398,7 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
 
                   <div className="p-3">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
-                        Attempt {attemptLabel}
-                      </div>
+                      <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">Attempt {attemptLabel}</div>
                       <span className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">
                         {safeTrim(r.status) || "unknown"}
                       </span>
@@ -306,17 +425,17 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                           <button
                             type="button"
                             onClick={() =>
-                              toggleBaseRender({
+                              toggleBase({
+                                kind: "render",
+                                key: baseKey,
+                                url,
                                 renderId: id,
-                                imageUrl: url,
-                                attemptLabel: attemptLabel || id.slice(0, 6),
                               })
                             }
-                            className={baseBtn(isBaseSelected)}
-                            title={isBaseSelected ? "Click to stop using this as base" : "Use this as the base input for the next render"}
-                            aria-pressed={isBaseSelected}
+                            className={renderBaseButtonClass(baseSelected)}
+                            title={baseSelected ? "Deselect base" : "Use this rendered image as the base input"}
                           >
-                            {isBaseSelected ? "Base selected" : "Use as base"}
+                            {baseSelected ? "Base selected" : "Use as base"}
                           </button>
                         ) : (
                           <span className="text-[11px] text-gray-400">—</span>
@@ -356,13 +475,6 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
                         </form>
                       </div>
                     </div>
-
-                    {/* Tiny helper line when a base is selected */}
-                    {isBaseSelected ? (
-                      <div className="mt-2 text-[11px] text-gray-600 dark:text-gray-300">
-                        This render will be used as the base for the next request.
-                      </div>
-                    ) : null}
                   </div>
                 </div>
               );
@@ -398,7 +510,7 @@ export default function RenderGallery(props: { quoteId: string; renderRows: Rend
               </button>
             </div>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={lightboxUrl} alt="Render preview" className="max-h-[80vh] w-auto object-contain bg-black/5" />
+            <img src={lightboxUrl} alt="Preview" className="max-h-[80vh] w-auto object-contain bg-black/5" />
           </div>
         </div>
       ) : null}
