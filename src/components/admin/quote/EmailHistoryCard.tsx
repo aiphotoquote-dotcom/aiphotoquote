@@ -1,4 +1,6 @@
 // src/components/admin/quote/EmailHistoryCard.tsx
+"use client";
+
 import React from "react";
 
 function safeTrim(v: unknown) {
@@ -38,6 +40,11 @@ export default function EmailHistoryCard(props: { quoteId: string; emails: Email
     return `/admin/quotes/${encodeURIComponent(quoteId)}/emails/${encodeURIComponent(eid)}`;
   }
 
+  function onRowClick(href: string | null) {
+    if (!href) return;
+    window.location.href = href;
+  }
+
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950/40">
       <div className="flex items-center justify-between gap-3">
@@ -66,6 +73,7 @@ export default function EmailHistoryCard(props: { quoteId: string; emails: Email
                 <th className="whitespace-nowrap border-b border-gray-200 py-2 pr-3 dark:border-gray-800">Status</th>
               </tr>
             </thead>
+
             <tbody>
               {emails.map((e) => {
                 const to = (Array.isArray(e.toEmails) ? e.toEmails : []).map(safeTrim).filter(Boolean).join(", ");
@@ -80,10 +88,14 @@ export default function EmailHistoryCard(props: { quoteId: string; emails: Email
                 return (
                   <tr
                     key={e.id}
+                    onClick={() => onRowClick(href)}
                     className={
                       "align-top " +
-                      (href ? "hover:bg-gray-50 dark:hover:bg-gray-900/20" : "")
+                      (href
+                        ? "cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/20"
+                        : "")
                     }
+                    title={href ? "Click to view sent email" : undefined}
                   >
                     <td className="whitespace-nowrap border-b border-gray-100 py-2 pr-3 text-gray-600 dark:border-gray-900/60 dark:text-gray-400">
                       {fmtWhen(e.createdAt)}
@@ -105,6 +117,10 @@ export default function EmailHistoryCard(props: { quoteId: string; emails: Email
                           href={href}
                           className="font-extrabold text-gray-900 underline decoration-gray-300 underline-offset-2 hover:decoration-gray-700 dark:text-gray-100 dark:decoration-gray-700 dark:hover:decoration-gray-300"
                           title="View sent email"
+                          onClick={(ev) => {
+                            // prevent double nav (row click + link click)
+                            ev.stopPropagation();
+                          }}
                         >
                           {subject}
                         </a>
@@ -123,9 +139,7 @@ export default function EmailHistoryCard(props: { quoteId: string; emails: Email
                       ) : null}
 
                       {href ? (
-                        <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
-                          Click to view
-                        </div>
+                        <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">Click to view</div>
                       ) : null}
                     </td>
 
