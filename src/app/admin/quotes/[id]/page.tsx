@@ -281,6 +281,7 @@ export default async function QuoteReviewPage({ params, searchParams }: PageProp
             renderRows={renderRows}
             lifecycleReadError={lifecycleReadError}
             activeVersion={activeVersion}
+            customerPhotos={(Array.isArray(photos) ? (photos as any[]) : []) ?? []}
           />
         </div>
       </div>

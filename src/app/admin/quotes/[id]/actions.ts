@@ -390,22 +390,63 @@ export async function requestRenderAction(formData: FormData) {
 
   const shopNotes = safeTrim(formData.get("shop_notes"));
 
-  // ✅ NEW: render evolution base selection from admin gallery
+  /**
+   * ✅ Base selection inputs (admin UI)
+   * We support BOTH naming styles for safety:
+   * - new: base_kind, base_url, base_render_id
+   * - legacy: base_image_url, base_render_id
+   */
+  const baseKindRaw = safeTrim(formData.get("base_kind"));
+  const baseUrlRawNew = safeTrim(formData.get("base_url"));
+  const baseUrlRawLegacy = safeTrim(formData.get("base_image_url"));
+
   const baseRenderIdRaw = safeTrim(formData.get("base_render_id"));
-  const baseImageUrlRaw = safeTrim(formData.get("base_image_url"));
+
+  const baseKind = (baseKindRaw || "").toLowerCase();
+  const baseUrlCandidate = baseUrlRawNew || baseUrlRawLegacy;
 
   const baseRenderId = baseRenderIdRaw && looksUuid(baseRenderIdRaw) ? baseRenderIdRaw : "";
-  const baseImageUrl = baseImageUrlRaw && isHttpUrl(baseImageUrlRaw) ? baseImageUrlRaw : "";
+  const baseUrl = baseUrlCandidate && isHttpUrl(baseUrlCandidate) ? baseUrlCandidate : "";
 
-  const baseMeta =
-    baseRenderId || baseImageUrl
-      ? {
-          // cron expects: meta.base.kind / url / renderId
-          kind: "render",
-          renderId: baseRenderId || null,
-          url: baseImageUrl || "",
-        }
-      : null;
+  type BaseMeta =
+    | { kind: "customer_photo"; url: string; renderId: null }
+    | { kind: "render"; url: string; renderId: string | null };
+
+  let baseMeta: BaseMeta | null = null;
+
+  // Normalize base kind
+  const kindNorm =
+    baseKind === "customer_photo" || baseKind === "customer" ? "customer_photo" : baseKind === "render" ? "render" : "none";
+
+  if (kindNorm === "customer_photo") {
+    // require url
+    if (baseUrl) {
+      baseMeta = { kind: "customer_photo", url: baseUrl, renderId: null };
+    }
+  } else if (kindNorm === "render") {
+    // render base: allow either renderId OR url; if renderId provided, validate ownership
+    if (baseRenderId) {
+      // Validate base render belongs to THIS tenant + quote, and has an imageUrl (so evolution makes sense)
+      const hit = await db
+        .select({ id: quoteRenders.id, imageUrl: (quoteRenders as any).imageUrl })
+        .from(quoteRenders)
+        .where(and(eq(quoteRenders.tenantId, tenantId), eq(quoteRenders.quoteLogId, quoteId), eq(quoteRenders.id, baseRenderId as any)))
+        .limit(1)
+        .then((r) => r[0] ?? null);
+
+      const img = safeTrimLocal((hit as any)?.imageUrl);
+      if (hit?.id && img) {
+        baseMeta = { kind: "render", renderId: baseRenderId, url: baseUrl || img };
+      } else if (baseUrl) {
+        // fall back: url-only, but only if valid
+        baseMeta = { kind: "render", renderId: null, url: baseUrl };
+      }
+    } else if (baseUrl) {
+      baseMeta = { kind: "render", renderId: null, url: baseUrl };
+    }
+  } else {
+    baseMeta = null;
+  }
 
   const q = await db
     .select({ output: quoteLogs.output })
@@ -481,7 +522,7 @@ export async function requestRenderAction(formData: FormData) {
         requestedBy: actorUserId,
         requestedAt: new Date().toISOString(),
 
-        // ✅ NEW: base selection for evolution
+        // ✅ base selection for evolution (customer photo or prior render)
         ...(baseMeta ? { base: baseMeta } : {}),
       },
     } as any)
@@ -516,7 +557,13 @@ export async function deleteVersionAction(formData: FormData) {
   const v = await db
     .select({ version: quoteVersions.version })
     .from(quoteVersions)
-    .where(and(eq(quoteVersions.id, versionId as any), eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.quoteLogId, quoteId)))
+    .where(
+      and(
+        eq(quoteVersions.id, versionId as any),
+        eq(quoteVersions.tenantId, tenantId),
+        eq(quoteVersions.quoteLogId, quoteId)
+      )
+    )
     .limit(1)
     .then((r) => r[0] ?? null);
 
@@ -531,7 +578,13 @@ export async function deleteVersionAction(formData: FormData) {
   await db
     .update(quoteNotes)
     .set({ quoteVersionId: null } as any)
-    .where(and(eq(quoteNotes.tenantId, tenantId), eq(quoteNotes.quoteLogId, quoteId), eq(quoteNotes.quoteVersionId, versionId as any)));
+    .where(
+      and(
+        eq(quoteNotes.tenantId, tenantId),
+        eq(quoteNotes.quoteLogId, quoteId),
+        eq(quoteNotes.quoteVersionId, versionId as any)
+      )
+    );
 
   await db.delete(quoteVersions).where(and(eq(quoteVersions.tenantId, tenantId), eq(quoteVersions.id, versionId as any)));
 

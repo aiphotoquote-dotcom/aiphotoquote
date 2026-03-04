@@ -22,8 +22,11 @@ export default function LifecyclePanelServer(props: {
   renderRows: QuoteRenderRow[];
   lifecycleReadError: string | null;
   activeVersion: number | null;
+
+  // ✅ allow choosing customer photos as render base
+  customerPhotos?: any[];
 }) {
-  const { quoteId, versionRows, noteRows, renderRows, lifecycleReadError, activeVersion } = props;
+  const { quoteId, versionRows, noteRows, renderRows, lifecycleReadError, activeVersion, customerPhotos } = props;
 
   return (
     <LifecyclePanel
@@ -33,6 +36,7 @@ export default function LifecyclePanelServer(props: {
       renderRows={renderRows}
       lifecycleReadError={lifecycleReadError}
       activeVersion={activeVersion}
+      customerPhotos={Array.isArray(customerPhotos) ? customerPhotos : []}
       createNewVersionAction={createNewVersionAction}
       restoreVersionAction={restoreVersionAction}
       requestRenderAction={requestRenderAction}

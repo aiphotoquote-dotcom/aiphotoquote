@@ -22,7 +22,7 @@ function chip(label: string, tone: "gray" | "blue" | "green" | "red" = "gray") {
       : tone === "green"
         ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/40 dark:bg-green-950/30 dark:text-green-200"
         : tone === "red"
-          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30"
           : "border-gray-200 bg-gray-50 text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
 
   return <span className={base + toneClass}>{label}</span>;
@@ -70,6 +70,9 @@ export default function LifecyclePanel(props: {
 
   activeVersion: number | null;
 
+  // ✅ pass customer photos so the gallery can offer them as base
+  customerPhotos?: any[];
+
   createNewVersionAction: any;
   restoreVersionAction: any;
   requestRenderAction: any;
@@ -86,6 +89,7 @@ export default function LifecyclePanel(props: {
     renderRows,
     lifecycleReadError,
     activeVersion,
+    customerPhotos,
     createNewVersionAction,
     restoreVersionAction,
     requestRenderAction,
@@ -313,11 +317,7 @@ export default function LifecyclePanel(props: {
                                   ? "border-gray-200 text-gray-400 dark:border-gray-800 dark:text-gray-500 cursor-not-allowed"
                                   : "border-red-200 text-red-700 hover:bg-red-50 dark:border-red-900/40 dark:text-red-300 dark:hover:bg-red-950/30")
                               }
-                              title={
-                                isActive
-                                  ? "Cannot delete the ACTIVE version"
-                                  : "Delete this version (and its renders + linked notes)"
-                              }
+                              title={isActive ? "Cannot delete the ACTIVE version" : "Delete this version (and its renders + linked notes)"}
                             >
                               Delete
                             </button>
@@ -435,7 +435,7 @@ export default function LifecyclePanel(props: {
               <div>
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Request a new render</div>
                 <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                  Queues a render attempt for the selected version. Optionally base it on a prior render (“evolution”).
+                  Choose a version + optional base image (customer photo or prior render), then queue a render attempt.
                 </div>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
@@ -443,23 +443,20 @@ export default function LifecyclePanel(props: {
               </div>
             </div>
 
-            {/* ✅ Base selection display (populated by RenderGallery client via DOM) */}
+            {/* ✅ This display is updated by the client RenderGallery when you pick a base */}
             <div
               id="apq-render-base-display"
-              className="mt-3 rounded-xl border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300"
+              className="mt-3 rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-300"
             >
               Base image: <span className="font-mono">default customer photo</span>{" "}
-              <span className="text-gray-500 dark:text-gray-400">(click “Use as base” on a rendered tile to evolve)</span>
+              <span className="text-gray-500">(pick a customer photo below, or click “Use as base” on a render)</span>
             </div>
 
-            <form
-              id="apq-new-render-form"
-              action={requestRenderAction}
-              className="mt-3 grid gap-3 lg:grid-cols-12"
-            >
-              {/* ✅ hidden base inputs populated by RenderGallery */}
+            <form id="apq-new-render-form" action={requestRenderAction} className="mt-3 grid gap-3 lg:grid-cols-12">
+              {/* ✅ base selection hidden inputs (set by client) */}
+              <input id="apq-base-kind" type="hidden" name="base_kind" value="none" />
+              <input id="apq-base-image-url" type="hidden" name="base_url" value="" />
               <input id="apq-base-render-id" type="hidden" name="base_render_id" value="" />
-              <input id="apq-base-image-url" type="hidden" name="base_image_url" value="" />
 
               <div className="lg:col-span-4">
                 <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">Version</div>
@@ -513,7 +510,11 @@ export default function LifecyclePanel(props: {
           </div>
 
           <div className="mt-4">
-            <RenderGallery quoteId={quoteId} renderRows={renderRows as any} />
+            <RenderGallery
+              quoteId={quoteId}
+              renderRows={renderRows as any}
+              customerPhotos={Array.isArray(customerPhotos) ? customerPhotos : []}
+            />
           </div>
         </div>
       </div>
