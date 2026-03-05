@@ -223,7 +223,18 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     const closing = safeTrim(body?.closing);
 
     const templateKey = safeTrim(body?.templateKey) as "standard" | "before_after" | "visual_first";
+
+    // Build before/after (may be null)
     const beforeAfter = deriveBeforeAfter(body);
+
+    // ✅ STRICT: only pass beforeAfter when BOTH images exist (template expects non-null)
+    const beforeAfterStrict:
+      | {
+          before: Img;
+          after: Img;
+        }
+      | undefined =
+      beforeAfter?.before && beforeAfter?.after ? { before: beforeAfter.before, after: beforeAfter.after } : undefined;
 
     const { featuredImage, galleryImages } = deriveImages(body);
 
@@ -249,7 +260,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
       subject,
       featuredImage,
       galleryImages,
-      beforeAfter: beforeAfter ?? undefined,
+      beforeAfter: beforeAfterStrict,
       brand,
       quoteBlocks,
       replyToEmail: from,
