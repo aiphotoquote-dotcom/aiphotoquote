@@ -115,9 +115,11 @@ function pickAiAssessmentFromAny(outAny: any) {
   return null;
 }
 
+// ✅ IMPORTANT: treat 0/negative as "no estimate"
 function money(n: any) {
   const v = Number(n);
   if (!Number.isFinite(v)) return null;
+  if (v <= 0) return null;
   return v;
 }
 
@@ -129,6 +131,7 @@ function formatMoney(n: number) {
   }
 }
 
+// ✅ IMPORTANT: refuse to format $0 or negatives
 function formatEstimateText(lowMaybe: any, highMaybe: any) {
   const low = money(lowMaybe);
   const high = money(highMaybe);
@@ -142,6 +145,13 @@ function asStringArray(v: any): string[] {
   if (!Array.isArray(v)) return [];
   return v.map((x) => safeTrim(x)).filter(Boolean);
 }
+
+function moneyStrToNumber(s: string): number | null {
+  const n = Number(String(s ?? "").replace(/[,$\s]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+type SelectedImage = { kind: "render" | "photo"; id: string; url: string; label: string };
 
 export default function QuoteEmailComposeClient(props: {
   quoteId: string;
@@ -242,6 +252,8 @@ export default function QuoteEmailComposeClient(props: {
       assessment?.estimate?.high ??
       assessment?.estimate?.estimate_high ??
       null;
+
+    // ✅ this will now return "" for 0/0 or <=0
     return formatEstimateText(low, high);
   }, [assessment]);
 
@@ -270,26 +282,10 @@ export default function QuoteEmailComposeClient(props: {
   }, [selectedVersionNumber]);
 
   /* ------------------------------ pricing override ------------------------------ */
-  const [pricingMode, setPricingMode] = useState<"fixed" | "range" | "none">("fixed");
+  const [pricingMode, setPricingMode] = useState<"none" | "fixed" | "range">("fixed");
   const [fixedPrice, setFixedPrice] = useState<string>("");
   const [rangeLow, setRangeLow] = useState<string>("");
   const [rangeHigh, setRangeHigh] = useState<string>("");
-
-  // section toggles (pricing visibility is now influenced by pricingMode==="none")
-  const [showPricing, setShowPricing] = useState(true);
-  const [showSummary, setShowSummary] = useState(true);
-  const [showScope, setShowScope] = useState(false);
-  const [showQuestions, setShowQuestions] = useState(true);
-  const [showAssumptions, setShowAssumptions] = useState(false);
-
-  function handleSetPricingMode(v: "fixed" | "range" | "none") {
-    setPricingMode(v);
-    if (v === "none") {
-      setShowPricing(false);
-    } else {
-      setShowPricing(true);
-    }
-  }
 
   useEffect(() => {
     const a = assessment ?? {};
@@ -309,39 +305,36 @@ export default function QuoteEmailComposeClient(props: {
     const lo = money(low);
     const hi = money(high);
 
-    // If user had explicitly set "none", keep it when switching versions.
-    // Otherwise, prefill from AI if present.
+    if (lo != null && hi != null && lo > 0 && hi > 0) {
+      setPricingMode("range");
+      setRangeLow(String(Math.round(lo)));
+      setRangeHigh(String(Math.round(hi)));
+      setFixedPrice("");
+      return;
+    }
+
+    if (lo != null && lo > 0) {
+      setPricingMode("fixed");
+      setFixedPrice(String(Math.round(lo)));
+      setRangeLow("");
+      setRangeHigh("");
+      return;
+    }
+
+    if (hi != null && hi > 0) {
+      setPricingMode("fixed");
+      setFixedPrice(String(Math.round(hi)));
+      setRangeLow("");
+      setRangeHigh("");
+      return;
+    }
+
+    // ✅ if AI has nothing valid, default to NONE (avoids $0)
+    setPricingMode("none");
     setFixedPrice("");
     setRangeLow("");
     setRangeHigh("");
-
-    if (pricingMode === "none") return;
-
-    if (lo != null && hi != null) {
-      setPricingMode("range");
-      setShowPricing(true);
-      setRangeLow(String(Math.round(lo)));
-      setRangeHigh(String(Math.round(hi)));
-      return;
-    }
-
-    if (lo != null) {
-      setPricingMode("fixed");
-      setShowPricing(true);
-      setFixedPrice(String(Math.round(lo)));
-      return;
-    }
-
-    if (hi != null) {
-      setPricingMode("fixed");
-      setShowPricing(true);
-      setFixedPrice(String(Math.round(hi)));
-      return;
-    }
-
-    setPricingMode("fixed");
-    setShowPricing(true);
-  }, [selectedVersionNumber, assessment]); // intentionally not depending on pricingMode
+  }, [selectedVersionNumber, assessment]);
 
   /* ------------------------------ selection state ------------------------------ */
   const [selectedRenderIds, setSelectedRenderIds] = useState<string[]>(
@@ -381,6 +374,13 @@ export default function QuoteEmailComposeClient(props: {
 
   const [closing, setClosing] = useState("Thanks,\n— " + computedBrandName);
 
+  /* ------------------------------ section toggles ------------------------------ */
+  const [showPricing, setShowPricing] = useState(true);
+  const [showSummary, setShowSummary] = useState(true);
+  const [showScope, setShowScope] = useState(false);
+  const [showQuestions, setShowQuestions] = useState(true);
+  const [showAssumptions, setShowAssumptions] = useState(false);
+
   function toggleRender(id: string) {
     setSelectedRenderIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
@@ -399,8 +399,8 @@ export default function QuoteEmailComposeClient(props: {
     return (customerPhotoItems ?? []).filter((p) => set.has(p.key)).filter((p) => safeTrim(p.url));
   }, [customerPhotoItems, selectedPhotoKeys]);
 
-  const selectedImages = useMemo(() => {
-    const imgs: Array<{ kind: "render" | "photo"; id: string; url: string; label: string }> = [];
+  const selectedImages: SelectedImage[] = useMemo(() => {
+    const imgs: SelectedImage[] = [];
     for (const r of selectedRenders) {
       const url = safeTrim(r.imageUrl);
       if (!url) continue;
@@ -421,15 +421,55 @@ export default function QuoteEmailComposeClient(props: {
 
   const totalSelectedImages = selectedImages.length;
 
-  const effectiveShowPricing = showPricing && pricingMode !== "none";
+  /* ---------------------- before/after pairing (explicit) ---------------------- */
+  const defaultBeforeAfter = useMemo(() => {
+    // Prefer BEFORE = customer photo, AFTER = render
+    const before = selectedImages.find((x) => x.kind === "photo") ?? selectedImages[0] ?? null;
+    const after = selectedImages.find((x) => x.kind === "render") ?? selectedImages[1] ?? selectedImages[0] ?? null;
+    if (before && after && before.id === after.id) {
+      // try to pick a different second
+      const alt = selectedImages.find((x) => x.id !== before.id) ?? null;
+      return { before, after: alt ?? after };
+    }
+    return { before, after };
+  }, [selectedImages]);
+
+  const [beforeId, setBeforeId] = useState<string>("");
+  const [afterId, setAfterId] = useState<string>("");
+
+  // Initialize pairing any time selection changes materially
+  useEffect(() => {
+    const wantBefore = defaultBeforeAfter.before?.id ?? "";
+    const wantAfter = defaultBeforeAfter.after?.id ?? "";
+    setBeforeId((prev) => (prev && selectedImages.some((x) => x.id === prev) ? prev : wantBefore));
+    setAfterId((prev) => (prev && selectedImages.some((x) => x.id === prev) ? prev : wantAfter));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedImages.map((x) => x.id).join("|")]);
+
+  const beforeAfterPair = useMemo(() => {
+    const before = selectedImages.find((x) => x.id === beforeId) ?? defaultBeforeAfter.before ?? null;
+    const after = selectedImages.find((x) => x.id === afterId) ?? defaultBeforeAfter.after ?? null;
+    return { before, after };
+  }, [selectedImages, beforeId, afterId, defaultBeforeAfter]);
+
+  function swapBeforeAfter() {
+    setBeforeId(afterId);
+    setAfterId(beforeId);
+  }
 
   const previewModel: QuoteEmailPreviewModel = useMemo(() => {
     const featured =
       templateKey === "before_after"
-        ? selectedImages.find((x) => x.kind === "photo") || selectedImages[0] || null
+        ? null
         : selectedImages.find((x) => x.kind === "render") || selectedImages[0] || null;
 
     const gallery = featured ? selectedImages.filter((x) => x.url !== featured.url) : selectedImages;
+
+    // If before/after is active, remove the paired images from the gallery to avoid duplicates
+    const galleryNoPair =
+      templateKey === "before_after" && beforeAfterPair.before?.url && beforeAfterPair.after?.url
+        ? gallery.filter((x) => x.url !== beforeAfterPair.before!.url && x.url !== beforeAfterPair.after!.url)
+        : gallery;
 
     return {
       templateKey,
@@ -451,15 +491,26 @@ export default function QuoteEmailComposeClient(props: {
       closing,
 
       featuredImage: featured ? { url: featured.url, label: featured.label } : null,
-      galleryImages: gallery.map((x) => ({ url: x.url, label: x.label })),
+      galleryImages: galleryNoPair.map((x) => ({ url: x.url, label: x.label })),
+
+      beforeAfter:
+        templateKey === "before_after"
+          ? {
+              before: beforeAfterPair.before
+                ? { url: beforeAfterPair.before.url, label: beforeAfterPair.before.label }
+                : null,
+              after: beforeAfterPair.after ? { url: beforeAfterPair.after.url, label: beforeAfterPair.after.label } : null,
+            }
+          : undefined,
 
       quoteBlocks: {
-        showPricing: effectiveShowPricing,
+        showPricing,
         showSummary,
         showScope,
         showQuestions,
         showAssumptions,
 
+        // ✅ aiEstimateText is now "" for 0/0 so it won't leak into email fallback
         estimateText: safeTrim(aiEstimateText),
         confidence: safeTrim(confidence),
         inspectionRequired,
@@ -498,7 +549,7 @@ export default function QuoteEmailComposeClient(props: {
     closing,
     selectedImages,
     totalSelectedImages,
-    effectiveShowPricing,
+    showPricing,
     showSummary,
     showScope,
     showQuestions,
@@ -514,6 +565,7 @@ export default function QuoteEmailComposeClient(props: {
     visibleScope,
     questions,
     assumptions,
+    beforeAfterPair,
   ]);
 
   /* ------------------------------ media drawer ------------------------------ */
@@ -567,13 +619,47 @@ export default function QuoteEmailComposeClient(props: {
   const ccOk = ccList.every(looksLikeEmail);
   const bccOk = bccList.every(looksLikeEmail);
 
+  function pricingValid(): { ok: boolean; message?: string } {
+    if (!showPricing || pricingMode === "none") return { ok: true };
+
+    if (pricingMode === "fixed") {
+      const n = moneyStrToNumber(fixedPrice);
+      if (n == null || n <= 0)
+        return { ok: false, message: "Fixed price must be a number greater than 0 (or choose None)." };
+      return { ok: true };
+    }
+
+    if (pricingMode === "range") {
+      const lo = moneyStrToNumber(rangeLow);
+      const hi = moneyStrToNumber(rangeHigh);
+      if (lo == null || lo <= 0) return { ok: false, message: "Range low must be a number greater than 0 (or choose None)." };
+      if (hi == null || hi <= 0) return { ok: false, message: "Range high must be a number greater than 0 (or choose None)." };
+      if (hi < lo) return { ok: false, message: "Range high must be greater than or equal to range low." };
+      return { ok: true };
+    }
+
+    return { ok: true };
+  }
+
+  function beforeAfterValid(): { ok: boolean; message?: string } {
+    if (templateKey !== "before_after") return { ok: true };
+    if (totalSelectedImages < 2) return { ok: false, message: "Before/After template requires at least 2 selected images." };
+    const b = beforeAfterPair.before;
+    const a = beforeAfterPair.after;
+    if (!b?.url || !a?.url) return { ok: false, message: "Pick both a Before and an After image." };
+    if (b.url === a.url) return { ok: false, message: "Before and After must be different images." };
+    return { ok: true };
+  }
+
   const canSend =
     toOk &&
     totalSelectedImages > 0 &&
     Boolean(safeTrim(subject)) &&
     Boolean(safeTrim(selectedVersionNumber)) &&
     ccOk &&
-    bccOk;
+    bccOk &&
+    pricingValid().ok &&
+    beforeAfterValid().ok;
 
   /* ------------------------------ send wiring ------------------------------ */
   const [sending, setSending] = useState(false);
@@ -592,12 +678,14 @@ export default function QuoteEmailComposeClient(props: {
     if (!bccOk) return setSendError("One or more BCC addresses look invalid.");
     if (totalSelectedImages <= 0) return setSendError("Select at least one image to send.");
 
+    const pv = pricingValid();
+    if (!pv.ok) return setSendError(pv.message || "Pricing invalid.");
+
+    const bav = beforeAfterValid();
+    if (!bav.ok) return setSendError(bav.message || "Before/After selection invalid.");
+
     const featuredImage = previewModel.featuredImage ?? null;
     const galleryImages = Array.isArray(previewModel.galleryImages) ? previewModel.galleryImages : [];
-
-    if (!featuredImage && galleryImages.length === 0) {
-      return setSendError("No images available to send. Select at least one image.");
-    }
 
     setSending(true);
     try {
@@ -614,7 +702,15 @@ export default function QuoteEmailComposeClient(props: {
 
         featuredImage,
         galleryImages,
-        selectedImages: selectedImages.map((x) => ({ url: x.url, label: x.label })),
+        selectedImages: selectedImages.map((x) => ({ url: x.url, label: x.label, kind: x.kind })),
+
+        beforeAfter:
+          templateKey === "before_after"
+            ? {
+                before: beforeAfterPair.before ? { url: beforeAfterPair.before.url, label: beforeAfterPair.before.label } : null,
+                after: beforeAfterPair.after ? { url: beforeAfterPair.after.url, label: beforeAfterPair.after.label } : null,
+              }
+            : undefined,
 
         to: safeTrim(to),
         cc: ccList,
@@ -625,14 +721,14 @@ export default function QuoteEmailComposeClient(props: {
         intro,
         closing,
 
-        // ✅ include editable blocks + IMPORTANT: estimateText
         quoteBlocks: {
-          showPricing: effectiveShowPricing,
+          showPricing,
           showSummary,
           showScope,
           showQuestions,
           showAssumptions,
 
+          // ✅ now safe (won't be $0—$0)
           estimateText: safeTrim(aiEstimateText),
 
           summary,
@@ -646,13 +742,13 @@ export default function QuoteEmailComposeClient(props: {
           rangeHigh,
         },
 
-        // ✅ send the SAME branding the preview shows
         brand: {
           name: safeTrim(previewModel.brandName),
           logoUrl: safeTrim(previewModel.brandLogoUrl),
           tagline: safeTrim(previewModel.brandTagline),
         },
 
+        fromHint: safeTrim(previewModel.brandName),
         shareUrl: safeTrim(shareUrl),
       };
 
@@ -676,31 +772,6 @@ export default function QuoteEmailComposeClient(props: {
       setSending(false);
     }
   }
-
-  // ✅ Force remount of the preview when major layout flags change (fixes “Pricing toggle does nothing”)
-  const previewKey = useMemo(() => {
-    return [
-      templateKey,
-      selectedVersionNumber,
-      totalSelectedImages,
-      effectiveShowPricing ? "p1" : "p0",
-      showSummary ? "s1" : "s0",
-      showQuestions ? "q1" : "q0",
-      showAssumptions ? "a1" : "a0",
-      showScope ? "sc1" : "sc0",
-      pricingMode,
-    ].join("|");
-  }, [
-    templateKey,
-    selectedVersionNumber,
-    totalSelectedImages,
-    effectiveShowPricing,
-    showSummary,
-    showQuestions,
-    showAssumptions,
-    showScope,
-    pricingMode,
-  ]);
 
   return (
     <div className="space-y-6">
@@ -753,23 +824,9 @@ export default function QuoteEmailComposeClient(props: {
             <div className="ml-1 flex items-center gap-2">
               <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">3) Sections</div>
               <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    // If user toggles pricing OFF, treat it like "none"
-                    // If they toggle ON, keep their last non-none mode (or default fixed)
-                    setShowPricing((v) => {
-                      const next = !v;
-                      if (!next) handleSetPricingMode("none");
-                      if (next && pricingMode === "none") handleSetPricingMode("fixed");
-                      return next;
-                    });
-                  }}
-                  className={toggleBtn(effectiveShowPricing)}
-                >
+                <button type="button" onClick={() => setShowPricing((v) => !v)} className={toggleBtn(showPricing)}>
                   Pricing
                 </button>
-
                 <button type="button" onClick={() => setShowSummary((v) => !v)} className={toggleBtn(showSummary)}>
                   Summary
                 </button>
@@ -785,10 +842,52 @@ export default function QuoteEmailComposeClient(props: {
               </div>
             </div>
 
+            {/* Before/After controls */}
+            {templateKey === "before_after" && totalSelectedImages >= 2 ? (
+              <div className="ml-1 flex flex-wrap items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-2 dark:border-gray-800 dark:bg-black">
+                <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Before/After</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">Before</div>
+                <select
+                  value={beforeId}
+                  onChange={(e) => setBeforeId(e.target.value)}
+                  className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs dark:border-gray-800 dark:bg-black"
+                >
+                  {selectedImages.map((img) => (
+                    <option key={img.id} value={img.id}>
+                      {img.label}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="button"
+                  onClick={swapBeforeAfter}
+                  className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                  title="Swap before and after"
+                >
+                  Swap
+                </button>
+
+                <div className="text-xs text-gray-500 dark:text-gray-400">After</div>
+                <select
+                  value={afterId}
+                  onChange={(e) => setAfterId(e.target.value)}
+                  className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs dark:border-gray-800 dark:bg-black"
+                >
+                  {selectedImages.map((img) => (
+                    <option key={img.id} value={img.id}>
+                      {img.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+
             {/* Chips */}
             <div className="ml-1 flex flex-wrap gap-2">
               {chip(`${totalSelectedImages} selected`)}
               {safeTrim(selectedVersionNumber) ? chip(`v${safeTrim(selectedVersionNumber)}`) : chip("v—")}
+              {/* ✅ aiEstimateText is now "" for 0/0 so this won't show $0 */}
               {aiEstimateText ? chip(aiEstimateText) : chip("estimate —")}
             </div>
           </div>
@@ -923,15 +1022,20 @@ export default function QuoteEmailComposeClient(props: {
 
         <div className="mt-4">
           <QuoteEmailPreview
-            key={previewKey}
             model={previewModel}
             onEdit={{
               setHeadline,
               setIntro,
               setClosing,
 
-              // ✅ IMPORTANT: do not pass setPricingMode directly anymore
-              setPricingMode: handleSetPricingMode,
+              setPricingMode: (v) => {
+                setPricingMode(v);
+                if (v === "none") {
+                  setShowPricing(false);
+                } else {
+                  setShowPricing(true);
+                }
+              },
               setFixedPrice,
               setRangeLow,
               setRangeHigh,
@@ -945,9 +1049,154 @@ export default function QuoteEmailComposeClient(props: {
         </div>
       </section>
 
-      {/* Media drawer (unchanged; omitted here on purpose for brevity) */}
-      {/* NOTE: If your file includes a media drawer below this, keep it as-is. */}
-      {/* If your current file ends here, you're good. */}
+      {/* Media drawer */}
+      {mediaOpen ? (
+        <div className="fixed inset-0 z-40">
+          <div className="absolute inset-0 bg-black/40" onClick={closeMedia} />
+          <div className="absolute right-0 top-0 h-full w-full max-w-3xl bg-white shadow-2xl dark:bg-black">
+            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-800">
+              <div>
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Select images</div>
+                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                  Pick renders and/or customer photos — the preview updates instantly.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {chip(`Selected: ${totalSelectedImages}`)}
+                <button
+                  type="button"
+                  onClick={closeMedia}
+                  className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+
+            <div className="h-[calc(100%-64px)] overflow-auto px-6 py-5 space-y-8">
+              {/* Renders */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Renders</div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">Rendered only</div>
+                </div>
+
+                {renderedRenders?.length ? (
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {renderedRenders.map((r) => {
+                      const url = safeTrim(r.imageUrl);
+                      if (!url) return null;
+                      const active = selectedRenderIds.includes(String(r.id));
+                      return (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => toggleRender(String(r.id))}
+                          className={
+                            "group rounded-2xl border overflow-hidden text-left transition " +
+                            (active
+                              ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
+                              : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700")
+                          }
+                          title="Toggle render"
+                        >
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={url} alt="Render" className="h-40 w-full object-cover bg-black/5" />
+                          <div className="p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+                                Render {r.attempt != null ? `#${Number(r.attempt)}` : ""}
+                              </div>
+                              {active ? (
+                                <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
+                                  SELECTED
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-gray-500 dark:text-gray-400 group-hover:underline">
+                                  Click to select
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+                    No rendered images found yet.
+                  </div>
+                )}
+              </div>
+
+              {/* Customer Photos */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Customer photos</div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">From the quote</div>
+                </div>
+
+                {customerPhotoItems?.length ? (
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    {customerPhotoItems.map((p) => {
+                      const active = selectedPhotoKeys.includes(p.key);
+                      const url = safeTrim(p.url);
+                      return (
+                        <button
+                          key={p.key}
+                          type="button"
+                          onClick={() => togglePhoto(p.key)}
+                          className={
+                            "group rounded-2xl border overflow-hidden text-left transition " +
+                            (active
+                              ? "border-black ring-2 ring-black dark:border-white dark:ring-white"
+                              : "border-gray-200 hover:border-gray-300 dark:border-gray-800 dark:hover:border-gray-700")
+                          }
+                          title="Toggle customer photo"
+                        >
+                          {url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={url} alt="Customer photo" className="h-32 w-full object-cover bg-black/5" />
+                          ) : (
+                            <div className="h-32 w-full flex items-center justify-center text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-black">
+                              Missing URL
+                            </div>
+                          )}
+                          <div className="p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-semibold text-gray-900 dark:text-gray-100">Customer photo</div>
+                              {active ? (
+                                <span className="rounded-full bg-black px-2 py-1 text-[11px] font-semibold text-white dark:bg-white dark:text-black">
+                                  SELECTED
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-gray-500 dark:text-gray-400 group-hover:underline">
+                                  Click to select
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
+                    No customer photos found on this quote.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-700 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200">
+                <div className="font-semibold">Tip</div>
+                <div className="mt-1">
+                  The preview chooses the best layout per template. Before/After lets you explicitly pick the pairing.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

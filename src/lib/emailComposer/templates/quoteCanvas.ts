@@ -78,7 +78,11 @@ function renderList(items: string[]) {
 }
 
 function computePricingDisplay(qb: QuoteBlocks | undefined): { title: string; detail: string } {
-  const estimateText = safeTrim(qb?.estimateText);
+  const rawEstimateText = safeTrim(qb?.estimateText);
+
+  // ✅ Ignore estimateText if it's effectively "$0" / "0"
+  const estNum = moneyFromString(rawEstimateText);
+  const estimateText = estNum != null && estNum <= 0 ? "" : rawEstimateText;
 
   const mode = qb?.pricingMode === "range" ? "range" : qb?.pricingMode === "none" ? "none" : "fixed";
   if (mode === "none") return { title: "Quote at a glance", detail: "" };
@@ -113,7 +117,6 @@ function renderBeforeAfterBlock(before: Img, after: Img) {
   const beforeLabel = escapeHtml(before.label || "Before");
   const afterLabel = escapeHtml(after.label || "After");
 
-  // Use tables for best email client support.
   return `
     <div style="margin-top:18px;">
       <div style="font-size:16px;font-weight:900;color:#111827;">Before <span style="color:#9ca3af;">→</span> After</div>
@@ -195,8 +198,9 @@ export function buildQuoteCanvasEmailHtml(args: {
     ? `<img src="${brandLogoUrl}" alt="${brandName}" style="height:40px;max-width:180px;border-radius:10px;object-fit:contain;display:block;border:1px solid #e5e7eb;background:#ffffff;padding:6px 10px;" />`
     : `<div style="width:40px;height:40px;border-radius:10px;background:#111827;"></div>`;
 
-  const pricingBlock = showPricing && safeTrim(pricing.detail)
-    ? `
+  const pricingBlock =
+    showPricing && safeTrim(pricing.detail)
+      ? `
       <div style="margin-top:22px;border:1px solid #e5e7eb;border-radius:16px;padding:18px;background:#ffffff;">
         <div style="font-size:14px;font-weight:700;color:#111827;">${escapeHtml(pricing.title)}</div>
         <div style="margin-top:8px;font-size:22px;font-weight:800;color:#111827;">${escapeHtml(pricing.detail)}</div>
@@ -223,7 +227,7 @@ export function buildQuoteCanvasEmailHtml(args: {
         </div>
       </div>
     `
-    : "";
+      : "";
 
   const summaryBlock =
     showSummary && summary
@@ -267,7 +271,6 @@ export function buildQuoteCanvasEmailHtml(args: {
     `
       : "";
 
-  // Image sections:
   const templateKey = args.templateKey ?? "standard";
 
   const beforeAfterHtml =
