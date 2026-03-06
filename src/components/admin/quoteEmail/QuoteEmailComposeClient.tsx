@@ -336,6 +336,28 @@ export default function QuoteEmailComposeClient(props: {
     setRangeHigh("");
   }, [selectedVersionNumber, assessment]);
 
+  /**
+   * ✅ CRITICAL FIX:
+   * The preview and email payload should NOT rely solely on aiEstimateText.
+   * If the AI estimate is missing/0, pricing can appear "not showing" even when you override.
+   * We compute an "effective" estimate text that prefers the override (pricingMode + fields),
+   * then falls back to aiEstimateText.
+   */
+  const effectiveEstimateText = useMemo(() => {
+    if (pricingMode === "fixed") {
+      const n = moneyStrToNumber(fixedPrice);
+      return n != null && n > 0 ? formatMoney(n) : "";
+    }
+    if (pricingMode === "range") {
+      const lo = moneyStrToNumber(rangeLow);
+      const hi = moneyStrToNumber(rangeHigh);
+      if (lo != null && lo > 0 && hi != null && hi > 0) return `${formatMoney(lo)} — ${formatMoney(hi)}`;
+      return "";
+    }
+    // pricingMode === "none" -> fall back to AI text if present
+    return safeTrim(aiEstimateText);
+  }, [pricingMode, fixedPrice, rangeLow, rangeHigh, aiEstimateText]);
+
   /* ------------------------------ selection state ------------------------------ */
   const [selectedRenderIds, setSelectedRenderIds] = useState<string[]>(
     Array.isArray(initialSelectedRenderIds) ? initialSelectedRenderIds : []
@@ -510,8 +532,12 @@ export default function QuoteEmailComposeClient(props: {
         showQuestions,
         showAssumptions,
 
-        // ✅ aiEstimateText is now "" for 0/0 so it won't leak into email fallback
-        estimateText: safeTrim(aiEstimateText),
+        /**
+         * ✅ CRITICAL FIX:
+         * Use effectiveEstimateText (override-first, then AI fallback).
+         * This makes the Pricing section actually show something when AI estimate is missing.
+         */
+        estimateText: safeTrim(effectiveEstimateText),
         confidence: safeTrim(confidence),
         inspectionRequired,
 
@@ -554,7 +580,7 @@ export default function QuoteEmailComposeClient(props: {
     showScope,
     showQuestions,
     showAssumptions,
-    aiEstimateText,
+    effectiveEstimateText,
     confidence,
     inspectionRequired,
     pricingMode,
@@ -728,8 +754,8 @@ export default function QuoteEmailComposeClient(props: {
           showQuestions,
           showAssumptions,
 
-          // ✅ now safe (won't be $0—$0)
-          estimateText: safeTrim(aiEstimateText),
+          // ✅ send the same effective text so the server-side email matches the preview
+          estimateText: safeTrim(effectiveEstimateText),
 
           summary,
           visibleScope,
@@ -887,8 +913,7 @@ export default function QuoteEmailComposeClient(props: {
             <div className="ml-1 flex flex-wrap gap-2">
               {chip(`${totalSelectedImages} selected`)}
               {safeTrim(selectedVersionNumber) ? chip(`v${safeTrim(selectedVersionNumber)}`) : chip("v—")}
-              {/* ✅ aiEstimateText is now "" for 0/0 so this won't show $0 */}
-              {aiEstimateText ? chip(aiEstimateText) : chip("estimate —")}
+              {safeTrim(effectiveEstimateText) ? chip(safeTrim(effectiveEstimateText)) : chip("estimate —")}
             </div>
           </div>
 
