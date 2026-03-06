@@ -112,11 +112,14 @@ function formatMoney(n: number) {
 }
 
 function computeOverrideEstimateText(qb: QuoteEmailPreviewModel["quoteBlocks"]): string {
+  // NOTE: when pricingMode is none, we intentionally return "" so the pill + big number hide
   if (qb.pricingMode === "none") return "";
+
   if (qb.pricingMode === "fixed") {
     const n = moneyStrToNumber(qb.fixedPrice);
     return n != null && n > 0 ? formatMoney(n) : "";
   }
+
   const lo = moneyStrToNumber(qb.rangeLow);
   const hi = moneyStrToNumber(qb.rangeHigh);
   if (lo != null && hi != null && lo > 0 && hi > 0) return `${formatMoney(lo)} — ${formatMoney(hi)}`;
@@ -250,7 +253,10 @@ export default function QuoteEmailPreview(props: {
   const overrideEstimateText = computeOverrideEstimateText(qb);
   const displayEstimate = safeTrim(overrideEstimateText) || safeTrim(qb.estimateText);
 
-  const showPricingEffective = qb.showPricing && qb.pricingMode !== "none";
+  // ✅ IMPORTANT FIX:
+  // Pricing visibility is controlled by showPricing ONLY.
+  // pricingMode="none" simply means "hide pricing amount", but the card still shows so user can switch modes.
+  const showPricingEffective = qb.showPricing;
 
   const baBefore = model.beforeAfter?.before ?? null;
   const baAfter = model.beforeAfter?.after ?? null;
@@ -259,7 +265,7 @@ export default function QuoteEmailPreview(props: {
 
   return (
     <div className="space-y-4">
-      {/* App chrome (like a mail preview panel) */}
+      {/* App chrome */}
       <div className="rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-black">
         <div className="flex items-center justify-between px-5 py-3">
           <div className="flex items-center gap-3">
@@ -280,7 +286,6 @@ export default function QuoteEmailPreview(props: {
 
       {/* Canvas background */}
       <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
-        {/* Email “paper” */}
         <div className="mx-auto max-w-[720px] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-black">
           {/* Header rows */}
           <div className="border-b border-gray-200 dark:border-gray-800 px-6 py-4">
@@ -364,7 +369,7 @@ export default function QuoteEmailPreview(props: {
 
             {/* Pills */}
             <div className="mt-5 flex flex-wrap gap-2">
-              {showPricingEffective && displayEstimate ? pill(`Estimate: ${displayEstimate}`) : null}
+              {showPricingEffective && qb.pricingMode !== "none" && displayEstimate ? pill(`Estimate: ${displayEstimate}`) : null}
               {qb.confidence ? pill(`Confidence: ${qb.confidence}`) : null}
               {qb.inspectionRequired === true ? pill("Inspection required") : null}
               {showBadges ? model.badges.map((b, i) => <React.Fragment key={`${b}-${i}`}>{pill(b)}</React.Fragment>) : null}
@@ -377,9 +382,16 @@ export default function QuoteEmailPreview(props: {
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote at a glance</div>
-                      <div className="mt-2 text-xl font-semibold text-gray-900 dark:text-gray-100">
-                        {displayEstimate ? displayEstimate : "Estimate pending"}
-                      </div>
+
+                      {qb.pricingMode === "none" ? (
+                        <div className="mt-2 text-sm font-semibold text-gray-600 dark:text-gray-300">
+                          Pricing hidden for this email.
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-xl font-semibold text-gray-900 dark:text-gray-100">
+                          {displayEstimate ? displayEstimate : "Estimate pending"}
+                        </div>
+                      )}
                     </div>
 
                     {/* Pricing mode toggle + inputs */}
@@ -387,9 +399,7 @@ export default function QuoteEmailPreview(props: {
                       <div className="flex items-center justify-end gap-2">
                         <button
                           type="button"
-                          onClick={() => {
-                            onEdit.setPricingMode("none");
-                          }}
+                          onClick={() => onEdit.setPricingMode("none")}
                           className={
                             "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
                             (qb.pricingMode === "none"
@@ -560,7 +570,7 @@ export default function QuoteEmailPreview(props: {
               ) : null}
             </div>
 
-            {/* BEFORE/AFTER block (preferred for before_after template) */}
+            {/* BEFORE/AFTER block */}
             {showBeforeAfterBlock ? (
               <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
                 <div className="border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center justify-between">
@@ -603,26 +613,23 @@ export default function QuoteEmailPreview(props: {
                   Tip: reply with changes if anything isn’t exactly what you want — we’ll revise the quote.
                 </div>
               </div>
+            ) : model.featuredImage ? (
+              <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={model.featuredImage.url}
+                  alt={model.featuredImage.label}
+                  className="w-full object-cover max-h-[460px] bg-black/5"
+                />
+                <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                  <div className="font-semibold">{model.featuredImage.label}</div>
+                  <div className="font-mono opacity-70">featured</div>
+                </div>
+              </div>
             ) : (
-              // fallback: featured image
-              model.featuredImage ? (
-                <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={model.featuredImage.url}
-                    alt={model.featuredImage.label}
-                    className="w-full object-cover max-h-[460px] bg-black/5"
-                  />
-                  <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                    <div className="font-semibold">{model.featuredImage.label}</div>
-                    <div className="font-mono opacity-70">featured</div>
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-6 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-                  Select at least one image to see the layout come alive.
-                </div>
-              )
+              <div className="mt-6 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+                Select at least one image to see the layout come alive.
+              </div>
             )}
 
             {/* Gallery */}

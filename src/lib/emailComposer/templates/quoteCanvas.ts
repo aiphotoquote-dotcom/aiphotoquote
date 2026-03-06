@@ -78,11 +78,7 @@ function renderList(items: string[]) {
 }
 
 function computePricingDisplay(qb: QuoteBlocks | undefined): { title: string; detail: string } {
-  const rawEstimateText = safeTrim(qb?.estimateText);
-
-  // ✅ Ignore estimateText if it's effectively "$0" / "0"
-  const estNum = moneyFromString(rawEstimateText);
-  const estimateText = estNum != null && estNum <= 0 ? "" : rawEstimateText;
+  const estimateText = safeTrim(qb?.estimateText);
 
   const mode = qb?.pricingMode === "range" ? "range" : qb?.pricingMode === "none" ? "none" : "fixed";
   if (mode === "none") return { title: "Quote at a glance", detail: "" };
@@ -174,7 +170,10 @@ export function buildQuoteCanvasEmailHtml(args: {
   const brandLogoUrl = safeTrim(args.brand?.logoUrl);
 
   const qb: QuoteBlocks = args.quoteBlocks ?? {};
-  const showPricing = qb.showPricing !== false && qb.pricingMode !== "none";
+
+  // ✅ IMPORTANT FIX: showPricing is controlled ONLY by showPricing flag.
+  // pricingMode="none" means "do not include pricing block in final email".
+  const showPricing = qb.showPricing !== false;
   const showSummary = qb.showSummary !== false;
   const showScope = qb.showScope === true;
   const showQuestions = qb.showQuestions !== false;
@@ -199,11 +198,13 @@ export function buildQuoteCanvasEmailHtml(args: {
     : `<div style="width:40px;height:40px;border-radius:10px;background:#111827;"></div>`;
 
   const pricingBlock =
-    showPricing && safeTrim(pricing.detail)
+    showPricing && qb.pricingMode !== "none"
       ? `
       <div style="margin-top:22px;border:1px solid #e5e7eb;border-radius:16px;padding:18px;background:#ffffff;">
         <div style="font-size:14px;font-weight:700;color:#111827;">${escapeHtml(pricing.title)}</div>
-        <div style="margin-top:8px;font-size:22px;font-weight:800;color:#111827;">${escapeHtml(pricing.detail)}</div>
+        <div style="margin-top:8px;font-size:22px;font-weight:800;color:#111827;">${
+          safeTrim(pricing.detail) ? escapeHtml(pricing.detail) : "Estimate pending"
+        }</div>
         <div style="margin-top:10px;font-size:14px;line-height:1.6;color:#374151;">
           Reply to approve and we’ll schedule the job. If anything looks off, tell us what to adjust.
         </div>
@@ -361,7 +362,7 @@ export function buildQuoteCanvasText(args: {
   const brandTagline = safeTrim(args.brand?.tagline);
 
   const qb: QuoteBlocks = args.quoteBlocks ?? {};
-  const showPricing = qb.showPricing !== false && qb.pricingMode !== "none";
+  const showPricing = qb.showPricing !== false;
   const showSummary = qb.showSummary !== false;
   const showScope = qb.showScope === true;
   const showQuestions = qb.showQuestions !== false;
@@ -380,7 +381,9 @@ export function buildQuoteCanvasText(args: {
   blocks.push(safeTrim(args.headline));
   blocks.push(toLines(args.intro));
 
-  if (showPricing && safeTrim(pricing.detail)) blocks.push(`${pricing.title}: ${pricing.detail}`);
+  // In text emails: only include pricing line if pricing is enabled AND not hidden by mode
+  if (showPricing && qb.pricingMode !== "none" && safeTrim(pricing.detail)) blocks.push(`${pricing.title}: ${pricing.detail}`);
+
   if (showSummary && summary) blocks.push(`Summary:\n${toLines(summary)}`);
   if (showScope && visibleScope.length) blocks.push(`Visible scope:\n- ${visibleScope.join("\n- ")}`);
   if (showQuestions && questions.length) blocks.push(`Questions (optional):\n- ${questions.join("\n- ")}`);
