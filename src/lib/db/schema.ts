@@ -379,8 +379,147 @@ export const quoteLogs = pgTable("quote_logs", {
   isRead: boolean("is_read").notNull().default(false),
   stage: text("stage").notNull().default("new"),
 
+  // ✅ NEW: points to which quote_versions.version is currently "active"
+  currentVersion: integer("current_version"),
+
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
+
+/**
+ * Quote versions — human-initiated lifecycle (additive; does NOT replace quote_logs)
+ */
+export const quoteVersions = pgTable(
+  "quote_versions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    quoteLogId: uuid("quote_log_id")
+      .notNull()
+      .references(() => quoteLogs.id, { onDelete: "cascade" }),
+
+    version: integer("version").notNull().default(1),
+
+    // nullable in prod
+    aiMode: text("ai_mode"),
+
+    // system | tenant_edit | ai_conversion
+    source: text("source").notNull().default("tenant_edit"),
+
+    // required in prod
+    createdBy: text("created_by").notNull().default("system"),
+
+    // optional in prod
+    reason: text("reason"),
+
+    output: jsonb("output").$type<any>().notNull().default({}),
+
+    // required in prod (NOT NULL)
+    meta: jsonb("meta").$type<any>().notNull().default({}),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    quoteLogCreatedIdx: index("quote_versions_quote_log_created_idx").on(t.quoteLogId, t.createdAt),
+    tenantCreatedIdx: index("quote_versions_tenant_created_idx").on(t.tenantId, t.createdAt),
+    quoteLogVersionUq: uniqueIndex("quote_versions_quote_log_id_version_uq").on(t.quoteLogId, t.version),
+  })
+);
+
+/**
+ * Quote notes — tenant-authored notes (internal for now; can add visibility flags later)
+ *
+ * ✅ MUST match prod DB shape you pasted:
+ * - body NOT NULL default ''
+ * - created_by NOT NULL default 'tenant'
+ * - quote_version_id FK ON DELETE SET NULL
+ * - indexes:
+ *   - quote_notes_quote_log_created_idx (quote_log_id, created_at desc)
+ *   - quote_notes_tenant_created_idx (tenant_id, created_at desc)
+ */
+export const quoteNotes = pgTable(
+  "quote_notes",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    quoteLogId: uuid("quote_log_id")
+      .notNull()
+      .references(() => quoteLogs.id, { onDelete: "cascade" }),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    quoteVersionId: uuid("quote_version_id").references(() => quoteVersions.id, { onDelete: "set null" }),
+
+    body: text("body").notNull().default(""),
+
+    createdBy: text("created_by").notNull().default("tenant"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    quoteLogCreatedIdx: index("quote_notes_quote_log_created_idx").on(t.quoteLogId, t.createdAt),
+    tenantCreatedIdx: index("quote_notes_tenant_created_idx").on(t.tenantId, t.createdAt),
+  })
+);
+
+/**
+ * Quote renders — manual render attempts per quote version (stored history)
+ */
+export const quoteRenders = pgTable(
+  "quote_renders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+
+    quoteLogId: uuid("quote_log_id")
+      .notNull()
+      .references(() => quoteLogs.id, { onDelete: "cascade" }),
+
+    quoteVersionId: uuid("quote_version_id")
+      .notNull()
+      .references(() => quoteVersions.id, { onDelete: "cascade" }),
+
+    // Attempt number per version (1..n)
+    attempt: integer("attempt").notNull().default(1),
+
+    // queued | running | rendered | failed
+    status: text("status").notNull().default("queued"),
+
+    // What we asked the renderer to do
+    prompt: text("prompt"),
+    shopNotes: text("shop_notes"),
+
+    // ✅ NEW: per-attempt flags (admin override, source, etc.)
+    meta: jsonb("meta").$type<any>().notNull().default({}),
+
+    // Output
+    imageUrl: text("image_url"),
+    error: text("error"),
+
+    // Which one is selected to show/send for the version
+    isSelected: boolean("is_selected").notNull().default(false),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => ({
+    tenantIdx: index("quote_renders_tenant_id_idx").on(t.tenantId),
+    quoteLogIdx: index("quote_renders_quote_log_id_idx").on(t.quoteLogId),
+    quoteVersionIdx: index("quote_renders_quote_version_id_idx").on(t.quoteVersionId),
+    statusIdx: index("quote_renders_status_idx").on(t.status),
+    createdIdx: index("quote_renders_created_at_idx").on(t.createdAt),
+    versionAttemptUq: uniqueIndex("quote_renders_quote_version_attempt_uq").on(t.quoteVersionId, t.attempt),
+  })
+);
 
 /**
  * Industries (✅ aligned to your Neon table shape)
@@ -466,16 +605,6 @@ export const tenantOnboarding = pgTable(
 
 /**
  * Industry prompt packs (✅ aligned to what your PCC page + merge route query)
- *
- * Your code queries:
- * - enabled
- * - version
- * - pack
- * - models
- * - prompts
- * - updated_at
- *
- * And uses "multiple versions per industry", so DO NOT unique industry_key here.
  */
 export const industryLlmPacks = pgTable(
   "industry_llm_packs",
@@ -504,11 +633,6 @@ export const industryLlmPacks = pgTable(
 
 /**
  * Industry change log (append-only)
- * ✅ MUST match prod DB:
- * - source_industry_key / target_industry_key
- * - snapshot (jsonb)
- * - created_at
- * - action check in DB (we'll expand to include canonicalize)
  */
 export const industryChangeLog = pgTable(
   "industry_change_log",

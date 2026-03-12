@@ -6,7 +6,13 @@ import OpenAI from "openai";
 import crypto from "crypto";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSecrets, tenantSettings, quoteLogs, platformConfig } from "@/lib/db/schema";
+import {
+  tenants,
+  tenantSecrets,
+  tenantSettings,
+  quoteLogs,
+  platformConfig,
+} from "@/lib/db/schema";
 import { decryptSecret } from "@/lib/crypto";
 
 import { sendEmail } from "@/lib/email";
@@ -528,7 +534,6 @@ async function resolveOpenAiClient(args: {
     .limit(1)
     .then((r) => r[0] ?? null);
 
-  // ✅ normalize nullable text column (Drizzle treats it as string|null)
   const tenantOpenaiKeyEnc = safeTrim(secretRow?.openaiKeyEnc);
   const hasTenantSecret = tenantOpenaiKeyEnc.length > 0;
 
@@ -556,7 +561,6 @@ async function resolveOpenAiClient(args: {
   // 4) From here on: either tenant key missing OR forced to platform.
   const platformAllowedByPlan = isPlatformKeyAllowedByPlan({ planTier, activationGraceCredits, activationGraceUsed });
 
-  // If NOT forced platform and platform not allowed, the only valid outcome is "missing tenant key"
   if (forceKeySource !== "platform_grace" && !platformAllowedByPlan) {
     const e: any = new Error("MISSING_OPENAI_KEY");
     e.code = "MISSING_OPENAI_KEY";
@@ -572,19 +576,16 @@ async function resolveOpenAiClient(args: {
     throw e;
   }
 
-  // Phase2 finalize: never consume (honor the frozen phase1 decision)
   if (!consumeGrace) {
     debug?.("resolveOpenAiClient.platformGrace.noConsume", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // Tier0: always allowed to use platform key, and we do NOT consume grace counters.
   if (isTier0(planTier)) {
     debug?.("resolveOpenAiClient.platformGrace.tier0", { keySource: "platform_grace" });
     return { openai: new OpenAI({ apiKey: platformKey }), keySource: "platform_grace" };
   }
 
-  // Tier1/2: consume grace when using platform key on phase1.
   const updated = await db
     .update(tenantSettings)
     .set({
@@ -673,6 +674,87 @@ function buildAiSnapshot(args: {
     },
     pricingPayload: resolved.pricing ?? null,
   };
+}
+
+/**
+ * ✅ Create/Update Quote Version v1 (system) once quote is finalized.
+ * This is additive and does NOT replace quote_logs.
+ *
+ * IMPORTANT:
+ * Your PROD quote_versions table (per your introspection) includes:
+ * - created_by (NOT NULL)
+ * - no updated_at column
+ * - meta (NOT NULL)
+ * - output (NOT NULL)
+ */
+async function upsertSystemVersionV1(args: {
+  tenantId: string;
+  quoteLogId: string;
+  policy: PricingPolicySnapshot;
+  output: any;
+  meta?: any;
+  debug?: DebugFn;
+}) {
+  const { tenantId, quoteLogId, policy, output, meta, debug } = args;
+
+  const p = normalizePricingPolicy(policy);
+
+  const aiMode: "assessment_only" | "range" | "fixed" =
+    p.ai_mode === "assessment_only" || p.ai_mode === "range" || p.ai_mode === "fixed" ? p.ai_mode : "assessment_only";
+
+  const versionOutput = {
+    confidence: output?.confidence ?? null,
+    inspection_required: output?.inspection_required ?? null,
+    estimate_low: output?.estimate_low ?? 0,
+    estimate_high: output?.estimate_high ?? 0,
+    currency: output?.currency ?? "USD",
+    summary: output?.summary ?? "",
+    visible_scope: Array.isArray(output?.visible_scope) ? output.visible_scope : [],
+    assumptions: Array.isArray(output?.assumptions) ? output.assumptions : [],
+    questions: Array.isArray(output?.questions) ? output.questions : [],
+    pricing_basis: output?.pricing_basis ?? null,
+    qa_context: output?.qa_context ?? null,
+  };
+
+  // ✅ meta MUST be jsonb NOT NULL in prod table
+  const metaSafe = meta && typeof meta === "object" ? meta : {};
+
+  debug?.("quoteVersions.v1.upsert.start", { tenantId, quoteLogId, aiMode });
+
+  await db.execute(sql`
+    insert into quote_versions (
+      tenant_id,
+      quote_log_id,
+      version,
+      ai_mode,
+      source,
+      created_by,
+      reason,
+      output,
+      meta,
+      created_at
+    )
+    values (
+      ${tenantId}::uuid,
+      ${quoteLogId}::uuid,
+      1,
+      ${aiMode},
+      'system',
+      'system',
+      null,
+      ${JSON.stringify(versionOutput)}::jsonb,
+      ${JSON.stringify(metaSafe)}::jsonb,
+      now()
+    )
+    on conflict (quote_log_id, version)
+    do update set
+      ai_mode = excluded.ai_mode,
+      source = excluded.source,
+      output = excluded.output,
+      meta = excluded.meta
+  `);
+
+  debug?.("quoteVersions.v1.upsert.ok", { quoteLogId });
 }
 
 // ---------------- email helpers ----------------
@@ -877,7 +959,6 @@ async function generateEstimate(args: {
 }) {
   const { openai, model, system, images, category, service_type, notes, normalizedAnswers, debug } = args;
 
-  // ✅ YES: we include the Q&A in the final estimator prompt (when present)
   const qaText = normalizedAnswers?.length
     ? normalizedAnswers.map((x) => `Q: ${x.question}\nA: ${x.answer}`).join("\n\n")
     : "";
@@ -1199,7 +1280,6 @@ export async function POST(req: Request) {
       ? normalizePricingPolicy(pricingPolicy)
       : applyPricingEnabledGate(normalizePricingPolicy(pricingPolicy), pricingEnabledGate);
 
-    // If phase2 did not have snapshots (older logs), fall back to current resolved pricing payload.
     if (!pricingConfigSnap) pricingConfigSnap = resolvedPricingConfig;
     if (!pricingRulesSnap) pricingRulesSnap = resolvedPricingRules;
 
@@ -1355,10 +1435,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // ✅ Phase2 render decision:
-      // - Prefer explicit request value when provided
-      // - Else fall back to stored snapshot (phase1)
-      // - Apply computeRenderOptIn so "opt-in not required" tenants default to TRUE
       const renderOptInFromReq =
         typeof parsed.data.render_opt_in === "boolean" ? parsed.data.render_opt_in : undefined;
       const renderOptInFromLog =
@@ -1380,8 +1456,6 @@ export async function POST(req: Request) {
         renderOptInEffective,
       });
 
-      // If phase2 request provided render_opt_in, persist it so the log reflects reality.
-      // Also keep quote_logs.renderOptIn column in sync.
       if (typeof renderOptInFromReq === "boolean") {
         const updatedInput = { ...(inputAny ?? {}), render_opt_in: renderOptInEffective };
         await db
@@ -1409,7 +1483,7 @@ export async function POST(req: Request) {
         category,
         service_type,
         notes,
-        normalizedAnswers, // ✅ YES: used by estimator
+        normalizedAnswers,
         debug,
       });
 
@@ -1432,8 +1506,6 @@ export async function POST(req: Request) {
         estimate_low: shaped.estimate_low,
         estimate_high: shaped.estimate_high,
         pricing_basis: computed.basis,
-
-        // ✅ make QA available to downstream consumers (rendering/job/UI)
         qa_context: {
           questions: storedQuestions,
           answers: normalizedAnswers,
@@ -1447,6 +1519,15 @@ export async function POST(req: Request) {
         set output = ${JSON.stringify(outputToStore)}::jsonb
         where id = ${quoteLogId}::uuid
       `);
+
+      await upsertSystemVersionV1({
+        tenantId: tenant.id,
+        quoteLogId,
+        policy: pricingPolicy,
+        output,
+        meta: { createdFrom: "quote_submit.phase2", ai_snapshot: aiSnapshot },
+        debug,
+      });
 
       try {
         const emailResult = await sendFinalEstimateEmails({
@@ -1539,10 +1620,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // ✅ Phase1 render decision:
-    // - If rendering disabled -> false
-    // - If opt-in required -> honor checkbox (default false if missing)
-    // - If opt-in NOT required -> default true
     const renderOptIn = computeRenderOptIn({
       tenantRenderEnabled: Boolean(resolved.tenant.tenantRenderEnabled),
       renderCustomerOptInRequired: Boolean(resolved.tenant.renderCustomerOptInRequired),
@@ -1558,7 +1635,6 @@ export async function POST(req: Request) {
       renderOptIn,
     });
 
-    // ✅ Freeze pricing policy + pricing inputs into the quote log so phase2 is immutable
     const policyToStore = applyPricingEnabledGate(pricingPolicy, Boolean(resolved.tenant.pricingEnabled));
 
     const pricing_config_snapshot: PricingConfigSnapshot | null = (resolved as any)?.pricing?.config ?? null;
@@ -1578,7 +1654,6 @@ export async function POST(req: Request) {
       pricing_config_snapshot,
       pricing_rules_snapshot,
 
-      // back-compat fields (keep)
       pricing_model_snapshot: policyToStore.pricing_enabled ? policyToStore.pricing_model ?? null : null,
       ai_mode_snapshot: policyToStore.ai_mode,
       pricing_enabled_snapshot: policyToStore.pricing_enabled,
@@ -1711,6 +1786,15 @@ export async function POST(req: Request) {
       set output = ${JSON.stringify(outputToStore)}::jsonb
       where id = ${quoteLogId}::uuid
     `);
+
+    await upsertSystemVersionV1({
+      tenantId: tenant.id,
+      quoteLogId,
+      policy: policyToStore,
+      output,
+      meta: { createdFrom: "quote_submit.phase1", ai_snapshot: aiSnapshotEstimated },
+      debug,
+    });
 
     try {
       const emailResult = await sendFinalEstimateEmails({

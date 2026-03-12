@@ -1,0 +1,680 @@
+// src/components/admin/quoteEmail/QuoteEmailPreview.tsx
+"use client";
+
+import React, { useEffect, useMemo, useRef } from "react";
+
+export type QuoteEmailPreviewModel = {
+  templateKey: "standard" | "before_after" | "visual_first";
+  quoteId: string;
+  tenantId: string;
+  selectedVersionNumber: string;
+
+  to: string;
+  cc: string;
+  bcc: string;
+
+  subject: string;
+
+  // ✅ brand bar
+  brandName?: string;
+  brandLogoUrl?: string;
+  brandTagline?: string;
+
+  headline: string;
+  intro: string;
+  closing: string;
+
+  featuredImage: { url: string; label: string } | null;
+  galleryImages: Array<{ url: string; label: string }>;
+
+  // ✅ explicit pairing for before/after template
+  beforeAfter?: {
+    before: { url: string; label: string } | null;
+    after: { url: string; label: string } | null;
+  };
+
+  badges: string[];
+
+  quoteBlocks: {
+    showPricing: boolean;
+    showSummary: boolean;
+    showScope: boolean;
+    showQuestions: boolean;
+    showAssumptions: boolean;
+
+    // AI baseline (informational)
+    estimateText: string;
+    confidence: string;
+    inspectionRequired: boolean | null;
+
+    // ✅ pricing override UI state (editable)
+    pricingMode: "none" | "fixed" | "range";
+    fixedPrice: string; // numeric string
+    rangeLow: string; // numeric string
+    rangeHigh: string; // numeric string;
+
+    summary: string;
+    visibleScope: string[];
+    questions: string[];
+    assumptions: string[];
+  };
+};
+
+function safeTrim(v: any) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function toLines(text: string) {
+  return String(text ?? "")
+    .split("\n")
+    .map((x) => x.replace(/\r/g, ""))
+    .join("\n");
+}
+
+function pill(text: string) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
+      {text}
+    </span>
+  );
+}
+
+function sectionCard(title: string, children: React.ReactNode) {
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
+      <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">{children}</div>
+    </div>
+  );
+}
+
+function editableClass() {
+  return [
+    "outline-none rounded-lg px-2 -mx-2",
+    "focus:ring-2 focus:ring-black/15 dark:focus:ring-white/20",
+    "hover:bg-gray-50/70 dark:hover:bg-white/5",
+    "transition",
+  ].join(" ");
+}
+
+function moneyStrToNumber(s: string): number | null {
+  const n = Number(String(s ?? "").replace(/[,$\s]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatMoney(n: number) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+  } catch {
+    return `$${Math.round(n)}`;
+  }
+}
+
+function computeOverrideEstimateText(qb: QuoteEmailPreviewModel["quoteBlocks"]): string {
+  // NOTE: when pricingMode is none, we intentionally return "" so the pill + big number hide
+  if (qb.pricingMode === "none") return "";
+
+  if (qb.pricingMode === "fixed") {
+    const n = moneyStrToNumber(qb.fixedPrice);
+    return n != null && n > 0 ? formatMoney(n) : "";
+  }
+
+  const lo = moneyStrToNumber(qb.rangeLow);
+  const hi = moneyStrToNumber(qb.rangeHigh);
+  if (lo != null && hi != null && lo > 0 && hi > 0) return `${formatMoney(lo)} — ${formatMoney(hi)}`;
+  if (lo != null && lo > 0) return `${formatMoney(lo)}+`;
+  if (hi != null && hi > 0) return `Up to ${formatMoney(hi)}`;
+  return "";
+}
+
+function initials(name: string) {
+  const s = safeTrim(name);
+  if (!s) return "Y";
+  const parts = s.split(/\s+/g).filter(Boolean);
+  const a = parts[0]?.[0] ?? "Y";
+  const b = parts.length > 1 ? parts[parts.length - 1]?.[0] : "";
+  return (a + b).toUpperCase();
+}
+
+function parseEditableList(text: string): string[] {
+  return String(text ?? "")
+    .split("\n")
+    .map((x) => x.replace(/\r/g, "").trim())
+    .map((x) => x.replace(/^[-•\u2022]\s*/g, "").trim())
+    .filter(Boolean);
+}
+
+function labelChip(text: string, tone: "light" | "dark" = "light") {
+  return (
+    <span
+      className={
+        "inline-flex items-center rounded-full px-3 py-1 text-[11px] font-extrabold tracking-wide " +
+        (tone === "dark"
+          ? "bg-black text-white dark:bg-white dark:text-black"
+          : "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200")
+      }
+    >
+      {text}
+    </span>
+  );
+}
+
+export default function QuoteEmailPreview(props: {
+  model: QuoteEmailPreviewModel;
+  onEdit: {
+    setHeadline: (v: string) => void;
+    setIntro: (v: string) => void;
+    setClosing: (v: string) => void;
+
+    // ✅ pricing edits
+    setPricingMode: (v: "none" | "fixed" | "range") => void;
+    setFixedPrice: (v: string) => void;
+    setRangeLow: (v: string) => void;
+    setRangeHigh: (v: string) => void;
+
+    // ✅ block edits
+    setSummary: (v: string) => void;
+    setVisibleScope: (v: string[]) => void;
+    setQuestions: (v: string[]) => void;
+    setAssumptions: (v: string[]) => void;
+  };
+}) {
+  const { model, onEdit } = props;
+
+  const headlineRef = useRef<HTMLDivElement | null>(null);
+  const introRef = useRef<HTMLDivElement | null>(null);
+  const closingRef = useRef<HTMLDivElement | null>(null);
+
+  const summaryRef = useRef<HTMLDivElement | null>(null);
+  const scopeRef = useRef<HTMLDivElement | null>(null);
+  const questionsRef = useRef<HTMLDivElement | null>(null);
+  const assumptionsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (headlineRef.current && headlineRef.current.innerText !== model.headline) {
+      headlineRef.current.innerText = model.headline;
+    }
+    if (introRef.current && introRef.current.innerText !== toLines(model.intro)) {
+      introRef.current.innerText = toLines(model.intro);
+    }
+    if (closingRef.current && closingRef.current.innerText !== toLines(model.closing)) {
+      closingRef.current.innerText = toLines(model.closing);
+    }
+  }, [model.headline, model.intro, model.closing]);
+
+  useEffect(() => {
+    if (summaryRef.current && summaryRef.current.innerText !== toLines(model.quoteBlocks.summary || "")) {
+      summaryRef.current.innerText = toLines(model.quoteBlocks.summary || "");
+    }
+    if (scopeRef.current) {
+      const want = (model.quoteBlocks.visibleScope || []).join("\n");
+      if (scopeRef.current.innerText !== want) scopeRef.current.innerText = want;
+    }
+    if (questionsRef.current) {
+      const want = (model.quoteBlocks.questions || []).join("\n");
+      if (questionsRef.current.innerText !== want) questionsRef.current.innerText = want;
+    }
+    if (assumptionsRef.current) {
+      const want = (model.quoteBlocks.assumptions || []).join("\n");
+      if (assumptionsRef.current.innerText !== want) assumptionsRef.current.innerText = want;
+    }
+  }, [model.quoteBlocks.summary, model.quoteBlocks.visibleScope, model.quoteBlocks.questions, model.quoteBlocks.assumptions]);
+
+  const frameTitle = useMemo(() => {
+    if (model.templateKey === "before_after") return "Before / After";
+    if (model.templateKey === "visual_first") return "Visual First";
+    return "Standard";
+  }, [model.templateKey]);
+
+  const galleryCols = model.templateKey === "visual_first" ? 3 : 2;
+  const qb = model.quoteBlocks;
+
+  const versionLabel = safeTrim(model.selectedVersionNumber) ? `v${safeTrim(model.selectedVersionNumber)}` : "v—";
+  const quoteShort = String(model.quoteId || "").slice(0, 8);
+
+  const toLine = (() => {
+    const parts: string[] = [];
+    const to = safeTrim(model.to);
+    const cc = safeTrim(model.cc);
+    const bcc = safeTrim(model.bcc);
+    if (to) parts.push(`To: ${to}`);
+    if (cc) parts.push(`CC: ${cc}`);
+    if (bcc) parts.push(`BCC: ${bcc}`);
+    return parts.join(" · ");
+  })();
+
+  const showBadges = Array.isArray(model.badges) && model.badges.length > 0;
+
+  const brandName = safeTrim(model.brandName) || "Your Shop Name";
+  const brandLogoUrl = safeTrim(model.brandLogoUrl);
+  const brandTagline = safeTrim(model.brandTagline) || "Quote ready to review";
+
+  const overrideEstimateText = computeOverrideEstimateText(qb);
+  const displayEstimate = safeTrim(overrideEstimateText) || safeTrim(qb.estimateText);
+
+  // ✅ IMPORTANT FIX:
+  // Pricing visibility is controlled by showPricing ONLY.
+  // pricingMode="none" simply means "hide pricing amount", but the card still shows so user can switch modes.
+  const showPricingEffective = qb.showPricing;
+
+  const baBefore = model.beforeAfter?.before ?? null;
+  const baAfter = model.beforeAfter?.after ?? null;
+  const showBeforeAfterBlock =
+    model.templateKey === "before_after" && baBefore?.url && baAfter?.url && baBefore.url !== baAfter.url;
+
+  return (
+    <div className="space-y-4">
+      {/* App chrome */}
+      <div className="rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-black">
+        <div className="flex items-center justify-between px-5 py-3">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-xl bg-gray-100 dark:bg-gray-900 flex items-center justify-center">
+              <div className="h-3 w-3 rounded-full bg-gray-400 dark:bg-gray-600" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Email Preview</div>
+              <div className="text-xs text-gray-600 dark:text-gray-300">
+                {frameTitle} · {versionLabel} · quote {quoteShort}…
+              </div>
+            </div>
+          </div>
+
+          <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">live · canvas · {model.templateKey}</div>
+        </div>
+      </div>
+
+      {/* Canvas background */}
+      <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-950">
+        <div className="mx-auto max-w-[720px] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-black">
+          {/* Header rows */}
+          <div className="border-b border-gray-200 dark:border-gray-800 px-6 py-4">
+            <div className="text-[11px] font-semibold tracking-wide text-gray-500 dark:text-gray-400 uppercase">
+              Subject
+            </div>
+            <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{model.subject}</div>
+
+            {toLine ? (
+              <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">{toLine}</div>
+            ) : (
+              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                Tip: set To/CC/BCC above to see delivery details here.
+              </div>
+            )}
+          </div>
+
+          {/* Body */}
+          <div className="px-6 py-7">
+            {/* Brand bar */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {brandLogoUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={brandLogoUrl}
+                    alt={brandName}
+                    className="h-10 w-auto max-w-[180px] rounded-lg object-contain border border-gray-200 dark:border-gray-800 bg-white px-2"
+                  />
+                ) : (
+                  <div className="h-9 w-9 rounded-xl bg-gray-900 dark:bg-white flex items-center justify-center">
+                    <div className="text-xs font-bold text-white dark:text-black">{initials(brandName)}</div>
+                  </div>
+                )}
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{brandName}</div>
+                  <div className="text-xs text-gray-600 dark:text-gray-300">{brandTagline}</div>
+                </div>
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                {versionLabel} · {quoteShort}…
+              </div>
+            </div>
+
+            {/* Headline */}
+            <div className="mt-6">
+              <div className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">Click any text to edit</div>
+              <div
+                ref={headlineRef}
+                contentEditable
+                suppressContentEditableWarning
+                onBlur={() => {
+                  const v = safeTrim(headlineRef.current?.innerText);
+                  if (v) onEdit.setHeadline(v);
+                }}
+                className={[
+                  editableClass(),
+                  "mt-2 text-[28px] leading-tight font-semibold text-gray-900 dark:text-gray-100 py-1",
+                ].join(" ")}
+              >
+                {model.headline}
+              </div>
+            </div>
+
+            {/* Intro */}
+            <div
+              ref={introRef}
+              contentEditable
+              suppressContentEditableWarning
+              onBlur={() => {
+                const v = toLines(introRef.current?.innerText || "");
+                onEdit.setIntro(v);
+              }}
+              className={[
+                editableClass(),
+                "mt-4 whitespace-pre-wrap text-sm leading-relaxed text-gray-700 dark:text-gray-200 py-2",
+              ].join(" ")}
+            >
+              {toLines(model.intro)}
+            </div>
+
+            {/* Pills */}
+            <div className="mt-5 flex flex-wrap gap-2">
+              {showPricingEffective && qb.pricingMode !== "none" && displayEstimate ? pill(`Estimate: ${displayEstimate}`) : null}
+              {qb.confidence ? pill(`Confidence: ${qb.confidence}`) : null}
+              {qb.inspectionRequired === true ? pill("Inspection required") : null}
+              {showBadges ? model.badges.map((b, i) => <React.Fragment key={`${b}-${i}`}>{pill(b)}</React.Fragment>) : null}
+            </div>
+
+            {/* Quote blocks */}
+            <div className="mt-6 space-y-3">
+              {showPricingEffective ? (
+                <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-black">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Quote at a glance</div>
+
+                      {qb.pricingMode === "none" ? (
+                        <div className="mt-2 text-sm font-semibold text-gray-600 dark:text-gray-300">
+                          Pricing hidden for this email.
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-xl font-semibold text-gray-900 dark:text-gray-100">
+                          {displayEstimate ? displayEstimate : "Estimate pending"}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Pricing mode toggle + inputs */}
+                    <div className="min-w-[280px]">
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => onEdit.setPricingMode("none")}
+                          className={
+                            "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
+                            (qb.pricingMode === "none"
+                              ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-black dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+                          }
+                        >
+                          None
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => onEdit.setPricingMode("fixed")}
+                          className={
+                            "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
+                            (qb.pricingMode === "fixed"
+                              ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-black dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+                          }
+                        >
+                          Fixed
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => onEdit.setPricingMode("range")}
+                          className={
+                            "rounded-full px-3 py-1.5 text-xs font-semibold border transition " +
+                            (qb.pricingMode === "range"
+                              ? "bg-black text-white border-black dark:bg-white dark:text-black dark:border-white"
+                              : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 dark:bg-black dark:text-gray-200 dark:border-gray-800 dark:hover:bg-gray-900")
+                          }
+                        >
+                          Range
+                        </button>
+                      </div>
+
+                      {qb.pricingMode === "fixed" ? (
+                        <div className="mt-3">
+                          <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300 text-right">
+                            Price (required &gt; 0)
+                          </div>
+                          <input
+                            value={qb.fixedPrice}
+                            onChange={(e) => onEdit.setFixedPrice(e.target.value)}
+                            placeholder="1500"
+                            className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                            inputMode="numeric"
+                          />
+                        </div>
+                      ) : qb.pricingMode === "range" ? (
+                        <div className="mt-3 grid grid-cols-2 gap-2">
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">Low (&gt; 0)</div>
+                            <input
+                              value={qb.rangeLow}
+                              onChange={(e) => onEdit.setRangeLow(e.target.value)}
+                              placeholder="1200"
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                              inputMode="numeric"
+                            />
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-semibold text-gray-600 dark:text-gray-300">High (&gt; 0)</div>
+                            <input
+                              value={qb.rangeHigh}
+                              onChange={(e) => onEdit.setRangeHigh(e.target.value)}
+                              placeholder="1800"
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-800 dark:bg-black"
+                              inputMode="numeric"
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-3 text-[11px] text-gray-600 dark:text-gray-300 text-right">
+                          Pricing hidden for this email.
+                        </div>
+                      )}
+
+                      <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 text-right">
+                        Editable — overrides AI estimate for this email.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 text-sm text-gray-700 dark:text-gray-200">
+                    Reply to approve and we’ll schedule the job. If anything looks off, tell us what to adjust.
+                  </div>
+                  <div className="mt-4 rounded-xl bg-gray-900 px-4 py-3 text-center text-sm font-semibold text-white dark:bg-white dark:text-black">
+                    Reply “Approved” to schedule
+                  </div>
+                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400 text-center">
+                    (You can ask questions or request changes — we’ll update the quote.)
+                  </div>
+                </div>
+              ) : null}
+
+              {qb.showSummary ? (
+                sectionCard(
+                  "Summary",
+                  <div
+                    ref={summaryRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const v = toLines(summaryRef.current?.innerText || "");
+                      onEdit.setSummary(v);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {qb.summary || ""}
+                  </div>
+                )
+              ) : null}
+
+              {qb.showScope ? (
+                sectionCard(
+                  "Visible scope",
+                  <div
+                    ref={scopeRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const xs = parseEditableList(scopeRef.current?.innerText || "");
+                      onEdit.setVisibleScope(xs);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {(qb.visibleScope || []).join("\n")}
+                  </div>
+                )
+              ) : null}
+
+              {qb.showQuestions ? (
+                sectionCard(
+                  "A few quick questions (optional)",
+                  <div
+                    ref={questionsRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const xs = parseEditableList(questionsRef.current?.innerText || "");
+                      onEdit.setQuestions(xs);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {(qb.questions || []).join("\n")}
+                  </div>
+                )
+              ) : null}
+
+              {qb.showAssumptions ? (
+                sectionCard(
+                  "Assumptions",
+                  <div
+                    ref={assumptionsRef}
+                    contentEditable
+                    suppressContentEditableWarning
+                    onBlur={() => {
+                      const xs = parseEditableList(assumptionsRef.current?.innerText || "");
+                      onEdit.setAssumptions(xs);
+                    }}
+                    className={[editableClass(), "whitespace-pre-wrap py-2"].join(" ")}
+                  >
+                    {(qb.assumptions || []).join("\n")}
+                  </div>
+                )
+              ) : null}
+            </div>
+
+            {/* BEFORE/AFTER block */}
+            {showBeforeAfterBlock ? (
+              <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                <div className="border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Before → After</div>
+                    <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">
+                      Side-by-side makes the transformation obvious (stacks cleanly on mobile).
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {labelChip("BEFORE")}
+                    <span className="text-gray-400">→</span>
+                    {labelChip("AFTER", "dark")}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2">
+                  <div className="relative">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={baBefore!.url} alt={baBefore!.label || "Before"} className="h-[320px] w-full object-cover bg-black/5" />
+                    <div className="absolute left-3 top-3">{labelChip("BEFORE")}</div>
+                    <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                      <div className="font-semibold">{baBefore!.label || "Before"}</div>
+                      <div className="font-mono opacity-70">left</div>
+                    </div>
+                  </div>
+
+                  <div className="relative border-t border-gray-200 dark:border-gray-800 sm:border-t-0 sm:border-l">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={baAfter!.url} alt={baAfter!.label || "After"} className="h-[320px] w-full object-cover bg-black/5" />
+                    <div className="absolute left-3 top-3">{labelChip("AFTER", "dark")}</div>
+                    <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                      <div className="font-semibold">{baAfter!.label || "After"}</div>
+                      <div className="font-mono opacity-70">right</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
+                  Tip: reply with changes if anything isn’t exactly what you want — we’ll revise the quote.
+                </div>
+              </div>
+            ) : model.featuredImage ? (
+              <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={model.featuredImage.url}
+                  alt={model.featuredImage.label}
+                  className="w-full object-cover max-h-[460px] bg-black/5"
+                />
+                <div className="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                  <div className="font-semibold">{model.featuredImage.label}</div>
+                  <div className="font-mono opacity-70">featured</div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
+                Select at least one image to see the layout come alive.
+              </div>
+            )}
+
+            {/* Gallery */}
+            {model.galleryImages?.length ? (
+              <div className="mt-6">
+                <div className="text-xs font-semibold text-gray-600 dark:text-gray-300">Included images</div>
+                <div className={"mt-3 grid gap-3 " + (galleryCols === 3 ? "sm:grid-cols-2 lg:grid-cols-3" : "sm:grid-cols-2")}>
+                  {model.galleryImages.map((img, idx) => (
+                    <div
+                      key={`${img.url}-${idx}`}
+                      className="overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-800"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={img.url} alt={img.label} className="h-40 w-full object-cover bg-black/5" />
+                      <div className="px-3 py-2 text-[11px] text-gray-600 dark:text-gray-300 flex items-center justify-between">
+                        <div className="font-semibold">{img.label}</div>
+                        <div className="font-mono opacity-70">#{idx + 1}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {/* Closing */}
+            <div
+              ref={closingRef}
+              contentEditable
+              suppressContentEditableWarning
+              onBlur={() => {
+                const v = toLines(closingRef.current?.innerText || "");
+                onEdit.setClosing(v);
+              }}
+              className={[editableClass(), "mt-7 whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-200 py-2"].join(" ")}
+            >
+              {toLines(model.closing)}
+            </div>
+
+            {/* Footer */}
+            <div className="mt-8 border-t border-gray-200 dark:border-gray-800 pt-4 text-[11px] text-gray-500 dark:text-gray-400">
+              Live preview canvas. Next: wire final HTML send (already mostly done).
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

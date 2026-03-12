@@ -1,0 +1,327 @@
+// src/app/api/admin/quotes/[id]/email/send/route.ts
+import { NextResponse, type NextRequest } from "next/server";
+import { sendComposerEmail } from "@/lib/emailComposer/sendComposerEmail";
+import { buildQuoteCanvasEmailHtml, buildQuoteCanvasText } from "@/lib/emailComposer/templates/quoteCanvas";
+import { db } from "@/lib/db/client";
+import { sql } from "drizzle-orm";
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function buildPlatformFrom(): string | null {
+  const fallback = safeTrim(process.env.RESEND_FALLBACK_FROM) || safeTrim(process.env.PLATFORM_FROM_EMAIL);
+  if (!fallback) return null;
+
+  const name = safeTrim(process.env.PLATFORM_FROM_NAME);
+  if (fallback.includes("<") && fallback.includes(">")) return fallback;
+  return name ? `${name} <${fallback}>` : fallback;
+}
+
+function asStringArray(v: any): string[] {
+  if (Array.isArray(v)) return v.map((x) => safeTrim(x)).filter(Boolean);
+  const s = safeTrim(v);
+  return s ? [s] : [];
+}
+
+function asOptionalStringArray(v: any): string[] | undefined {
+  const xs = asStringArray(v);
+  return xs.length ? xs : undefined;
+}
+
+// NOTE: label is REQUIRED because buildQuoteCanvasEmailHtml expects it.
+type Img = { url: string; label: string };
+
+function normalizeImg(v: any): Img | null {
+  const url = safeTrim(v?.url ?? v?.publicUrl ?? v?.blobUrl ?? v);
+  if (!url) return null;
+  const label = safeTrim(v?.label ?? "");
+  return { url, label };
+}
+
+function normalizeImgs(v: any): Img[] {
+  if (!Array.isArray(v)) return [];
+  return v.map(normalizeImg).filter(Boolean) as Img[];
+}
+
+function deriveImages(body: any): { featuredImage: Img | null; galleryImages: Img[] } {
+  const featured = normalizeImg(body?.featuredImage);
+  const gallery = normalizeImgs(body?.galleryImages);
+
+  if (featured || gallery.length) {
+    return { featuredImage: featured, galleryImages: gallery };
+  }
+
+  const selected = normalizeImgs(body?.selectedImages ?? body?.images ?? []);
+  if (selected.length) {
+    return { featuredImage: selected[0], galleryImages: selected.slice(1) };
+  }
+
+  return { featuredImage: null, galleryImages: [] };
+}
+
+function deriveBeforeAfter(body: any): { before: Img | null; after: Img | null } | null {
+  const ba = body?.beforeAfter ?? null;
+  if (!ba) return null;
+  const before = normalizeImg(ba?.before);
+  const after = normalizeImg(ba?.after);
+  if (!before?.url || !after?.url) return null;
+  if (before.url === after.url) return null;
+  return { before, after };
+}
+
+function deriveBrand(body: any): { name?: string; logoUrl?: string; tagline?: string } | undefined {
+  const b = body?.brand ?? null;
+  const name = safeTrim(b?.name ?? body?.shopName ?? "");
+  const logoUrl = safeTrim(b?.logoUrl ?? body?.shopLogoUrl ?? "");
+  const tagline = safeTrim(b?.tagline ?? body?.brandSubtitle ?? body?.brandTagline ?? "");
+
+  const out = {
+    ...(name ? { name } : {}),
+    ...(logoUrl ? { logoUrl } : {}),
+    ...(tagline ? { tagline } : {}),
+  };
+
+  return Object.keys(out).length ? out : undefined;
+}
+
+async function logQuoteEmailSend(args: {
+  tenantId: string;
+  quoteLogId: string;
+  kind: string;
+  to: string[];
+  subject: string;
+  result: { ok: boolean; provider?: string; providerMessageId?: string | null; error?: string | null };
+}) {
+  try {
+    await db.execute(sql`
+      insert into quote_email_sends (
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        to_emails,
+        subject,
+        provider,
+        provider_message_id,
+        ok,
+        error,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${args.tenantId}::uuid,
+        ${args.quoteLogId}::uuid,
+        ${args.kind},
+        ${JSON.stringify(args.to)}::jsonb,
+        ${args.subject},
+        ${String(args.result.provider ?? "") || null},
+        ${args.result.providerMessageId ?? null},
+        ${Boolean(args.result.ok)},
+        ${args.result.ok ? null : (args.result.error ?? "UNKNOWN_EMAIL_ERROR")},
+        now()
+      )
+    `);
+  } catch {
+    // logging should never break the send response
+  }
+}
+
+async function storeQuoteEmail(args: {
+  tenantId: string;
+  quoteLogId: string;
+
+  kind: string;
+  initiatedBy: "tenant" | "system";
+
+  fromEmail: string;
+  to: string[];
+  cc?: string[] | undefined;
+  bcc?: string[] | undefined;
+
+  subject: string;
+  html: string;
+  text: string;
+
+  result: any;
+}): Promise<string | null> {
+  try {
+    const r = await db.execute(sql`
+      insert into quote_emails (
+        id,
+        tenant_id,
+        quote_log_id,
+        kind,
+        initiated_by,
+        provider,
+        provider_message_id,
+        from_email,
+        to_json,
+        cc_json,
+        bcc_json,
+        subject,
+        html,
+        text,
+        meta,
+        created_at
+      )
+      values (
+        gen_random_uuid(),
+        ${args.tenantId}::uuid,
+        ${args.quoteLogId}::uuid,
+        ${args.kind},
+        ${args.initiatedBy},
+        ${String(args.result?.provider ?? "") || null},
+        ${args.result?.providerMessageId ?? null},
+        ${args.fromEmail},
+        ${JSON.stringify(args.to)}::jsonb,
+        ${JSON.stringify(args.cc ?? [])}::jsonb,
+        ${JSON.stringify(args.bcc ?? [])}::jsonb,
+        ${args.subject},
+        ${args.html},
+        ${args.text},
+        ${JSON.stringify((args.result && (args.result.meta ?? args.result)) ?? {})}::jsonb,
+        now()
+      )
+      returning id
+    `);
+
+    const row: any = (r as any)?.rows?.[0] ?? (Array.isArray(r) ? (r as any)[0] : null);
+    const id = safeTrim(row?.id);
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function POST(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    const quoteId = safeTrim(id);
+    if (!quoteId) return NextResponse.json({ ok: false, error: "Missing quote id" }, { status: 400 });
+
+    const body: any = await req.json().catch(() => ({}));
+
+    const tenantId = safeTrim(body?.tenantId);
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "Missing tenantId" }, { status: 400 });
+    }
+
+    const to = asStringArray(body?.to);
+    if (!to.length) {
+      return NextResponse.json({ ok: false, error: "Missing to" }, { status: 400 });
+    }
+
+    const subject = safeTrim(body?.subject);
+    if (!subject) {
+      return NextResponse.json({ ok: false, error: "Missing subject" }, { status: 400 });
+    }
+
+    const headline = safeTrim(body?.headline);
+    const intro = safeTrim(body?.intro);
+    const closing = safeTrim(body?.closing);
+
+    const templateKey = safeTrim(body?.templateKey) as "standard" | "before_after" | "visual_first";
+
+    // Build before/after (may be null)
+    const beforeAfter = deriveBeforeAfter(body);
+
+    // ✅ STRICT: only pass beforeAfter when BOTH images exist (template expects non-null)
+    const beforeAfterStrict:
+      | {
+          before: Img;
+          after: Img;
+        }
+      | undefined =
+      beforeAfter?.before && beforeAfter?.after ? { before: beforeAfter.before, after: beforeAfter.after } : undefined;
+
+    const { featuredImage, galleryImages } = deriveImages(body);
+
+    const from = safeTrim(body?.from) || buildPlatformFrom() || null;
+    if (!from) {
+      return NextResponse.json(
+        { ok: false, error: "Missing from and no PLATFORM_FROM_EMAIL/RESEND_FALLBACK_FROM configured" },
+        { status: 400 }
+      );
+    }
+
+    const cc = asOptionalStringArray(body?.cc);
+    const bcc = asOptionalStringArray(body?.bcc);
+
+    const brand = deriveBrand(body);
+    const quoteBlocks = body?.quoteBlocks ?? undefined;
+
+    const html = buildQuoteCanvasEmailHtml({
+      templateKey: templateKey === "before_after" || templateKey === "visual_first" ? templateKey : "standard",
+      headline,
+      intro,
+      closing,
+      subject,
+      featuredImage,
+      galleryImages,
+      beforeAfter: beforeAfterStrict,
+      brand,
+      quoteBlocks,
+      replyToEmail: from,
+    });
+
+    const text = buildQuoteCanvasText({
+      headline,
+      intro,
+      closing,
+      brand,
+      quoteBlocks,
+    });
+
+    const result = await sendComposerEmail({
+      tenantId,
+      message: {
+        from,
+        to,
+        cc,
+        bcc,
+        subject,
+        html,
+        text,
+        headers: {
+          "X-APQ-Composer": "1",
+          ...(quoteId ? { "X-APQ-QuoteId": quoteId } : {}),
+        },
+      },
+    });
+
+    const storedEmailId = await storeQuoteEmail({
+      tenantId,
+      quoteLogId: quoteId,
+      kind: "composer",
+      initiatedBy: "tenant",
+      fromEmail: from,
+      to,
+      cc,
+      bcc,
+      subject,
+      html,
+      text,
+      result,
+    });
+
+    await logQuoteEmailSend({
+      tenantId,
+      quoteLogId: quoteId,
+      kind: "composer",
+      to,
+      subject,
+      result: {
+        ok: Boolean((result as any)?.ok),
+        provider: (result as any)?.provider,
+        providerMessageId: (result as any)?.providerMessageId ?? null,
+        error: (result as any)?.error ?? null,
+      },
+    });
+
+    return NextResponse.json({ ...(result as any), storedEmailId });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? String(e) }, { status: 500 });
+  }
+}

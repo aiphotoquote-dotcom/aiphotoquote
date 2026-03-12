@@ -71,6 +71,13 @@
       "when": 1771041630622,
       "tag": "0009_legal_silver_centurion",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1772255874389,
+      "tag": "0010_nostalgic_sister_grimm",
+      "breakpoints": true
     }
   ]
 }
