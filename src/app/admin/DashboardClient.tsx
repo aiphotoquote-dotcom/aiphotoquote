@@ -8,6 +8,8 @@ type TenantRow = {
   slug: string;
   name: string | null;
   role: "owner" | "admin" | "member";
+  logoUrl?: string | null;
+  brandLogoUrl?: string | null;
 };
 
 type ContextResp =
@@ -47,6 +49,38 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function pickTenantLogo(t: TenantRow | null): string {
+  if (!t) return "";
+  return safeTrim(t.logoUrl) || safeTrim(t.brandLogoUrl) || "";
+}
+
+function initialsFromTenant(t: TenantRow | null): string {
+  const source = safeTrim(t?.name) || safeTrim(t?.slug) || "T";
+  const parts = source
+    .replace(/[-_]+/g, " ")
+    .split(/\s+/g)
+    .filter(Boolean);
+
+  const a = parts[0]?.[0] ?? "T";
+  const b = parts.length > 1 ? parts[1]?.[0] ?? "" : "";
+  return (a + b).toUpperCase();
+}
+
+function roleTone(role: TenantRow["role"] | undefined) {
+  if (role === "owner") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200";
+  }
+  if (role === "admin") {
+    return "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200";
+  }
+  return "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
+}
+
 export default function DashboardClient() {
   const [context, setContext] = useState<{ activeTenantId: string | null; tenants: TenantRow[] }>({
     activeTenantId: null,
@@ -69,7 +103,11 @@ export default function DashboardClient() {
     setContext({ activeTenantId: data.activeTenantId, tenants: data.tenants });
     setNeedsPick(!!data.needsTenantSelection);
 
-    return { activeTenantId: data.activeTenantId, tenants: data.tenants, needsTenantSelection: !!data.needsTenantSelection };
+    return {
+      activeTenantId: data.activeTenantId,
+      tenants: data.tenants,
+      needsTenantSelection: !!data.needsTenantSelection,
+    };
   }
 
   async function loadMetrics() {
@@ -84,14 +122,12 @@ export default function DashboardClient() {
     try {
       const ctx = await loadContext();
 
-      // ✅ If user has multiple tenants and none is active yet, don't call tenant-scoped APIs.
       if (!ctx.activeTenantId && (ctx.tenants?.length || 0) > 1) {
         setMetrics(null);
         setErr("No active tenant selected yet. Use the Tenant switcher in the top nav to pick one.");
         return;
       }
 
-      // If single-tenant, /api/tenant/context should auto-select and set cookies.
       await loadMetrics();
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -111,13 +147,19 @@ export default function DashboardClient() {
     [context]
   );
 
+  const activeTenantLogo = useMemo(() => pickTenantLogo(activeTenant), [activeTenant]);
+  const activeTenantDisplayName = useMemo(
+    () => safeTrim(activeTenant?.name) || safeTrim(activeTenant?.slug) || "Active tenant",
+    [activeTenant]
+  );
+
   const m = metrics && metrics.ok ? metrics.metrics : null;
 
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-black">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
             <div className="inline-flex items-center rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
               Admin Dashboard
             </div>
@@ -150,26 +192,74 @@ export default function DashboardClient() {
             ) : null}
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <a
-              href="/admin/quotes"
-              className="inline-flex items-center justify-center rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-            >
-              Open Quotes
-            </a>
-            <a
-              href="/admin/settings"
-              className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-            >
-              Tenant Settings
-            </a>
-            <button
-              type="button"
-              onClick={bootstrap}
-              className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-            >
-              Refresh
-            </button>
+          <div className="flex w-full flex-col gap-3 lg:w-auto lg:min-w-[360px]">
+            {activeTenant ? (
+              <div className="overflow-hidden rounded-2xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white shadow-sm dark:border-gray-800 dark:from-gray-950 dark:to-black">
+                <div className="flex items-center gap-4 p-4">
+                  <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
+                    {activeTenantLogo ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={activeTenantLogo}
+                        alt={activeTenantDisplayName}
+                        className="h-full w-full object-contain bg-white p-2"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-gray-900 to-gray-700 text-lg font-extrabold tracking-wide text-white dark:from-white dark:to-gray-300 dark:text-black">
+                        {initialsFromTenant(activeTenant)}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
+                      Active tenant
+                    </div>
+
+                    <div className="mt-1 truncate text-lg font-extrabold text-gray-900 dark:text-gray-100">
+                      {activeTenantDisplayName}
+                    </div>
+
+                    <div className="mt-1 truncate font-mono text-xs text-gray-500 dark:text-gray-400">
+                      {activeTenant.slug}
+                    </div>
+
+                    <div className="mt-3">
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold capitalize",
+                          roleTone(activeTenant.role)
+                        )}
+                      >
+                        {activeTenant.role}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              <a
+                href="/admin/quotes"
+                className="inline-flex items-center justify-center rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                Open Quotes
+              </a>
+              <a
+                href="/admin/settings"
+                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Tenant Settings
+              </a>
+              <button
+                type="button"
+                onClick={bootstrap}
+                className="inline-flex items-center justify-center rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Refresh
+              </button>
+            </div>
           </div>
         </div>
 
