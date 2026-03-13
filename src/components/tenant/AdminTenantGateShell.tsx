@@ -12,19 +12,12 @@ type TenantContextResp =
       ok: true;
       activeTenantId: string | null;
       tenants: Array<any>;
-      needsTenantSelection?: boolean;
-      autoSelected?: boolean;
-      clearedStaleCookie?: boolean;
     }
   | {
       ok: false;
       error: string;
       message?: string;
     };
-
-function samePath(pathname: string, target: string) {
-  return pathname === target || pathname.startsWith(`${target}/`);
-}
 
 export default function AdminTenantGateShell({
   children,
@@ -53,15 +46,7 @@ export default function AdminTenantGateShell({
     let cancelled = false;
 
     async function run() {
-      if (bypassChrome) {
-        if (!cancelled) {
-          setAllowed(true);
-          setChecked(true);
-        }
-        return;
-      }
-
-      if (allowTenantlessAdminPage) {
+      if (bypassChrome || allowTenantlessAdminPage) {
         if (!cancelled) {
           setAllowed(true);
           setChecked(true);
@@ -76,16 +61,11 @@ export default function AdminTenantGateShell({
         if (cancelled) return;
 
         if (!("ok" in data) || !data.ok) {
-          // Do NOT assume onboarding on transient/context failures.
-          // Let the centralized auth landing page decide.
-          if (!samePath(pathname, "/auth/after-sign-in")) {
-            router.replace("/auth/after-sign-in");
-          }
+          router.replace("/onboarding");
           return;
         }
 
         const tenants = Array.isArray(data.tenants) ? data.tenants : [];
-        const tenantCount = tenants.length;
         const hasActiveTenant = Boolean(data.activeTenantId);
 
         if (hasActiveTenant) {
@@ -94,25 +74,14 @@ export default function AdminTenantGateShell({
           return;
         }
 
-        // Only truly brand-new / tenantless users should go to onboarding.
-        if (tenantCount === 0) {
-          if (!samePath(pathname, "/onboarding")) {
-            router.replace("/onboarding");
-          }
+        if (tenants.length === 0) {
+          router.replace("/onboarding");
           return;
         }
 
-        // Existing user with tenants but no active tenant cookie yet.
-        if (!samePath(pathname, "/admin/select-tenant")) {
-          router.replace("/admin/select-tenant");
-        }
+        router.replace("/admin/select-tenant");
       } catch {
-        if (cancelled) return;
-
-        // Network/timing issue: do not dump existing users into onboarding.
-        if (!samePath(pathname, "/auth/after-sign-in")) {
-          router.replace("/auth/after-sign-in");
-        }
+        if (!cancelled) router.replace("/onboarding");
       }
     }
 
@@ -121,7 +90,7 @@ export default function AdminTenantGateShell({
     return () => {
       cancelled = true;
     };
-  }, [allowTenantlessAdminPage, bypassChrome, pathname, router]);
+  }, [allowTenantlessAdminPage, bypassChrome, router]);
 
   if (bypassChrome) {
     return <>{children}</>;
