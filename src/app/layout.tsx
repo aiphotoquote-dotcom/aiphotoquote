@@ -10,10 +10,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <ClerkProvider
-      afterSignInUrl="/auth/after-sign-in"
-      afterSignUpUrl="/auth/after-sign-in"
-    >
+    <ClerkProvider afterSignInUrl="/auth/after-sign-in" afterSignUpUrl="/auth/after-sign-in">
       <html lang="en" suppressHydrationWarning>
         <body className="min-h-screen overflow-x-hidden bg-background text-foreground antialiased">
           {children}

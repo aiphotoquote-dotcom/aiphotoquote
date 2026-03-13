@@ -1,10 +1,16 @@
+// src/app/auth/after-sign-in/page.tsx
 "use client";
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
 type ContextResp =
-  | { ok: true; activeTenantId: string | null; tenants: Array<any>; needsTenantSelection?: boolean }
+  | {
+      ok: true;
+      activeTenantId: string | null;
+      tenants: Array<any>;
+      needsTenantSelection?: boolean;
+    }
   | { ok: false; error: string; message?: string };
 
 export default function AfterSignInPage() {
@@ -15,26 +21,28 @@ export default function AfterSignInPage() {
 
     async function run() {
       try {
-        // This will auto-select + set cookie when there is exactly 1 tenant
         const res = await fetch("/api/tenant/context", { cache: "no-store" });
         const data = (await res.json()) as ContextResp;
 
         if (cancelled) return;
 
         if (!("ok" in data) || !data.ok) {
-          router.replace("/dashboard");
+          router.replace("/admin");
           return;
         }
 
-        // If we have an active tenant, we’re good
         if (data.activeTenantId) {
           router.replace("/admin");
           return;
         }
 
-        // Multiple tenants (or none): send them to admin where your switcher exists,
-        // OR you can create a dedicated tenant-picker page later.
-        // If you want a dedicated picker, change this to: router.replace("/select-tenant");
+        const tenantCount = Array.isArray(data.tenants) ? data.tenants.length : 0;
+
+        if (tenantCount === 0) {
+          router.replace("/onboarding");
+          return;
+        }
+
         router.replace("/admin");
       } catch {
         if (!cancelled) router.replace("/admin");
@@ -42,6 +50,7 @@ export default function AfterSignInPage() {
     }
 
     run();
+
     return () => {
       cancelled = true;
     };
