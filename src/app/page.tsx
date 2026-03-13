@@ -191,18 +191,18 @@ function SteelCard({
           bg: "bg-gradient-to-b from-white to-slate-50",
         }
       : tone === "olive"
-      ? {
-          top: "from-emerald-900 to-lime-950",
-          ring: "ring-emerald-300/30",
-          iconWrap: "border-emerald-300/30 bg-emerald-50 text-emerald-950",
-          bg: "bg-gradient-to-b from-white to-emerald-50/60",
-        }
-      : {
-          top: "from-zinc-700 to-zinc-950",
-          ring: "ring-zinc-300/40",
-          iconWrap: "border-zinc-300/40 bg-zinc-50 text-zinc-950",
-          bg: "bg-gradient-to-b from-white to-zinc-50",
-        };
+        ? {
+            top: "from-emerald-900 to-lime-950",
+            ring: "ring-emerald-300/30",
+            iconWrap: "border-emerald-300/30 bg-emerald-50 text-emerald-950",
+            bg: "bg-gradient-to-b from-white to-emerald-50/60",
+          }
+        : {
+            top: "from-zinc-700 to-zinc-950",
+            ring: "ring-zinc-300/40",
+            iconWrap: "border-zinc-300/40 bg-zinc-50 text-zinc-950",
+            bg: "bg-gradient-to-b from-white to-zinc-50",
+          };
 
   return (
     <div
@@ -267,9 +267,14 @@ function Divider() {
 
 export default async function HomePage() {
   const { userId } = await auth();
-  if (userId) redirect("/admin");
 
-  // Industrial / service stock imagery (used as CSS backgrounds, no Next/Image config needed)
+  // IMPORTANT:
+  // Do not send authenticated users straight to /admin from the marketing homepage.
+  // Route them through the centralized post-auth decision page so:
+  // - new users with 0 tenants go to /onboarding
+  // - existing users with tenants go to /admin
+  if (userId) redirect("/auth/after-sign-in");
+
   const heroImg =
     "https://images.unsplash.com/photo-1581092918484-8313c8e7c9c5?auto=format&fit=crop&w=1800&q=80";
   const tile1 =
@@ -285,17 +290,13 @@ export default async function HomePage() {
     <div className="min-h-screen bg-white text-gray-900">
       <MarketingTopNav />
 
-      {/* ================= HERO ================= */}
       <section className="relative isolate overflow-hidden">
-        {/* Background photo */}
         <div className="absolute inset-0">
           <div
             className="absolute inset-0 bg-cover bg-center"
             style={{ backgroundImage: `url('${heroImg}')` }}
           />
-          {/* Contrast */}
           <div className="absolute inset-0 bg-black/70" />
-          {/* “Brushed steel” + “blueprint grid” overlays (no external assets) */}
           <svg className="absolute inset-0 h-full w-full opacity-[0.22]" aria-hidden="true">
             <defs>
               <pattern id="grid" width="72" height="72" patternUnits="userSpaceOnUse">
@@ -317,13 +318,11 @@ export default async function HomePage() {
             <rect width="100%" height="100%" fill="url(#grid)" />
             <rect width="100%" height="100%" fill="url(#brushed)" />
           </svg>
-          {/* Vignette */}
           <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-black/60 to-black/85" />
         </div>
 
         <div className="relative mx-auto max-w-6xl px-4 py-14 sm:px-6 sm:py-20">
           <div className="grid gap-10 lg:grid-cols-[1.2fr_0.8fr] lg:items-start">
-            {/* Left */}
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <Pill>
@@ -382,7 +381,6 @@ export default async function HomePage() {
               </div>
             </div>
 
-            {/* Right: graphical collage + “sample output” */}
             <div className="space-y-4">
               <div className="grid gap-4">
                 <PhotoTile src={tile1} label="Job Photos" />
@@ -440,7 +438,6 @@ export default async function HomePage() {
           </div>
         </div>
 
-        {/* “logo strip” style divider */}
         <div className="relative border-t border-white/10 bg-black/65">
           <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
             <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-white/55">
@@ -455,7 +452,6 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* ================= WHY IT EXISTS ================= */}
       <section className="bg-white py-16">
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
           <div className="grid gap-10 lg:grid-cols-2 lg:items-start">
@@ -532,7 +528,6 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* ================= HOW IT WORKS (graphical) ================= */}
       <section id="how-it-works" className="bg-gray-50 py-16">
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -554,7 +549,6 @@ export default async function HomePage() {
           </div>
 
           <div className="mt-10 rounded-[34px] border border-gray-200 bg-white p-6 shadow-sm">
-            {/* Graphical pipeline */}
             <div className="grid gap-4 lg:grid-cols-4">
               {[
                 { t: "1) Capture", d: "Customer uploads photos + quick details.", i: "camera" as const, tone: "steel" as const },
@@ -591,7 +585,6 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* ================= FEATURE GRID (meat) ================= */}
       <section id="features" className="bg-white py-16">
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
           <div className="text-xs font-extrabold tracking-widest uppercase text-gray-500">What’s inside</div>
@@ -643,7 +636,6 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* ================= INDUSTRIAL STRIP (graphic / photo) ================= */}
       <section className="relative overflow-hidden py-16">
         <div
           className="absolute inset-0 bg-cover bg-center"
@@ -717,7 +709,6 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* ================= PRICING (simple placeholder) ================= */}
       <section id="pricing" className="bg-white py-16">
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -767,7 +758,6 @@ export default async function HomePage() {
         </div>
       </section>
 
-      {/* FOOTER */}
       <footer className="bg-white pb-14">
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
           <div className="border-t border-gray-200 pt-8">
