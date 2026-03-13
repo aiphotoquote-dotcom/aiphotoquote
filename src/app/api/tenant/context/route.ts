@@ -51,7 +51,7 @@ async function listTenantsForUser(userId: string) {
       t.name AS name,
       m.role AS role,
       t.created_at AS created_at,
-      COALESCE(ts.brand_logo_url, ts.logo_url, '') AS brand_logo_url
+      COALESCE(ts.brand_logo_url, '') AS brand_logo_url
     FROM tenant_members m
     JOIN tenants t
       ON t.id = m.tenant_id
@@ -93,7 +93,7 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
       t.slug AS slug,
       t.name AS name,
       m.role AS role,
-      COALESCE(ts.brand_logo_url, ts.logo_url, '') AS brand_logo_url
+      COALESCE(ts.brand_logo_url, '') AS brand_logo_url
     FROM tenant_members m
     JOIN tenants t
       ON t.id = m.tenant_id
@@ -125,7 +125,7 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
       t.slug AS slug,
       t.name AS name,
       m.role AS role,
-      COALESCE(ts.brand_logo_url, ts.logo_url, '') AS brand_logo_url
+      COALESCE(ts.brand_logo_url, '') AS brand_logo_url
     FROM tenant_members m
     JOIN tenants t ON t.id = m.tenant_id
     LEFT JOIN tenant_settings ts
