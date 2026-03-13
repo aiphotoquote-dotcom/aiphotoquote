@@ -1,3 +1,5 @@
+// src/components/tenant/AdminTenantGateShell.tsx
+
 "use client";
 
 import React, { useEffect, useState } from "react";
@@ -36,6 +38,17 @@ export default function AdminTenantGateShell({
     pathname.startsWith("/onboarding")
   ) {
     return <>{children}</>;
+  }
+
+  // Allow the tenant picker page itself to render without the active-tenant gate,
+  // otherwise it can redirect to itself forever.
+  if (pathname.startsWith("/admin/select-tenant")) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-neutral-950">
+        <AdminTopNav />
+        <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
+      </div>
+    );
   }
 
   useEffect(() => {
