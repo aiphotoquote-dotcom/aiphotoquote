@@ -2,7 +2,7 @@
 
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 import AdminTopNav from "@/components/admin/AdminTopNav";
@@ -31,30 +31,40 @@ export default function AdminTenantGateShell({
   const [checked, setChecked] = useState(false);
   const [allowed, setAllowed] = useState(false);
 
-  // Allow auth + onboarding routes to render without admin chrome
-  if (
-    pathname.startsWith("/sign-in") ||
-    pathname.startsWith("/sign-up") ||
-    pathname.startsWith("/onboarding")
-  ) {
-    return <>{children}</>;
-  }
-
-  // Allow the tenant picker page itself to render without the active-tenant gate,
-  // otherwise it can redirect to itself forever.
-  if (pathname.startsWith("/admin/select-tenant")) {
+  const bypassChrome = useMemo(() => {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-neutral-950">
-        <AdminTopNav />
-        <main className="mx-auto max-w-6xl px-4 py-6">{children}</main>
-      </div>
+      pathname.startsWith("/sign-in") ||
+      pathname.startsWith("/sign-up") ||
+      pathname.startsWith("/onboarding")
     );
-  }
+  }, [pathname]);
+
+  const allowTenantlessAdminPage = useMemo(() => {
+    return pathname.startsWith("/admin/select-tenant");
+  }, [pathname]);
 
   useEffect(() => {
     let cancelled = false;
 
     async function run() {
+      // Auth/onboarding routes are intentionally outside admin gating
+      if (bypassChrome) {
+        if (!cancelled) {
+          setAllowed(true);
+          setChecked(true);
+        }
+        return;
+      }
+
+      // Allow the tenant picker page itself to render without an active tenant
+      if (allowTenantlessAdminPage) {
+        if (!cancelled) {
+          setAllowed(true);
+          setChecked(true);
+        }
+        return;
+      }
+
       try {
         const res = await fetch("/api/tenant/context", { cache: "no-store" });
         const data = (await res.json()) as TenantContextResp;
@@ -93,7 +103,11 @@ export default function AdminTenantGateShell({
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [allowTenantlessAdminPage, bypassChrome, router]);
+
+  if (bypassChrome) {
+    return <>{children}</>;
+  }
 
   if (!checked || !allowed) {
     return (
