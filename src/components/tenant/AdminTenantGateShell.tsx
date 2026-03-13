@@ -1,31 +1,33 @@
-// src/components/tenant/AdminTenantGateShell.tsx
 "use client";
 
-import React from "react";
-import { usePathname } from "next/navigation";
+import React, { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 
 import AdminTopNav from "@/components/admin/AdminTopNav";
 
-/**
- * AdminTenantGateShell
- *
- * Purpose:
- * - Wraps all /admin pages
- * - Provides consistent top navigation
- * - Ensures tenant context is established before rendering children
- *
- * NOTE:
- * - Any tenant debug UI has been intentionally removed
- * - Tenant visibility is now handled exclusively via:
- *   - AdminTopNav (read-only)
- *   - AdminTenantSwitcher (authoritative)
- */
+type TenantContextResp =
+  | {
+      ok: true;
+      activeTenantId: string | null;
+      tenants: Array<any>;
+      needsTenantSelection?: boolean;
+    }
+  | {
+      ok: false;
+      error: string;
+      message?: string;
+    };
+
 export default function AdminTenantGateShell({
   children,
 }: {
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
+
+  const [checked, setChecked] = useState(false);
+  const [allowed, setAllowed] = useState(false);
 
   // Allow auth + onboarding routes to render without admin chrome
   if (
@@ -34,6 +36,62 @@ export default function AdminTenantGateShell({
     pathname.startsWith("/onboarding")
   ) {
     return <>{children}</>;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function run() {
+      try {
+        const res = await fetch("/api/tenant/context", { cache: "no-store" });
+        const data = (await res.json()) as TenantContextResp;
+
+        if (cancelled) return;
+
+        if (!("ok" in data) || !data.ok) {
+          router.replace("/onboarding");
+          return;
+        }
+
+        const tenants = Array.isArray(data.tenants) ? data.tenants : [];
+        const hasActiveTenant = Boolean(data.activeTenantId);
+
+        if (hasActiveTenant) {
+          setAllowed(true);
+          setChecked(true);
+          return;
+        }
+
+        if (tenants.length === 0) {
+          router.replace("/onboarding");
+          return;
+        }
+
+        router.replace("/admin/select-tenant");
+      } catch {
+        if (!cancelled) {
+          router.replace("/onboarding");
+        }
+      }
+    }
+
+    run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  if (!checked || !allowed) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-neutral-950">
+        <div className="mx-auto max-w-6xl px-4 py-10">
+          <div className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
+            Preparing your workspace…
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
