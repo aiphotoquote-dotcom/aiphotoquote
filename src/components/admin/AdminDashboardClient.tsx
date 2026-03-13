@@ -1,3 +1,5 @@
+// src/components/admin/AdminDashboardClient.tsx
+
 "use client";
 
 import Link from "next/link";
@@ -6,6 +8,14 @@ import React, { useEffect, useMemo, useState } from "react";
 function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
+
+type TenantRow = {
+  tenantId: string;
+  slug: string;
+  name: string | null;
+  role: "owner" | "admin" | "member";
+  brandLogoUrl?: string | null;
+};
 
 type Totals = {
   totalLeads: number;
@@ -17,16 +27,11 @@ type Totals = {
 type MetricsResp =
   | {
       ok: true;
-      // Newer shape
       totals?: Totals;
-
-      // Older/current route shape (flat)
       totalLeads?: number;
       unread?: number;
       stageNew?: number;
       inProgress?: number;
-
-      // extra fields may exist
       [k: string]: any;
     }
   | { ok: false; error: string; message?: string };
@@ -46,6 +51,16 @@ type RecentResp =
     }
   | { ok: false; error: string; message?: string };
 
+type ContextResp =
+  | {
+      ok: true;
+      activeTenantId: string | null;
+      tenants: TenantRow[];
+      needsTenantSelection?: boolean;
+      autoSelected?: boolean;
+    }
+  | { ok: false; error: string; message?: string };
+
 async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
@@ -55,6 +70,11 @@ async function safeJson<T>(res: Response): Promise<T> {
     );
   }
   return (await res.json()) as T;
+}
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
 }
 
 function normalizeStage(v: any) {
@@ -111,6 +131,38 @@ function prettyDate(d: string) {
   }
 }
 
+function initialsFromTenant(t: TenantRow | null) {
+  const source = safeTrim(t?.name) || safeTrim(t?.slug) || "T";
+  const parts = source
+    .replace(/[-_]+/g, " ")
+    .split(/\s+/g)
+    .filter(Boolean);
+
+  const a = parts[0]?.[0] ?? "T";
+  const b = parts.length > 1 ? parts[1]?.[0] ?? "" : "";
+  return (a + b).toUpperCase();
+}
+
+function roleChip(role: TenantRow["role"] | undefined) {
+  const base = "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold capitalize";
+  if (role === "owner") {
+    return cn(
+      base,
+      "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200"
+    );
+  }
+  if (role === "admin") {
+    return cn(
+      base,
+      "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+    );
+  }
+  return cn(
+    base,
+    "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200"
+  );
+}
+
 function StatCard(props: { label: string; value: number; sub: string }) {
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-800 dark:bg-gray-950">
@@ -128,6 +180,7 @@ function StatCard(props: { label: string; value: number; sub: string }) {
 export default function AdminDashboardClient() {
   const [metrics, setMetrics] = useState<MetricsResp | null>(null);
   const [recent, setRecent] = useState<RecentResp | null>(null);
+  const [context, setContext] = useState<ContextResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -135,24 +188,29 @@ export default function AdminDashboardClient() {
     setLoading(true);
     setErr(null);
     try {
-      const [mRes, rRes] = await Promise.all([
+      const [mRes, rRes, cRes] = await Promise.all([
         fetch("/api/admin/dashboard/metrics", { cache: "no-store" }),
         fetch("/api/admin/dashboard/recent?limit=8", { cache: "no-store" }),
+        fetch("/api/tenant/context", { cache: "no-store" }),
       ]);
 
       const mJson = await safeJson<MetricsResp>(mRes);
       const rJson = await safeJson<RecentResp>(rRes);
+      const cJson = await safeJson<ContextResp>(cRes);
 
       setMetrics(mJson);
       setRecent(rJson);
+      setContext(cJson);
 
       if (!mJson.ok) setErr(mJson.message || mJson.error || "Failed to load metrics");
       else if (!rJson.ok) setErr(rJson.message || rJson.error || "Failed to load recent leads");
+      else if (!cJson.ok) setErr(cJson.message || cJson.error || "Failed to load tenant context");
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setErr(msg);
       setMetrics({ ok: false, error: "FETCH_FAILED", message: msg });
       setRecent({ ok: false, error: "FETCH_FAILED", message: msg });
+      setContext({ ok: false, error: "FETCH_FAILED", message: msg });
     } finally {
       setLoading(false);
     }
@@ -168,7 +226,6 @@ export default function AdminDashboardClient() {
       return { totalLeads: 0, unread: 0, stageNew: 0, inProgress: 0 };
     }
 
-    // Prefer totals shape if present
     if (metrics.totals && typeof metrics.totals === "object") {
       return {
         totalLeads: Number(metrics.totals.totalLeads ?? 0) || 0,
@@ -178,7 +235,6 @@ export default function AdminDashboardClient() {
       };
     }
 
-    // Fall back to flat shape
     return {
       totalLeads: Number((metrics as any).totalLeads ?? 0) || 0,
       unread: Number((metrics as any).unread ?? 0) || 0,
@@ -187,12 +243,16 @@ export default function AdminDashboardClient() {
     };
   }, [metrics]);
 
+  const activeTenant = useMemo(() => {
+    if (!context || !context.ok) return null;
+    return context.tenants.find((t) => t.tenantId === context.activeTenantId) ?? null;
+  }, [context]);
+
   return (
     <div className="space-y-8">
-      {/* Hero header */}
       <div className="rounded-3xl border border-gray-200 bg-white p-7 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
-          <div>
+          <div className="min-w-0">
             <div className="text-xs font-semibold tracking-wide text-gray-500 dark:text-gray-400">
               Admin Dashboard
             </div>
@@ -210,30 +270,67 @@ export default function AdminDashboardClient() {
             ) : null}
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <Link
-              href="/admin/quotes"
-              className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-            >
-              View Quotes
-            </Link>
-            <Link
-              href="/admin/settings"
-              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-            >
-              Settings
-            </Link>
-            <Link
-              href="/admin/setup"
-              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
-            >
-              Setup
-            </Link>
+          <div className="flex w-full flex-col gap-3 md:w-auto md:min-w-[320px]">
+            {activeTenant ? (
+              <div className="rounded-2xl border border-gray-200 bg-gradient-to-br from-gray-50 to-white p-4 shadow-sm dark:border-gray-800 dark:from-gray-950 dark:to-black">
+                <div className="flex items-center gap-4">
+                  <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
+                    {safeTrim(activeTenant.brandLogoUrl) ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={safeTrim(activeTenant.brandLogoUrl)}
+                        alt={safeTrim(activeTenant.name) || activeTenant.slug}
+                        className="h-full w-full object-contain bg-white p-2"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-gray-900 to-gray-700 text-lg font-extrabold tracking-wide text-white dark:from-white dark:to-gray-300 dark:text-black">
+                        {initialsFromTenant(activeTenant)}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
+                      Active tenant
+                    </div>
+                    <div className="mt-1 truncate text-lg font-semibold text-gray-900 dark:text-gray-100">
+                      {safeTrim(activeTenant.name) || activeTenant.slug}
+                    </div>
+                    <div className="mt-1 truncate font-mono text-xs text-gray-500 dark:text-gray-400">
+                      {activeTenant.slug}
+                    </div>
+                    <div className="mt-3">
+                      <span className={roleChip(activeTenant.role)}>{activeTenant.role}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2 md:justify-end">
+              <Link
+                href="/admin/quotes"
+                className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+              >
+                View Quotes
+              </Link>
+              <Link
+                href="/admin/settings"
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Settings
+              </Link>
+              <Link
+                href="/admin/setup"
+                className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-100 dark:hover:bg-gray-900"
+              >
+                Setup
+              </Link>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Metric tiles */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="TOTAL LEADS" value={totals.totalLeads} sub="All-time for active tenant" />
         <StatCard label="UNREAD" value={totals.unread} sub="Needs attention" />
@@ -241,7 +338,6 @@ export default function AdminDashboardClient() {
         <StatCard label="IN PROGRESS" value={totals.inProgress} sub="Read / Estimate / Quoted" />
       </div>
 
-      {/* Recent leads */}
       <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
