@@ -23,6 +23,7 @@ function json(data: any, status = 200) {
 function digitsOnly(s: string) {
   return (s || "").replace(/\D/g, "");
 }
+
 function formatUSPhone(raw: string) {
   const d = digitsOnly(raw).slice(0, 10);
   const a = d.slice(0, 3);

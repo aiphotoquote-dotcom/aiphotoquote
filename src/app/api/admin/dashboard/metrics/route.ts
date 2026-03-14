@@ -31,6 +31,12 @@ function toInt(v: any) {
 /**
  * Dashboard metrics for active tenant.
  * Uses created_at (NOT submitted_at).
+ *
+ * IMPORTANT:
+ * - "New" remains raw stage='new'
+ * - "In Progress" must include:
+ *   - stage in ('read','estimate','quoted')
+ *   - OR quotes that are still stage='new' but have been read already
  */
 export async function GET() {
   const gate = await requireTenantRole(["owner", "admin", "member"]);
@@ -43,27 +49,38 @@ export async function GET() {
           tenant_id,
           created_at,
           COALESCE(is_read, false) AS is_read,
-          COALESCE(stage, 'new') AS stage
+          lower(COALESCE(stage, 'new')) AS stage
         FROM quote_logs
         WHERE tenant_id = ${gate.tenantId}::uuid
       )
       SELECT
         COALESCE((SELECT COUNT(*)::int FROM base), 0) AS "totalLeads",
+
         COALESCE((SELECT COUNT(*)::int FROM base WHERE is_read = false), 0) AS "unread",
-        COALESCE((SELECT COUNT(*)::int FROM base WHERE lower(stage) = 'new'), 0) AS "stageNew",
-        COALESCE((SELECT COUNT(*)::int FROM base WHERE lower(stage) IN ('read','estimate','quoted')), 0) AS "inProgress",
+
+        COALESCE((SELECT COUNT(*)::int FROM base WHERE stage = 'new'), 0) AS "stageNew",
+
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM base
+          WHERE stage IN ('read', 'estimate', 'quoted')
+             OR (stage = 'new' AND is_read = true)
+        ), 0) AS "inProgress",
+
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
           WHERE created_at >= date_trunc('day', now())
             AND created_at <  date_trunc('day', now()) + interval '1 day'
         ), 0) AS "todayNew",
+
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
           WHERE created_at >= date_trunc('day', now()) - interval '1 day'
             AND created_at <  date_trunc('day', now())
         ), 0) AS "yesterdayNew",
+
         COALESCE((
           SELECT COUNT(*)::int
           FROM base
@@ -85,7 +102,6 @@ export async function GET() {
       staleUnread: toInt(row.staleUnread),
     });
   } catch (e: any) {
-    // Log real error server-side; don't leak SQL details to the client.
     console.error("[admin.dashboard.metrics] failed", {
       tenantId: gate.tenantId,
       code: e?.code,

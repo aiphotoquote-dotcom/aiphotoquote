@@ -231,7 +231,6 @@ export default function AdminDashboardPage() {
   const [recent, setRecent] = useState<RecentResp | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // last known-good metrics so we never overwrite with junk/empty payloads
   const lastGoodMetricsRef = useRef<MetricsOk | null>(null);
 
   async function fetchTenantContext() {
@@ -276,7 +275,7 @@ export default function AdminDashboardPage() {
       const ctx = await checkTenantContext();
       if (!ctx) return;
 
-      const bust = Date.now().toString(); // cache-bust helps iOS/Safari weirdness
+      const bust = Date.now().toString();
       const [mRes, rRes] = await Promise.all([
         fetch(`/api/admin/dashboard/metrics?bust=${bust}`, { cache: "no-store" }),
         fetch(`/api/admin/dashboard/recent?bust=${bust}`, { cache: "no-store" }),
@@ -285,7 +284,6 @@ export default function AdminDashboardPage() {
       const mJson = await mRes.json().catch(() => null);
       const rJson = await rRes.json().catch(() => null);
 
-      // ✅ Metrics: only accept payload if it's complete + numeric.
       const valid = validateMetricsPayload(mJson);
       if (valid) {
         lastGoodMetricsRef.current = valid;
@@ -313,19 +311,16 @@ export default function AdminDashboardPage() {
     }
   }
 
-  // 1) initial mount
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) reload when route becomes active again
   useEffect(() => {
     if (pathname === "/admin") load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
-  // 3) reload when page is restored from bfcache
   useEffect(() => {
     const onPageShow = (e: PageTransitionEvent) => {
       if (e.persisted) load();
@@ -526,29 +521,45 @@ export default function AdminDashboardPage() {
                 <li
                   key={x.id}
                   className={cn(
-                    "grid grid-cols-12 items-center px-4 py-3",
                     x.isRead ? "" : "bg-yellow-50/60 dark:bg-yellow-950/10"
                   )}
                 >
-                  <div className="col-span-5">
-                    <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{x.customerName}</div>
-                    {x.customerPhone ? (
-                      <div className="text-xs text-gray-600 dark:text-gray-300">{x.customerPhone}</div>
-                    ) : null}
-                  </div>
+                  <Link
+                    href={`/admin/quotes/${x.id}`}
+                    className={cn(
+                      "grid grid-cols-12 items-center px-4 py-3 transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                    )}
+                  >
+                    <div className="col-span-5 min-w-0">
+                      <div className="text-sm font-semibold text-gray-900 underline-offset-2 hover:underline dark:text-gray-100">
+                        {x.customerName}
+                      </div>
+                      {x.customerPhone ? (
+                        <div className="text-xs text-gray-600 dark:text-gray-300">{x.customerPhone}</div>
+                      ) : null}
+                    </div>
 
-                  <div className="col-span-2">{chip(stageLabel(x.stage), stageLabel(x.stage) === "new" ? "blue" : "gray")}</div>
+                    <div className="col-span-2">
+                      {chip(stageLabel(x.stage), stageLabel(x.stage) === "new" ? "blue" : "gray")}
+                    </div>
 
-                  <div className="col-span-3 text-sm text-gray-700 dark:text-gray-200">{fmtDate(x.submittedAt)}</div>
+                    <div className="col-span-3 text-sm text-gray-700 dark:text-gray-200">
+                      {fmtDate(x.submittedAt)}
+                    </div>
 
-                  <div className="col-span-2 flex justify-end">{x.isRead ? chip("Read", "gray") : chip("Unread", "yellow")}</div>
+                    <div className="col-span-2 flex justify-end">
+                      {x.isRead ? chip("Read", "gray") : chip("Unread", "yellow")}
+                    </div>
+                  </Link>
                 </li>
               ))}
             </ul>
           </div>
         )}
 
-        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">Tip: unread rows are lightly highlighted so you can scan faster.</div>
+        <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+          Tip: unread rows are lightly highlighted so you can scan faster.
+        </div>
       </div>
     </div>
   );
