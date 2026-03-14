@@ -41,8 +41,12 @@ type TenantContextResp =
         slug: string;
         name: string | null;
         role: "owner" | "admin" | "member";
+        brandLogoUrl?: string | null;
+        brandLogoVariant?: "auto" | "light" | "dark" | null;
       }>;
       needsTenantSelection?: boolean;
+      autoSelected?: boolean;
+      clearedStaleCookie?: boolean;
     }
   | { ok: false; error: string; message?: string };
 
@@ -71,12 +75,12 @@ function chip(label: string, tone: "gray" | "blue" | "yellow" | "green" | "red" 
     tone === "green"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-950/40 dark:text-green-200"
       : tone === "yellow"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
-      : tone === "red"
-      ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
-      : tone === "blue"
-      ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
-      : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-950/40 dark:text-yellow-200"
+        : tone === "red"
+          ? "border-red-200 bg-red-50 text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200"
+          : tone === "blue"
+            ? "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200"
+            : "border-gray-200 bg-gray-50 text-gray-800 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-200";
 
   return <span className={cn(base, cls)}>{label}</span>;
 }
@@ -129,11 +133,100 @@ function normalizeRecent(r: any): RecentResp {
   return { ok: true, leads: Array.isArray(r.leads) ? r.leads : [] };
 }
 
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function initialsFromTenant(t: {
+  name: string | null;
+  slug: string;
+} | null): string {
+  const raw = safeTrim(t?.name) || safeTrim(t?.slug) || "T";
+  const parts = raw
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+  }
+  return (parts[0]?.slice(0, 2) || "T").toUpperCase();
+}
+
+function logoShellClass(variant?: string | null) {
+  const v = safeTrim(variant).toLowerCase();
+
+  if (v === "light") return "bg-neutral-950 border-gray-800";
+  if (v === "dark") return "bg-white border-gray-200";
+
+  return "bg-white border-gray-200 dark:bg-neutral-950 dark:border-gray-800";
+}
+
+function TenantHeroCard({
+  tenant,
+}: {
+  tenant: {
+    tenantId: string;
+    slug: string;
+    name: string | null;
+    brandLogoUrl?: string | null;
+    brandLogoVariant?: "auto" | "light" | "dark" | null;
+  } | null;
+}) {
+  if (!tenant) return null;
+
+  const displayName = safeTrim(tenant.name) || safeTrim(tenant.slug) || "Tenant";
+  const slug = safeTrim(tenant.slug);
+  const logoUrl = safeTrim(tenant.brandLogoUrl);
+  const variant = tenant.brandLogoVariant ?? "auto";
+
+  return (
+    <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+      <div className="flex items-center gap-4">
+        <div
+          className={cn(
+            "flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl border shadow-sm",
+            logoShellClass(variant)
+          )}
+        >
+          {logoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={logoUrl}
+              alt={`${displayName} logo`}
+              className="max-h-14 max-w-[56px] object-contain"
+            />
+          ) : (
+            <span className="text-lg font-extrabold tracking-wide text-gray-700 dark:text-gray-200">
+              {initialsFromTenant(tenant)}
+            </span>
+          )}
+        </div>
+
+        <div className="min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+            Active tenant
+          </div>
+          <div className="mt-1 truncate text-xl font-semibold text-gray-900 dark:text-gray-100">
+            {displayName}
+          </div>
+          <div className="mt-1 truncate text-sm text-gray-500 dark:text-gray-400">
+            {slug}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AdminDashboardPage() {
   const pathname = usePathname() || "";
   const router = useRouter();
 
   const [tenantChecked, setTenantChecked] = useState(false);
+  const [tenantCtx, setTenantCtx] = useState<TenantContextResp | null>(null);
   const [metrics, setMetrics] = useState<MetricsResp | null>(null);
   const [recent, setRecent] = useState<RecentResp | null>(null);
   const [loading, setLoading] = useState(true);
@@ -141,39 +234,47 @@ export default function AdminDashboardPage() {
   // last known-good metrics so we never overwrite with junk/empty payloads
   const lastGoodMetricsRef = useRef<MetricsOk | null>(null);
 
-  async function checkTenantContext(): Promise<boolean> {
+  async function fetchTenantContext() {
+    const res = await fetch("/api/tenant/context", {
+      cache: "no-store",
+      credentials: "include",
+    });
+    return (await res.json().catch(() => null)) as TenantContextResp | null;
+  }
+
+  async function checkTenantContext(): Promise<TenantContextResp | null> {
     try {
-      const res = await fetch("/api/tenant/context", { cache: "no-store" });
-      const data = (await res.json().catch(() => null)) as TenantContextResp | null;
+      const data = await fetchTenantContext();
+      setTenantCtx(data);
 
       if (!data || !("ok" in data) || !data.ok) {
-        return false;
+        return null;
       }
 
       const tenants = Array.isArray(data.tenants) ? data.tenants : [];
       const hasActiveTenant = Boolean(data.activeTenantId);
 
       if (hasActiveTenant) {
-        return true;
+        return data;
       }
 
       if (tenants.length === 0) {
         router.replace("/onboarding");
-        return false;
+        return null;
       }
 
       router.replace("/admin/select-tenant");
-      return false;
+      return null;
     } catch {
-      return false;
+      return null;
     }
   }
 
   async function load() {
     setLoading(true);
     try {
-      const okToLoad = await checkTenantContext();
-      if (!okToLoad) return;
+      const ctx = await checkTenantContext();
+      if (!ctx) return;
 
       const bust = Date.now().toString(); // cache-bust helps iOS/Safari weirdness
       const [mRes, rRes] = await Promise.all([
@@ -190,22 +291,18 @@ export default function AdminDashboardPage() {
         lastGoodMetricsRef.current = valid;
         setMetrics(valid);
       } else {
-        // If server gave an error, surface it. If it gave incomplete ok:true, keep last good.
         if (mJson && typeof mJson === "object" && mJson.ok === false) {
           setMetrics({ ok: false, error: mJson.error || "FETCH_FAILED", message: mJson.message });
         } else if (lastGoodMetricsRef.current) {
-          // keep prior good metrics (do not overwrite with zeros)
           setMetrics(lastGoodMetricsRef.current);
         } else {
           setMetrics({ ok: false, error: "BAD_RESPONSE", message: "Metrics response incomplete." });
         }
       }
 
-      // Recent list can safely default to empty; still keep normal behavior
       const rNorm = normalizeRecent(rJson);
       setRecent(rNorm);
     } catch (e: any) {
-      // do not clobber good metrics on transient fetch failure
       if (lastGoodMetricsRef.current) setMetrics(lastGoodMetricsRef.current);
       else setMetrics({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
 
@@ -247,6 +344,11 @@ export default function AdminDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const activeTenant =
+    tenantCtx && "ok" in tenantCtx && tenantCtx.ok && tenantCtx.activeTenantId
+      ? (tenantCtx.tenants || []).find((t) => t.tenantId === tenantCtx.activeTenantId) ?? null
+      : null;
+
   const mOk = Boolean(metrics && "ok" in metrics && (metrics as any).ok);
   const rOk = Boolean(recent && "ok" in recent && (recent as any).ok);
 
@@ -274,49 +376,55 @@ export default function AdminDashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What’s happening today</p>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-          Quick snapshot of inbound leads and where they are in your pipeline.
-        </p>
+      {/* Header + tenant branding */}
+      <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr] lg:items-start">
+        <div>
+          <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">What’s happening today</p>
+          <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+            Quick snapshot of inbound leads and where they are in your pipeline.
+          </p>
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <Link
-            href="/admin/quotes"
-            className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
-          >
-            View Quotes
-          </Link>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Link
+              href="/admin/quotes"
+              className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 dark:bg-white dark:text-black"
+            >
+              View Quotes
+            </Link>
 
-          {mOk ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <Link href="/admin/quotes?view=unread" className="hover:opacity-90">
-                {chip(`Unread: ${(metrics as any).unread}`, (metrics as any).staleUnread > 0 ? "yellow" : "gray")}
-              </Link>
-              <Link href="/admin/quotes?view=new" className="hover:opacity-90">
-                {chip(`New: ${(metrics as any).stageNew}`, "blue")}
-              </Link>
-              <Link href="/admin/quotes?view=in_progress" className="hover:opacity-90">
-                {chip(`In progress: ${(metrics as any).inProgress}`, "green")}
-              </Link>
+            {mOk ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Link href="/admin/quotes?view=unread" className="hover:opacity-90">
+                  {chip(`Unread: ${(metrics as any).unread}`, (metrics as any).staleUnread > 0 ? "yellow" : "gray")}
+                </Link>
+                <Link href="/admin/quotes?view=new" className="hover:opacity-90">
+                  {chip(`New: ${(metrics as any).stageNew}`, "blue")}
+                </Link>
+                <Link href="/admin/quotes?view=in_progress" className="hover:opacity-90">
+                  {chip(`In progress: ${(metrics as any).inProgress}`, "green")}
+                </Link>
 
-              <span className="ml-1">{chip(`Today: ${(metrics as any).todayNew} (${todayDelta.label})`, todayDelta.tone)}</span>
-            </div>
-          ) : loading ? (
-            <div className="text-sm text-gray-500">Loading…</div>
-          ) : (
-            <div className="text-sm text-red-600">{(metrics as any)?.message || "Failed to load metrics."}</div>
-          )}
+                <span className="ml-1">{chip(`Today: ${(metrics as any).todayNew} (${todayDelta.label})`, todayDelta.tone)}</span>
+              </div>
+            ) : loading ? (
+              <div className="text-sm text-gray-500">Loading…</div>
+            ) : (
+              <div className="text-sm text-red-600">{(metrics as any)?.message || "Failed to load metrics."}</div>
+            )}
 
-          <button
-            type="button"
-            onClick={load}
-            className="ml-auto rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
-          >
-            Refresh
-          </button>
+            <button
+              type="button"
+              onClick={load}
+              className="ml-auto rounded-lg border border-gray-200 px-3 py-2 text-sm font-semibold hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-[132px]">
+          <TenantHeroCard tenant={activeTenant as any} />
         </div>
       </div>
 
