@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import { db } from "@/lib/db/client";
@@ -30,19 +30,14 @@ function firstRow(r: any): any | null {
 
 function getCookieTenantId(jar: Awaited<ReturnType<typeof cookies>>) {
   const candidates = [
-    // common variants
     jar.get("activeTenantId")?.value,
     jar.get("active_tenant_id")?.value,
     jar.get("tenantId")?.value,
     jar.get("tenant_id")?.value,
-
-    // “namespaced” variants (often used by custom switchers)
     jar.get("apq_activeTenantId")?.value,
     jar.get("apq_active_tenant_id")?.value,
     jar.get("apqTenantId")?.value,
     jar.get("apq_tenant_id")?.value,
-
-    // __Host- prefix variants (stricter cookie rules)
     jar.get("__Host-activeTenantId")?.value,
     jar.get("__Host-active_tenant_id")?.value,
     jar.get("__Host-tenantId")?.value,
@@ -182,9 +177,6 @@ function safeParseMaybeJson(v: any) {
   return { raw: v };
 }
 
-/**
- * Presentable AI bits (legacy tolerant)
- */
 function normalizeAiOutput(outputRaw: any) {
   const root = safeParseMaybeJson(outputRaw) ?? null;
   const assessment = root?.assessment && typeof root.assessment === "object" ? root.assessment : null;
@@ -212,8 +204,6 @@ function normalizeAiOutput(outputRaw: any) {
           : null,
     estimateLow,
     estimateHigh,
-
-    // ✅ also return snapshot if present
     aiSnapshot: root?.ai_snapshot && typeof root.ai_snapshot === "object" ? root.ai_snapshot : null,
   };
 }
@@ -278,10 +268,6 @@ type PageProps = {
 
 type ViewMode = "all" | "unread" | "new" | "in_progress" | "custom";
 
-/**
- * ✅ Pricing badge should come from the stored ai_snapshot policy,
- * not inferred from estimate numbers (assessment-only can still be “enabled”).
- */
 function pricingBadgeFromSnapshot(aiSnapshot: any) {
   const pol = aiSnapshot?.pricing?.policy ?? null;
   const enabled = pol?.pricing_enabled;
@@ -289,7 +275,6 @@ function pricingBadgeFromSnapshot(aiSnapshot: any) {
 
   if (enabled === false) return chip("Pricing: Off", "gray");
 
-  // enabled could be true, or missing (older data)
   if (enabled === true) {
     if (mode === "assessment_only") return chip("Pricing: Assessment only", "gray");
     if (mode === "fixed") return chip("Pricing: Fixed", "blue");
@@ -297,16 +282,9 @@ function pricingBadgeFromSnapshot(aiSnapshot: any) {
     return chip("Pricing: On", "blue");
   }
 
-  // unknown (older rows)
   return null;
 }
 
-/**
- * ✅ Display dollars ONLY when pricing is enabled AND mode is not assessment_only.
- * - fixed OR low==high => "$X"
- * - range => "$X – $Y"
- * - pricing off / assessment_only => "AI assessment"
- */
 function estimateDisplayFromSnapshot(args: {
   aiSnapshot: any;
   estLow: number | null;
@@ -322,12 +300,10 @@ function estimateDisplayFromSnapshot(args: {
   const enabled = pol?.pricing_enabled;
   const mode = String(pol?.ai_mode ?? "").trim();
 
-  // If explicitly off, or assessment_only: never show dollars (even if numbers exist)
   if (enabled === false || mode === "assessment_only") {
     return <span className="text-gray-500 dark:text-gray-400">AI assessment</span>;
   }
 
-  // If explicitly fixed OR low==high: show single number (prevents "$X – $X")
   const low = estLow;
   const high = estHigh;
 
@@ -335,7 +311,6 @@ function estimateDisplayFromSnapshot(args: {
     return <>{money(low ?? high)}</>;
   }
 
-  // Range fallback (handles missing mode/legacy)
   return (
     <>
       {money(low)} – {money(high)}
@@ -349,9 +324,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
   const sp = searchParams ? await searchParams : {};
 
-  // -------------------------
-  // view= (canonical) + legacy filters
-  // -------------------------
   const viewRaw = Array.isArray(sp.view) ? sp.view[0] : sp.view;
   const viewNorm = String(viewRaw ?? "").toLowerCase().trim();
 
@@ -386,24 +358,18 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
     viewMode = unreadOnly || inProgressOnly || stageParam ? "custom" : "all";
   }
 
-  // pagination
   const page = clampInt(sp.page, 1, 1, 10_000);
   const pageSize = clampInt(sp.pageSize, 25, 5, 200);
   const offset = (page - 1) * pageSize;
 
-  // delete confirm UI
   const deleteIdRaw = sp?.deleteId;
   const confirmDeleteRaw = sp?.confirmDelete;
   const deleteId = Array.isArray(deleteIdRaw) ? String(deleteIdRaw[0] ?? "") : String(deleteIdRaw ?? "");
   const confirmDelete = confirmDeleteRaw === "1" || (Array.isArray(confirmDeleteRaw) && confirmDeleteRaw.includes("1"));
 
-  // -------------------------
-  // tenant selection (cookie -> validated membership -> recent membership -> owned fallback)
-  // -------------------------
   const jar = await cookies();
   let tenantIdMaybe = getCookieTenantId(jar);
 
-  // validate cookie tenant membership (prevents stale/wrong tenant cookie)
   if (tenantIdMaybe) {
     const ok = await db.execute(sql`
       select 1 as ok
@@ -416,7 +382,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
     if (!firstRow(ok)?.ok) tenantIdMaybe = null;
   }
 
-  // fall back to most recently updated active membership
   if (!tenantIdMaybe) {
     const r = await db.execute(sql`
       select tenant_id
@@ -430,7 +395,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
     tenantIdMaybe = row?.tenant_id ? String(row.tenant_id) : null;
   }
 
-  // last resort: first owned tenant
   if (!tenantIdMaybe) {
     const t = await db
       .select({ id: tenants.id })
@@ -459,16 +423,17 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
   const tenantId = tenantIdMaybe;
 
-  // -------------------------
-  // WHERE filters
-  // -------------------------
   const whereParts: any[] = [eq(quoteLogs.tenantId, tenantId)];
 
   if (unreadOnly) whereParts.push(eq(quoteLogs.isRead, false));
 
   if (inProgressOnly) {
-    // rule: ONLY read / estimate / quoted
-    whereParts.push(inArray(quoteLogs.stage, ["read", "estimate", "quoted"]));
+    whereParts.push(
+      or(
+        inArray(quoteLogs.stage, ["read", "estimate", "quoted"]),
+        and(eq(quoteLogs.stage, "new"), eq(quoteLogs.isRead, true))
+      )
+    );
   }
 
   if (stageParam) whereParts.push(eq(quoteLogs.stage, stageParam));
@@ -476,10 +441,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const whereAll = and(...whereParts);
   const hasFilters = unreadOnly || inProgressOnly || Boolean(stageParam) || viewMode !== "all";
 
-  // -------------------------
-  // Preserve filter params in paging/delete links
-  // Use view= if present/known; otherwise use legacy
-  // -------------------------
   const useView = viewMode === "unread" || viewMode === "new" || viewMode === "in_progress";
 
   const filterParams: Record<string, string | number | null> = useView
@@ -513,7 +474,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
     redirect(`/admin/quotes${qs({ ...filterParams, page, pageSize })}`);
   }
 
-  // counts + rows
   const totalCount = await db
     .select({ c: sql<number>`count(*)` })
     .from(quoteLogs)
@@ -525,7 +485,7 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
       id: quoteLogs.id,
       createdAt: quoteLogs.createdAt,
       input: quoteLogs.input,
-      output: (quoteLogs as any).output, // ✅ pull AI results
+      output: (quoteLogs as any).output,
       renderStatus: quoteLogs.renderStatus,
       isRead: quoteLogs.isRead,
       stage: quoteLogs.stage,
@@ -543,9 +503,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
   const prevPage = safePage > 1 ? safePage - 1 : null;
   const nextPage = safePage < totalPages ? safePage + 1 : null;
 
-  // -------------------------
-  // Pills (canonical view= links)
-  // -------------------------
   const pillBase = { page: 1, pageSize };
   const hrefAll = `/admin/quotes${qs({ ...pillBase })}`;
   const hrefUnread = `/admin/quotes${qs({ ...pillBase, view: "unread" })}`;
@@ -559,7 +516,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-10 space-y-6">
-      {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Quotes</h1>
@@ -584,7 +540,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
         </div>
       </div>
 
-      {/* Paging controls */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Link
@@ -614,7 +569,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
           </Link>
         </div>
 
-        {/* page size selector (no JS) */}
         <form action="/admin/quotes" method="GET" className="flex items-center gap-2">
           {filterParams.view ? <input type="hidden" name="view" value={String(filterParams.view)} /> : null}
           {!filterParams.view && unreadOnly ? <input type="hidden" name="unread" value="1" /> : null}
@@ -643,7 +597,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
         </form>
       </div>
 
-      {/* List */}
       <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
         {rows.length === 0 ? (
           <div className="p-6 text-sm text-gray-700 dark:text-gray-300">No quotes match these filters.</div>
@@ -674,7 +627,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
 
               const cancelHref = `/admin/quotes` + qs({ ...filterParams, page: safePage, pageSize }) + `#${anchor}`;
 
-              // ✅ Pricing badge from snapshot (truth)
               const pricingBadge = pricingBadgeFromSnapshot(ai.aiSnapshot);
 
               return (
@@ -699,11 +651,8 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         {stageChip(st)}
                         {renderChip((r as any).renderStatus)}
 
-                        {/* AI badges */}
                         {ai.confidence ? chip(`Confidence: ${String(ai.confidence)}`, confTone as any) : null}
                         {ai.inspectionRequired != null ? chip(ai.inspectionRequired ? "Inspection" : "No inspection", inspTone as any) : null}
-
-                        {/* ✅ Pricing badge from ai_snapshot */}
                         {pricingBadge}
                       </div>
 
@@ -717,7 +666,6 @@ export default async function AdminQuotesPage({ searchParams }: PageProps) {
                         ) : null}
                       </div>
 
-                      {/* Presentable AI preview */}
                       <div className="mt-3 grid gap-2">
                         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                           {estimateDisplayFromSnapshot({ aiSnapshot: ai.aiSnapshot, estLow, estHigh })}
