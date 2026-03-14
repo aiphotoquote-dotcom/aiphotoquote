@@ -1,3 +1,4 @@
+// src/app/api/tenant/context/route.ts
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
@@ -38,25 +39,17 @@ function noStore(res: NextResponse) {
   return res;
 }
 
-function safeTrim(v: unknown) {
-  const s = String(v ?? "").trim();
-  return s ? s : "";
-}
-
 async function listTenantsForUser(userId: string) {
   const r = await db.execute(sql`
     SELECT
-      t.id AS tenant_id,
+      t.id  AS tenant_id,
       t.slug AS slug,
       t.name AS name,
       m.role AS role,
-      t.created_at AS created_at,
-      COALESCE(ts.brand_logo_url, '') AS brand_logo_url
+      t.created_at AS created_at
     FROM tenant_members m
     JOIN tenants t
       ON t.id = m.tenant_id
-    LEFT JOIN tenant_settings ts
-      ON ts.tenant_id = t.id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
       AND COALESCE(t.status, 'active') = 'active'
@@ -68,7 +61,6 @@ async function listTenantsForUser(userId: string) {
     slug: String(x.slug),
     name: x.name ? String(x.name) : null,
     role: normalizeRole(x.role),
-    brandLogoUrl: safeTrim(x.brand_logo_url) || null,
   }));
 }
 
@@ -92,13 +84,10 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
       t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
-      m.role AS role,
-      COALESCE(ts.brand_logo_url, '') AS brand_logo_url
+      m.role AS role
     FROM tenant_members m
     JOIN tenants t
       ON t.id = m.tenant_id
-    LEFT JOIN tenant_settings ts
-      ON ts.tenant_id = t.id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
       AND COALESCE(t.status, 'active') = 'active'
@@ -114,7 +103,6 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
     slug: String(row.slug),
     name: row.name ? String(row.name) : null,
     role: normalizeRole(row.role),
-    brandLogoUrl: safeTrim(row.brand_logo_url) || null,
   };
 }
 
@@ -124,12 +112,9 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
       t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
-      m.role AS role,
-      COALESCE(ts.brand_logo_url, '') AS brand_logo_url
+      m.role AS role
     FROM tenant_members m
     JOIN tenants t ON t.id = m.tenant_id
-    LEFT JOIN tenant_settings ts
-      ON ts.tenant_id = t.id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
       AND COALESCE(t.status, 'active') = 'active'
@@ -145,7 +130,6 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
     slug: String(row.slug),
     name: row.name ? String(row.name) : null,
     role: normalizeRole(row.role),
-    brandLogoUrl: safeTrim(row.brand_logo_url) || null,
   };
 }
 
@@ -183,6 +167,7 @@ export async function GET() {
         );
       }
 
+      // stale cookie (or tenant became archived)
       const cleared = NextResponse.json({
         ok: true,
         activeTenantId: null,
@@ -200,6 +185,7 @@ export async function GET() {
       return noStore(clearedRes);
     }
 
+    // no cookie
     if (tenantsForUser.length === 1) {
       const res = NextResponse.json({
         ok: true,
@@ -246,15 +232,7 @@ export async function POST(req: Request) {
       return noStore(NextResponse.json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, { status: 400 }));
     }
 
-    let selected:
-      | {
-          tenantId: string;
-          slug: string;
-          name: string | null;
-          role: TenantRole;
-          brandLogoUrl: string | null;
-        }
-      | null = null;
+    let selected: { tenantId: string; slug: string; name: string | null; role: TenantRole } | null = null;
 
     if (tenantId) {
       const ok = await hasTenantAccessById(userId, tenantId);
