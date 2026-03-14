@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 type MetricsOk = {
   ok: true;
@@ -29,6 +29,20 @@ type RecentResp =
         customerName: string;
         customerPhone: string | null;
       }>;
+    }
+  | { ok: false; error: string; message?: string };
+
+type TenantContextResp =
+  | {
+      ok: true;
+      activeTenantId: string | null;
+      tenants: Array<{
+        tenantId: string;
+        slug: string;
+        name: string | null;
+        role: "owner" | "admin" | "member";
+      }>;
+      needsTenantSelection?: boolean;
     }
   | { ok: false; error: string; message?: string };
 
@@ -117,7 +131,9 @@ function normalizeRecent(r: any): RecentResp {
 
 export default function AdminDashboardPage() {
   const pathname = usePathname() || "";
+  const router = useRouter();
 
+  const [tenantChecked, setTenantChecked] = useState(false);
   const [metrics, setMetrics] = useState<MetricsResp | null>(null);
   const [recent, setRecent] = useState<RecentResp | null>(null);
   const [loading, setLoading] = useState(true);
@@ -125,9 +141,40 @@ export default function AdminDashboardPage() {
   // last known-good metrics so we never overwrite with junk/empty payloads
   const lastGoodMetricsRef = useRef<MetricsOk | null>(null);
 
+  async function checkTenantContext(): Promise<boolean> {
+    try {
+      const res = await fetch("/api/tenant/context", { cache: "no-store" });
+      const data = (await res.json().catch(() => null)) as TenantContextResp | null;
+
+      if (!data || !("ok" in data) || !data.ok) {
+        return false;
+      }
+
+      const tenants = Array.isArray(data.tenants) ? data.tenants : [];
+      const hasActiveTenant = Boolean(data.activeTenantId);
+
+      if (hasActiveTenant) {
+        return true;
+      }
+
+      if (tenants.length === 0) {
+        router.replace("/onboarding");
+        return false;
+      }
+
+      router.replace("/admin/select-tenant");
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   async function load() {
     setLoading(true);
     try {
+      const okToLoad = await checkTenantContext();
+      if (!okToLoad) return;
+
       const bust = Date.now().toString(); // cache-bust helps iOS/Safari weirdness
       const [mRes, rRes] = await Promise.all([
         fetch(`/api/admin/dashboard/metrics?bust=${bust}`, { cache: "no-store" }),
@@ -164,6 +211,7 @@ export default function AdminDashboardPage() {
 
       setRecent({ ok: false, error: "FETCH_FAILED", message: e?.message ?? String(e) });
     } finally {
+      setTenantChecked(true);
       setLoading(false);
     }
   }
@@ -212,6 +260,17 @@ export default function AdminDashboardPage() {
     if (p > 0) return { label: `+${p}%`, tone: "green" as const };
     return { label: `${p}%`, tone: "red" as const };
   }, [mOk, metrics]);
+
+  if (!tenantChecked && loading) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">Preparing your workspace…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
