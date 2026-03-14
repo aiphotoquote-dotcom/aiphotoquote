@@ -21,11 +21,23 @@ const Body = z.object({
 });
 
 type TenantRole = "owner" | "admin" | "member";
+type BrandLogoVariant = "auto" | "light" | "dark";
 
 function normalizeRole(v: unknown): TenantRole {
   const r = String(v ?? "").trim().toLowerCase();
   if (r === "owner" || r === "admin" || r === "member") return r;
   return "member";
+}
+
+function normalizeLogoVariant(v: unknown): BrandLogoVariant {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "light" || s === "dark") return s;
+  return "auto";
+}
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
 }
 
 function rows(r: any): any[] {
@@ -42,14 +54,18 @@ function noStore(res: NextResponse) {
 async function listTenantsForUser(userId: string) {
   const r = await db.execute(sql`
     SELECT
-      t.id  AS tenant_id,
+      t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
       m.role AS role,
-      t.created_at AS created_at
+      t.created_at AS created_at,
+      ts.brand_logo_url AS brand_logo_url,
+      ts.brand_logo_variant AS brand_logo_variant
     FROM tenant_members m
     JOIN tenants t
       ON t.id = m.tenant_id
+    LEFT JOIN tenant_settings ts
+      ON ts.tenant_id = t.id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
       AND COALESCE(t.status, 'active') = 'active'
@@ -61,6 +77,8 @@ async function listTenantsForUser(userId: string) {
     slug: String(x.slug),
     name: x.name ? String(x.name) : null,
     role: normalizeRole(x.role),
+    brandLogoUrl: safeTrim(x.brand_logo_url) || null,
+    brandLogoVariant: normalizeLogoVariant(x.brand_logo_variant),
   }));
 }
 
@@ -84,10 +102,14 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
       t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
-      m.role AS role
+      m.role AS role,
+      ts.brand_logo_url AS brand_logo_url,
+      ts.brand_logo_variant AS brand_logo_variant
     FROM tenant_members m
     JOIN tenants t
       ON t.id = m.tenant_id
+    LEFT JOIN tenant_settings ts
+      ON ts.tenant_id = t.id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
       AND COALESCE(t.status, 'active') = 'active'
@@ -103,6 +125,8 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
     slug: String(row.slug),
     name: row.name ? String(row.name) : null,
     role: normalizeRole(row.role),
+    brandLogoUrl: safeTrim(row.brand_logo_url) || null,
+    brandLogoVariant: normalizeLogoVariant(row.brand_logo_variant),
   };
 }
 
@@ -112,9 +136,13 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
       t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
-      m.role AS role
+      m.role AS role,
+      ts.brand_logo_url AS brand_logo_url,
+      ts.brand_logo_variant AS brand_logo_variant
     FROM tenant_members m
     JOIN tenants t ON t.id = m.tenant_id
+    LEFT JOIN tenant_settings ts
+      ON ts.tenant_id = t.id
     WHERE m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
       AND COALESCE(t.status, 'active') = 'active'
@@ -130,6 +158,8 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
     slug: String(row.slug),
     name: row.name ? String(row.name) : null,
     role: normalizeRole(row.role),
+    brandLogoUrl: safeTrim(row.brand_logo_url) || null,
+    brandLogoVariant: normalizeLogoVariant(row.brand_logo_variant),
   };
 }
 
@@ -167,7 +197,6 @@ export async function GET() {
         );
       }
 
-      // stale cookie (or tenant became archived)
       const cleared = NextResponse.json({
         ok: true,
         activeTenantId: null,
@@ -185,7 +214,6 @@ export async function GET() {
       return noStore(clearedRes);
     }
 
-    // no cookie
     if (tenantsForUser.length === 1) {
       const res = NextResponse.json({
         ok: true,
@@ -232,7 +260,16 @@ export async function POST(req: Request) {
       return noStore(NextResponse.json({ ok: false, error: "MISSING_TENANT_SELECTOR" }, { status: 400 }));
     }
 
-    let selected: { tenantId: string; slug: string; name: string | null; role: TenantRole } | null = null;
+    let selected:
+      | {
+          tenantId: string;
+          slug: string;
+          name: string | null;
+          role: TenantRole;
+          brandLogoUrl: string | null;
+          brandLogoVariant: BrandLogoVariant;
+        }
+      | null = null;
 
     if (tenantId) {
       const ok = await hasTenantAccessById(userId, tenantId);

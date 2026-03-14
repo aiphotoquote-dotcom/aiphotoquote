@@ -28,7 +28,15 @@ function activeFromPath(pathname: string): NavKey {
   return "dashboard";
 }
 
-type TenantRow = { tenantId: string; slug: string; name: string | null; role: string };
+type TenantRow = {
+  tenantId: string;
+  slug: string;
+  name: string | null;
+  role: string;
+  brandLogoUrl?: string | null;
+  brandLogoVariant?: "auto" | "light" | "dark" | null;
+};
+
 type TenantContextResp =
   | {
       ok: true;
@@ -46,13 +54,133 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
     tone === "good"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200"
       : tone === "warn"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
-      : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
+        : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
 
   return (
     <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
       {props.children}
     </span>
+  );
+}
+
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
+
+function initialsFromTenant(t: TenantRow | null): string {
+  const raw = safeTrim(t?.name) || safeTrim(t?.slug) || "T";
+  const parts = raw
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+  }
+  return (parts[0]?.slice(0, 2) || "T").toUpperCase();
+}
+
+function logoShellClass(variant?: string | null) {
+  const v = safeTrim(variant).toLowerCase();
+
+  if (v === "light") {
+    // logo was made for dark backgrounds
+    return "bg-neutral-950 border-gray-800";
+  }
+
+  if (v === "dark") {
+    // logo was made for light backgrounds
+    return "bg-white border-gray-200";
+  }
+
+  // auto
+  return "bg-white border-gray-200 dark:bg-neutral-950 dark:border-gray-800";
+}
+
+function TenantBrandBadge({ tenant }: { tenant: TenantRow | null }) {
+  if (!tenant) return null;
+
+  const displayName = safeTrim(tenant.name) || safeTrim(tenant.slug) || "Tenant";
+  const slug = safeTrim(tenant.slug);
+  const logoUrl = safeTrim(tenant.brandLogoUrl);
+  const variant = tenant.brandLogoVariant ?? "auto";
+
+  return (
+    <div className="hidden md:flex items-center gap-3 rounded-2xl border border-gray-200 bg-white/80 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
+      <div
+        className={cn(
+          "flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl border shadow-sm",
+          logoShellClass(variant)
+        )}
+      >
+        {logoUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={logoUrl}
+            alt={`${displayName} logo`}
+            className="max-h-8 max-w-[32px] object-contain"
+          />
+        ) : (
+          <span className="text-xs font-extrabold tracking-wide text-gray-700 dark:text-gray-200">
+            {initialsFromTenant(tenant)}
+          </span>
+        )}
+      </div>
+
+      <div className="min-w-0">
+        <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">
+          {displayName}
+        </div>
+        <div className="truncate text-xs text-gray-500 dark:text-gray-400">
+          {slug || "tenant"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MobileTenantBrandCard({ tenant }: { tenant: TenantRow | null }) {
+  if (!tenant) return null;
+
+  const displayName = safeTrim(tenant.name) || safeTrim(tenant.slug) || "Tenant";
+  const slug = safeTrim(tenant.slug);
+  const logoUrl = safeTrim(tenant.brandLogoUrl);
+  const variant = tenant.brandLogoVariant ?? "auto";
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white/70 px-3 py-3 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
+      <div
+        className={cn(
+          "flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl border shadow-sm",
+          logoShellClass(variant)
+        )}
+      >
+        {logoUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={logoUrl}
+            alt={`${displayName} logo`}
+            className="max-h-8 max-w-[32px] object-contain"
+          />
+        ) : (
+          <span className="text-xs font-extrabold tracking-wide text-gray-700 dark:text-gray-200">
+            {initialsFromTenant(tenant)}
+          </span>
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">
+          {displayName}
+        </div>
+        <div className="truncate text-xs text-gray-500 dark:text-gray-400">
+          {slug || "tenant"}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -142,10 +270,7 @@ export default function AdminTopNav() {
     function onTenantChanged() {
       loadContext().catch(() => null);
 
-      // Try soft refresh first…
       router.refresh();
-
-      // …but iOS can keep stale RSC on the current route; hard reload guarantees consistency.
       hardReloadSameUrl();
     }
     window.addEventListener("apq:tenant-changed", onTenantChanged as any);
@@ -166,7 +291,7 @@ export default function AdminTopNav() {
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/70 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/70">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
         {/* Left: Brand + desktop nav */}
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <Link
             href="/admin"
             className="group flex items-center gap-2 rounded-xl px-2 py-1 font-semibold text-gray-900 hover:bg-gray-100 dark:text-gray-100 dark:hover:bg-white/5"
@@ -176,6 +301,8 @@ export default function AdminTopNav() {
             </span>
             <span className="tracking-tight">AI Photo Quote</span>
           </Link>
+
+          <TenantBrandBadge tenant={activeTenant} />
 
           <nav className="hidden md:flex items-center gap-1">
             {links.map((l) => (
@@ -225,7 +352,9 @@ export default function AdminTopNav() {
       {/* Mobile drawer */}
       {mobileOpen ? (
         <div className="md:hidden border-t border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/80">
-          <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-3">
+          <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-3">
+            {activeTenant ? <MobileTenantBrandCard tenant={activeTenant} /> : null}
+
             {/* Tenant switcher (mobile) */}
             {shouldShowSwitcher ? (
               <div className="rounded-xl border border-gray-200 bg-white/70 px-3 py-3 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
