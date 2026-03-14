@@ -184,19 +184,6 @@ export default function AdminTopNav() {
               </Link>
             ))}
           </nav>
-
-          {/* Tenant pill (desktop) */}
-          <div className="hidden md:flex items-center">
-            {ctxLoading ? (
-              <Pill>Tenant: …</Pill>
-            ) : activeTenant ? (
-              <Pill tone="good">
-                Tenant: <span className="ml-1 font-mono">{activeTenant.slug}</span>
-              </Pill>
-            ) : (
-              <Pill tone="warn">Tenant: none</Pill>
-            )}
-          </div>
         </div>
 
         {/* Right: tenant switcher + account (desktop) */}
