@@ -65,53 +65,47 @@ const NullableBool = z.preprocess((v) => {
 const NullableJson = z.preprocess((v) => {
   if (v === undefined) return undefined;
   if (v === null) return null;
-  if (typeof v === "object") return v; // accept objects/arrays directly
+  if (typeof v === "object") return v;
   if (typeof v === "string") {
     const s = v.trim();
     if (!s) return null;
     try {
       return JSON.parse(s);
     } catch {
-      return v; // will fail zod
+      return v;
     }
   }
   return v;
 }, z.any().nullable().optional());
 
+const NullableTimezone = z.preprocess((v) => {
+  if (typeof v === "string") {
+    const s = v.trim();
+    return s === "" ? null : s;
+  }
+  return v;
+}, z.string().max(120).nullable());
+
 /**
- * ✅ IMPORTANT CHANGE (back-compat safe):
- * This route supports PARTIAL updates so pricing pages can write pricing fields
- * without resending branding/email fields.
- *
- * - If tenant_settings row exists: update only provided fields (undefined => preserve).
- * - If tenant_settings row DOES NOT exist: require base branding/email fields to insert.
- *
- * ✅ Pricing policy rule:
- * - If pricing_enabled is explicitly set to false:
- *   - force ai_mode = "assessment_only"
- *   - force pricing_model = null
- *   (pricing config fields may remain stored, but are ignored while disabled)
+ * Partial updates supported.
  */
 const PostBody = z
   .object({
-    // branding/email (optional for updates, required for first-time insert)
     business_name: z.string().trim().min(1).max(120).optional(),
     lead_to_email: z.string().trim().email().max(200).optional(),
-    resend_from_email: z.string().trim().min(5).max(200).optional(), // "Name <email@domain>"
+    resend_from_email: z.string().trim().min(5).max(200).optional(),
 
-    // tenant branding
     brand_logo_url: NullableUrl.optional(),
-    brand_logo_variant: BrandLogoVariant, // auto|light|dark|null
+    brand_logo_variant: BrandLogoVariant,
 
-    // enterprise/oauth
     email_send_mode: z.enum(["standard", "enterprise"]).optional(),
     email_identity_id: z.string().uuid().nullable().optional(),
 
-    // ✅ pricing policy controls
+    reporting_timezone: NullableTimezone.optional(),
+
     pricing_enabled: z.boolean().optional(),
     ai_mode: AiMode.optional(),
 
-    // ✅ pricing model + model-specific defaults
     pricing_model: PricingModel.optional(),
 
     flat_rate_default: NullableInt.optional(),
@@ -141,6 +135,7 @@ async function getTenantSettingsRow(tenantId: string) {
       brand_logo_variant,
       email_send_mode,
       email_identity_id,
+      reporting_timezone,
 
       pricing_enabled,
       ai_mode,
@@ -176,49 +171,40 @@ function normalizeAiMode(v: unknown): "assessment_only" | "range" | "fixed" {
   return "assessment_only";
 }
 
-/**
- * Apply partial update semantics:
- * - undefined => preserve existing value
- * - null => clear (when allowed)
- */
 async function upsertTenantSettingsPartial(tenantId: string, data: z.infer<typeof PostBody>) {
   const existing = await getTenantSettingsRow(tenantId);
 
-  // Determine effective email send mode
   const emailSendMode =
     data.email_send_mode !== undefined
       ? normalizeEmailSendMode(data.email_send_mode)
       : normalizeEmailSendMode(existing?.email_send_mode ?? "standard");
 
-  // Pricing enabled (effective)
   const pricingEnabledEffective =
     data.pricing_enabled !== undefined ? Boolean(data.pricing_enabled) : Boolean(existing?.pricing_enabled ?? false);
 
-  // AI mode (effective) — if pricing disabled, force assessment_only
   const aiModeEffective = pricingEnabledEffective
     ? data.ai_mode !== undefined
       ? normalizeAiMode(data.ai_mode)
       : normalizeAiMode(existing?.ai_mode ?? "assessment_only")
     : "assessment_only";
 
-  // pricing_model expression — if pricing disabled (explicit or effective), force null
   const pricingModelExpr =
     pricingEnabledEffective === false ? null : data.pricing_model !== undefined ? data.pricing_model : sql`pricing_model`;
 
-  // Only allow email_identity_id change if caller provided it.
   const emailIdentityIdExpr =
     data.email_identity_id !== undefined
       ? emailSendMode === "enterprise"
         ? data.email_identity_id
-        : data.email_identity_id // allow explicit clear even in standard mode
+        : data.email_identity_id
       : sql`email_identity_id`;
 
-  // logo fields
   const brandLogoUrlExpr = data.brand_logo_url !== undefined ? (data.brand_logo_url ?? null) : sql`brand_logo_url`;
   const brandLogoVariantExpr =
     data.brand_logo_variant !== undefined ? (data.brand_logo_variant ?? null) : sql`brand_logo_variant`;
 
-  // pricing fields (config stays as-is; ignored when pricing_enabled=false)
+  const reportingTimezoneExpr =
+    data.reporting_timezone !== undefined ? (data.reporting_timezone ?? null) : sql`reporting_timezone`;
+
   const flatRateDefaultExpr = data.flat_rate_default !== undefined ? data.flat_rate_default : sql`flat_rate_default`;
   const hourlyLaborRateExpr = data.hourly_labor_rate !== undefined ? data.hourly_labor_rate : sql`hourly_labor_rate`;
   const materialMarkupPercentExpr =
@@ -236,7 +222,6 @@ async function upsertTenantSettingsPartial(tenantId: string, data: z.infer<typeo
       ? (data.assessment_fee_credit_toward_job ?? null)
       : sql`assessment_fee_credit_toward_job`;
 
-  // Branding/email required only if inserting a missing row
   if (!existing) {
     const businessName = (data.business_name ?? "").trim();
     const leadToEmail = (data.lead_to_email ?? "").trim();
@@ -264,6 +249,8 @@ async function upsertTenantSettingsPartial(tenantId: string, data: z.infer<typeo
 
         email_send_mode,
         email_identity_id,
+
+        reporting_timezone,
 
         pricing_enabled,
         ai_mode,
@@ -295,6 +282,8 @@ async function upsertTenantSettingsPartial(tenantId: string, data: z.infer<typeo
         ${emailSendMode},
         ${emailSendMode === "enterprise" ? (data.email_identity_id ?? null) : (data.email_identity_id ?? null)},
 
+        ${data.reporting_timezone ?? null},
+
         ${pricingEnabledEffective},
         ${aiModeEffective},
 
@@ -316,12 +305,9 @@ async function upsertTenantSettingsPartial(tenantId: string, data: z.infer<typeo
     return await getTenantSettingsRow(tenantId);
   }
 
-  // Update existing row with "preserve unless provided" semantics.
-  // pricing_enabled: if provided => set it, else preserve.
   const pricingEnabledExpr =
     data.pricing_enabled !== undefined ? Boolean(data.pricing_enabled) : sql`pricing_enabled`;
 
-  // ai_mode: if pricing disabled (effective) force assessment_only; else preserve unless provided.
   const aiModeExpr =
     pricingEnabledEffective === false
       ? "assessment_only"
@@ -341,6 +327,8 @@ async function upsertTenantSettingsPartial(tenantId: string, data: z.infer<typeo
 
       email_send_mode = ${emailSendMode},
       email_identity_id = ${emailIdentityIdExpr},
+
+      reporting_timezone = ${reportingTimezoneExpr},
 
       pricing_enabled = ${pricingEnabledExpr},
       ai_mode = ${aiModeExpr},
@@ -382,7 +370,6 @@ export async function GET() {
     tenantId: gate.tenantId,
     role: gate.role,
     settings: {
-      // branding/email
       business_name: settings?.business_name ?? "",
       lead_to_email: settings?.lead_to_email ?? "",
       resend_from_email: settings?.resend_from_email ?? "",
@@ -393,11 +380,11 @@ export async function GET() {
       email_send_mode: settings?.email_send_mode ?? "standard",
       email_identity_id: settings?.email_identity_id ?? null,
 
-      // pricing policy
+      reporting_timezone: settings?.reporting_timezone ?? null,
+
       pricing_enabled: settings?.pricing_enabled ?? false,
       ai_mode: settings?.ai_mode ?? "assessment_only",
 
-      // pricing config
       pricing_model: settings?.pricing_model ?? null,
       flat_rate_default: settings?.flat_rate_default ?? null,
       hourly_labor_rate: settings?.hourly_labor_rate ?? null,
@@ -430,7 +417,6 @@ export async function POST(req: Request) {
       tenantId: gate.tenantId,
       role: gate.role,
       settings: {
-        // branding/email
         business_name: saved?.business_name ?? "",
         lead_to_email: saved?.lead_to_email ?? "",
         resend_from_email: saved?.resend_from_email ?? "",
@@ -441,11 +427,11 @@ export async function POST(req: Request) {
         email_send_mode: saved?.email_send_mode ?? "standard",
         email_identity_id: saved?.email_identity_id ?? null,
 
-        // pricing policy
+        reporting_timezone: saved?.reporting_timezone ?? null,
+
         pricing_enabled: saved?.pricing_enabled ?? false,
         ai_mode: saved?.ai_mode ?? "assessment_only",
 
-        // pricing config
         pricing_model: saved?.pricing_model ?? null,
         flat_rate_default: saved?.flat_rate_default ?? null,
         hourly_labor_rate: saved?.hourly_labor_rate ?? null,

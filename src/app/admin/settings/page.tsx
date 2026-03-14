@@ -33,6 +33,8 @@ type SettingsResp =
 
         email_send_mode?: "standard" | "enterprise" | null;
         email_identity_id?: string | null;
+
+        reporting_timezone?: string | null;
       };
     }
   | { ok: false; error: string; message?: string; issues?: any };
@@ -61,6 +63,41 @@ type BrandedState = "neutral" | "warn" | "good" | "bad";
    Helpers
 ======================= */
 
+const FALLBACK_TIMEZONES = [
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Phoenix",
+  "America/Los_Angeles",
+  "America/Anchorage",
+  "Pacific/Honolulu",
+  "America/Toronto",
+  "America/Vancouver",
+  "Europe/London",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "UTC",
+];
+
+function getTimeZoneOptions(): Array<{ value: string; label: string }> {
+  try {
+    const anyIntl = Intl as typeof Intl & {
+      supportedValuesOf?: (key: string) => string[];
+    };
+
+    if (typeof anyIntl.supportedValuesOf === "function") {
+      const zones = anyIntl.supportedValuesOf("timeZone");
+      if (Array.isArray(zones) && zones.length > 0) {
+        return zones.map((z) => ({ value: z, label: z }));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return FALLBACK_TIMEZONES.map((z) => ({ value: z, label: z }));
+}
+
 async function safeJson<T>(res: Response): Promise<T> {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("application/json")) {
@@ -87,11 +124,9 @@ function extractEmailAddress(raw: string): string | null {
   const s = String(raw ?? "").trim();
   if (!s) return null;
 
-  // Name <email@domain.com>
   const m = s.match(/<([^>]+)>/);
   const candidate = (m?.[1] ?? s).trim();
 
-  // Basic sanity check
   if (!candidate.includes("@")) return null;
   return candidate;
 }
@@ -238,6 +273,10 @@ export default function AdminTenantSettingsPage() {
   const [brandLogoUrl, setBrandLogoUrl] = useState("");
   const [brandLogoVariant, setBrandLogoVariant] = useState<"auto" | "light" | "dark">("auto");
 
+  /* ---------- reporting ---------- */
+  const [reportingTimezone, setReportingTimezone] = useState("");
+  const timeZoneOptions = useMemo(() => getTimeZoneOptions(), []);
+
   /* ---------- email ---------- */
   const [emailSendMode, setEmailSendMode] = useState<"standard" | "enterprise">("standard");
   const [emailIdentityId, setEmailIdentityId] = useState("");
@@ -298,6 +337,7 @@ export default function AdminTenantSettingsPage() {
     setEmailSendMode(modeRaw === "enterprise" ? "enterprise" : "standard");
 
     setEmailIdentityId((data.settings.email_identity_id ?? "").toString());
+    setReportingTimezone((data.settings.reporting_timezone ?? "").toString());
   }
 
   async function loadEmailStatus() {
@@ -328,29 +368,6 @@ export default function AdminTenantSettingsPage() {
       setErr(e?.message ?? String(e));
       setEmailStatus(null);
     } finally {
-      setLoading(false);
-    }
-  }
-
-  async function switchTenant(tenantId: string) {
-    setErr(null);
-    setMsg(null);
-    setLoading(true);
-
-    try {
-      const res = await fetch(CONTEXT_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenantId }),
-      });
-
-      const data = await safeJson<any>(res);
-      if (!data?.ok) throw new Error(data?.message || data?.error || "Failed to switch tenant");
-
-      await bootstrap();
-      setMsg("Switched tenant.");
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
       setLoading(false);
     }
   }
@@ -438,6 +455,8 @@ export default function AdminTenantSettingsPage() {
 
         email_send_mode: emailSendMode,
         email_identity_id: emailIdentityId.trim() || null,
+
+        reporting_timezone: reportingTimezone.trim() || null,
       };
 
       const res = await fetch(SETTINGS_URL, {
@@ -507,7 +526,6 @@ export default function AdminTenantSettingsPage() {
       };
     }
 
-    // UI-only for now (we’ll plug in Resend domain status next)
     return {
       state: "warn",
       title: "Verification required",
@@ -557,6 +575,10 @@ export default function AdminTenantSettingsPage() {
               <Pill tone="neutral">
                 Logo variant: <span className="ml-1 font-mono">{brandLogoVariant}</span>
               </Pill>
+
+              <Pill tone="neutral">
+                Reporting TZ: <span className="ml-1 font-mono">{reportingTimezone || "not set"}</span>
+              </Pill>
             </div>
 
             {msg ? <div className="mt-2 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
@@ -565,44 +587,6 @@ export default function AdminTenantSettingsPage() {
         </div>
 
         <div className="grid gap-5">
-          {/* Active tenant */}
-          <Card
-            title="Active Tenant"
-            subtitle="If you belong to multiple tenants, switch here."
-            right={<Pill tone="neutral">{tenants.length} tenants</Pill>}
-          >
-            {tenants.length === 0 ? (
-              <div className="text-sm text-gray-700 dark:text-gray-300">No tenants yet.</div>
-            ) : (
-              <div className="grid gap-2">
-                {tenants.map((t) => {
-                  const isActive = t.tenantId === activeTenantId;
-                  return (
-                    <button
-                      key={t.tenantId}
-                      onClick={() => switchTenant(t.tenantId)}
-                      className={cx(
-                        "w-full rounded-xl border p-3 text-left transition",
-                        isActive
-                          ? "border-blue-300 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-900/15"
-                          : "border-gray-200 bg-white hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-medium text-gray-900 dark:text-white">
-                          {t.name || t.slug}{" "}
-                          <span className="text-gray-500 dark:text-gray-400 font-normal">({t.slug})</span>
-                        </div>
-                        <span className="text-xs font-mono text-gray-600 dark:text-gray-300">{t.role}</span>
-                      </div>
-                      <div className="mt-1 text-xs font-mono text-gray-500 dark:text-gray-400">{t.tenantId}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
-
           {/* Branding */}
           <Card
             title="Branding"
@@ -726,7 +710,6 @@ export default function AdminTenantSettingsPage() {
                     <div className="mb-2 text-xs font-semibold text-gray-700 dark:text-gray-200">Light</div>
                     <div className="flex items-center justify-center rounded-lg bg-gray-50 p-6 dark:bg-black/30">
                       {hasBrandLogo ? (
-                        // eslint-disable-next-line @next/next/no-img-element
                         <img
                           src={(brandLogoUrlStr ?? "").trim()}
                           alt="Tenant logo"
@@ -743,7 +726,6 @@ export default function AdminTenantSettingsPage() {
                     <div className="mb-2 text-xs font-semibold text-gray-700 dark:text-gray-200">Dark</div>
                     <div className="flex items-center justify-center rounded-lg bg-black p-6">
                       {hasBrandLogo ? (
-                        // eslint-disable-next-line @next/next/no-img-element
                         <img
                           src={(brandLogoUrlStr ?? "").trim()}
                           alt="Tenant logo"
@@ -979,6 +961,39 @@ export default function AdminTenantSettingsPage() {
                   />
                 </div>
 
+                {/* Reporting */}
+                <div className="grid gap-4">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">Reporting</div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Select
+                      label="Reporting Time Zone"
+                      value={reportingTimezone}
+                      onChange={setReportingTimezone}
+                      disabled={!canEdit}
+                      options={[
+                        { value: "", label: "Select a time zone…" },
+                        ...timeZoneOptions,
+                      ]}
+                      hint="Used for dashboard/reporting date boundaries like today, yesterday, and weekly rollups."
+                    />
+
+                    <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white">Current selection</div>
+                      <div className="mt-2 text-sm text-gray-700 dark:text-gray-300">
+                        {reportingTimezone ? (
+                          <span className="font-mono">{reportingTimezone}</span>
+                        ) : (
+                          "No reporting time zone set yet."
+                        )}
+                      </div>
+                      <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                        Recommendation: set this to the tenant’s real business time zone.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Enterprise connect */}
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-white/10 dark:bg-white/5">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1068,7 +1083,7 @@ export default function AdminTenantSettingsPage() {
                 {/* Save row */}
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="text-xs text-gray-500 dark:text-gray-400">
-                    Tip: upload a logo, set the logo variant, configure email routing, then click Save Settings.
+                    Tip: upload a logo, set the logo variant, configure email routing, choose the reporting time zone, then click Save Settings.
                   </div>
 
                   <div className="flex items-center gap-3">
