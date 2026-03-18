@@ -7,7 +7,11 @@ function cn(...xs: Array<string | false | null | undefined>) {
   return xs.filter(Boolean).join(" ");
 }
 
-export default function ExitImpersonationButton() {
+export default function ExitImpersonationButton({
+  tenantId,
+}: {
+  tenantId: string;
+}) {
   const [working, setWorking] = useState(false);
 
   async function stopImpersonation() {
@@ -18,13 +22,18 @@ export default function ExitImpersonationButton() {
       const res = await fetch("/api/pcc/impersonation", {
         method: "DELETE",
         credentials: "include",
+        cache: "no-store",
       });
 
       const data = await res.json().catch(() => null);
-      const redirectTo = data?.redirectTo || "/pcc/tenants";
-      window.location.assign(redirectTo);
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+      }
+
+      window.location.assign(data?.redirectTo || `/pcc/tenants/${encodeURIComponent(tenantId)}`);
     } catch {
-      window.location.assign("/pcc/tenants");
+      window.location.assign(`/pcc/tenants/${encodeURIComponent(tenantId)}`);
     } finally {
       setWorking(false);
     }
