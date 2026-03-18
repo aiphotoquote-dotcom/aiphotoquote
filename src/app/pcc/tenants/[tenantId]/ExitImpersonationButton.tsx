@@ -19,7 +19,7 @@ export default function ExitImpersonationButton({
 
     setWorking(true);
     try {
-      const res = await fetch("/api/pcc/impersonation", {
+      const res = await fetch("/api/pcc/impersonate", {
         method: "DELETE",
         credentials: "include",
         cache: "no-store",
