@@ -44,7 +44,6 @@ function Card({
 }
 
 export default async function PccHomePage() {
-  // PCC requires platform-level access
   await requirePlatformRole([
     "platform_owner",
     "platform_admin",
@@ -56,7 +55,6 @@ export default async function PccHomePage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="rounded-2xl border border-gray-200 bg-white p-6 dark:border-gray-800 dark:bg-gray-950">
         <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
           Platform Control Center
@@ -71,7 +69,6 @@ export default async function PccHomePage() {
         </div>
       </div>
 
-      {/* Core sections */}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card
           title="Tenants & Memberships"
@@ -102,8 +99,15 @@ export default async function PccHomePage() {
         <Card
           title="Environment Controls"
           description="Feature flags, model routing, emergency switches."
-          href="/pcc/environment"
+          href="/pcc/env"
           badge="planned"
+        />
+
+        <Card
+          title="Onboarding Invites"
+          description="Create single-use onboarding invites and manage invite-only rollout."
+          href="/pcc/invites"
+          badge="new"
         />
 
         <Card
@@ -114,10 +118,9 @@ export default async function PccHomePage() {
         />
       </div>
 
-      {/* Footer note */}
       <div className="rounded-2xl border border-gray-200 bg-white p-5 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-300">
-        PCC v1 is intentionally read-only.  
-        Each section will gain persistence, auditing, and billing hooks incrementally.
+        PCC v1 is intentionally read-only in many areas. Each section gains persistence,
+        auditing, and billing hooks incrementally.
       </div>
     </div>
   );

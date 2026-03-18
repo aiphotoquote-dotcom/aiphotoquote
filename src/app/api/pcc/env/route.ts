@@ -1,7 +1,7 @@
 // src/app/api/pcc/env/route.ts
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { eq } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { platformConfig } from "@/lib/db/schema/platform_config";
@@ -22,65 +22,49 @@ function json(data: any, status = 200) {
   });
 }
 
-const NullableTrimmedString = (max: number) =>
-  z.preprocess((v) => {
-    if (typeof v !== "string") return v;
-    const s = v.trim();
-    return s === "" ? null : s;
-  }, z.string().max(max).nullable());
-
 const PayloadSchema = z.object({
   aiQuotingEnabled: z.boolean(),
   aiRenderingEnabled: z.boolean(),
 
   siteMode: z.enum(["marketing_live", "coming_soon"]),
-  siteModePayload: z.record(z.string(), z.any()).nullable(),
+  siteModePayload: z.record(z.any()).nullable(),
+
+  onboardingMode: z.enum(["open", "invite_only"]),
 
   adminBannerEnabled: z.boolean(),
-  adminBannerText: NullableTrimmedString(500),
+  adminBannerText: z.string().trim().max(500).nullable(),
   adminBannerTone: z.enum(["info", "success", "warning", "danger"]),
-  adminBannerHref: NullableTrimmedString(500),
-  adminBannerCtaLabel: NullableTrimmedString(80),
+  adminBannerHref: z.string().trim().max(500).nullable(),
+  adminBannerCtaLabel: z.string().trim().max(80).nullable(),
 
   maintenanceEnabled: z.boolean(),
-  maintenanceMessage: NullableTrimmedString(500),
+  maintenanceMessage: z.string().trim().max(500).nullable(),
 });
 
 export async function GET() {
-  try {
-    await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
+  await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
-    const cfg = await getPlatformConfig();
+  const cfg = await getPlatformConfig();
 
-    return json({
-      ok: true,
-      config: cfg,
-    });
-  } catch (e: any) {
-    return json(
-      {
-        ok: false,
-        error: "FORBIDDEN",
-        message: e?.message ?? "Forbidden.",
-      },
-      403
-    );
-  }
+  return json({
+    ok: true,
+    config: cfg,
+  });
 }
 
 export async function POST(req: Request) {
+  await requirePlatformRole(["platform_owner", "platform_admin"]);
+
+  const body = await req.json().catch(() => null);
+  const parsed = PayloadSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
+  }
+
+  const data = parsed.data;
+
   try {
-    await requirePlatformRole(["platform_owner", "platform_admin"]);
-
-    const body = await req.json().catch(() => null);
-    const parsed = PayloadSchema.safeParse(body);
-
-    if (!parsed.success) {
-      return json({ ok: false, error: "BAD_REQUEST", issues: parsed.error.issues }, 400);
-    }
-
-    const data = parsed.data;
-
     await db
       .insert(platformConfig)
       .values({
@@ -92,14 +76,16 @@ export async function POST(req: Request) {
         siteMode: data.siteMode,
         siteModePayload: data.siteModePayload ?? null,
 
+        onboardingMode: data.onboardingMode,
+
         adminBannerEnabled: data.adminBannerEnabled,
-        adminBannerText: data.adminBannerText,
+        adminBannerText: data.adminBannerText ?? null,
         adminBannerTone: data.adminBannerTone,
-        adminBannerHref: data.adminBannerHref,
-        adminBannerCtaLabel: data.adminBannerCtaLabel,
+        adminBannerHref: data.adminBannerHref ?? null,
+        adminBannerCtaLabel: data.adminBannerCtaLabel ?? null,
 
         maintenanceEnabled: data.maintenanceEnabled,
-        maintenanceMessage: data.maintenanceMessage,
+        maintenanceMessage: data.maintenanceMessage ?? null,
 
         updatedAt: new Date(),
       })
@@ -112,37 +98,37 @@ export async function POST(req: Request) {
           siteMode: data.siteMode,
           siteModePayload: data.siteModePayload ?? null,
 
+          onboardingMode: data.onboardingMode,
+
           adminBannerEnabled: data.adminBannerEnabled,
-          adminBannerText: data.adminBannerText,
+          adminBannerText: data.adminBannerText ?? null,
           adminBannerTone: data.adminBannerTone,
-          adminBannerHref: data.adminBannerHref,
-          adminBannerCtaLabel: data.adminBannerCtaLabel,
+          adminBannerHref: data.adminBannerHref ?? null,
+          adminBannerCtaLabel: data.adminBannerCtaLabel ?? null,
 
           maintenanceEnabled: data.maintenanceEnabled,
-          maintenanceMessage: data.maintenanceMessage,
+          maintenanceMessage: data.maintenanceMessage ?? null,
 
           updatedAt: new Date(),
         },
       });
 
-    const saved = await getPlatformConfig();
+    const saved = await db
+      .select()
+      .from(platformConfig)
+      .where(eq(platformConfig.id, "singleton"))
+      .limit(1);
 
     return json({
       ok: true,
-      config: saved,
+      config: saved[0] ?? null,
     });
   } catch (e: any) {
-    const msg = e?.message ?? String(e);
-
-    if (msg === "FORBIDDEN") {
-      return json({ ok: false, error: "FORBIDDEN", message: "Forbidden." }, 403);
-    }
-
     return json(
       {
         ok: false,
         error: "SAVE_FAILED",
-        message: msg,
+        message: e?.message ?? String(e),
       },
       500
     );

@@ -18,17 +18,17 @@ function NavItem({ href, label }: { href: string; label: string }) {
 }
 
 export default async function PccLayout({ children }: { children: React.ReactNode }) {
-  // ✅ Centralized PCC gate (uses existing env-driven platform roles)
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-6 space-y-6">
+    <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
       <div className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-950">
         <div className="flex flex-wrap items-center gap-2">
           <NavItem href="/pcc" label="Overview" />
           <NavItem href="/pcc/industries" label="Industries" />
           <NavItem href="/pcc/llm" label="LLM Manager" />
           <NavItem href="/pcc/env" label="Environment" />
+          <NavItem href="/pcc/invites" label="Invites" />
           <NavItem href="/pcc/tenants" label="Tenants" />
           <NavItem href="/pcc/billing" label="Billing" />
         </div>

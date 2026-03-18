@@ -7,6 +7,7 @@ export const runtime = "nodejs";
 
 type BannerTone = "info" | "success" | "warning" | "danger";
 type SiteMode = "marketing_live" | "coming_soon";
+type OnboardingMode = "open" | "invite_only";
 
 type PlatformConfigResp =
   | {
@@ -17,6 +18,8 @@ type PlatformConfigResp =
 
         siteMode: SiteMode;
         siteModePayload: Record<string, any> | null;
+
+        onboardingMode: OnboardingMode;
 
         adminBannerEnabled: boolean;
         adminBannerText: string | null;
@@ -44,7 +47,7 @@ function Card({
   children?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-5 space-y-4 dark:border-gray-800 dark:bg-gray-950">
+    <div className="space-y-4 rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
       <div>
         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
         {desc ? <div className="mt-1 text-xs text-gray-600 dark:text-gray-300">{desc}</div> : null}
@@ -160,6 +163,8 @@ export default function PccEnvPage() {
   const [siteSecondaryCtaHref, setSiteSecondaryCtaHref] = useState("/sign-in");
   const [siteLaunchLabel, setSiteLaunchLabel] = useState("Summer 2026");
 
+  const [onboardingMode, setOnboardingMode] = useState<OnboardingMode>("open");
+
   const [adminBannerEnabled, setAdminBannerEnabled] = useState(false);
   const [adminBannerText, setAdminBannerText] = useState("");
   const [adminBannerTone, setAdminBannerTone] = useState<BannerTone>("info");
@@ -198,6 +203,8 @@ export default function PccEnvPage() {
       setSiteSecondaryCtaHref(val(payload, "secondaryCtaHref", "/sign-in"));
       setSiteLaunchLabel(val(payload, "launchLabel", "Summer 2026"));
 
+      setOnboardingMode(cfg.onboardingMode ?? "open");
+
       setAdminBannerEnabled(Boolean(cfg.adminBannerEnabled));
       setAdminBannerText(cfg.adminBannerText ?? "");
       setAdminBannerTone(cfg.adminBannerTone ?? "info");
@@ -234,6 +241,8 @@ export default function PccEnvPage() {
           secondaryCtaHref: siteSecondaryCtaHref.trim(),
           launchLabel: siteLaunchLabel.trim(),
         },
+
+        onboardingMode,
 
         adminBannerEnabled,
         adminBannerText: adminBannerText.trim() || null,
@@ -284,11 +293,11 @@ export default function PccEnvPage() {
       <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
         <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">Environment</div>
         <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-          Platform-wide public-site controls, admin banner controls, and maintenance controls.
+          Platform-wide public-site controls, admin banner controls, maintenance controls, and onboarding access mode.
         </div>
 
         {msg ? <div className="mt-3 text-sm text-green-700 dark:text-green-300">{msg}</div> : null}
-        {err ? <div className="mt-3 text-sm text-red-700 dark:text-red-300 whitespace-pre-wrap">{err}</div> : null}
+        {err ? <div className="mt-3 whitespace-pre-wrap text-sm text-red-700 dark:text-red-300">{err}</div> : null}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -309,23 +318,46 @@ export default function PccEnvPage() {
           </div>
         </Card>
 
-        <Card title="Admin maintenance lockout" desc="Blocks normal admin access while leaving PCC available to platform operators.">
-          <div className="grid gap-3">
-            <Toggle
-              label="Maintenance enabled"
-              checked={maintenanceEnabled}
-              onChange={setMaintenanceEnabled}
-              hint="Non-platform users are shown a maintenance screen in /admin."
-            />
-            <Area
-              label="Maintenance message"
-              value={maintenanceMessage}
-              onChange={setMaintenanceMessage}
-              placeholder="We’re performing scheduled maintenance. Please check back shortly."
-            />
+        <Card
+          title="Onboarding access"
+          desc="Control whether new tenant onboarding is open or invite-only."
+        >
+          <div>
+            <label className="block text-sm font-medium text-gray-800 dark:text-gray-200">Onboarding mode</label>
+            <select
+              value={onboardingMode}
+              onChange={(e) => setOnboardingMode(e.target.value as OnboardingMode)}
+              className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-white/10 dark:bg-white/5 dark:text-white"
+            >
+              <option value="open">open</option>
+              <option value="invite_only">invite_only</option>
+            </select>
+            <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
+              When set to <span className="font-semibold">invite_only</span>, onboarding should require a valid invite or code.
+            </div>
           </div>
         </Card>
       </div>
+
+      <Card
+        title="Admin maintenance lockout"
+        desc="Blocks normal admin access while leaving PCC available to platform operators."
+      >
+        <div className="grid gap-3">
+          <Toggle
+            label="Maintenance enabled"
+            checked={maintenanceEnabled}
+            onChange={setMaintenanceEnabled}
+            hint="Non-platform users are shown a maintenance screen in /admin."
+          />
+          <Area
+            label="Maintenance message"
+            value={maintenanceMessage}
+            onChange={setMaintenanceMessage}
+            placeholder="We’re performing scheduled maintenance. Please check back shortly."
+          />
+        </div>
+      </Card>
 
       <Card title="Public website mode" desc="Control what aiphotoquote.com shows without code changes.">
         <div className="grid gap-4">

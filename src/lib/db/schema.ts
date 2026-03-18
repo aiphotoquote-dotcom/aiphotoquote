@@ -55,6 +55,71 @@ export const platformUsers = pgTable(
 );
 
 /**
+ * Platform onboarding invites
+ *
+ * Used when onboarding mode is invite_only.
+ * One invite is intended to produce one tenant.
+ */
+export const platformOnboardingInvites = pgTable(
+  "platform_onboarding_invites",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    /**
+     * Human-friendly invite code
+     * Example: APQ-7H3K-2X9Q
+     */
+    code: text("code").notNull(),
+
+    /**
+     * Optional intended recipient email
+     */
+    email: text("email"),
+
+    /**
+     * Clerk/app actor reference for who created it.
+     * Keeping this portable enough for current PCC usage.
+     */
+    createdBy: text("created_by").notNull(),
+
+    /**
+     * pending | used | revoked | expired
+     */
+    status: text("status").notNull().default("pending"),
+
+    /**
+     * If consumed, which tenant was created from this invite
+     */
+    usedByTenantId: uuid("used_by_tenant_id"),
+
+    /**
+     * If consumed, when it happened
+     */
+    usedAt: timestamp("used_at", { withTimezone: true }),
+
+    /**
+     * Optional expiration timestamp
+     */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+
+    /**
+     * Flexible room for future metadata:
+     * note, invited name, send channel, etc.
+     */
+    meta: jsonb("meta").$type<any>().notNull().default({}),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    codeUq: uniqueIndex("platform_onboarding_invites_code_uq").on(t.code),
+    statusIdx: index("platform_onboarding_invites_status_idx").on(t.status),
+    emailIdx: index("platform_onboarding_invites_email_idx").on(t.email),
+    usedByTenantIdx: index("platform_onboarding_invites_used_by_tenant_id_idx").on(t.usedByTenantId),
+  })
+);
+
+/**
  * Platform config (single-row feature gates)
  */
 export const platformConfig = pgTable("platform_config", {
@@ -65,6 +130,13 @@ export const platformConfig = pgTable("platform_config", {
 
   siteMode: text("site_mode").notNull().default("marketing_live"),
   siteModePayload: jsonb("site_mode_payload").$type<any>(),
+
+  /**
+   * Onboarding mode
+   * - open: normal self-serve onboarding
+   * - invite_only: requires a valid invite/code
+   */
+  onboardingMode: text("onboarding_mode").notNull().default("open"),
 
   adminBannerEnabled: boolean("admin_banner_enabled").notNull().default(false),
   adminBannerText: text("admin_banner_text"),

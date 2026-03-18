@@ -1,10 +1,10 @@
 // src/lib/platform/getPlatformConfig.ts
-
 import { db } from "@/lib/db/client";
 import { platformConfig } from "@/lib/db/schema/platform_config";
 import { eq } from "drizzle-orm";
 
 export type PlatformSiteMode = "marketing_live" | "coming_soon";
+export type PlatformOnboardingMode = "open" | "invite_only";
 
 export type RuntimePlatformConfig = {
   id: string;
@@ -13,6 +13,8 @@ export type RuntimePlatformConfig = {
 
   siteMode: PlatformSiteMode;
   siteModePayload: Record<string, any> | null;
+
+  onboardingMode: PlatformOnboardingMode;
 
   adminBannerEnabled: boolean;
   adminBannerText: string | null;
@@ -31,6 +33,11 @@ function normalizeSiteMode(v: unknown): PlatformSiteMode {
   return s === "coming_soon" ? "coming_soon" : "marketing_live";
 }
 
+function normalizeOnboardingMode(v: unknown): PlatformOnboardingMode {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "invite_only" ? "invite_only" : "open";
+}
+
 function normalizeBannerTone(v: unknown): "info" | "success" | "warning" | "danger" {
   const s = String(v ?? "").trim().toLowerCase();
   if (s === "success") return "success";
@@ -43,11 +50,13 @@ function normalizeRow(row: any): RuntimePlatformConfig {
   return {
     id: String(row?.id ?? "singleton"),
     aiQuotingEnabled: Boolean(row?.aiQuotingEnabled ?? true),
-    aiRenderingEnabled: Boolean(row?.aiRenderingEnabled ?? false),
+    aiRenderingEnabled: Boolean(row?.aiRenderingEnabled ?? true),
 
     siteMode: normalizeSiteMode(row?.siteMode),
     siteModePayload:
       row?.siteModePayload && typeof row.siteModePayload === "object" ? row.siteModePayload : null,
+
+    onboardingMode: normalizeOnboardingMode(row?.onboardingMode),
 
     adminBannerEnabled: Boolean(row?.adminBannerEnabled ?? false),
     adminBannerText: row?.adminBannerText ? String(row.adminBannerText) : null,
@@ -92,10 +101,12 @@ export async function getPlatformConfig(): Promise<RuntimePlatformConfig> {
     return {
       id: "singleton",
       aiQuotingEnabled: true,
-      aiRenderingEnabled: false,
+      aiRenderingEnabled: true,
 
       siteMode: "marketing_live",
       siteModePayload: null,
+
+      onboardingMode: "open",
 
       adminBannerEnabled: false,
       adminBannerText: null,
