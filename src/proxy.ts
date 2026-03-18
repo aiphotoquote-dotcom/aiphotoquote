@@ -1,4 +1,5 @@
 // src/proxy.ts
+
 import { NextResponse, type NextRequest } from "next/server";
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
@@ -17,17 +18,18 @@ const isProtectedRoute = createRouteMatcher([
   "/api/pcc(.*)",
   "/api/tenant(.*)",
   "/api/onboarding(.*)",
+
+  // Temporary/debug protected API routes
+  "/api/debug(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req: NextRequest) => {
   // ✅ Protect only protected routes
   if (isProtectedRoute(req)) {
-    // Clerk handles redirects/rewrites internally.
-    // We still must allow the middleware to complete normally.
     await auth.protect();
   }
 
-  // ✅ CRITICAL: Always return a response so Next never “hangs”
+  // ✅ Always return a response
   return NextResponse.next();
 });
 
@@ -47,5 +49,8 @@ export const config = {
     "/api/pcc(.*)",
     "/api/tenant(.*)",
     "/api/onboarding(.*)",
+
+    // Temporary/debug protected API routes
+    "/api/debug(.*)",
   ],
 };
