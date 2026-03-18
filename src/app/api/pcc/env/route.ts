@@ -27,7 +27,7 @@ const PayloadSchema = z.object({
   aiRenderingEnabled: z.boolean(),
 
   siteMode: z.enum(["marketing_live", "coming_soon"]),
-  siteModePayload: z.record(z.any()).nullable(),
+  siteModePayload: z.record(z.string(), z.any()).nullable(),
 
   onboardingMode: z.enum(["open", "invite_only"]),
 
