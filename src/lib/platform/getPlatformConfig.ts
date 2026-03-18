@@ -1,3 +1,5 @@
+// src/lib/platform/getPlatformConfig.ts
+
 import { db } from "@/lib/db/client";
 import { platformConfig } from "@/lib/db/schema/platform_config";
 import { eq } from "drizzle-orm";
@@ -41,7 +43,7 @@ function normalizeRow(row: any): RuntimePlatformConfig {
   return {
     id: String(row?.id ?? "singleton"),
     aiQuotingEnabled: Boolean(row?.aiQuotingEnabled ?? true),
-    aiRenderingEnabled: Boolean(row?.aiRenderingEnabled ?? true),
+    aiRenderingEnabled: Boolean(row?.aiRenderingEnabled ?? false),
 
     siteMode: normalizeSiteMode(row?.siteMode),
     siteModePayload:
@@ -90,7 +92,7 @@ export async function getPlatformConfig(): Promise<RuntimePlatformConfig> {
     return {
       id: "singleton",
       aiQuotingEnabled: true,
-      aiRenderingEnabled: true,
+      aiRenderingEnabled: false,
 
       siteMode: "marketing_live",
       siteModePayload: null,

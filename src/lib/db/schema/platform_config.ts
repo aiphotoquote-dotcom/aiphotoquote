@@ -1,3 +1,5 @@
+// src/lib/db/schema/platform_config.ts
+
 import { pgTable, text, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 
 export const platformConfig = pgTable("platform_config", {
@@ -6,7 +8,7 @@ export const platformConfig = pgTable("platform_config", {
 
   // Global switches
   aiQuotingEnabled: boolean("ai_quoting_enabled").notNull().default(true),
-  aiRenderingEnabled: boolean("ai_rendering_enabled").notNull().default(true),
+  aiRenderingEnabled: boolean("ai_rendering_enabled").notNull().default(false),
 
   // Public website mode
   siteMode: text("site_mode").notNull().default("marketing_live"),

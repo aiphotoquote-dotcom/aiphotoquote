@@ -78,6 +78,13 @@
       "when": 1772255874389,
       "tag": "0010_nostalgic_sister_grimm",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1773852730106,
+      "tag": "0011_military_devos",
+      "breakpoints": true
     }
   ]
 }
