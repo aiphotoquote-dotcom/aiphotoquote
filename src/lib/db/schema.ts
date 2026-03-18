@@ -58,10 +58,19 @@ export const platformUsers = pgTable(
  * Platform config (single-row feature gates)
  */
 export const platformConfig = pgTable("platform_config", {
-  id: uuid("id").defaultRandom().primaryKey(),
+  id: text("id").primaryKey().notNull().default("singleton"),
 
   aiQuotingEnabled: boolean("ai_quoting_enabled").notNull().default(true),
   aiRenderingEnabled: boolean("ai_rendering_enabled").notNull().default(false),
+
+  siteMode: text("site_mode").notNull().default("marketing_live"),
+  siteModePayload: jsonb("site_mode_payload").$type<any>(),
+
+  adminBannerEnabled: boolean("admin_banner_enabled").notNull().default(false),
+  adminBannerText: text("admin_banner_text"),
+  adminBannerTone: text("admin_banner_tone").notNull().default("info"),
+  adminBannerHref: text("admin_banner_href"),
+  adminBannerCtaLabel: text("admin_banner_cta_label"),
 
   maintenanceEnabled: boolean("maintenance_enabled").notNull().default(false),
   maintenanceMessage: text("maintenance_message"),
