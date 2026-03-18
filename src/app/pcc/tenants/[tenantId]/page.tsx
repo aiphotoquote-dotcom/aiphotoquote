@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
+import { readTenantImpersonationFromCookies } from "@/lib/platform/tenantImpersonation";
 import AdminControls from "./AdminControls";
 
 export const runtime = "nodejs";
@@ -250,11 +251,12 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
     );
   }
 
-  const [tenant, settings, onboarding, members] = await Promise.all([
+  const [tenant, settings, onboarding, members, impersonation] = await Promise.all([
     loadTenant(tid),
     loadSettings(tid),
     loadOnboardingAnalysis(tid),
     loadMembers(tid),
+    readTenantImpersonationFromCookies().catch(() => null),
   ]);
 
   if (!tenant) {
@@ -268,6 +270,7 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
   }
 
   const isArchived = String(tenant.status).toLowerCase() === "archived";
+  const isImpersonatingThisTenant = Boolean(impersonation && impersonation.tenantId === tenant.id);
 
   const planTier = normalizeTier(settings?.planTier ?? "tier0");
   const monthlyLimit = settings?.monthlyQuoteLimit ?? null;
@@ -275,7 +278,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
   const graceUsed = settings?.activationGraceUsed ?? 0;
   const graceRemaining = Math.max(0, graceTotal - graceUsed);
 
-  // ✅ Common ai_analysis fields (your current shape)
   const businessGuess = pick(onboarding, ["businessGuess", "business_guess", "analysis.businessGuess"]) ?? null;
   const confidenceScore = pick(onboarding, ["confidenceScore", "confidence_score"]) ?? null;
   const confidencePct = toPct(confidenceScore);
@@ -295,7 +297,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
     toBool(pick(onboarding, ["industryInterview.status"])) ??
     null;
 
-  // ✅ PCC “actions” metadata (written by our routes)
   const metaStatus = safeTrim(pick(onboarding, ["meta.status"])) || "";
   const metaSource = safeTrim(pick(onboarding, ["meta.source"])) || "";
   const metaPrevSuggested = safeTrim(pick(onboarding, ["meta.previousSuggestedIndustryKey"])) || "";
@@ -319,12 +320,12 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10 space-y-4">
-      {/* Header */}
       <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <div className="text-xs text-gray-600 dark:text-gray-300">Tenant</div>
+
               <span
                 className={cn(
                   "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
@@ -335,15 +336,20 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
               >
                 {isArchived ? "ARCHIVED" : "ACTIVE"}
               </span>
+
               <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
                 {planTier}
               </span>
+
+              {isImpersonatingThisTenant ? (
+                <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-[11px] font-semibold text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
+                  IMPERSONATING
+                </span>
+              ) : null}
             </div>
 
             <div className="mt-2 flex items-start gap-3">
-              {/* Logo */}
               {settings?.brandLogoUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={settings.brandLogoUrl}
                   alt={`${tenant.name} logo`}
@@ -368,6 +374,9 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
               {tenant.createdAt ? <div>Created: {fmtDate(tenant.createdAt)}</div> : null}
               {settings?.updatedAt ? <div>Settings updated: {fmtDate(settings.updatedAt)}</div> : null}
               {isArchived && tenant.archivedAt ? <div>Archived: {fmtDate(tenant.archivedAt)}</div> : null}
+              {isImpersonatingThisTenant && impersonation?.startedAt ? (
+                <div>Impersonation started: {fmtDate(impersonation.startedAt)}</div>
+              ) : null}
             </div>
           </div>
 
@@ -379,7 +388,7 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
               </div>
             </div>
 
-            <div className="flex justify-end gap-2">
+            <div className="flex justify-end gap-2 flex-wrap">
               <Link
                 href="/pcc/tenants"
                 className={cn(
@@ -389,6 +398,33 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
               >
                 Back
               </Link>
+
+              {isImpersonatingThisTenant ? (
+                <>
+                  <Link
+                    href="/admin"
+                    className={cn(
+                      "inline-flex items-center rounded-xl border px-3 py-2 text-xs font-semibold",
+                      "border-purple-200 bg-purple-50 text-purple-900 hover:bg-purple-100 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100 dark:hover:bg-purple-950/50"
+                    )}
+                  >
+                    Open admin
+                  </Link>
+
+                  <form action="/api/pcc/impersonation" method="post">
+                    <input type="hidden" name="_method" value="DELETE" />
+                    <button
+                      type="submit"
+                      className={cn(
+                        "inline-flex items-center rounded-xl border px-3 py-2 text-xs font-semibold",
+                        "border-red-200 bg-red-50 text-red-800 hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/50"
+                      )}
+                    >
+                      Exit impersonation
+                    </button>
+                  </form>
+                </>
+              ) : null}
 
               <Link
                 href={`/pcc/tenants/${encodeURIComponent(tenant.id)}/delete`}
@@ -403,6 +439,12 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
           </div>
         </div>
 
+        {isImpersonatingThisTenant ? (
+          <div className="mt-5 rounded-2xl border border-purple-200 bg-purple-50 p-4 text-sm text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
+            You are currently impersonating this tenant. Admin pages will behave as this tenant until you exit impersonation.
+          </div>
+        ) : null}
+
         {isArchived ? (
           <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-100">
             This tenant is archived. It should not appear in normal app flows. Historical data remains available for audit.
@@ -410,7 +452,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
         ) : null}
       </div>
 
-      {/* Plan / Credits Summary */}
       <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Plan & credits</div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -424,14 +465,13 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-black">
             <div className="text-xs font-semibold text-gray-700 dark:text-gray-200">Grace credits</div>
             <div className="mt-1 text-sm text-gray-700 dark:text-gray-200">
-              Total <span className="font-mono">{graceTotal}</span> · Used <span className="font-mono">{graceUsed}</span>{" "}
-              · Remaining <span className="font-mono">{graceRemaining}</span>
+              Total <span className="font-mono">{graceTotal}</span> · Used <span className="font-mono">{graceUsed}</span> · Remaining{" "}
+              <span className="font-mono">{graceRemaining}</span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Onboarding AI Analysis */}
       <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -505,7 +545,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
             ) : null}
           </div>
 
-          {/* Industry signals (PCC-focused) */}
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 text-sm dark:border-gray-800 dark:bg-black">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -672,7 +711,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
         </div>
       </div>
 
-      {/* Admin controls */}
       <AdminControls
         tenantId={tenant.id}
         isArchived={isArchived}
@@ -686,7 +724,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
         }}
       />
 
-      {/* Members */}
       <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-900">
         <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Members</div>
         <div className="mt-3 grid gap-2">
