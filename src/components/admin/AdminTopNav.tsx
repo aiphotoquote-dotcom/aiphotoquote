@@ -29,6 +29,7 @@ function activeFromPath(pathname: string): NavKey {
 }
 
 type TenantRow = { tenantId: string; slug: string; name: string | null; role: string };
+
 type TenantContextResp =
   | {
       ok: true;
@@ -60,30 +61,14 @@ type PlatformPublicResp =
     }
   | { ok: false; error: string; message?: string };
 
-type ImpersonationResp =
-  | {
-      ok: true;
-      active: boolean;
-      impersonation: null | {
-        tenantId: string;
-        tenantName: string | null;
-        tenantSlug: string;
-        previousTenantId: string | null;
-        actorClerkUserId: string;
-        actorEmail: string | null;
-        startedAt: string;
-      };
-    }
-  | { ok: false; error: string; message?: string };
-
 function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "warn" }) {
   const tone = props.tone ?? "neutral";
   const cls =
     tone === "good"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200"
       : tone === "warn"
-      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
-      : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
+        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
+        : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
 
   return (
     <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
@@ -129,7 +114,6 @@ export default function AdminTopNav() {
   const [ctxLoading, setCtxLoading] = useState(true);
 
   const [platform, setPlatform] = useState<PlatformPublicResp | null>(null);
-  const [impersonation, setImpersonation] = useState<ImpersonationResp | null>(null);
   const [stoppingImpersonation, setStoppingImpersonation] = useState(false);
 
   const loadContext = useCallback(async () => {
@@ -162,24 +146,10 @@ export default function AdminTopNav() {
     }
   }, []);
 
-  const loadImpersonation = useCallback(async () => {
-    try {
-      const res = await fetch("/api/pcc/impersonation", {
-        cache: "no-store",
-        credentials: "include",
-      });
-      const data = (await res.json().catch(() => null)) as ImpersonationResp | null;
-      setImpersonation(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid impersonation response" });
-    } catch (e: any) {
-      setImpersonation({ ok: false, error: "IMPERSONATION_FETCH_FAILED", message: e?.message ?? String(e) });
-    }
-  }, []);
-
   useEffect(() => {
     loadContext();
     loadPlatform();
-    loadImpersonation();
-  }, [loadContext, loadPlatform, loadImpersonation]);
+  }, [loadContext, loadPlatform]);
 
   useEffect(() => {
     setMobileOpen(false);
@@ -188,20 +158,17 @@ export default function AdminTopNav() {
   useEffect(() => {
     loadContext();
     loadPlatform();
-    loadImpersonation();
-  }, [pathname, loadContext, loadPlatform, loadImpersonation]);
+  }, [pathname, loadContext, loadPlatform]);
 
   useEffect(() => {
     function onFocus() {
       loadContext();
       loadPlatform();
-      loadImpersonation();
     }
     function onVis() {
       if (document.visibilityState === "visible") {
         loadContext();
         loadPlatform();
-        loadImpersonation();
       }
     }
     window.addEventListener("focus", onFocus);
@@ -210,7 +177,7 @@ export default function AdminTopNav() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadContext, loadPlatform, loadImpersonation]);
+  }, [loadContext, loadPlatform]);
 
   function hardReloadSameUrl() {
     try {
@@ -224,7 +191,6 @@ export default function AdminTopNav() {
     function onTenantChanged() {
       loadContext().catch(() => null);
       loadPlatform().catch(() => null);
-      loadImpersonation().catch(() => null);
       router.refresh();
       hardReloadSameUrl();
     }
@@ -232,7 +198,7 @@ export default function AdminTopNav() {
     return () => {
       window.removeEventListener("apq:tenant-changed", onTenantChanged as any);
     };
-  }, [loadContext, loadPlatform, loadImpersonation, router]);
+  }, [loadContext, loadPlatform, router]);
 
   async function stopImpersonation() {
     if (stoppingImpersonation) return;
@@ -260,7 +226,11 @@ export default function AdminTopNav() {
       : null;
 
   const impersonationActive =
-    impersonation && "ok" in impersonation && impersonation.ok && impersonation.active && impersonation.impersonation;
+    ctx &&
+    "ok" in ctx &&
+    ctx.ok &&
+    ctx.impersonation?.active === true &&
+    ctx.impersonation;
 
   const shouldShowSwitcher =
     !impersonationActive &&
@@ -326,14 +296,14 @@ export default function AdminTopNav() {
             <div className="font-medium">
               Impersonation active — you are viewing{" "}
               <span className="font-extrabold">
-                {impersonation.impersonation?.tenantName || impersonation.impersonation?.tenantSlug}
+                {impersonationActive.tenantName || impersonationActive.tenantSlug}
               </span>{" "}
-              ({impersonation.impersonation?.tenantSlug})
+              ({impersonationActive.tenantSlug})
             </div>
 
             <div className="flex items-center gap-2">
               <Link
-                href={`/pcc/tenants/${encodeURIComponent(impersonation.impersonation?.tenantId || "")}`}
+                href={`/pcc/tenants/${encodeURIComponent(impersonationActive.tenantId)}`}
                 className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90"
               >
                 View in PCC
