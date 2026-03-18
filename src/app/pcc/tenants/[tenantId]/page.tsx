@@ -7,6 +7,7 @@ import { db } from "@/lib/db/client";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import { readTenantImpersonationFromCookies } from "@/lib/platform/tenantImpersonation";
 import AdminControls from "./AdminControls";
+import ExitImpersonationButton from "./ExitImpersonationButton";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -408,19 +409,7 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
                     Open admin
                   </Link>
 
-                  <form action="/api/pcc/impersonate" method="post">
-                    <input type="hidden" name="_method" value="DELETE" />
-                    <button
-                      type="submit"
-                      formAction="/api/pcc/impersonate"
-                      className={cn(
-                        "inline-flex items-center rounded-xl border px-3 py-2 text-xs font-semibold",
-                        "border-red-200 bg-red-50 text-red-800 hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/50"
-                      )}
-                    >
-                      Exit impersonation
-                    </button>
-                  </form>
+                  <ExitImpersonationButton tenantId={tenant.id} />
                 </>
               ) : null}
 
