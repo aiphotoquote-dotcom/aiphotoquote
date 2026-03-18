@@ -1,4 +1,5 @@
 // src/app/api/tenant/context/route.ts
+
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
@@ -51,25 +52,87 @@ function noStore(res: NextResponse) {
   return res;
 }
 
+/**
+ * IMPORTANT:
+ * Support BOTH:
+ * 1) canonical membership via tenant_members
+ * 2) legacy ownership via tenants.owner_clerk_user_id
+ *
+ * We dedupe by tenant_id and prefer the strongest role:
+ * owner > admin > member
+ */
 async function listTenantsForUser(userId: string) {
   const r = await db.execute(sql`
+    WITH member_rows AS (
+      SELECT
+        t.id AS tenant_id,
+        t.slug AS slug,
+        t.name AS name,
+        m.role AS role,
+        t.created_at AS created_at,
+        ts.brand_logo_url AS brand_logo_url,
+        ts.brand_logo_variant AS brand_logo_variant
+      FROM tenant_members m
+      JOIN tenants t
+        ON t.id = m.tenant_id
+      LEFT JOIN tenant_settings ts
+        ON ts.tenant_id = t.id
+      WHERE m.clerk_user_id = ${userId}
+        AND (m.status IS NULL OR m.status = 'active')
+        AND COALESCE(t.status, 'active') = 'active'
+    ),
+    legacy_owner_rows AS (
+      SELECT
+        t.id AS tenant_id,
+        t.slug AS slug,
+        t.name AS name,
+        'owner'::text AS role,
+        t.created_at AS created_at,
+        ts.brand_logo_url AS brand_logo_url,
+        ts.brand_logo_variant AS brand_logo_variant
+      FROM tenants t
+      LEFT JOIN tenant_settings ts
+        ON ts.tenant_id = t.id
+      WHERE t.owner_clerk_user_id = ${userId}
+        AND COALESCE(t.status, 'active') = 'active'
+    ),
+    combined AS (
+      SELECT * FROM member_rows
+      UNION ALL
+      SELECT * FROM legacy_owner_rows
+    ),
+    ranked AS (
+      SELECT
+        tenant_id,
+        slug,
+        name,
+        role,
+        created_at,
+        brand_logo_url,
+        brand_logo_variant,
+        ROW_NUMBER() OVER (
+          PARTITION BY tenant_id
+          ORDER BY
+            CASE lower(role)
+              WHEN 'owner' THEN 1
+              WHEN 'admin' THEN 2
+              ELSE 3
+            END,
+            created_at ASC
+        ) AS rn
+      FROM combined
+    )
     SELECT
-      t.id AS tenant_id,
-      t.slug AS slug,
-      t.name AS name,
-      m.role AS role,
-      t.created_at AS created_at,
-      ts.brand_logo_url AS brand_logo_url,
-      ts.brand_logo_variant AS brand_logo_variant
-    FROM tenant_members m
-    JOIN tenants t
-      ON t.id = m.tenant_id
-    LEFT JOIN tenant_settings ts
-      ON ts.tenant_id = t.id
-    WHERE m.clerk_user_id = ${userId}
-      AND (m.status IS NULL OR m.status = 'active')
-      AND COALESCE(t.status, 'active') = 'active'
-    ORDER BY t.created_at ASC
+      tenant_id,
+      slug,
+      name,
+      role,
+      created_at,
+      brand_logo_url,
+      brand_logo_variant
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY created_at ASC
   `);
 
   return rows(r).map((x: any) => ({
@@ -85,14 +148,20 @@ async function listTenantsForUser(userId: string) {
 async function hasTenantAccessById(userId: string, tenantId: string) {
   const r = await db.execute(sql`
     SELECT 1
-    FROM tenant_members m
-    JOIN tenants t ON t.id = m.tenant_id
-    WHERE m.tenant_id = ${tenantId}::uuid
+    FROM tenants t
+    LEFT JOIN tenant_members m
+      ON m.tenant_id = t.id
       AND m.clerk_user_id = ${userId}
       AND (m.status IS NULL OR m.status = 'active')
+    WHERE t.id = ${tenantId}::uuid
       AND COALESCE(t.status, 'active') = 'active'
+      AND (
+        m.tenant_id IS NOT NULL
+        OR t.owner_clerk_user_id = ${userId}
+      )
     LIMIT 1
   `);
+
   return rows(r).length > 0;
 }
 
@@ -102,18 +171,22 @@ async function resolveTenantBySlugForUser(userId: string, tenantSlug: string) {
       t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
-      m.role AS role,
+      COALESCE(m.role, CASE WHEN t.owner_clerk_user_id = ${userId} THEN 'owner' END, 'member') AS role,
       ts.brand_logo_url AS brand_logo_url,
       ts.brand_logo_variant AS brand_logo_variant
-    FROM tenant_members m
-    JOIN tenants t
-      ON t.id = m.tenant_id
+    FROM tenants t
+    LEFT JOIN tenant_members m
+      ON m.tenant_id = t.id
+      AND m.clerk_user_id = ${userId}
+      AND (m.status IS NULL OR m.status = 'active')
     LEFT JOIN tenant_settings ts
       ON ts.tenant_id = t.id
-    WHERE m.clerk_user_id = ${userId}
-      AND (m.status IS NULL OR m.status = 'active')
+    WHERE t.slug = ${tenantSlug}
       AND COALESCE(t.status, 'active') = 'active'
-      AND t.slug = ${tenantSlug}
+      AND (
+        m.tenant_id IS NOT NULL
+        OR t.owner_clerk_user_id = ${userId}
+      )
     LIMIT 1
   `);
 
@@ -136,17 +209,22 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
       t.id AS tenant_id,
       t.slug AS slug,
       t.name AS name,
-      m.role AS role,
+      COALESCE(m.role, CASE WHEN t.owner_clerk_user_id = ${userId} THEN 'owner' END, 'member') AS role,
       ts.brand_logo_url AS brand_logo_url,
       ts.brand_logo_variant AS brand_logo_variant
-    FROM tenant_members m
-    JOIN tenants t ON t.id = m.tenant_id
+    FROM tenants t
+    LEFT JOIN tenant_members m
+      ON m.tenant_id = t.id
+      AND m.clerk_user_id = ${userId}
+      AND (m.status IS NULL OR m.status = 'active')
     LEFT JOIN tenant_settings ts
       ON ts.tenant_id = t.id
-    WHERE m.clerk_user_id = ${userId}
-      AND (m.status IS NULL OR m.status = 'active')
+    WHERE t.id = ${tenantId}::uuid
       AND COALESCE(t.status, 'active') = 'active'
-      AND t.id = ${tenantId}::uuid
+      AND (
+        m.tenant_id IS NOT NULL
+        OR t.owner_clerk_user_id = ${userId}
+      )
     LIMIT 1
   `);
 
@@ -166,7 +244,9 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
 export async function GET() {
   try {
     const { userId } = await auth();
-    if (!userId) return noStore(NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 }));
+    if (!userId) {
+      return noStore(NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 }));
+    }
 
     await requireAppUserId();
 
@@ -243,7 +323,9 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
-    if (!userId) return noStore(NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 }));
+    if (!userId) {
+      return noStore(NextResponse.json({ ok: false, error: "UNAUTHENTICATED" }, { status: 401 }));
+    }
 
     await requireAppUserId();
 
