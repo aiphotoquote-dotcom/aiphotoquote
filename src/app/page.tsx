@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
 
 import MarketingTopNav from "@/components/marketing/MarketingTopNav";
+import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -265,16 +266,115 @@ function Divider() {
   return <div className="h-px w-full bg-gradient-to-r from-transparent via-gray-200 to-transparent" />;
 }
 
-export default async function HomePage() {
-  const { userId } = await auth();
+function resolveComingSoonPayload(payload: Record<string, any> | null | undefined) {
+  return {
+    eyebrow: String(payload?.eyebrow ?? "Launching Summer 2026"),
+    headline: String(payload?.headline ?? "AI Photo Quote is getting ready."),
+    subheadline: String(
+      payload?.subheadline ??
+        "A smarter quoting platform for working service-business owners is on the way."
+    ),
+    primaryCtaLabel: String(payload?.primaryCtaLabel ?? "Request an invite"),
+    primaryCtaHref: String(payload?.primaryCtaHref ?? "mailto:hello@aiphotoquote.com"),
+    secondaryCtaLabel: String(payload?.secondaryCtaLabel ?? "Invited pilot? Sign in"),
+    secondaryCtaHref: String(payload?.secondaryCtaHref ?? "/sign-in"),
+    launchLabel: String(payload?.launchLabel ?? "Summer 2026"),
+  };
+}
 
-  // IMPORTANT:
-  // Do not send authenticated users straight to /admin from the marketing homepage.
-  // Route them through the centralized post-auth decision page so:
-  // - new users with 0 tenants go to /onboarding
-  // - existing users with tenants go to /admin
-  if (userId) redirect("/auth/after-sign-in");
+function ComingSoonPage({ payload }: { payload: ReturnType<typeof resolveComingSoonPayload> }) {
+  return (
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.08),transparent_35%),linear-gradient(180deg,#111827_0%,#020617_100%)] text-white">
+      <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-5 sm:px-6">
+        <a href="/" className="text-sm font-extrabold tracking-tight text-white">
+          AI Photo Quote
+        </a>
 
+        <a
+          href="/sign-in"
+          className="inline-flex items-center justify-center rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10"
+        >
+          Sign in
+        </a>
+      </div>
+
+      <section className="mx-auto max-w-6xl px-4 pb-20 pt-10 sm:px-6 sm:pb-28 sm:pt-16">
+        <div className="grid gap-10 lg:grid-cols-[1.15fr_0.85fr] lg:items-center">
+          <div>
+            <div className="inline-flex items-center rounded-full border border-white/15 bg-white/5 px-4 py-1.5 text-xs font-extrabold tracking-[0.18em] text-white/80 uppercase">
+              {payload.eyebrow}
+            </div>
+
+            <h1 className="mt-6 text-4xl font-extrabold tracking-tight sm:text-6xl">
+              {payload.headline}
+            </h1>
+
+            <p className="mt-5 max-w-2xl text-lg text-white/75">
+              {payload.subheadline}
+            </p>
+
+            <div className="mt-8 flex flex-wrap gap-3">
+              <a
+                href={payload.primaryCtaHref}
+                className="inline-flex items-center justify-center rounded-2xl bg-white px-6 py-3 text-sm font-extrabold text-gray-950 shadow-lg hover:bg-gray-100"
+              >
+                {payload.primaryCtaLabel}
+              </a>
+
+              <a
+                href={payload.secondaryCtaHref}
+                className="inline-flex items-center justify-center rounded-2xl border border-white/20 bg-white/5 px-6 py-3 text-sm font-semibold text-white hover:bg-white/10"
+              >
+                {payload.secondaryCtaLabel}
+              </a>
+            </div>
+
+            <div className="mt-10 flex flex-wrap gap-3">
+              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                <div className="text-xs font-semibold text-white/60">Launch window</div>
+                <div className="mt-1 text-xl font-extrabold text-white">{payload.launchLabel}</div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3">
+                <div className="text-xs font-semibold text-white/60">Pilot access</div>
+                <div className="mt-1 text-xl font-extrabold text-white">Invitation only</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[32px] border border-white/10 bg-white/5 p-6 backdrop-blur">
+            <div className="text-xs font-extrabold tracking-widest uppercase text-white/55">
+              What’s coming
+            </div>
+
+            <div className="mt-4 grid gap-3">
+              {[
+                "Photo-first AI quote drafting",
+                "Structured scope + assumptions",
+                "Confidence and inspection signaling",
+                "Admin pipeline for working owners",
+                "Optional concept renders for premium jobs",
+              ].map((x) => (
+                <div
+                  key={x}
+                  className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm font-semibold text-white/85"
+                >
+                  {x}
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-5 rounded-2xl border border-white/10 bg-black/20 p-4 text-sm text-white/70">
+              Already invited to pilot the platform? Use the sign-in button above to access your admin workspace normally.
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function LiveMarketingPage() {
   const heroImg =
     "https://images.unsplash.com/photo-1581092918484-8313c8e7c9c5?auto=format&fit=crop&w=1800&q=80";
   const tile1 =
@@ -797,4 +897,18 @@ export default async function HomePage() {
       </footer>
     </div>
   );
+}
+
+export default async function HomePage() {
+  const { userId } = await auth();
+
+  if (userId) redirect("/auth/after-sign-in");
+
+  const cfg = await getPlatformConfig();
+
+  if (cfg.siteMode === "coming_soon") {
+    return <ComingSoonPage payload={resolveComingSoonPayload(cfg.siteModePayload)} />;
+  }
+
+  return <LiveMarketingPage />;
 }

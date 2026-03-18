@@ -40,6 +40,19 @@ type TenantContextResp =
     }
   | { ok: false; error: string; message?: string };
 
+type PlatformPublicResp =
+  | {
+      ok: true;
+      config: {
+        adminBannerEnabled: boolean;
+        adminBannerText: string | null;
+        adminBannerTone: "info" | "success" | "warning" | "danger";
+        adminBannerHref: string | null;
+        adminBannerCtaLabel: string | null;
+      };
+    }
+  | { ok: false; error: string; message?: string };
+
 function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "warn" }) {
   const tone = props.tone ?? "neutral";
   const cls =
@@ -54,6 +67,19 @@ function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "w
       {props.children}
     </span>
   );
+}
+
+function bannerToneClass(tone: "info" | "success" | "warning" | "danger") {
+  if (tone === "success") {
+    return "border-green-200 bg-green-50 text-green-900 dark:border-green-900/40 dark:bg-green-950/30 dark:text-green-100";
+  }
+  if (tone === "warning") {
+    return "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/40 dark:bg-yellow-950/30 dark:text-yellow-100";
+  }
+  if (tone === "danger") {
+    return "border-red-200 bg-red-50 text-red-800 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200";
+  }
+  return "border-blue-200 bg-blue-50 text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-100";
 }
 
 export default function AdminTopNav() {
@@ -76,9 +102,10 @@ export default function AdminTopNav() {
     { key: "widgets", href: "/admin/setup/widget", label: "Widgets" },
   ];
 
-  // ---- Tenant context ----
   const [ctx, setCtx] = useState<TenantContextResp | null>(null);
   const [ctxLoading, setCtxLoading] = useState(true);
+
+  const [platform, setPlatform] = useState<PlatformPublicResp | null>(null);
 
   const loadContext = useCallback(async () => {
     setCtxLoading(true);
@@ -97,28 +124,43 @@ export default function AdminTopNav() {
     }
   }, []);
 
-  // Initial load
+  const loadPlatform = useCallback(async () => {
+    try {
+      const res = await fetch("/api/platform/public", {
+        cache: "no-store",
+        credentials: "include",
+      });
+      const data = (await res.json().catch(() => null)) as PlatformPublicResp | null;
+      setPlatform(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid platform response" });
+    } catch (e: any) {
+      setPlatform({ ok: false, error: "PLATFORM_FETCH_FAILED", message: e?.message ?? String(e) });
+    }
+  }, []);
+
   useEffect(() => {
     loadContext();
-  }, [loadContext]);
+    loadPlatform();
+  }, [loadContext, loadPlatform]);
 
-  // Close mobile drawer on route change
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
 
-  // Refresh tenant context on route change
   useEffect(() => {
     loadContext();
-  }, [pathname, loadContext]);
+    loadPlatform();
+  }, [pathname, loadContext, loadPlatform]);
 
-  // Refresh tenant context when the tab becomes active again
   useEffect(() => {
     function onFocus() {
       loadContext();
+      loadPlatform();
     }
     function onVis() {
-      if (document.visibilityState === "visible") loadContext();
+      if (document.visibilityState === "visible") {
+        loadContext();
+        loadPlatform();
+      }
     }
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVis);
@@ -126,7 +168,7 @@ export default function AdminTopNav() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadContext]);
+  }, [loadContext, loadPlatform]);
 
   function hardReloadSameUrl() {
     try {
@@ -136,23 +178,18 @@ export default function AdminTopNav() {
     }
   }
 
-  // Allow ANY component to request a context refresh:
-  // window.dispatchEvent(new Event("apq:tenant-changed"))
   useEffect(() => {
     function onTenantChanged() {
       loadContext().catch(() => null);
-
-      // Try soft refresh first…
+      loadPlatform().catch(() => null);
       router.refresh();
-
-      // …but iOS can keep stale RSC on the current route; hard reload guarantees consistency.
       hardReloadSameUrl();
     }
     window.addEventListener("apq:tenant-changed", onTenantChanged as any);
     return () => {
       window.removeEventListener("apq:tenant-changed", onTenantChanged as any);
     };
-  }, [loadContext, router]);
+  }, [loadContext, loadPlatform, router]);
 
   const activeTenant =
     ctx && "ok" in ctx && ctx.ok && ctx.activeTenantId
@@ -162,10 +199,14 @@ export default function AdminTopNav() {
   const shouldShowSwitcher =
     !ctxLoading && ctx && "ok" in ctx && ctx.ok && Array.isArray(ctx.tenants) && ctx.tenants.length > 0;
 
+  const banner =
+    platform && "ok" in platform && platform.ok && platform.config.adminBannerEnabled && platform.config.adminBannerText
+      ? platform.config
+      : null;
+
   return (
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/70 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/70">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
-        {/* Left: Brand + desktop nav */}
         <div className="flex items-center gap-3">
           <Link
             href="/admin"
@@ -186,7 +227,6 @@ export default function AdminTopNav() {
           </nav>
         </div>
 
-        {/* Right: tenant switcher + account (desktop) */}
         <div className="hidden md:flex items-center gap-3">
           {shouldShowSwitcher ? <AdminTenantSwitcher /> : null}
 
@@ -195,7 +235,6 @@ export default function AdminTopNav() {
           </div>
         </div>
 
-        {/* Mobile menu button */}
         <div className="flex items-center gap-2 md:hidden">
           <button
             type="button"
@@ -209,11 +248,26 @@ export default function AdminTopNav() {
         </div>
       </div>
 
-      {/* Mobile drawer */}
+      {banner ? (
+        <div className={cn("border-t", bannerToneClass(banner.adminBannerTone))}>
+          <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <div className="font-medium">{banner.adminBannerText}</div>
+
+            {banner.adminBannerHref && banner.adminBannerCtaLabel ? (
+              <a
+                href={banner.adminBannerHref}
+                className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90"
+              >
+                {banner.adminBannerCtaLabel}
+              </a>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {mobileOpen ? (
         <div className="md:hidden border-t border-gray-200 bg-white/80 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/80">
           <div className="mx-auto max-w-6xl px-4 py-3 flex flex-col gap-3">
-            {/* Tenant switcher (mobile) */}
             {shouldShowSwitcher ? (
               <div className="rounded-xl border border-gray-200 bg-white/70 px-3 py-3 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
                 <AdminTenantSwitcher variant="select" />
@@ -233,13 +287,11 @@ export default function AdminTopNav() {
               </div>
             )}
 
-            {/* account */}
             <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white/70 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-black/30">
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Account</div>
               <UserButton afterSignOutUrl="/" />
             </div>
 
-            {/* links */}
             <div className="mt-1 flex flex-col gap-1">
               {links.map((l) => (
                 <Link key={l.key} href={l.href} className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}>
