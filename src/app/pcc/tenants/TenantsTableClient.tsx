@@ -133,12 +133,11 @@ type Row = {
   activationGraceCredits?: any;
   activationGraceUsed?: any;
 
-  // OPTIONAL (future-ready): if server includes these, we’ll show richer PCC info.
-  industryKey?: string | null; // from tenant_settings.industry_key
-  aiSuggestedIndustryKey?: string | null; // from tenant_onboarding.ai_analysis.suggestedIndustryKey
-  aiNeedsConfirmation?: any; // from tenant_onboarding.ai_analysis.needsConfirmation
-  aiStatus?: string | null; // from tenant_onboarding.ai_analysis.meta.status (running|error|done|etc)
-  aiConfidenceScore?: any; // from tenant_onboarding.ai_analysis.confidenceScore (0..1)
+  industryKey?: string | null;
+  aiSuggestedIndustryKey?: string | null;
+  aiNeedsConfirmation?: any;
+  aiStatus?: string | null;
+  aiConfidenceScore?: any;
 };
 
 export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]; showArchived: boolean }) {
@@ -148,8 +147,9 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
   const selectedIds = useMemo(() => Object.keys(selected).filter((k) => selected[k]), [selected]);
   const selectedCount = selectedIds.length;
 
+  const [impersonatingTenantId, setImpersonatingTenantId] = useState<string | null>(null);
+
   const selectableRows = useMemo(() => {
-    // Only allow selecting ACTIVE rows (archived rows can still be viewed, not re-archived)
     return rows.filter((r) => String(r.status ?? "active").toLowerCase() !== "archived");
   }, [rows]);
 
@@ -210,7 +210,6 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
         throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
       }
 
-      // Reset UI + refresh server list
       setBulkOpen(false);
       setConfirmText("");
       setReason("");
@@ -223,9 +222,30 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
     }
   }
 
+  async function startImpersonation(tenantId: string) {
+    setErr(null);
+    setImpersonatingTenantId(tenantId);
+
+    try {
+      const res = await fetch(`/api/pcc/tenants/${encodeURIComponent(tenantId)}/impersonate`, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.ok) {
+        throw new Error(j?.message || j?.error || `HTTP ${res.status}`);
+      }
+
+      window.location.assign(j?.redirectTo || "/admin");
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+      setImpersonatingTenantId(null);
+    }
+  }
+
   return (
     <div className="space-y-3">
-      {/* Bulk action bar */}
       {selectedCount ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/40 dark:bg-amber-950/30">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -262,7 +282,12 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
         </div>
       ) : null}
 
-      {/* Table */}
+      {err ? (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200">
+          {err}
+        </div>
+      ) : null}
+
       <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
         <div className="grid grid-cols-12 gap-0 border-b border-gray-200 bg-gray-50 px-4 py-3 text-xs font-semibold text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
           <div className="col-span-1 flex items-center">
@@ -303,7 +328,6 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
               const graceUsed = Number(t.activationGraceUsed ?? 0);
               const graceLeft = Math.max(0, graceTotal - graceUsed);
 
-              // Optional AI/Industry signals (only show if present)
               const settingsIndustryKey = safeTrim(t.industryKey ?? "");
               const aiKey = safeTrim(t.aiSuggestedIndustryKey ?? "");
               const needsConfirm = toBool(t.aiNeedsConfirmation);
@@ -331,6 +355,8 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                   : aiStatus.toLowerCase() === "rejected"
                   ? "warn"
                   : "good";
+
+              const isImpersonatingThisRow = impersonatingTenantId === id;
 
               return (
                 <div key={id} className="grid grid-cols-12 gap-0 px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-900">
@@ -371,7 +397,6 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                         Grace: <span className="font-mono">{graceLeft}</span>
                       </span>
 
-                      {/* Optional AI/Industry chips */}
                       {hasAnyAi ? (
                         <span className="hidden sm:inline-flex items-center">
                           <span className="mx-1 text-gray-300 dark:text-gray-700">•</span>
@@ -420,6 +445,21 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                   </div>
 
                   <div className="col-span-2 flex justify-end gap-2">
+                    {!isArchived ? (
+                      <button
+                        type="button"
+                        onClick={() => startImpersonation(id)}
+                        disabled={Boolean(impersonatingTenantId)}
+                        className={cn(
+                          "inline-flex items-center rounded-lg border px-3 py-2 text-xs font-semibold",
+                          "border-purple-200 bg-purple-50 text-purple-900 hover:bg-purple-100 disabled:opacity-50",
+                          "dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100 dark:hover:bg-purple-950/50"
+                        )}
+                      >
+                        {isImpersonatingThisRow ? "Impersonating…" : "Impersonate"}
+                      </button>
+                    ) : null}
+
                     <Link
                       href={`/pcc/tenants/${encodeURIComponent(id)}`}
                       className={cn(
@@ -449,7 +489,6 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
         )}
       </div>
 
-      {/* Bulk confirm modal */}
       {bulkOpen ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
           <div className="w-full max-w-lg rounded-2xl border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-800 dark:bg-gray-950">

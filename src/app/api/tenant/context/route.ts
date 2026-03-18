@@ -12,6 +12,9 @@ import {
   setActiveTenantCookie,
   clearActiveTenantCookies,
 } from "@/lib/tenant/activeTenant";
+import { getActorContext } from "@/lib/rbac/actor";
+import { hasPlatformRole } from "@/lib/rbac/guards";
+import { readTenantImpersonationFromCookies } from "@/lib/platform/tenantImpersonation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,15 +55,6 @@ function noStore(res: NextResponse) {
   return res;
 }
 
-/**
- * IMPORTANT:
- * Support BOTH:
- * 1) canonical membership via tenant_members
- * 2) legacy ownership via tenants.owner_clerk_user_id
- *
- * We dedupe by tenant_id and prefer the strongest role:
- * owner > admin > member
- */
 async function listTenantsForUser(userId: string) {
   const r = await db.execute(sql`
     WITH member_rows AS (
@@ -241,6 +235,58 @@ async function fetchTenantByIdForUser(userId: string, tenantId: string) {
   };
 }
 
+async function fetchTenantByIdAny(tenantId: string) {
+  const r = await db.execute(sql`
+    SELECT
+      t.id AS tenant_id,
+      t.slug AS slug,
+      t.name AS name,
+      ts.brand_logo_url AS brand_logo_url,
+      ts.brand_logo_variant AS brand_logo_variant
+    FROM tenants t
+    LEFT JOIN tenant_settings ts
+      ON ts.tenant_id = t.id
+    WHERE t.id = ${tenantId}::uuid
+      AND COALESCE(t.status, 'active') = 'active'
+    LIMIT 1
+  `);
+
+  const row = rows(r)[0] ?? null;
+  if (!row?.tenant_id) return null;
+
+  return {
+    tenantId: String(row.tenant_id),
+    slug: String(row.slug),
+    name: row.name ? String(row.name) : null,
+    role: "owner" as TenantRole,
+    brandLogoUrl: safeTrim(row.brand_logo_url) || null,
+    brandLogoVariant: normalizeLogoVariant(row.brand_logo_variant),
+  };
+}
+
+async function getActiveImpersonationForCurrentActor() {
+  try {
+    const actor = await getActorContext();
+    if (!hasPlatformRole(actor, ["platform_owner", "platform_admin", "platform_support"])) {
+      return null;
+    }
+
+    const imp = await readTenantImpersonationFromCookies();
+    if (!imp) return null;
+    if (imp.actorClerkUserId !== actor.clerkUserId) return null;
+
+    const tenant = await fetchTenantByIdAny(imp.tenantId);
+    if (!tenant) return null;
+
+    return {
+      impersonation: imp,
+      tenant,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function GET() {
   try {
     const { userId } = await auth();
@@ -249,6 +295,25 @@ export async function GET() {
     }
 
     await requireAppUserId();
+
+    const activeImpersonation = await getActiveImpersonationForCurrentActor();
+    if (activeImpersonation) {
+      return noStore(
+        NextResponse.json({
+          ok: true,
+          activeTenantId: activeImpersonation.tenant.tenantId,
+          tenants: [activeImpersonation.tenant],
+          needsTenantSelection: false,
+          impersonation: {
+            active: true,
+            tenantId: activeImpersonation.tenant.tenantId,
+            tenantSlug: activeImpersonation.tenant.slug,
+            tenantName: activeImpersonation.tenant.name,
+            startedAt: activeImpersonation.impersonation.startedAt,
+          },
+        })
+      );
+    }
 
     const tenantsForUser = await listTenantsForUser(userId);
     const cookieTenantId = await readActiveTenantIdFromCookies();
@@ -328,6 +393,20 @@ export async function POST(req: Request) {
     }
 
     await requireAppUserId();
+
+    const activeImpersonation = await getActiveImpersonationForCurrentActor();
+    if (activeImpersonation) {
+      return noStore(
+        NextResponse.json(
+          {
+            ok: false,
+            error: "IMPERSONATION_ACTIVE",
+            message: "Exit impersonation before switching tenants.",
+          },
+          { status: 409 }
+        )
+      );
+    }
 
     const bodyJson = await req.json().catch(() => null);
     const parsed = Body.safeParse(bodyJson);

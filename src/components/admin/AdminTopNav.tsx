@@ -37,6 +37,13 @@ type TenantContextResp =
       needsTenantSelection?: boolean;
       autoSelected?: boolean;
       clearedStaleCookie?: boolean;
+      impersonation?: {
+        active: boolean;
+        tenantId: string;
+        tenantSlug: string;
+        tenantName: string | null;
+        startedAt: string;
+      };
     }
   | { ok: false; error: string; message?: string };
 
@@ -53,14 +60,30 @@ type PlatformPublicResp =
     }
   | { ok: false; error: string; message?: string };
 
+type ImpersonationResp =
+  | {
+      ok: true;
+      active: boolean;
+      impersonation: null | {
+        tenantId: string;
+        tenantName: string | null;
+        tenantSlug: string;
+        previousTenantId: string | null;
+        actorClerkUserId: string;
+        actorEmail: string | null;
+        startedAt: string;
+      };
+    }
+  | { ok: false; error: string; message?: string };
+
 function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "warn" }) {
   const tone = props.tone ?? "neutral";
   const cls =
     tone === "good"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200"
       : tone === "warn"
-        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
-        : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
+      : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
 
   return (
     <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
@@ -106,6 +129,8 @@ export default function AdminTopNav() {
   const [ctxLoading, setCtxLoading] = useState(true);
 
   const [platform, setPlatform] = useState<PlatformPublicResp | null>(null);
+  const [impersonation, setImpersonation] = useState<ImpersonationResp | null>(null);
+  const [stoppingImpersonation, setStoppingImpersonation] = useState(false);
 
   const loadContext = useCallback(async () => {
     setCtxLoading(true);
@@ -137,10 +162,24 @@ export default function AdminTopNav() {
     }
   }, []);
 
+  const loadImpersonation = useCallback(async () => {
+    try {
+      const res = await fetch("/api/pcc/impersonation", {
+        cache: "no-store",
+        credentials: "include",
+      });
+      const data = (await res.json().catch(() => null)) as ImpersonationResp | null;
+      setImpersonation(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid impersonation response" });
+    } catch (e: any) {
+      setImpersonation({ ok: false, error: "IMPERSONATION_FETCH_FAILED", message: e?.message ?? String(e) });
+    }
+  }, []);
+
   useEffect(() => {
     loadContext();
     loadPlatform();
-  }, [loadContext, loadPlatform]);
+    loadImpersonation();
+  }, [loadContext, loadPlatform, loadImpersonation]);
 
   useEffect(() => {
     setMobileOpen(false);
@@ -149,17 +188,20 @@ export default function AdminTopNav() {
   useEffect(() => {
     loadContext();
     loadPlatform();
-  }, [pathname, loadContext, loadPlatform]);
+    loadImpersonation();
+  }, [pathname, loadContext, loadPlatform, loadImpersonation]);
 
   useEffect(() => {
     function onFocus() {
       loadContext();
       loadPlatform();
+      loadImpersonation();
     }
     function onVis() {
       if (document.visibilityState === "visible") {
         loadContext();
         loadPlatform();
+        loadImpersonation();
       }
     }
     window.addEventListener("focus", onFocus);
@@ -168,7 +210,7 @@ export default function AdminTopNav() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadContext, loadPlatform]);
+  }, [loadContext, loadPlatform, loadImpersonation]);
 
   function hardReloadSameUrl() {
     try {
@@ -182,6 +224,7 @@ export default function AdminTopNav() {
     function onTenantChanged() {
       loadContext().catch(() => null);
       loadPlatform().catch(() => null);
+      loadImpersonation().catch(() => null);
       router.refresh();
       hardReloadSameUrl();
     }
@@ -189,15 +232,44 @@ export default function AdminTopNav() {
     return () => {
       window.removeEventListener("apq:tenant-changed", onTenantChanged as any);
     };
-  }, [loadContext, loadPlatform, router]);
+  }, [loadContext, loadPlatform, loadImpersonation, router]);
+
+  async function stopImpersonation() {
+    if (stoppingImpersonation) return;
+
+    setStoppingImpersonation(true);
+    try {
+      const res = await fetch("/api/pcc/impersonation", {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      const data = await res.json().catch(() => null);
+      const redirectTo = data?.redirectTo || "/pcc/tenants";
+      window.location.assign(redirectTo);
+    } catch {
+      window.location.assign("/pcc/tenants");
+    } finally {
+      setStoppingImpersonation(false);
+    }
+  }
 
   const activeTenant =
     ctx && "ok" in ctx && ctx.ok && ctx.activeTenantId
       ? (ctx.tenants || []).find((t) => t.tenantId === ctx.activeTenantId) ?? null
       : null;
 
+  const impersonationActive =
+    impersonation && "ok" in impersonation && impersonation.ok && impersonation.active && impersonation.impersonation;
+
   const shouldShowSwitcher =
-    !ctxLoading && ctx && "ok" in ctx && ctx.ok && Array.isArray(ctx.tenants) && ctx.tenants.length > 0;
+    !impersonationActive &&
+    !ctxLoading &&
+    ctx &&
+    "ok" in ctx &&
+    ctx.ok &&
+    Array.isArray(ctx.tenants) &&
+    ctx.tenants.length > 0;
 
   const banner =
     platform && "ok" in platform && platform.ok && platform.config.adminBannerEnabled && platform.config.adminBannerText
@@ -247,6 +319,38 @@ export default function AdminTopNav() {
           </button>
         </div>
       </div>
+
+      {impersonationActive ? (
+        <div className="border-t border-purple-200 bg-purple-50 text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
+          <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <div className="font-medium">
+              Impersonation active — you are viewing{" "}
+              <span className="font-extrabold">
+                {impersonation.impersonation?.tenantName || impersonation.impersonation?.tenantSlug}
+              </span>{" "}
+              ({impersonation.impersonation?.tenantSlug})
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Link
+                href={`/pcc/tenants/${encodeURIComponent(impersonation.impersonation?.tenantId || "")}`}
+                className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90"
+              >
+                View in PCC
+              </Link>
+
+              <button
+                type="button"
+                onClick={stopImpersonation}
+                disabled={stoppingImpersonation}
+                className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90 disabled:opacity-50"
+              >
+                {stoppingImpersonation ? "Exiting…" : "Exit impersonation"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {banner ? (
         <div className={cn("border-t", bannerToneClass(banner.adminBannerTone))}>
@@ -299,6 +403,17 @@ export default function AdminTopNav() {
                 </Link>
               ))}
             </div>
+
+            {impersonationActive ? (
+              <button
+                type="button"
+                onClick={stopImpersonation}
+                disabled={stoppingImpersonation}
+                className="rounded-xl border border-purple-200 bg-purple-50 px-3 py-2 text-sm font-extrabold text-purple-900 hover:bg-purple-100 disabled:opacity-50 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100 dark:hover:bg-purple-950/50"
+              >
+                {stoppingImpersonation ? "Exiting impersonation…" : "Exit impersonation"}
+              </button>
+            ) : null}
           </div>
         </div>
       ) : null}
