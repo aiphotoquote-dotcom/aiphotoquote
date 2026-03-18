@@ -1,5 +1,4 @@
-// src/app/api/pcc/impersonation/route.ts
-
+// src/app/api/pcc/impersonate/route.ts
 import { NextResponse } from "next/server";
 import { sql } from "drizzle-orm";
 
@@ -44,9 +43,7 @@ function firstRow(r: any): any | null {
 async function getPlatformActorOr403() {
   try {
     const actor = await getActorContext();
-    if (
-      !hasPlatformRole(actor, ["platform_owner", "platform_admin", "platform_support"])
-    ) {
+    if (!hasPlatformRole(actor, ["platform_owner", "platform_admin", "platform_support"])) {
       return { ok: false as const, res: json({ ok: false, error: "FORBIDDEN" }, 403) };
     }
     return { ok: true as const, actor };
@@ -104,7 +101,7 @@ async function appendAuditLog(args: {
       )
     `);
   } catch (e) {
-    console.error("[impersonation.stop] audit log write failed", e);
+    console.error("[impersonate.stop] audit log write failed", e);
   }
 }
 

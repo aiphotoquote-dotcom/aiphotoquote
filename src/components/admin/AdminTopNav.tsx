@@ -29,7 +29,6 @@ function activeFromPath(pathname: string): NavKey {
 }
 
 type TenantRow = { tenantId: string; slug: string; name: string | null; role: string };
-
 type TenantContextResp =
   | {
       ok: true;
@@ -38,13 +37,6 @@ type TenantContextResp =
       needsTenantSelection?: boolean;
       autoSelected?: boolean;
       clearedStaleCookie?: boolean;
-      impersonation?: {
-        active: boolean;
-        tenantId: string;
-        tenantSlug: string;
-        tenantName: string | null;
-        startedAt: string;
-      };
     }
   | { ok: false; error: string; message?: string };
 
@@ -61,14 +53,30 @@ type PlatformPublicResp =
     }
   | { ok: false; error: string; message?: string };
 
+type ImpersonationResp =
+  | {
+      ok: true;
+      active: boolean;
+      impersonation: null | {
+        tenantId: string;
+        tenantName: string;
+        tenantSlug: string;
+        previousTenantId: string | null;
+        actorClerkUserId: string;
+        actorEmail: string | null;
+        startedAt: string;
+      };
+    }
+  | { ok: false; error: string; message?: string };
+
 function Pill(props: { children: React.ReactNode; tone?: "neutral" | "good" | "warn" }) {
   const tone = props.tone ?? "neutral";
   const cls =
     tone === "good"
       ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900/50 dark:bg-green-900/20 dark:text-green-200"
       : tone === "warn"
-        ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
-        : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
+      ? "border-yellow-200 bg-yellow-50 text-yellow-900 dark:border-yellow-900/50 dark:bg-yellow-900/20 dark:text-yellow-100"
+      : "border-gray-200 bg-white/70 text-gray-700 dark:border-gray-800 dark:bg-black/30 dark:text-gray-200";
 
   return (
     <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold", cls)}>
@@ -114,6 +122,7 @@ export default function AdminTopNav() {
   const [ctxLoading, setCtxLoading] = useState(true);
 
   const [platform, setPlatform] = useState<PlatformPublicResp | null>(null);
+  const [impersonation, setImpersonation] = useState<ImpersonationResp | null>(null);
   const [stoppingImpersonation, setStoppingImpersonation] = useState(false);
 
   const loadContext = useCallback(async () => {
@@ -146,10 +155,24 @@ export default function AdminTopNav() {
     }
   }, []);
 
+  const loadImpersonation = useCallback(async () => {
+    try {
+      const res = await fetch("/api/pcc/impersonate", {
+        cache: "no-store",
+        credentials: "include",
+      });
+      const data = (await res.json().catch(() => null)) as ImpersonationResp | null;
+      setImpersonation(data ?? { ok: false, error: "BAD_RESPONSE", message: "Invalid impersonation response" });
+    } catch (e: any) {
+      setImpersonation({ ok: false, error: "IMPERSONATION_FETCH_FAILED", message: e?.message ?? String(e) });
+    }
+  }, []);
+
   useEffect(() => {
     loadContext();
     loadPlatform();
-  }, [loadContext, loadPlatform]);
+    loadImpersonation();
+  }, [loadContext, loadPlatform, loadImpersonation]);
 
   useEffect(() => {
     setMobileOpen(false);
@@ -158,17 +181,20 @@ export default function AdminTopNav() {
   useEffect(() => {
     loadContext();
     loadPlatform();
-  }, [pathname, loadContext, loadPlatform]);
+    loadImpersonation();
+  }, [pathname, loadContext, loadPlatform, loadImpersonation]);
 
   useEffect(() => {
     function onFocus() {
       loadContext();
       loadPlatform();
+      loadImpersonation();
     }
     function onVis() {
       if (document.visibilityState === "visible") {
         loadContext();
         loadPlatform();
+        loadImpersonation();
       }
     }
     window.addEventListener("focus", onFocus);
@@ -177,20 +203,19 @@ export default function AdminTopNav() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadContext, loadPlatform]);
+  }, [loadContext, loadPlatform, loadImpersonation]);
 
   function hardReloadSameUrl() {
     try {
       window.location.assign(window.location.href);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   useEffect(() => {
     function onTenantChanged() {
       loadContext().catch(() => null);
       loadPlatform().catch(() => null);
+      loadImpersonation().catch(() => null);
       router.refresh();
       hardReloadSameUrl();
     }
@@ -198,14 +223,14 @@ export default function AdminTopNav() {
     return () => {
       window.removeEventListener("apq:tenant-changed", onTenantChanged as any);
     };
-  }, [loadContext, loadPlatform, router]);
+  }, [loadContext, loadPlatform, loadImpersonation, router]);
 
   async function stopImpersonation() {
     if (stoppingImpersonation) return;
 
     setStoppingImpersonation(true);
     try {
-      const res = await fetch("/api/pcc/impersonation", {
+      const res = await fetch("/api/pcc/impersonate", {
         method: "DELETE",
         credentials: "include",
       });
@@ -225,26 +250,16 @@ export default function AdminTopNav() {
       ? (ctx.tenants || []).find((t) => t.tenantId === ctx.activeTenantId) ?? null
       : null;
 
-  const impersonationActive =
-    ctx &&
-    "ok" in ctx &&
-    ctx.ok &&
-    ctx.impersonation?.active === true &&
-    ctx.impersonation;
-
   const shouldShowSwitcher =
-    !impersonationActive &&
-    !ctxLoading &&
-    ctx &&
-    "ok" in ctx &&
-    ctx.ok &&
-    Array.isArray(ctx.tenants) &&
-    ctx.tenants.length > 0;
+    !ctxLoading && ctx && "ok" in ctx && ctx.ok && Array.isArray(ctx.tenants) && ctx.tenants.length > 0;
 
   const banner =
     platform && "ok" in platform && platform.ok && platform.config.adminBannerEnabled && platform.config.adminBannerText
       ? platform.config
       : null;
+
+  const activeImpersonation =
+    impersonation && "ok" in impersonation && impersonation.ok && impersonation.active ? impersonation.impersonation : null;
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-gray-200 bg-white/70 backdrop-blur dark:border-gray-800 dark:bg-neutral-950/70">
@@ -290,20 +305,17 @@ export default function AdminTopNav() {
         </div>
       </div>
 
-      {impersonationActive ? (
+      {activeImpersonation ? (
         <div className="border-t border-purple-200 bg-purple-50 text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
           <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
             <div className="font-medium">
-              Impersonation active — you are viewing{" "}
-              <span className="font-extrabold">
-                {impersonationActive.tenantName || impersonationActive.tenantSlug}
-              </span>{" "}
-              ({impersonationActive.tenantSlug})
+              Impersonating tenant: <span className="font-semibold">{activeImpersonation.tenantName}</span>
+              <span className="ml-2 font-mono text-xs">({activeImpersonation.tenantSlug})</span>
             </div>
 
             <div className="flex items-center gap-2">
               <Link
-                href={`/pcc/tenants/${encodeURIComponent(impersonationActive.tenantId)}`}
+                href={`/pcc/tenants/${encodeURIComponent(activeImpersonation.tenantId)}`}
                 className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90"
               >
                 View in PCC
@@ -366,6 +378,29 @@ export default function AdminTopNav() {
               <UserButton afterSignOutUrl="/" />
             </div>
 
+            {activeImpersonation ? (
+              <div className="rounded-xl border border-purple-200 bg-purple-50 px-3 py-3 text-sm text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
+                <div className="font-semibold">Impersonating</div>
+                <div className="mt-1 text-xs font-mono">{activeImpersonation.tenantSlug}</div>
+                <div className="mt-3 flex gap-2">
+                  <Link
+                    href={`/pcc/tenants/${encodeURIComponent(activeImpersonation.tenantId)}`}
+                    className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90"
+                  >
+                    View in PCC
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={stopImpersonation}
+                    disabled={stoppingImpersonation}
+                    className="inline-flex items-center rounded-lg border border-current/20 px-3 py-1.5 text-xs font-extrabold hover:opacity-90 disabled:opacity-50"
+                  >
+                    {stoppingImpersonation ? "Exiting…" : "Exit"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             <div className="mt-1 flex flex-col gap-1">
               {links.map((l) => (
                 <Link key={l.key} href={l.href} className={cn(linkBase, activeKey === l.key ? linkActive : linkIdle)}>
@@ -373,17 +408,6 @@ export default function AdminTopNav() {
                 </Link>
               ))}
             </div>
-
-            {impersonationActive ? (
-              <button
-                type="button"
-                onClick={stopImpersonation}
-                disabled={stoppingImpersonation}
-                className="rounded-xl border border-purple-200 bg-purple-50 px-3 py-2 text-sm font-extrabold text-purple-900 hover:bg-purple-100 disabled:opacity-50 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100 dark:hover:bg-purple-950/50"
-              >
-                {stoppingImpersonation ? "Exiting impersonation…" : "Exit impersonation"}
-              </button>
-            ) : null}
           </div>
         </div>
       ) : null}

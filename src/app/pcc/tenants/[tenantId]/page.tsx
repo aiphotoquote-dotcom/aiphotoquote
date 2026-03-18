@@ -325,7 +325,6 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <div className="text-xs text-gray-600 dark:text-gray-300">Tenant</div>
-
               <span
                 className={cn(
                   "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
@@ -336,11 +335,9 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
               >
                 {isArchived ? "ARCHIVED" : "ACTIVE"}
               </span>
-
               <span className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-700 dark:border-gray-800 dark:bg-black dark:text-gray-200">
                 {planTier}
               </span>
-
               {isImpersonatingThisTenant ? (
                 <span className="inline-flex items-center rounded-full border border-purple-200 bg-purple-50 px-2 py-0.5 text-[11px] font-semibold text-purple-900 dark:border-purple-900/40 dark:bg-purple-950/30 dark:text-purple-100">
                   IMPERSONATING
@@ -411,10 +408,11 @@ export default async function TenantDetailPage(props: { params: Promise<{ tenant
                     Open admin
                   </Link>
 
-                  <form action="/api/pcc/impersonation" method="post">
+                  <form action="/api/pcc/impersonate" method="post">
                     <input type="hidden" name="_method" value="DELETE" />
                     <button
                       type="submit"
+                      formAction="/api/pcc/impersonate"
                       className={cn(
                         "inline-flex items-center rounded-xl border px-3 py-2 text-xs font-semibold",
                         "border-red-200 bg-red-50 text-red-800 hover:bg-red-100 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/50"
