@@ -196,15 +196,13 @@ export default async function InvitePage({
   const afterUrl = `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`;
 
   // ✅ Important:
-  // Only explicit /sign-in routes should render SignIn.
-  // Callback and verification subpaths from invite signup must remain on SignUp,
-  // otherwise Clerk can bounce between incompatible auth states.
+  // Use Clerk virtual routing here. Dynamic invite URLs are not stable enough
+  // to use as Clerk "path" values, and that can dump users back to global /sign-up.
   if (isSignInPath(tail)) {
     return (
       <main className="flex min-h-screen items-center justify-center px-6 py-14">
         <SignIn
-          routing="path"
-          path={inviteSignInPath}
+          routing="virtual"
           signUpUrl={inviteBasePath}
           forceRedirectUrl={afterUrl}
           fallbackRedirectUrl={afterUrl}
@@ -216,8 +214,7 @@ export default async function InvitePage({
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
-        routing="path"
-        path={inviteBasePath}
+        routing="virtual"
         signInUrl={inviteSignInPath}
         forceRedirectUrl={afterUrl}
         fallbackRedirectUrl={afterUrl}
