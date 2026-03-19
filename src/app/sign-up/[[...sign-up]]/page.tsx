@@ -110,22 +110,6 @@ export default async function Page({
   const pathParts = routeParams?.["sign-up"] ?? [];
   const isInternalClerkPath = isClerkInternalPath(pathParts);
 
-  // Signed-in user with an onboarding session should bypass Clerk sign-up
-  // and go straight into onboarding.
-  if (userId && onboardingSessionId) {
-    redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
-  }
-
-  // Signed-in user with only a legacy invite code also bypasses sign-up.
-  if (userId && inviteCode) {
-    redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
-  }
-
-  // Signed-in user without onboarding context follows normal auth flow.
-  if (userId) {
-    redirect("/auth/after-sign-in");
-  }
-
   let hasValidOnboardingSession = false;
   if (onboardingSessionId) {
     const now = new Date();
@@ -171,9 +155,23 @@ export default async function Page({
     hasValidLegacyInvite = rows.length > 0;
   }
 
-  // In invite-only mode, allow sign-up only when a valid onboarding session
-  // or a still-supported valid invite code is present. Never block Clerk
-  // internal callback/verification paths.
+  // ✅ IMPORTANT:
+  // Let Clerk finish its own internal callback/verification flows.
+  // Do NOT short-circuit those paths even if userId/onboardingSession exists.
+  if (!isInternalClerkPath) {
+    if (userId && hasValidOnboardingSession && onboardingSessionId) {
+      redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
+    }
+
+    if (userId && hasValidLegacyInvite && inviteCode) {
+      redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
+    }
+
+    if (userId) {
+      redirect("/auth/after-sign-in");
+    }
+  }
+
   if (
     cfg.onboardingMode === "invite_only" &&
     !hasValidOnboardingSession &&
@@ -183,10 +181,10 @@ export default async function Page({
     return <InviteOnlyBlocked />;
   }
 
-  const afterUrl = hasValidOnboardingSession
-    ? `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId!)}`
-    : hasValidLegacyInvite
-      ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode!)}`
+  const afterUrl = hasValidOnboardingSession && onboardingSessionId
+    ? `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`
+    : hasValidLegacyInvite && inviteCode
+      ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`
       : "/auth/after-sign-in";
 
   return (
