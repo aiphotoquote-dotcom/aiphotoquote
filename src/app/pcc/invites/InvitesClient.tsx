@@ -1,10 +1,11 @@
 // src/app/pcc/invites/InvitesClient.tsx
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 type OnboardingMode = "open" | "invite_only";
 type InviteStatus = "pending" | "used" | "revoked" | "expired";
+type InviteFilter = "all" | InviteStatus;
 
 type InviteRow = {
   id: string;
@@ -63,6 +64,37 @@ async function safeJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
+function matchesSearch(invite: InviteRow, rawQuery: string) {
+  const q = safeTrim(rawQuery).toLowerCase();
+  if (!q) return true;
+
+  const haystack = [
+    invite.code,
+    invite.email ?? "",
+    invite.createdBy ?? "",
+    invite.createdByEmail ?? "",
+    invite.campaignKey ?? "",
+    invite.source ?? "",
+    invite.targetIndustryKey ?? "",
+    invite.usedByTenantId ?? "",
+    invite.meta?.note ?? "",
+  ]
+    .map((x) => String(x).toLowerCase())
+    .join(" ");
+
+  return haystack.includes(q);
+}
+
+function sortNewestFirst(a: InviteRow, b: InviteRow) {
+  const ad = new Date(a.createdAt).getTime();
+  const bd = new Date(b.createdAt).getTime();
+  return bd - ad;
+}
+
+function countByStatus(invites: InviteRow[], status: InviteStatus) {
+  return invites.filter((x) => x.status === status).length;
+}
+
 export default function InvitesClient({
   initialOnboardingMode,
   initialInvites,
@@ -70,7 +102,7 @@ export default function InvitesClient({
   initialOnboardingMode: OnboardingMode;
   initialInvites: InviteRow[];
 }) {
-  const [invites, setInvites] = useState<InviteRow[]>(initialInvites);
+  const [invites, setInvites] = useState<InviteRow[]>([...initialInvites].sort(sortNewestFirst));
 
   const [email, setEmail] = useState("");
   const [note, setNote] = useState("");
@@ -86,12 +118,53 @@ export default function InvitesClient({
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const [filter, setFilter] = useState<InviteFilter>("pending");
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+
   const inviteOnly = initialOnboardingMode === "invite_only";
+  const pageSize = 10;
 
   const inviteBaseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
     return `${window.location.origin}/invite/`;
   }, []);
+
+  const counts = useMemo(
+    () => ({
+      all: invites.length,
+      pending: countByStatus(invites, "pending"),
+      used: countByStatus(invites, "used"),
+      revoked: countByStatus(invites, "revoked"),
+      expired: countByStatus(invites, "expired"),
+    }),
+    [invites]
+  );
+
+  const filteredInvites = useMemo(() => {
+    const rows = invites.filter((invite) => {
+      if (filter !== "all" && invite.status !== filter) return false;
+      return matchesSearch(invite, query);
+    });
+
+    return [...rows].sort(sortNewestFirst);
+  }, [invites, filter, query]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredInvites.length / pageSize));
+
+  const pagedInvites = useMemo(() => {
+    const safePage = Math.min(page, totalPages);
+    const start = (safePage - 1) * pageSize;
+    return filteredInvites.slice(start, start + pageSize);
+  }, [filteredInvites, page, totalPages]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter, query]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   async function createInvite() {
     setCreating(true);
@@ -118,8 +191,17 @@ export default function InvitesClient({
         throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
       }
 
-      setInvites((prev) => [data.invite as InviteRow, ...prev]);
-      setMsg(`Invite created: ${data.invite.code}`);
+      const newInvite = data.invite as InviteRow;
+      setInvites((prev) => [newInvite, ...prev].sort(sortNewestFirst));
+      setFilter("pending");
+
+      if (data?.emailSendOk === false) {
+        setMsg(`Invite created: ${data.invite.code}. Email warning: ${data.emailSendError || "send failed"}`);
+      } else if (newInvite.email) {
+        setMsg(`Invite created: ${data.invite.code}. Email sent.`);
+      } else {
+        setMsg(`Invite created: ${data.invite.code}`);
+      }
 
       setEmail("");
       setNote("");
@@ -151,7 +233,7 @@ export default function InvitesClient({
       }
 
       const next = data.invite as InviteRow;
-      setInvites((prev) => prev.map((row) => (row.id === inviteId ? next : row)));
+      setInvites((prev) => prev.map((row) => (row.id === inviteId ? next : row)).sort(sortNewestFirst));
       setMsg(`Invite revoked: ${next.code}`);
     } catch (e: any) {
       setErr(e?.message ?? String(e));
@@ -302,118 +384,197 @@ export default function InvitesClient({
 
       <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
         <div className="border-b border-gray-200 bg-gray-50 px-5 py-4 dark:border-gray-800 dark:bg-gray-900">
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Invites</div>
-          <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Most recent 200 invites.</div>
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Invites</div>
+              <div className="mt-1 text-sm text-gray-600 dark:text-gray-300">Most recent 200 invites.</div>
+            </div>
+
+            <div className="w-full lg:w-auto lg:min-w-[340px]">
+              <label className="block text-xs font-medium text-gray-700 dark:text-gray-300">Search</label>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search by code, email, campaign, source…"
+                className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-white/10 dark:bg-white/5 dark:text-white"
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {([
+              ["pending", `Pending (${counts.pending})`],
+              ["used", `Used (${counts.used})`],
+              ["revoked", `Revoked (${counts.revoked})`],
+              ["expired", `Expired (${counts.expired})`],
+              ["all", `All (${counts.all})`],
+            ] as Array<[InviteFilter, string]>).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setFilter(value)}
+                className={cn(
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
+                  filter === value
+                    ? "border-blue-600 bg-blue-600 text-white"
+                    : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-200 dark:hover:bg-white/10"
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
+            <div>
+              Showing {filteredInvites.length === 0 ? 0 : (page - 1) * pageSize + 1}–
+              {Math.min(page * pageSize, filteredInvites.length)} of {filteredInvites.length}
+              {filter !== "all" ? ` ${filter}` : ""} invite{filteredInvites.length === 1 ? "" : "s"}
+            </div>
+            <div>
+              Page {totalPages === 0 ? 1 : page} of {totalPages}
+            </div>
+          </div>
         </div>
 
-        {invites.length === 0 ? (
-          <div className="px-5 py-8 text-sm text-gray-600 dark:text-gray-300">No invites yet.</div>
+        {filteredInvites.length === 0 ? (
+          <div className="px-5 py-8 text-sm text-gray-600 dark:text-gray-300">No invites match the current view.</div>
         ) : (
-          <div className="divide-y divide-gray-200 dark:divide-gray-800">
-            {invites.map((invite) => {
-              const link = `${inviteBaseUrl}${encodeURIComponent(invite.code)}`;
-              const noteText =
-                invite.meta && typeof invite.meta === "object" && invite.meta.note
-                  ? String(invite.meta.note)
-                  : null;
+          <>
+            <div className="divide-y divide-gray-200 dark:divide-gray-800">
+              {pagedInvites.map((invite) => {
+                const link = `${inviteBaseUrl}${encodeURIComponent(invite.code)}`;
+                const noteText =
+                  invite.meta && typeof invite.meta === "object" && invite.meta.note
+                    ? String(invite.meta.note)
+                    : null;
 
-              const campaign = safeTrim(invite.campaignKey);
-              const sourceText = safeTrim(invite.source);
-              const targetIndustry = safeTrim(invite.targetIndustryKey);
-              const creatorEmail = safeTrim(invite.createdByEmail);
+                const campaign = safeTrim(invite.campaignKey);
+                const sourceText = safeTrim(invite.source);
+                const targetIndustry = safeTrim(invite.targetIndustryKey);
+                const creatorEmail = safeTrim(invite.createdByEmail);
 
-              return (
-                <div key={invite.id} className="px-5 py-4">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0 space-y-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="font-mono text-sm font-semibold text-gray-900 dark:text-gray-100">
-                          {invite.code}
-                        </div>
-                        <span
-                          className={cn(
-                            "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
-                            statusTone(invite.status)
-                          )}
-                        >
-                          {invite.status}
-                        </span>
-                        {targetIndustry ? (
-                          <span className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-900 dark:border-violet-900/40 dark:bg-violet-950/30 dark:text-violet-100">
-                            industry: {targetIndustry}
-                            {invite.targetIndustryLocked ? " (locked)" : ""}
+                return (
+                  <div key={invite.id} className="px-5 py-4">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0 space-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="font-mono text-sm font-semibold text-gray-900 dark:text-gray-100">
+                            {invite.code}
+                          </div>
+                          <span
+                            className={cn(
+                              "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                              statusTone(invite.status)
+                            )}
+                          >
+                            {invite.status}
                           </span>
+                          {targetIndustry ? (
+                            <span className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-900 dark:border-violet-900/40 dark:bg-violet-950/30 dark:text-violet-100">
+                              industry: {targetIndustry}
+                              {invite.targetIndustryLocked ? " (locked)" : ""}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <div className="text-sm text-gray-600 dark:text-gray-300">Email: {invite.email ?? "—"}</div>
+
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          Created: {fmtDate(invite.createdAt)} · Expires: {fmtDate(invite.expiresAt)} · Used:{" "}
+                          {fmtDate(invite.usedAt)}
+                        </div>
+
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          Created by: <span className="font-mono">{invite.createdBy}</span>
+                          {creatorEmail ? <> · {creatorEmail}</> : null}
+                        </div>
+
+                        {campaign || sourceText ? (
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            {campaign ? (
+                              <>
+                                Campaign: <span className="font-mono">{campaign}</span>
+                              </>
+                            ) : null}
+                            {campaign && sourceText ? " · " : null}
+                            {sourceText ? (
+                              <>
+                                Source: <span className="font-mono">{sourceText}</span>
+                              </>
+                            ) : null}
+                          </div>
                         ) : null}
+
+                        {invite.usedByTenantId ? (
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            Tenant used: <span className="font-mono">{invite.usedByTenantId}</span>
+                          </div>
+                        ) : null}
+
+                        {noteText ? <div className="text-xs text-gray-600 dark:text-gray-300">Note: {noteText}</div> : null}
+
+                        <div className="break-all text-xs text-gray-500 dark:text-gray-400">Link: {link}</div>
                       </div>
 
-                      <div className="text-sm text-gray-600 dark:text-gray-300">
-                        Email: {invite.email ?? "—"}
-                      </div>
-
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        Created: {fmtDate(invite.createdAt)} · Expires: {fmtDate(invite.expiresAt)} · Used:{" "}
-                        {fmtDate(invite.usedAt)}
-                      </div>
-
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        Created by: <span className="font-mono">{invite.createdBy}</span>
-                        {creatorEmail ? <> · {creatorEmail}</> : null}
-                      </div>
-
-                      {campaign || sourceText ? (
-                        <div className="text-xs text-gray-500 dark:text-gray-400">
-                          {campaign ? <>Campaign: <span className="font-mono">{campaign}</span></> : null}
-                          {campaign && sourceText ? " · " : null}
-                          {sourceText ? <>Source: <span className="font-mono">{sourceText}</span></> : null}
-                        </div>
-                      ) : null}
-
-                      {invite.usedByTenantId ? (
-                        <div className="text-xs text-gray-500 dark:text-gray-400">
-                          Tenant used: <span className="font-mono">{invite.usedByTenantId}</span>
-                        </div>
-                      ) : null}
-
-                      {noteText ? (
-                        <div className="text-xs text-gray-600 dark:text-gray-300">Note: {noteText}</div>
-                      ) : null}
-
-                      <div className="break-all text-xs text-gray-500 dark:text-gray-400">Link: {link}</div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={() => copyText(invite.code, "Code")}
-                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
-                      >
-                        Copy code
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => copyText(link, "Invite link")}
-                        className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
-                      >
-                        Copy link
-                      </button>
-
-                      {invite.status === "pending" ? (
+                      <div className="flex flex-wrap gap-2">
                         <button
                           type="button"
-                          onClick={() => revokeInvite(invite.id)}
-                          disabled={workingId === invite.id}
-                          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800 hover:bg-red-100 disabled:opacity-50 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/50"
+                          onClick={() => copyText(invite.code, "Code")}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
                         >
-                          {workingId === invite.id ? "Revoking…" : "Revoke"}
+                          Copy code
                         </button>
-                      ) : null}
+
+                        <button
+                          type="button"
+                          onClick={() => copyText(link, "Invite link")}
+                          className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 hover:bg-gray-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+                        >
+                          Copy link
+                        </button>
+
+                        {invite.status === "pending" ? (
+                          <button
+                            type="button"
+                            onClick={() => revokeInvite(invite.id)}
+                            disabled={workingId === invite.id}
+                            className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-800 hover:bg-red-100 disabled:opacity-50 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/50"
+                          >
+                            {workingId === invite.id ? "Revoking…" : "Revoke"}
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 border-t border-gray-200 px-5 py-4 dark:border-gray-800">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+              >
+                Previous
+              </button>
+
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                Page {page} of {totalPages}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-800 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:hover:bg-white/10"
+              >
+                Next
+              </button>
+            </div>
+          </>
         )}
       </div>
     </div>
