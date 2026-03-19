@@ -3,7 +3,7 @@ import React from "react";
 import { redirect } from "next/navigation";
 import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
-import { SignUp } from "@clerk/nextjs";
+import { SignIn, SignUp } from "@clerk/nextjs";
 
 import { db } from "@/lib/db/client";
 import {
@@ -24,8 +24,12 @@ function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
 }
 
-function isClerkInternalPath(segments: string[]) {
-  const tail = segments.slice(1).join("/").toLowerCase();
+function tailSegments(segments: string[]) {
+  return segments.slice(1).map((x) => safeTrim(x)).filter(Boolean);
+}
+
+function isClerkCallbackPath(parts: string[]) {
+  const tail = parts.join("/").toLowerCase();
   return (
     tail.includes("sso-callback") ||
     tail.includes("verify") ||
@@ -34,6 +38,11 @@ function isClerkInternalPath(segments: string[]) {
     tail.includes("continue") ||
     tail.includes("callback")
   );
+}
+
+function isSignInPath(parts: string[]) {
+  const tail = parts.join("/").toLowerCase();
+  return tail === "sign-in" || tail.startsWith("sign-in/");
 }
 
 function InviteUnavailable({
@@ -70,6 +79,7 @@ export default async function InvitePage({
   const { segments } = await params;
   const pathSegments = Array.isArray(segments) ? segments : [];
   const inviteCode = safeTrim(pathSegments[0]);
+  const tail = tailSegments(pathSegments);
 
   if (!inviteCode) {
     return (
@@ -121,9 +131,6 @@ export default async function InvitePage({
   const user = clerkUserId ? await currentUser().catch(() => null) : null;
   const signedInEmail = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
 
-  // ✅ IMPORTANT:
-  // Always reuse the newest active session for this invite first,
-  // regardless of whether it was originally anonymous.
   const existingSessionRows = await db
     .select({
       id: platformOnboardingSessions.id,
@@ -152,12 +159,8 @@ export default async function InvitePage({
       .values({
         inviteId: invite.id,
         inviteCode: String(invite.code),
-
-        // ✅ When signed out, do NOT bind to invite.email.
-        // That caused post-auth recovery mismatch.
         clerkUserId: clerkUserId ? String(clerkUserId) : null,
         email: signedInEmail || null,
-
         status: "active",
         tenantId: null,
         meta: {
@@ -187,7 +190,6 @@ export default async function InvitePage({
     );
   }
 
-  // ✅ If the user is now authenticated, claim the session.
   if (clerkUserId) {
     await db.execute(sql`
       update platform_onboarding_sessions
@@ -204,14 +206,29 @@ export default async function InvitePage({
   }
 
   const inviteBasePath = `/invite/${encodeURIComponent(inviteCode)}`;
+  const inviteSignInPath = `${inviteBasePath}/sign-in`;
   const afterUrl = `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`;
+
+  if (isSignInPath(tail) || isClerkCallbackPath(tail)) {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-6 py-14">
+        <SignIn
+          routing="path"
+          path={inviteSignInPath}
+          signUpUrl={inviteBasePath}
+          forceRedirectUrl={afterUrl}
+          fallbackRedirectUrl={afterUrl}
+        />
+      </main>
+    );
+  }
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
         routing="path"
         path={inviteBasePath}
-        signInUrl={inviteBasePath}
+        signInUrl={inviteSignInPath}
         forceRedirectUrl={afterUrl}
         fallbackRedirectUrl={afterUrl}
       />
