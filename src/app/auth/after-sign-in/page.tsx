@@ -70,9 +70,7 @@ export default async function AfterSignInPage({
       .limit(1);
 
     if (rows.length > 0) {
-      redirect(
-        `/onboarding?mode=new&onboardingSession=${encodeURIComponent(explicitSessionId)}`
-      );
+      redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(explicitSessionId)}`);
     }
   }
 
@@ -102,8 +100,11 @@ export default async function AfterSignInPage({
   const tenantCount = rows.length;
 
   if (tenantCount === 0) {
+    // ✅ Critical loop breaker:
+    // In invite_only mode, zero-tenant users should land on the blocked sign-up page,
+    // not on "/" where homepage auth logic may bounce them back here.
     if (cfg.onboardingMode === "invite_only") {
-      redirect("/");
+      redirect("/sign-up");
     }
 
     redirect("/onboarding");

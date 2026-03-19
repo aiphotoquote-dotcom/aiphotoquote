@@ -28,18 +28,6 @@ function tailSegments(segments: string[]) {
   return segments.slice(1).map((x) => safeTrim(x)).filter(Boolean);
 }
 
-function isClerkCallbackPath(parts: string[]) {
-  const tail = parts.join("/").toLowerCase();
-  return (
-    tail.includes("sso-callback") ||
-    tail.includes("verify") ||
-    tail.includes("factor-one") ||
-    tail.includes("factor-two") ||
-    tail.includes("continue") ||
-    tail.includes("callback")
-  );
-}
-
 function isSignInPath(parts: string[]) {
   const tail = parts.join("/").toLowerCase();
   return tail === "sign-in" || tail.startsWith("sign-in/");
@@ -200,16 +188,18 @@ export default async function InvitePage({
       where id = ${onboardingSessionId}::uuid
     `);
 
-    redirect(
-      `/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`
-    );
+    redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
   }
 
   const inviteBasePath = `/invite/${encodeURIComponent(inviteCode)}`;
   const inviteSignInPath = `${inviteBasePath}/sign-in`;
   const afterUrl = `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`;
 
-  if (isSignInPath(tail) || isClerkCallbackPath(tail)) {
+  // ✅ Important:
+  // Only explicit /sign-in routes should render SignIn.
+  // Callback and verification subpaths from invite signup must remain on SignUp,
+  // otherwise Clerk can bounce between incompatible auth states.
+  if (isSignInPath(tail)) {
     return (
       <main className="flex min-h-screen items-center justify-center px-6 py-14">
         <SignIn
