@@ -81,24 +81,30 @@ export default async function Page({
   const inviteCode = pickInviteParam(sp);
   const { userId } = await auth();
 
-  // Canonicalize invite access through the dedicated invite route.
-  if (inviteCode) {
-    redirect(`/invite/${encodeURIComponent(inviteCode)}`);
+  // ✅ Signed-in user with an invite should skip Clerk sign-up
+  // and go straight into invited onboarding flow.
+  if (userId && inviteCode) {
+    redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
   }
 
+  // ✅ Signed-in user without an invite just goes to normal post-auth flow.
   if (userId) {
     redirect("/auth/after-sign-in");
   }
 
-  if (cfg.onboardingMode === "invite_only") {
+  // ✅ In invite-only mode, block only when no invite is present.
+  if (cfg.onboardingMode === "invite_only" && !inviteCode) {
     return <InviteOnlyBlocked />;
   }
 
+  // ✅ IMPORTANT:
+  // Do NOT redirect invite-bearing sign-up requests back to /invite/[code].
+  // That caused the redirect loop with the dedicated invite page.
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
-        afterSignInUrl="/auth/after-sign-in"
-        afterSignUpUrl="/auth/after-sign-in"
+        afterSignInUrl={inviteCode ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}` : "/auth/after-sign-in"}
+        afterSignUpUrl={inviteCode ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}` : "/auth/after-sign-in"}
       />
     </main>
   );
