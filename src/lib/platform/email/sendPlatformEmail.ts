@@ -1,5 +1,4 @@
 // src/lib/platform/email/sendPlatformEmail.ts
-
 import { Resend } from "resend";
 
 export type PlatformEmailSendInput = {
@@ -59,11 +58,25 @@ function normalizeTags(tags: PlatformEmailSendInput["tags"]) {
     .filter((t) => t.name && t.value);
 }
 
+function looksLikeFormattedFrom(v?: string | null) {
+  const s = safeTrim(v);
+  return !!s && s.includes("<") && s.includes(">") && s.includes("@");
+}
+
+function looksLikePlainEmail(v?: string | null) {
+  const s = safeTrim(v);
+  return !!s && s.includes("@") && !s.includes("<") && !s.includes(">");
+}
+
 function formatFromAddress(fromEmail?: string | null, fromName?: string | null) {
   const email = safeTrim(fromEmail);
   const name = safeTrim(fromName);
 
   if (!email) return "";
+
+  // ✅ If env already contains `Name <email@...>`, use it as-is.
+  if (looksLikeFormattedFrom(email)) return email;
+
   if (!name) return email;
 
   const escapedName = name.replace(/"/g, '\\"');
@@ -80,16 +93,13 @@ function getDefaultFromEmail() {
 }
 
 function getDefaultFromName() {
-  return (
-    safeTrim(process.env.PLATFORM_FROM_EMAIL_NAME) ||
-    "AI Photo Quote"
-  );
+  return safeTrim(process.env.PLATFORM_FROM_EMAIL_NAME) || "AI Photo Quote";
 }
 
 function getDefaultReplyTo() {
   return (
     safeTrim(process.env.PLATFORM_REPLY_TO) ||
-    safeTrim(process.env.PLATFORM_FROM_EMAIL) ||
+    (looksLikePlainEmail(process.env.PLATFORM_FROM_EMAIL) ? safeTrim(process.env.PLATFORM_FROM_EMAIL) : "") ||
     ""
   );
 }
