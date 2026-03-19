@@ -3,8 +3,6 @@ import React from "react";
 import { redirect } from "next/navigation";
 import { auth } from "@clerk/nextjs/server";
 
-import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -42,20 +40,16 @@ export default async function InviteAcceptPage({
 }) {
   const { code } = await params;
   const inviteCode = safeCode(code);
-  await getPlatformConfig();
   const { userId } = await auth();
 
   if (!inviteCode) {
     return <InviteBlocked />;
   }
 
-  // ✅ Signed-in users should bypass the post-auth router completely.
-  // We want the invite to force onboarding, even for an existing user
-  // that already has another tenant.
+  // ✅ Force invited onboarding into NEW tenant mode.
   if (userId) {
-    redirect(`/onboarding?invite=${encodeURIComponent(inviteCode)}`);
+    redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
   }
 
-  // Signed-out users still go through Clerk sign-up/sign-in first.
   redirect(`/sign-up?invite=${encodeURIComponent(inviteCode)}`);
 }

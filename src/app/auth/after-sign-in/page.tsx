@@ -32,7 +32,7 @@ export default function AfterSignInPage() {
         const inviteCode = safeInvite(params.get("invite"));
 
         if (inviteCode) {
-          router.replace(`/onboarding?invite=${encodeURIComponent(inviteCode)}`);
+          router.replace(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
           return;
         }
 
