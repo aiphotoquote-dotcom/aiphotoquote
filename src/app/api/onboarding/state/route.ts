@@ -77,9 +77,10 @@ function getQuery(req: Request) {
     const u = new URL(req.url);
     const mode = safeMode(u.searchParams.get("mode"));
     const tenantId = safeTrim(u.searchParams.get("tenantId"));
-    return { mode, tenantId };
+    const onboardingSession = safeTrim(u.searchParams.get("onboardingSession"));
+    return { mode, tenantId, onboardingSession };
   } catch {
-    return { mode: "new" as Mode, tenantId: "" };
+    return { mode: "new" as Mode, tenantId: "", onboardingSession: "" };
   }
 }
 
@@ -126,6 +127,63 @@ async function ensureAppUser(clerkUserId: string): Promise<{ appUserId: string }
   const appUserId = row?.id ? String(row.id) : null;
   if (!appUserId) throw new Error("FAILED_TO_UPSERT_APP_USER");
   return { appUserId };
+}
+
+async function consumeInviteBackedOnboardingSession(args: {
+  onboardingSessionId: string | null;
+  tenantId: string;
+  clerkUserId: string;
+}) {
+  const onboardingSessionId = safeTrim(args.onboardingSessionId);
+  const tenantId = safeTrim(args.tenantId);
+  const clerkUserId = safeTrim(args.clerkUserId);
+
+  if (!onboardingSessionId || !tenantId || !clerkUserId) return;
+
+  const r = await db.execute(sql`
+    select
+      s.id,
+      s.invite_id,
+      s.status,
+      s.tenant_id
+    from platform_onboarding_sessions s
+    where s.id = ${onboardingSessionId}::uuid
+      and s.status = 'active'
+    limit 1
+  `);
+
+  const row = firstRow(r);
+  if (!row?.id) return;
+
+  const inviteId = row.invite_id ? String(row.invite_id) : "";
+  const alreadyBoundTenantId = row.tenant_id ? String(row.tenant_id) : "";
+
+  if (alreadyBoundTenantId) return;
+
+  await db.execute(sql`
+    update platform_onboarding_sessions
+    set
+      tenant_id = ${tenantId}::uuid,
+      status = 'consumed',
+      consumed_at = now(),
+      updated_at = now(),
+      clerk_user_id = ${clerkUserId}
+    where id = ${onboardingSessionId}::uuid
+      and status = 'active'
+  `);
+
+  if (inviteId) {
+    await db.execute(sql`
+      update platform_onboarding_invites
+      set
+        status = 'used',
+        used_by_tenant_id = ${tenantId}::uuid,
+        used_at = now(),
+        updated_at = now()
+      where id = ${inviteId}::uuid
+        and status = 'pending'
+    `);
+  }
 }
 
 /* --------------------- NO-CACHE response headers --------------------- */
@@ -399,7 +457,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const { mode, tenantId: queryTenantId } = getQuery(req);
+    const { mode, tenantId: queryTenantId, onboardingSession: queryOnboardingSession } = getQuery(req);
     const { clerkUserId } = await requireAuthed();
 
     const body = await req.json().catch(() => null);
@@ -469,6 +527,7 @@ export async function POST(req: Request) {
       }
 
       let tenantId: string | null = null;
+      let createdNewTenant = false;
 
       if (mode === "update" || mode === "existing") {
         const t = safeTrim(body?.tenantId) || safeTrim(queryTenantId);
@@ -490,6 +549,7 @@ export async function POST(req: Request) {
         const trow = firstRow(tIns);
         if (!trow?.id) throw new Error("FAILED_TO_CREATE_TENANT");
         tenantId = String(trow.id);
+        createdNewTenant = true;
 
         await db.execute(sql`
           insert into tenant_members (tenant_id, clerk_user_id, role, status, created_at, updated_at)
@@ -519,6 +579,55 @@ export async function POST(req: Request) {
             set business_name = excluded.business_name,
                 updated_at = now()
         `);
+      }
+
+      // ✅ Consume invite-backed onboarding session only when a NEW tenant was created.
+      if (createdNewTenant && tenantId) {
+        const onboardingSessionId =
+          safeTrim(body?.onboardingSession) || safeTrim(queryOnboardingSession);
+
+        if (onboardingSessionId) {
+          const s = await db.execute(sql`
+            select
+              s.id,
+              s.invite_id,
+              s.status,
+              s.tenant_id
+            from platform_onboarding_sessions s
+            where s.id = ${onboardingSessionId}::uuid
+              and s.status = 'active'
+            limit 1
+          `);
+
+          const srow = firstRow(s);
+
+          if (srow?.id && !srow?.tenant_id) {
+            await db.execute(sql`
+              update platform_onboarding_sessions
+              set
+                tenant_id = ${tenantId}::uuid,
+                status = 'consumed',
+                consumed_at = now(),
+                updated_at = now(),
+                clerk_user_id = ${clerkUserId}
+              where id = ${onboardingSessionId}::uuid
+                and status = 'active'
+            `);
+
+            if (srow.invite_id) {
+              await db.execute(sql`
+                update platform_onboarding_invites
+                set
+                  status = 'used',
+                  used_by_tenant_id = ${tenantId}::uuid,
+                  used_at = now(),
+                  updated_at = now()
+                where id = ${String(srow.invite_id)}::uuid
+                  and status = 'pending'
+              `);
+            }
+          }
+        }
       }
 
       // ✅ CRITICAL: ALWAYS go to step 2.
