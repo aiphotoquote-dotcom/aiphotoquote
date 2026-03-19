@@ -42,18 +42,20 @@ export default async function InviteAcceptPage({
 }) {
   const { code } = await params;
   const inviteCode = safeCode(code);
-  const cfg = await getPlatformConfig();
+  await getPlatformConfig();
   const { userId } = await auth();
 
   if (!inviteCode) {
     return <InviteBlocked />;
   }
 
-  // If onboarding is open, invite links can still work as a direct onboarding shortcut.
-  // If invite_only, this becomes the canonical entrypoint.
+  // ✅ Signed-in users should bypass the post-auth router completely.
+  // We want the invite to force onboarding, even for an existing user
+  // that already has another tenant.
   if (userId) {
-    redirect(`/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`);
+    redirect(`/onboarding?invite=${encodeURIComponent(inviteCode)}`);
   }
 
+  // Signed-out users still go through Clerk sign-up/sign-in first.
   redirect(`/sign-up?invite=${encodeURIComponent(inviteCode)}`);
 }
