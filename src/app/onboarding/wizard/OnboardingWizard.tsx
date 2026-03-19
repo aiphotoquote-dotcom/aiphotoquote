@@ -48,6 +48,29 @@ function clampStep(n: any) {
   return Math.max(1, Math.min(7, Math.floor(x)));
 }
 
+function getOnboardingSessionFromLocation(): string {
+  try {
+    const sp = new URLSearchParams(window.location.search);
+    return safeTrim(sp.get("onboardingSession"));
+  } catch {
+    return "";
+  }
+}
+
+function withOnboardingSession(url: string, onboardingSession: string) {
+  const session = safeTrim(onboardingSession);
+  if (!session) return url;
+
+  try {
+    const u = new URL(url, window.location.origin);
+    u.searchParams.set("onboardingSession", session);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}onboardingSession=${encodeURIComponent(session)}`;
+  }
+}
+
 export default function OnboardingWizard() {
   const [{ step, mode, tenantId }, setNav] = useState(() => getUrlParams());
 
@@ -56,6 +79,7 @@ export default function OnboardingWizard() {
   const [err, setErr] = useState<string | null>(null);
 
   const [lastAction, setLastAction] = useState<string | null>(null);
+  const [onboardingSession, setOnboardingSession] = useState<string>("");
 
   // step 3 -> 3b handoff state
   const [pendingIndustryKey, setPendingIndustryKey] = useState<string>("");
@@ -114,7 +138,8 @@ export default function OnboardingWizard() {
       const navMode = explicit?.mode ?? mode;
       const navTenantId = safeTrim(explicit?.tenantId ?? tenantId);
 
-      const res = await fetch(buildStateUrl(navMode, navTenantId), { method: "GET", cache: "no-store" });
+      const stateUrl = withOnboardingSession(buildStateUrl(navMode, navTenantId), onboardingSession);
+      const res = await fetch(stateUrl, { method: "GET", cache: "no-store" });
       const j = (await res.json().catch(() => null)) as OnboardingState | null;
 
       if (!res.ok || !(j as any)?.ok) throw new Error((j as any)?.message || (j as any)?.error || `HTTP ${res.status}`);
@@ -152,8 +177,12 @@ export default function OnboardingWizard() {
 
   useEffect(() => {
     const p = getUrlParams();
+    const session = getOnboardingSessionFromLocation();
+
     setNav(p);
+    setOnboardingSession(session);
     setLoading(true);
+
     refresh({ mode: p.mode, tenantId: p.tenantId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -184,11 +213,12 @@ export default function OnboardingWizard() {
     setErr(null);
     setLastAction(null);
 
-    const res = await fetch(buildStateUrl(mode, safeTrim(tenantId)), {
+    const res = await fetch(withOnboardingSession(buildStateUrl(mode, safeTrim(tenantId)), onboardingSession), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         step: 1,
+        onboardingSession: onboardingSession || undefined,
         ...payload,
         website: payload.website ? normalizeWebsiteInput(payload.website) : undefined,
       }),
@@ -355,13 +385,14 @@ export default function OnboardingWizard() {
 
     await ensureActiveTenant(tid);
 
-    const res = await fetch(buildStateUrl(mode, tid), {
+    const res = await fetch(withOnboardingSession(buildStateUrl(mode, tid), onboardingSession), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         // ✅ API expects branding = step 5 (per your state route)
         step: 5,
         tenantId: tid,
+        onboardingSession: onboardingSession || undefined,
         lead_to_email: payload.leadToEmail.trim(),
         brand_logo_url: safeTrim(payload.brandLogoUrl) ? safeTrim(payload.brandLogoUrl) : null,
       }),
