@@ -193,11 +193,11 @@ export default async function InvitePage({
 
   const inviteBasePath = `/invite/${encodeURIComponent(inviteCode)}`;
   const inviteSignInPath = `${inviteBasePath}/sign-in`;
-  const afterUrl = `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`;
 
-  // ✅ Important:
-  // Use Clerk virtual routing here. Dynamic invite URLs are not stable enough
-  // to use as Clerk "path" values, and that can dump users back to global /sign-up.
+  // ✅ Durable handoff:
+  // always send Clerk to after-sign-in with invite code, not anonymous session id.
+  const afterUrl = `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`;
+
   if (isSignInPath(tail)) {
     return (
       <main className="flex min-h-screen items-center justify-center px-6 py-14">

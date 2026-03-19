@@ -1,10 +1,13 @@
 // src/app/auth/after-sign-in/page.tsx
 import { redirect } from "next/navigation";
-import { and, desc, eq, gt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
-import { platformOnboardingSessions } from "@/lib/db/schema";
+import {
+  platformOnboardingInvites,
+  platformOnboardingSessions,
+} from "@/lib/db/schema";
 import { requireAppUserId } from "@/lib/auth/requireAppUser";
 import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
@@ -31,6 +34,10 @@ function pickParam(v: string | string[] | undefined): string | null {
   return null;
 }
 
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
 export default async function AfterSignInPage({
   searchParams,
 }: {
@@ -54,7 +61,7 @@ export default async function AfterSignInPage({
   const email = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
   const now = new Date();
 
-  // 1) Explicit onboarding session in query always wins.
+  // 1) Explicit onboarding session always wins.
   if (explicitSessionId) {
     const rows = await db
       .select({
@@ -71,18 +78,105 @@ export default async function AfterSignInPage({
       .limit(1);
 
     if (rows.length > 0) {
+      await db.execute(sql`
+        update platform_onboarding_sessions
+        set
+          clerk_user_id = ${clerkUserId},
+          email = ${email || null},
+          updated_at = now()
+        where id = ${explicitSessionId}::uuid
+      `);
+
       redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(explicitSessionId)}`);
     }
   }
 
-  // 2) Legacy explicit invite query fallback.
+  // 2) Explicit invite is the durable recovery key.
   if (explicitInvite) {
-    redirect(`/onboarding?mode=new&invite=${encodeURIComponent(explicitInvite)}`);
+    const inviteRows = await db
+      .select({
+        id: platformOnboardingInvites.id,
+        code: platformOnboardingInvites.code,
+      })
+      .from(platformOnboardingInvites)
+      .where(
+        and(
+          eq(platformOnboardingInvites.code, explicitInvite),
+          eq(platformOnboardingInvites.status, "pending"),
+          or(
+            isNull(platformOnboardingInvites.expiresAt),
+            gt(platformOnboardingInvites.expiresAt, now)
+          )
+        )
+      )
+      .limit(1);
+
+    const invite = inviteRows[0] ?? null;
+
+    if (invite?.id) {
+      const existingSessionRows = await db
+        .select({
+          id: platformOnboardingSessions.id,
+          createdAt: platformOnboardingSessions.createdAt,
+        })
+        .from(platformOnboardingSessions)
+        .where(
+          and(
+            eq(platformOnboardingSessions.inviteId, invite.id),
+            eq(platformOnboardingSessions.status, "active"),
+            gt(platformOnboardingSessions.expiresAt, now)
+          )
+        )
+        .orderBy(desc(platformOnboardingSessions.createdAt))
+        .limit(1);
+
+      let onboardingSessionId = existingSessionRows[0]?.id
+        ? String(existingSessionRows[0].id)
+        : "";
+
+      if (!onboardingSessionId) {
+        const inserted = await db
+          .insert(platformOnboardingSessions)
+          .values({
+            inviteId: invite.id,
+            inviteCode: String(invite.code),
+            clerkUserId: String(clerkUserId),
+            email: email || null,
+            status: "active",
+            tenantId: null,
+            meta: {
+              source: "after_sign_in_invite_recovery",
+              recoveredFromInvite: String(invite.code),
+            },
+            expiresAt: addMinutes(now, 30),
+            consumedAt: null,
+            cancelledAt: null,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning({
+            id: platformOnboardingSessions.id,
+          });
+
+        onboardingSessionId = inserted[0]?.id ? String(inserted[0].id) : "";
+      } else {
+        await db.execute(sql`
+          update platform_onboarding_sessions
+          set
+            clerk_user_id = ${clerkUserId},
+            email = ${email || null},
+            updated_at = now()
+          where id = ${onboardingSessionId}::uuid
+        `);
+      }
+
+      if (onboardingSessionId) {
+        redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
+      }
+    }
   }
 
-  // 3) Recovery path:
-  // If Clerk lands on /auth/after-sign-in without the onboardingSession query,
-  // recover the newest active onboarding session for this signed-in user/email.
+  // 3) Recovery path for explicit session being dropped but user already bound.
   const recoveredRows = await db
     .select({
       id: platformOnboardingSessions.id,
