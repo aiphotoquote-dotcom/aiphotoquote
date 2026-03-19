@@ -1,7 +1,9 @@
 // src/app/sign-up/[[...sign-up]]/page.tsx
 import React from "react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { SignUp } from "@clerk/nextjs";
+import { auth } from "@clerk/nextjs/server";
 
 import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
 
@@ -78,6 +80,13 @@ export default async function Page({
   const cfg = await getPlatformConfig();
   const sp = await searchParams;
   const inviteCode = pickInviteParam(sp);
+  const { userId } = await auth();
+
+  // ✅ Existing signed-in user with an invite should bypass Clerk sign-up
+  // and go straight into the invite-aware post-auth router.
+  if (userId && inviteCode) {
+    redirect(`/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`);
+  }
 
   if (cfg.onboardingMode === "invite_only" && !inviteCode) {
     return <InviteOnlyBlocked />;
@@ -87,7 +96,11 @@ export default async function Page({
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
         afterSignInUrl="/auth/after-sign-in"
-        afterSignUpUrl={inviteCode ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}` : "/auth/after-sign-in"}
+        afterSignUpUrl={
+          inviteCode
+            ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`
+            : "/auth/after-sign-in"
+        }
       />
     </main>
   );
