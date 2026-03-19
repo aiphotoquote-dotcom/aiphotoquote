@@ -103,7 +103,8 @@ export default async function InvitePage({
         )
       )
     )
-    .limit(1);
+    .limit(1)
+      .then((rows) => rows);
 
   const invite = inviteRows[0] ?? null;
 
@@ -141,7 +142,8 @@ export default async function InvitePage({
             : eq(platformOnboardingSessions.inviteCode, inviteCode)
       )
     )
-    .limit(1);
+    .limit(1)
+      .then((rows) => rows);
 
   let onboardingSessionId = existingSessionRows[0]?.id
     ? String(existingSessionRows[0].id)
@@ -191,11 +193,18 @@ export default async function InvitePage({
     );
   }
 
+  const inviteBasePath = `/invite/${encodeURIComponent(inviteCode)}`;
   const afterUrl = `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`;
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
-      <SignUp afterSignInUrl={afterUrl} afterSignUpUrl={afterUrl} />
+      <SignUp
+        routing="path"
+        path={inviteBasePath}
+        signInUrl={inviteBasePath}
+        forceRedirectUrl={afterUrl}
+        fallbackRedirectUrl={afterUrl}
+      />
     </main>
   );
 }
