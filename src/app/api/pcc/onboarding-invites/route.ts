@@ -14,6 +14,11 @@ const CreateInviteSchema = z.object({
   email: z.string().trim().email().nullable().optional(),
   expiresAt: z.string().datetime().nullable().optional(),
   note: z.string().trim().max(500).nullable().optional(),
+
+  campaignKey: z.string().trim().max(120).nullable().optional(),
+  source: z.string().trim().max(120).nullable().optional(),
+  targetIndustryKey: z.string().trim().max(120).nullable().optional(),
+  targetIndustryLocked: z.boolean().optional(),
 });
 
 function json(data: any, status = 200) {
@@ -41,6 +46,11 @@ function normalizeDate(v: unknown): Date | null {
   if (!v) return null;
   const d = new Date(String(v));
   return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function normalizeKey(v: unknown): string | null {
+  const s = safeTrim(v);
+  return s || null;
 }
 
 function randomChars(len: number) {
@@ -73,6 +83,28 @@ async function generateUniqueInviteCode(): Promise<string> {
   throw new Error("FAILED_TO_GENERATE_UNIQUE_INVITE_CODE");
 }
 
+function shapeInvite(row: any) {
+  return {
+    id: String(row.id),
+    code: String(row.code),
+    email: row.email ? String(row.email) : null,
+    createdBy: String(row.createdBy),
+    createdByEmail: row.createdByEmail ? String(row.createdByEmail) : null,
+    campaignKey: row.campaignKey ? String(row.campaignKey) : null,
+    source: row.source ? String(row.source) : null,
+    targetIndustryKey: row.targetIndustryKey ? String(row.targetIndustryKey) : null,
+    targetIndustryLocked: Boolean(row.targetIndustryLocked ?? false),
+    status: String(row.status),
+    usedByTenantId: row.usedByTenantId ? String(row.usedByTenantId) : null,
+    usedAt: row.usedAt ?? null,
+    expiresAt: row.expiresAt ?? null,
+    meta: row.meta ?? {},
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    inviteLink: `/invite/${encodeURIComponent(String(row.code))}`,
+  };
+}
+
 export async function GET() {
   await requirePlatformRole(["platform_owner", "platform_admin", "platform_support"]);
 
@@ -82,6 +114,11 @@ export async function GET() {
       code: platformOnboardingInvites.code,
       email: platformOnboardingInvites.email,
       createdBy: platformOnboardingInvites.createdBy,
+      createdByEmail: platformOnboardingInvites.createdByEmail,
+      campaignKey: platformOnboardingInvites.campaignKey,
+      source: platformOnboardingInvites.source,
+      targetIndustryKey: platformOnboardingInvites.targetIndustryKey,
+      targetIndustryLocked: platformOnboardingInvites.targetIndustryLocked,
       status: platformOnboardingInvites.status,
       usedByTenantId: platformOnboardingInvites.usedByTenantId,
       usedAt: platformOnboardingInvites.usedAt,
@@ -96,19 +133,7 @@ export async function GET() {
 
   return json({
     ok: true,
-    invites: rows.map((row) => ({
-      id: String(row.id),
-      code: String(row.code),
-      email: row.email ? String(row.email) : null,
-      createdBy: String(row.createdBy),
-      status: String(row.status),
-      usedByTenantId: row.usedByTenantId ? String(row.usedByTenantId) : null,
-      usedAt: row.usedAt ?? null,
-      expiresAt: row.expiresAt ?? null,
-      meta: row.meta ?? {},
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    })),
+    invites: rows.map(shapeInvite),
   });
 }
 
@@ -133,6 +158,11 @@ export async function POST(req: NextRequest) {
   const expiresAt = normalizeDate(parsed.data.expiresAt);
   const note = safeTrim(parsed.data.note);
 
+  const campaignKey = normalizeKey(parsed.data.campaignKey);
+  const source = normalizeKey(parsed.data.source);
+  const targetIndustryKey = normalizeKey(parsed.data.targetIndustryKey);
+  const targetIndustryLocked = Boolean(parsed.data.targetIndustryLocked ?? false);
+
   if (parsed.data.expiresAt && !expiresAt) {
     return json(
       {
@@ -151,6 +181,11 @@ export async function POST(req: NextRequest) {
       code,
       email,
       createdBy: actor.clerkUserId,
+      createdByEmail: actor.email ?? null,
+      campaignKey,
+      source,
+      targetIndustryKey,
+      targetIndustryLocked,
       status: "pending",
       expiresAt,
       meta: {
@@ -166,6 +201,11 @@ export async function POST(req: NextRequest) {
       code: platformOnboardingInvites.code,
       email: platformOnboardingInvites.email,
       createdBy: platformOnboardingInvites.createdBy,
+      createdByEmail: platformOnboardingInvites.createdByEmail,
+      campaignKey: platformOnboardingInvites.campaignKey,
+      source: platformOnboardingInvites.source,
+      targetIndustryKey: platformOnboardingInvites.targetIndustryKey,
+      targetIndustryLocked: platformOnboardingInvites.targetIndustryLocked,
       status: platformOnboardingInvites.status,
       usedByTenantId: platformOnboardingInvites.usedByTenantId,
       usedAt: platformOnboardingInvites.usedAt,
@@ -188,19 +228,6 @@ export async function POST(req: NextRequest) {
 
   return json({
     ok: true,
-    invite: {
-      id: String(invite.id),
-      code: String(invite.code),
-      email: invite.email ? String(invite.email) : null,
-      createdBy: String(invite.createdBy),
-      status: String(invite.status),
-      usedByTenantId: invite.usedByTenantId ? String(invite.usedByTenantId) : null,
-      usedAt: invite.usedAt ?? null,
-      expiresAt: invite.expiresAt ?? null,
-      meta: invite.meta ?? {},
-      createdAt: invite.createdAt,
-      updatedAt: invite.updatedAt,
-      inviteLink: `/sign-up?invite=${encodeURIComponent(String(invite.code))}`,
-    },
+    invite: shapeInvite(invite),
   });
 }
