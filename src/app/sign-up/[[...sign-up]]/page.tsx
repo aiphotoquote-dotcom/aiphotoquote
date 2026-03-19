@@ -155,10 +155,10 @@ export default async function Page({
     hasValidLegacyInvite = rows.length > 0;
   }
 
-  // ✅ IMPORTANT:
-  // Let Clerk finish its own internal callback/verification flows.
-  // Do NOT short-circuit those paths even if userId/onboardingSession exists.
+  // Let Clerk finish its internal callback/verification flows.
+  // Do not short-circuit those paths even if userId/session exists.
   if (!isInternalClerkPath) {
+    // Signed-in user with valid onboarding context should go straight to onboarding.
     if (userId && hasValidOnboardingSession && onboardingSessionId) {
       redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
     }
@@ -166,12 +166,9 @@ export default async function Page({
     if (userId && hasValidLegacyInvite && inviteCode) {
       redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
     }
-
-    if (userId) {
-      redirect("/auth/after-sign-in");
-    }
   }
 
+  // In invite-only mode, plain /sign-up with no valid onboarding context is blocked.
   if (
     cfg.onboardingMode === "invite_only" &&
     !hasValidOnboardingSession &&
@@ -181,11 +178,12 @@ export default async function Page({
     return <InviteOnlyBlocked />;
   }
 
-  const afterUrl = hasValidOnboardingSession && onboardingSessionId
-    ? `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`
-    : hasValidLegacyInvite && inviteCode
-      ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`
-      : "/auth/after-sign-in";
+  const afterUrl =
+    hasValidOnboardingSession && onboardingSessionId
+      ? `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId)}`
+      : hasValidLegacyInvite && inviteCode
+        ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`
+        : "/auth/after-sign-in";
 
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
