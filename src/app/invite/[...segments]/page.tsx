@@ -1,7 +1,7 @@
 // src/app/invite/[...segments]/page.tsx
 import React from "react";
 import { redirect } from "next/navigation";
-import { and, eq, gt, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { SignUp } from "@clerk/nextjs";
 
@@ -80,7 +80,7 @@ export default async function InvitePage({
     );
   }
 
-  const cfg = await getPlatformConfig();
+  await getPlatformConfig();
   const now = new Date();
 
   const inviteRows = await db
@@ -103,8 +103,7 @@ export default async function InvitePage({
         )
       )
     )
-    .limit(1)
-      .then((rows) => rows);
+    .limit(1);
 
   const invite = inviteRows[0] ?? null;
 
@@ -120,30 +119,28 @@ export default async function InvitePage({
   const authState = await auth();
   const clerkUserId = authState?.userId ?? null;
   const user = clerkUserId ? await currentUser().catch(() => null) : null;
-  const observedEmail =
-    safeTrim(user?.emailAddresses?.[0]?.emailAddress) ||
-    safeTrim(invite.email) ||
-    "";
+  const signedInEmail = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
 
+  // ✅ IMPORTANT:
+  // Always reuse the newest active session for this invite first,
+  // regardless of whether it was originally anonymous.
   const existingSessionRows = await db
     .select({
       id: platformOnboardingSessions.id,
+      clerkUserId: platformOnboardingSessions.clerkUserId,
+      email: platformOnboardingSessions.email,
+      createdAt: platformOnboardingSessions.createdAt,
     })
     .from(platformOnboardingSessions)
     .where(
       and(
-        eq(platformOnboardingSessions.status, "active"),
-        gt(platformOnboardingSessions.expiresAt, now),
         eq(platformOnboardingSessions.inviteId, invite.id),
-        clerkUserId
-          ? eq(platformOnboardingSessions.clerkUserId, clerkUserId)
-          : observedEmail
-            ? eq(platformOnboardingSessions.email, observedEmail)
-            : eq(platformOnboardingSessions.inviteCode, inviteCode)
+        eq(platformOnboardingSessions.status, "active"),
+        gt(platformOnboardingSessions.expiresAt, now)
       )
     )
-    .limit(1)
-      .then((rows) => rows);
+    .orderBy(desc(platformOnboardingSessions.createdAt))
+    .limit(1);
 
   let onboardingSessionId = existingSessionRows[0]?.id
     ? String(existingSessionRows[0].id)
@@ -155,13 +152,16 @@ export default async function InvitePage({
       .values({
         inviteId: invite.id,
         inviteCode: String(invite.code),
+
+        // ✅ When signed out, do NOT bind to invite.email.
+        // That caused post-auth recovery mismatch.
         clerkUserId: clerkUserId ? String(clerkUserId) : null,
-        email: observedEmail || null,
+        email: signedInEmail || null,
+
         status: "active",
         tenantId: null,
         meta: {
           source: "invite_accept",
-          onboardingMode: cfg.onboardingMode,
           inviteEmail: invite.email ?? null,
           createdFromPath: `/invite/${encodeURIComponent(inviteCode)}`,
         },
@@ -187,7 +187,17 @@ export default async function InvitePage({
     );
   }
 
-  if (!isClerkInternalPath(pathSegments) && clerkUserId) {
+  // ✅ If the user is now authenticated, claim the session.
+  if (clerkUserId) {
+    await db.execute(sql`
+      update platform_onboarding_sessions
+      set
+        clerk_user_id = ${String(clerkUserId)},
+        email = ${signedInEmail || null},
+        updated_at = now()
+      where id = ${onboardingSessionId}::uuid
+    `);
+
     redirect(
       `/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`
     );
