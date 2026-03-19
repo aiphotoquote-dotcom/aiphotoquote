@@ -73,7 +73,7 @@ export default function InvitesClient({
 
   const inviteBaseUrl = useMemo(() => {
     if (typeof window === "undefined") return "";
-    return `${window.location.origin}/sign-up?invite=`;
+    return `${window.location.origin}/invite/`;
   }, []);
 
   async function createInvite() {
