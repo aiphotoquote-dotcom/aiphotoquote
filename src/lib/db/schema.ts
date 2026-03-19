@@ -83,6 +83,45 @@ export const platformOnboardingInvites = pgTable(
     createdBy: text("created_by").notNull(),
 
     /**
+     * Optional creator email snapshot for easier PCC reporting.
+     */
+    createdByEmail: text("created_by_email"),
+
+    /**
+     * Optional attribution / campaign context.
+     * Examples:
+     * - pilot_march_2026
+     * - hvac_beta_wave_1
+     * - referral_partner_acme
+     */
+    campaignKey: text("campaign_key"),
+
+    /**
+     * Optional source / channel snapshot.
+     * Examples:
+     * - email
+     * - sms
+     * - manual
+     * - referral
+     */
+    source: text("source"),
+
+    /**
+     * Optional target industry hint or lock.
+     * Examples:
+     * - upholstery
+     * - hvac_contractor
+     * - paving_contractor
+     */
+    targetIndustryKey: text("target_industry_key"),
+
+    /**
+     * If true, onboarding should treat targetIndustryKey as locked/final.
+     * If false, it can be used as a strong prefill / recommendation.
+     */
+    targetIndustryLocked: boolean("target_industry_locked").notNull().default(false),
+
+    /**
      * pending | used | revoked | expired
      */
     status: text("status").notNull().default("pending"),
@@ -116,6 +155,8 @@ export const platformOnboardingInvites = pgTable(
     statusIdx: index("platform_onboarding_invites_status_idx").on(t.status),
     emailIdx: index("platform_onboarding_invites_email_idx").on(t.email),
     usedByTenantIdx: index("platform_onboarding_invites_used_by_tenant_id_idx").on(t.usedByTenantId),
+    campaignIdx: index("platform_onboarding_invites_campaign_key_idx").on(t.campaignKey),
+    targetIndustryIdx: index("platform_onboarding_invites_target_industry_key_idx").on(t.targetIndustryKey),
   })
 );
 
@@ -164,6 +205,14 @@ export const platformOnboardingSessions = pgTable(
     email: text("email"),
 
     /**
+     * Snapshot attribution copied from invite at session creation time.
+     */
+    campaignKey: text("campaign_key"),
+    source: text("source"),
+    targetIndustryKey: text("target_industry_key"),
+    targetIndustryLocked: boolean("target_industry_locked").notNull().default(false),
+
+    /**
      * active | consumed | expired | cancelled
      */
     status: text("status").notNull().default("active"),
@@ -197,6 +246,8 @@ export const platformOnboardingSessions = pgTable(
     clerkIdx: index("platform_onboarding_sessions_clerk_user_id_idx").on(t.clerkUserId),
     tenantIdx: index("platform_onboarding_sessions_tenant_id_idx").on(t.tenantId),
     expiresIdx: index("platform_onboarding_sessions_expires_at_idx").on(t.expiresAt),
+    campaignIdx: index("platform_onboarding_sessions_campaign_key_idx").on(t.campaignKey),
+    targetIndustryIdx: index("platform_onboarding_sessions_target_industry_key_idx").on(t.targetIndustryKey),
   })
 );
 
