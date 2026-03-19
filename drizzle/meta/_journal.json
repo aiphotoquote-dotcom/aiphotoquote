@@ -92,6 +92,13 @@
       "when": 1773874104331,
       "tag": "0012_serious_cyclops",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1773893092207,
+      "tag": "0013_pale_chronomancer",
+      "breakpoints": true
     }
   ]
 }

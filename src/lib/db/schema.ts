@@ -120,6 +120,87 @@ export const platformOnboardingInvites = pgTable(
 );
 
 /**
+ * Platform onboarding sessions
+ *
+ * A short-lived server-side session created from an invite accept.
+ * This survives auth redirects and cleanly tells the app:
+ * "this user is in the middle of creating a NEW tenant from an invite."
+ *
+ * Status:
+ * - active
+ * - consumed
+ * - expired
+ * - cancelled
+ */
+export const platformOnboardingSessions = pgTable(
+  "platform_onboarding_sessions",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+
+    /**
+     * The invite this session came from.
+     * Sessions are invite-backed when onboarding is invite_only.
+     */
+    inviteId: uuid("invite_id").references(() => platformOnboardingInvites.id, {
+      onDelete: "set null",
+    }),
+
+    /**
+     * Snapshot of the code used when session was created.
+     * Useful for forensics even if the invite later changes state.
+     */
+    inviteCode: text("invite_code"),
+
+    /**
+     * Clerk user id once/if the user authenticates.
+     * Nullable because the session may be created before sign-in.
+     */
+    clerkUserId: text("clerk_user_id"),
+
+    /**
+     * Optional email observed at the time of session creation.
+     * Helps correlate signed-out start -> signed-in completion.
+     */
+    email: text("email"),
+
+    /**
+     * active | consumed | expired | cancelled
+     */
+    status: text("status").notNull().default("active"),
+
+    /**
+     * If this session ultimately creates a tenant, record it here.
+     */
+    tenantId: uuid("tenant_id").references(() => tenants.id, {
+      onDelete: "set null",
+    }),
+
+    /**
+     * Free-form metadata for future use:
+     * user agent, source campaign, notes, etc.
+     */
+    meta: jsonb("meta").$type<any>().notNull().default({}),
+
+    /**
+     * Session lifecycle
+     */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    statusIdx: index("platform_onboarding_sessions_status_idx").on(t.status),
+    inviteIdx: index("platform_onboarding_sessions_invite_id_idx").on(t.inviteId),
+    clerkIdx: index("platform_onboarding_sessions_clerk_user_id_idx").on(t.clerkUserId),
+    tenantIdx: index("platform_onboarding_sessions_tenant_id_idx").on(t.tenantId),
+    expiresIdx: index("platform_onboarding_sessions_expires_at_idx").on(t.expiresAt),
+  })
+);
+
+/**
  * Platform config (single-row feature gates)
  */
 export const platformConfig = pgTable("platform_config", {
