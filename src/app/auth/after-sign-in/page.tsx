@@ -15,7 +15,7 @@ type ContextResp =
     }
   | { ok: false; error: string; message?: string };
 
-function safeInvite(v: string | null) {
+function safeParam(v: string | null) {
   const s = String(v ?? "").trim();
   return s ? s : null;
 }
@@ -29,8 +29,19 @@ export default function AfterSignInPage() {
     async function run() {
       try {
         const params = new URLSearchParams(window.location.search);
-        const inviteCode = safeInvite(params.get("invite"));
 
+        const onboardingSession = safeParam(params.get("onboardingSession"));
+        const inviteCode = safeParam(params.get("invite"));
+
+        // ✅ Highest priority: active onboarding session
+        if (onboardingSession) {
+          router.replace(
+            `/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSession)}`
+          );
+          return;
+        }
+
+        // ✅ Legacy fallback while invite flow is still partially supported
         if (inviteCode) {
           router.replace(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
           return;
