@@ -3,8 +3,8 @@ import React from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { SignUp } from "@clerk/nextjs";
-import { auth } from "@clerk/nextjs/server";
-import { and, eq, gt, isNull, or } from "drizzle-orm";
+import { auth, currentUser } from "@clerk/nextjs/server";
+import { and, desc, eq, gt, isNull, or } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import {
@@ -102,7 +102,11 @@ export default async function Page({
   const cfg = await getPlatformConfig();
   const sp = await searchParams;
   const routeParams = await params;
-  const { userId } = await auth();
+
+  const authState = await auth();
+  const userId = authState?.userId ?? null;
+  const user = userId ? await currentUser().catch(() => null) : null;
+  const signedInEmail = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
 
   const inviteCode = pickStringParam(sp.invite);
   const onboardingSessionId = pickStringParam(sp.onboardingSession);
@@ -110,10 +114,10 @@ export default async function Page({
   const pathParts = routeParams?.["sign-up"] ?? [];
   const isInternalClerkPath = isClerkInternalPath(pathParts);
 
+  const now = new Date();
+
   let hasValidOnboardingSession = false;
   if (onboardingSessionId) {
-    const now = new Date();
-
     const rows = await db
       .select({
         id: platformOnboardingSessions.id,
@@ -133,8 +137,6 @@ export default async function Page({
 
   let hasValidLegacyInvite = false;
   if (inviteCode) {
-    const now = new Date();
-
     const rows = await db
       .select({
         id: platformOnboardingInvites.id,
@@ -155,10 +157,41 @@ export default async function Page({
     hasValidLegacyInvite = rows.length > 0;
   }
 
+  // ✅ Recovery path:
+  // If Clerk lands on plain /sign-up after auth and we have a signed-in user,
+  // recover the newest active onboarding session for that user and continue.
+  if (!isInternalClerkPath && userId && !hasValidOnboardingSession && !hasValidLegacyInvite) {
+    const recoveryRows = await db
+      .select({
+        id: platformOnboardingSessions.id,
+        createdAt: platformOnboardingSessions.createdAt,
+      })
+      .from(platformOnboardingSessions)
+      .where(
+        and(
+          eq(platformOnboardingSessions.status, "active"),
+          gt(platformOnboardingSessions.expiresAt, now),
+          or(
+            eq(platformOnboardingSessions.clerkUserId, userId),
+            signedInEmail
+              ? eq(platformOnboardingSessions.email, signedInEmail)
+              : eq(platformOnboardingSessions.clerkUserId, userId)
+          )
+        )
+      )
+      .orderBy(desc(platformOnboardingSessions.createdAt))
+      .limit(1);
+
+    const recovered = recoveryRows[0] ?? null;
+    if (recovered?.id) {
+      redirect(
+        `/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(recovered.id))}`
+      );
+    }
+  }
+
   // Let Clerk finish its internal callback/verification flows.
-  // Do not short-circuit those paths even if userId/session exists.
   if (!isInternalClerkPath) {
-    // Signed-in user with valid onboarding context should go straight to onboarding.
     if (userId && hasValidOnboardingSession && onboardingSessionId) {
       redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
     }
