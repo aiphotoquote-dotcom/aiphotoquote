@@ -1,4 +1,4 @@
-// src/app/invite/[code]/page.tsx
+// src/app/invite/[...segments]/page.tsx
 import React from "react";
 import { redirect } from "next/navigation";
 import { and, eq, gt, isNull, or } from "drizzle-orm";
@@ -22,6 +22,18 @@ function safeTrim(v: unknown) {
 
 function addMinutes(date: Date, minutes: number) {
   return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+function isClerkInternalPath(segments: string[]) {
+  const tail = segments.slice(1).join("/").toLowerCase();
+  return (
+    tail.includes("sso-callback") ||
+    tail.includes("verify") ||
+    tail.includes("factor-one") ||
+    tail.includes("factor-two") ||
+    tail.includes("continue") ||
+    tail.includes("callback")
+  );
 }
 
 function InviteUnavailable({
@@ -50,13 +62,14 @@ function InviteUnavailable({
   );
 }
 
-export default async function InviteAcceptPage({
+export default async function InvitePage({
   params,
 }: {
-  params: Promise<{ code: string }>;
+  params: Promise<{ segments: string[] }>;
 }) {
-  const { code } = await params;
-  const inviteCode = safeTrim(code);
+  const { segments } = await params;
+  const pathSegments = Array.isArray(segments) ? segments : [];
+  const inviteCode = safeTrim(pathSegments[0]);
 
   if (!inviteCode) {
     return (
@@ -114,8 +127,6 @@ export default async function InviteAcceptPage({
   const existingSessionRows = await db
     .select({
       id: platformOnboardingSessions.id,
-      clerkUserId: platformOnboardingSessions.clerkUserId,
-      email: platformOnboardingSessions.email,
     })
     .from(platformOnboardingSessions)
     .where(
@@ -174,8 +185,7 @@ export default async function InviteAcceptPage({
     );
   }
 
-  // Signed-in users bypass Clerk sign-up entirely.
-  if (clerkUserId) {
+  if (!isClerkInternalPath(pathSegments) && clerkUserId) {
     redirect(
       `/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`
     );
