@@ -1,12 +1,13 @@
 // src/app/auth/after-sign-in/page.tsx
 import { redirect } from "next/navigation";
-import { and, desc, eq, gt, or } from "drizzle-orm";
+import { and, desc, eq, gt, or, sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
 import { platformOnboardingSessions } from "@/lib/db/schema";
 import { requireAppUserId } from "@/lib/auth/requireAppUser";
 import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
+import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,14 +47,14 @@ export default async function AfterSignInPage({
     redirect("/sign-in");
   }
 
-  // Keep your app user layer warm/consistent
   await requireAppUserId();
 
+  const cfg = await getPlatformConfig();
   const user = await currentUser().catch(() => null);
   const email = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
   const now = new Date();
 
-  // 1) Highest priority: explicit onboarding session from query
+  // 1) Explicit onboarding session in query always wins.
   if (explicitSessionId) {
     const rows = await db
       .select({
@@ -76,18 +77,15 @@ export default async function AfterSignInPage({
     }
   }
 
-  // 2) Legacy fallback while old invite query links still exist
+  // 2) Legacy invite query fallback.
   if (explicitInvite) {
     redirect(`/onboarding?mode=new&invite=${encodeURIComponent(explicitInvite)}`);
   }
 
-  // 3) Strong fallback: find the newest active onboarding session for this user
-  //    by clerk_user_id OR email
+  // 3) Strong fallback: find newest active onboarding session for this user/email.
   const sessionRows = await db
     .select({
       id: platformOnboardingSessions.id,
-      clerkUserId: platformOnboardingSessions.clerkUserId,
-      email: platformOnboardingSessions.email,
       createdAt: platformOnboardingSessions.createdAt,
     })
     .from(platformOnboardingSessions)
@@ -97,7 +95,9 @@ export default async function AfterSignInPage({
         gt(platformOnboardingSessions.expiresAt, now),
         or(
           eq(platformOnboardingSessions.clerkUserId, clerkUserId),
-          email ? eq(platformOnboardingSessions.email, email) : eq(platformOnboardingSessions.clerkUserId, clerkUserId)
+          email
+            ? eq(platformOnboardingSessions.email, email)
+            : eq(platformOnboardingSessions.clerkUserId, clerkUserId)
         )
       )
     )
@@ -112,30 +112,34 @@ export default async function AfterSignInPage({
     );
   }
 
-  // 4) Normal tenant routing fallback
+  // 4) Normal tenant routing fallback.
   const activeTenantId = await readActiveTenantIdFromCookies();
-
-  // If a tenant is already active, go straight to admin
   if (activeTenantId) {
     redirect("/admin");
   }
 
-  // Otherwise inspect tenant memberships for this clerk user
-  const memberships = await db.execute(`
+  const membershipRows = await db.execute(sql`
     select tenant_id
     from tenant_members
-    where clerk_user_id = '${clerkUserId.replace(/'/g, "''")}'
+    where clerk_user_id = ${clerkUserId}
       and (status is null or status = 'active')
     limit 2
-  ` as any);
+  `);
 
   const rows: any[] =
-    (memberships as any)?.rows ??
-    (Array.isArray(memberships) ? memberships : []);
+    (membershipRows as any)?.rows ??
+    (Array.isArray(membershipRows) ? membershipRows : []);
 
   const tenantCount = rows.length;
 
   if (tenantCount === 0) {
+    // ✅ Critical loop breaker:
+    // In invite-only mode, do NOT fall into generic onboarding unless
+    // there is an active onboarding session (handled above).
+    if (cfg.onboardingMode === "invite_only") {
+      redirect("/");
+    }
+
     redirect("/onboarding");
   }
 
