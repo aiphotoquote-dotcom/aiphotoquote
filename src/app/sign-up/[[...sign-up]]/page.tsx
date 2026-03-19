@@ -63,8 +63,7 @@ function InviteOnlyBlocked() {
           </div>
 
           <div className="mt-6 rounded-2xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-600 dark:border-gray-800 dark:bg-black dark:text-gray-300">
-            If you already received an invite, use the full invite link you were sent or return to
-            this page with <span className="font-mono">?invite=YOURCODE</span>.
+            If you already received an invite, use the full invite link you were sent.
           </div>
         </div>
       </div>
@@ -82,13 +81,16 @@ export default async function Page({
   const inviteCode = pickInviteParam(sp);
   const { userId } = await auth();
 
-  // ✅ Existing signed-in user with an invite should bypass Clerk sign-up
-  // and go straight into the invite-aware post-auth router.
-  if (userId && inviteCode) {
-    redirect(`/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`);
+  // Canonicalize invite access through the dedicated invite route.
+  if (inviteCode) {
+    redirect(`/invite/${encodeURIComponent(inviteCode)}`);
   }
 
-  if (cfg.onboardingMode === "invite_only" && !inviteCode) {
+  if (userId) {
+    redirect("/auth/after-sign-in");
+  }
+
+  if (cfg.onboardingMode === "invite_only") {
     return <InviteOnlyBlocked />;
   }
 
@@ -96,11 +98,7 @@ export default async function Page({
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
         afterSignInUrl="/auth/after-sign-in"
-        afterSignUpUrl={
-          inviteCode
-            ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`
-            : "/auth/after-sign-in"
-        }
+        afterSignUpUrl="/auth/after-sign-in"
       />
     </main>
   );
