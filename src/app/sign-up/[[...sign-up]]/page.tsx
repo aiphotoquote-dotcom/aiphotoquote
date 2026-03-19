@@ -28,6 +28,20 @@ function pickInviteParam(
   return null;
 }
 
+function isClerkInternalPath(pathParts: string[] | undefined) {
+  const parts = Array.isArray(pathParts) ? pathParts : [];
+  const joined = parts.join("/").toLowerCase();
+
+  return (
+    joined.includes("sso-callback") ||
+    joined.includes("verify") ||
+    joined.includes("factor-one") ||
+    joined.includes("factor-two") ||
+    joined.includes("continue") ||
+    joined.includes("callback")
+  );
+}
+
 function InviteOnlyBlocked() {
   return (
     <main className="min-h-screen bg-gray-50 px-6 py-14 dark:bg-neutral-950">
@@ -72,34 +86,38 @@ function InviteOnlyBlocked() {
 }
 
 export default async function Page({
+  params,
   searchParams,
 }: {
+  params: Promise<{ "sign-up"?: string[] }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const cfg = await getPlatformConfig();
   const sp = await searchParams;
+  const routeParams = await params;
+
   const inviteCode = pickInviteParam(sp);
   const { userId } = await auth();
 
-  // ✅ Signed-in user with an invite should skip Clerk sign-up
-  // and go straight into invited onboarding flow.
+  const pathParts = routeParams?.["sign-up"] ?? [];
+  const isInternalClerkPath = isClerkInternalPath(pathParts);
+
+  // Signed-in user with invite should skip Clerk sign-up and go straight to onboarding.
   if (userId && inviteCode) {
     redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
   }
 
-  // ✅ Signed-in user without an invite just goes to normal post-auth flow.
+  // Signed-in user without invite follows normal auth flow.
   if (userId) {
     redirect("/auth/after-sign-in");
   }
 
-  // ✅ In invite-only mode, block only when no invite is present.
-  if (cfg.onboardingMode === "invite_only" && !inviteCode) {
+  // In invite-only mode, block only the plain sign-up entry.
+  // Never block Clerk internal callback/verification paths.
+  if (cfg.onboardingMode === "invite_only" && !inviteCode && !isInternalClerkPath) {
     return <InviteOnlyBlocked />;
   }
 
-  // ✅ IMPORTANT:
-  // Do NOT redirect invite-bearing sign-up requests back to /invite/[code].
-  // That caused the redirect loop with the dedicated invite page.
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
