@@ -1,4 +1,5 @@
 // src/lib/platform/email/sendPlatformEmail.ts
+
 import { Resend } from "resend";
 
 export type PlatformEmailSendInput = {
@@ -71,9 +72,8 @@ function formatFromAddress(fromEmail?: string | null, fromName?: string | null) 
 
 function getDefaultFromEmail() {
   return (
-    safeTrim(process.env.PLATFORM_EMAIL_FROM) ||
-    safeTrim(process.env.RESEND_FALLBACK_FROM) ||
     safeTrim(process.env.PLATFORM_FROM_EMAIL) ||
+    safeTrim(process.env.RESEND_FALLBACK_FROM) ||
     safeTrim(process.env.RESEND_FROM_EMAIL) ||
     ""
   );
@@ -81,16 +81,15 @@ function getDefaultFromEmail() {
 
 function getDefaultFromName() {
   return (
-    safeTrim(process.env.PLATFORM_EMAIL_FROM_NAME) ||
-    safeTrim(process.env.PLATFORM_FROM_NAME) ||
+    safeTrim(process.env.PLATFORM_FROM_EMAIL_NAME) ||
     "AI Photo Quote"
   );
 }
 
 function getDefaultReplyTo() {
   return (
-    safeTrim(process.env.PLATFORM_EMAIL_REPLY_TO) ||
     safeTrim(process.env.PLATFORM_REPLY_TO) ||
+    safeTrim(process.env.PLATFORM_FROM_EMAIL) ||
     ""
   );
 }
