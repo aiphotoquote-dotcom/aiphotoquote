@@ -1,6 +1,6 @@
 // src/app/auth/after-sign-in/page.tsx
 import { redirect } from "next/navigation";
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, or, sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
@@ -50,7 +50,8 @@ export default async function AfterSignInPage({
   await requireAppUserId();
 
   const cfg = await getPlatformConfig();
-  await currentUser().catch(() => null);
+  const user = await currentUser().catch(() => null);
+  const email = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
   const now = new Date();
 
   // 1) Explicit onboarding session in query always wins.
@@ -79,7 +80,36 @@ export default async function AfterSignInPage({
     redirect(`/onboarding?mode=new&invite=${encodeURIComponent(explicitInvite)}`);
   }
 
-  // 3) Normal tenant routing fallback.
+  // 3) Recovery path:
+  // If Clerk lands on /auth/after-sign-in without the onboardingSession query,
+  // recover the newest active onboarding session for this signed-in user/email.
+  const recoveredRows = await db
+    .select({
+      id: platformOnboardingSessions.id,
+      createdAt: platformOnboardingSessions.createdAt,
+    })
+    .from(platformOnboardingSessions)
+    .where(
+      and(
+        eq(platformOnboardingSessions.status, "active"),
+        gt(platformOnboardingSessions.expiresAt, now),
+        or(
+          eq(platformOnboardingSessions.clerkUserId, clerkUserId),
+          email
+            ? eq(platformOnboardingSessions.email, email)
+            : eq(platformOnboardingSessions.clerkUserId, clerkUserId)
+        )
+      )
+    )
+    .orderBy(desc(platformOnboardingSessions.createdAt))
+    .limit(1);
+
+  const recovered = recoveredRows[0] ?? null;
+  if (recovered?.id) {
+    redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(recovered.id))}`);
+  }
+
+  // 4) Normal tenant routing fallback.
   const activeTenantId = await readActiveTenantIdFromCookies();
   if (activeTenantId) {
     redirect("/admin");
@@ -100,9 +130,6 @@ export default async function AfterSignInPage({
   const tenantCount = rows.length;
 
   if (tenantCount === 0) {
-    // ✅ Critical loop breaker:
-    // In invite_only mode, zero-tenant users should land on the blocked sign-up page,
-    // not on "/" where homepage auth logic may bounce them back here.
     if (cfg.onboardingMode === "invite_only") {
       redirect("/sign-up");
     }
