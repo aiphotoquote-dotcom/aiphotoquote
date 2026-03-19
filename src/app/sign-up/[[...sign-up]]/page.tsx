@@ -4,27 +4,34 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { SignUp } from "@clerk/nextjs";
 import { auth } from "@clerk/nextjs/server";
+import { and, eq, gt, isNull, or } from "drizzle-orm";
 
+import { db } from "@/lib/db/client";
+import {
+  platformOnboardingInvites,
+  platformOnboardingSessions,
+} from "@/lib/db/schema";
 import { getPlatformConfig } from "@/lib/platform/getPlatformConfig";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function pickInviteParam(
-  searchParams: Record<string, string | string[] | undefined>
-): string | null {
-  const raw = searchParams?.invite;
+function safeTrim(v: unknown) {
+  const s = String(v ?? "").trim();
+  return s ? s : "";
+}
 
-  if (typeof raw === "string") {
-    const v = raw.trim();
-    return v ? v : null;
+function pickStringParam(v: string | string[] | undefined): string | null {
+  if (typeof v === "string") {
+    const s = safeTrim(v);
+    return s || null;
   }
-
-  if (Array.isArray(raw)) {
-    const first = raw.find((x) => typeof x === "string" && x.trim());
-    return first ? first.trim() : null;
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      const s = safeTrim(item);
+      if (s) return s;
+    }
   }
-
   return null;
 }
 
@@ -95,35 +102,96 @@ export default async function Page({
   const cfg = await getPlatformConfig();
   const sp = await searchParams;
   const routeParams = await params;
-
-  const inviteCode = pickInviteParam(sp);
   const { userId } = await auth();
+
+  const inviteCode = pickStringParam(sp.invite);
+  const onboardingSessionId = pickStringParam(sp.onboardingSession);
 
   const pathParts = routeParams?.["sign-up"] ?? [];
   const isInternalClerkPath = isClerkInternalPath(pathParts);
 
-  // Signed-in user with invite should skip Clerk sign-up and go straight to onboarding.
+  // Signed-in user with an onboarding session should bypass Clerk sign-up
+  // and go straight into onboarding.
+  if (userId && onboardingSessionId) {
+    redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
+  }
+
+  // Signed-in user with only a legacy invite code also bypasses sign-up.
   if (userId && inviteCode) {
     redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
   }
 
-  // Signed-in user without invite follows normal auth flow.
+  // Signed-in user without onboarding context follows normal auth flow.
   if (userId) {
     redirect("/auth/after-sign-in");
   }
 
-  // In invite-only mode, block only the plain sign-up entry.
-  // Never block Clerk internal callback/verification paths.
-  if (cfg.onboardingMode === "invite_only" && !inviteCode && !isInternalClerkPath) {
+  let hasValidOnboardingSession = false;
+  if (onboardingSessionId) {
+    const now = new Date();
+
+    const rows = await db
+      .select({
+        id: platformOnboardingSessions.id,
+      })
+      .from(platformOnboardingSessions)
+      .where(
+        and(
+          eq(platformOnboardingSessions.id, onboardingSessionId),
+          eq(platformOnboardingSessions.status, "active"),
+          gt(platformOnboardingSessions.expiresAt, now)
+        )
+      )
+      .limit(1);
+
+    hasValidOnboardingSession = rows.length > 0;
+  }
+
+  let hasValidLegacyInvite = false;
+  if (inviteCode) {
+    const now = new Date();
+
+    const rows = await db
+      .select({
+        id: platformOnboardingInvites.id,
+      })
+      .from(platformOnboardingInvites)
+      .where(
+        and(
+          eq(platformOnboardingInvites.code, inviteCode),
+          eq(platformOnboardingInvites.status, "pending"),
+          or(
+            isNull(platformOnboardingInvites.expiresAt),
+            gt(platformOnboardingInvites.expiresAt, now)
+          )
+        )
+      )
+      .limit(1);
+
+    hasValidLegacyInvite = rows.length > 0;
+  }
+
+  // In invite-only mode, allow sign-up only when a valid onboarding session
+  // or a still-supported valid invite code is present. Never block Clerk
+  // internal callback/verification paths.
+  if (
+    cfg.onboardingMode === "invite_only" &&
+    !hasValidOnboardingSession &&
+    !hasValidLegacyInvite &&
+    !isInternalClerkPath
+  ) {
     return <InviteOnlyBlocked />;
   }
 
+  const afterUrl = hasValidOnboardingSession
+    ? `/auth/after-sign-in?onboardingSession=${encodeURIComponent(onboardingSessionId!)}`
+    : hasValidLegacyInvite
+      ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode!)}`
+      : "/auth/after-sign-in";
+
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
-      <SignUp
-        afterSignInUrl={inviteCode ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}` : "/auth/after-sign-in"}
-        afterSignUpUrl={inviteCode ? `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}` : "/auth/after-sign-in"}
-      />
+      <SignUp afterSignInUrl={afterUrl} afterSignUpUrl={afterUrl} />
     </main>
   );
 }
