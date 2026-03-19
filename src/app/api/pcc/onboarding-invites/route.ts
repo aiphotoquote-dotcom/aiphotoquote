@@ -254,7 +254,10 @@ export async function POST(req: NextRequest) {
 
     emailSendOk = Boolean(sendRes?.ok);
     emailSendError = sendRes?.ok ? null : sendRes?.error ?? "Failed to send invite email";
-    emailProviderMessageId = sendRes?.providerMessageId ?? null;
+
+    if ("providerMessageId" in sendRes) {
+      emailProviderMessageId = sendRes.providerMessageId ?? null;
+    }
   }
 
   return json({
