@@ -1,97 +1,147 @@
 // src/app/auth/after-sign-in/page.tsx
-"use client";
+import { redirect } from "next/navigation";
+import { and, desc, eq, gt, or } from "drizzle-orm";
+import { auth, currentUser } from "@clerk/nextjs/server";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { db } from "@/lib/db/client";
+import { platformOnboardingSessions } from "@/lib/db/schema";
+import { requireAppUserId } from "@/lib/auth/requireAppUser";
+import { readActiveTenantIdFromCookies } from "@/lib/tenant/activeTenant";
 
-type ContextResp =
-  | {
-      ok: true;
-      activeTenantId: string | null;
-      tenants: Array<any>;
-      needsTenantSelection?: boolean;
-      autoSelected?: boolean;
-      clearedStaleCookie?: boolean;
-    }
-  | { ok: false; error: string; message?: string };
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function safeParam(v: string | null) {
+function safeTrim(v: unknown) {
   const s = String(v ?? "").trim();
-  return s ? s : null;
+  return s ? s : "";
 }
 
-export default function AfterSignInPage() {
-  const router = useRouter();
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function run() {
-      try {
-        const params = new URLSearchParams(window.location.search);
-
-        const onboardingSession = safeParam(params.get("onboardingSession"));
-        const inviteCode = safeParam(params.get("invite"));
-
-        // ✅ Highest priority: active onboarding session
-        if (onboardingSession) {
-          router.replace(
-            `/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSession)}`
-          );
-          return;
-        }
-
-        // ✅ Legacy fallback while invite flow is still partially supported
-        if (inviteCode) {
-          router.replace(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
-          return;
-        }
-
-        const res = await fetch("/api/tenant/context", {
-          cache: "no-store",
-          credentials: "include",
-        });
-
-        const data = (await res.json()) as ContextResp;
-
-        if (cancelled) return;
-
-        if (!("ok" in data) || !data.ok) {
-          router.replace("/admin");
-          return;
-        }
-
-        const tenantCount = Array.isArray(data.tenants) ? data.tenants.length : 0;
-        const hasActiveTenant = Boolean(data.activeTenantId);
-
-        if (hasActiveTenant) {
-          router.replace("/admin");
-          return;
-        }
-
-        if (tenantCount === 0) {
-          router.replace("/onboarding");
-          return;
-        }
-
-        router.replace("/admin/select-tenant");
-      } catch {
-        if (!cancelled) router.replace("/admin");
-      }
+function pickParam(v: string | string[] | undefined): string | null {
+  if (typeof v === "string") {
+    const s = safeTrim(v);
+    return s || null;
+  }
+  if (Array.isArray(v)) {
+    for (const item of v) {
+      const s = safeTrim(item);
+      if (s) return s;
     }
+  }
+  return null;
+}
 
-    run();
+export default async function AfterSignInPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = await searchParams;
+  const explicitSessionId = pickParam(sp.onboardingSession);
+  const explicitInvite = pickParam(sp.invite);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
+  const authState = await auth();
+  const clerkUserId = authState?.userId ?? null;
 
-  return (
-    <div className="mx-auto max-w-xl px-6 py-16">
-      <div className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-700">
-        Preparing your workspace…
-      </div>
-    </div>
-  );
+  if (!clerkUserId) {
+    redirect("/sign-in");
+  }
+
+  // Keep your app user layer warm/consistent
+  await requireAppUserId();
+
+  const user = await currentUser().catch(() => null);
+  const email = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
+  const now = new Date();
+
+  // 1) Highest priority: explicit onboarding session from query
+  if (explicitSessionId) {
+    const rows = await db
+      .select({
+        id: platformOnboardingSessions.id,
+      })
+      .from(platformOnboardingSessions)
+      .where(
+        and(
+          eq(platformOnboardingSessions.id, explicitSessionId),
+          eq(platformOnboardingSessions.status, "active"),
+          gt(platformOnboardingSessions.expiresAt, now)
+        )
+      )
+      .limit(1);
+
+    if (rows.length > 0) {
+      redirect(
+        `/onboarding?mode=new&onboardingSession=${encodeURIComponent(explicitSessionId)}`
+      );
+    }
+  }
+
+  // 2) Legacy fallback while old invite query links still exist
+  if (explicitInvite) {
+    redirect(`/onboarding?mode=new&invite=${encodeURIComponent(explicitInvite)}`);
+  }
+
+  // 3) Strong fallback: find the newest active onboarding session for this user
+  //    by clerk_user_id OR email
+  const sessionRows = await db
+    .select({
+      id: platformOnboardingSessions.id,
+      clerkUserId: platformOnboardingSessions.clerkUserId,
+      email: platformOnboardingSessions.email,
+      createdAt: platformOnboardingSessions.createdAt,
+    })
+    .from(platformOnboardingSessions)
+    .where(
+      and(
+        eq(platformOnboardingSessions.status, "active"),
+        gt(platformOnboardingSessions.expiresAt, now),
+        or(
+          eq(platformOnboardingSessions.clerkUserId, clerkUserId),
+          email ? eq(platformOnboardingSessions.email, email) : eq(platformOnboardingSessions.clerkUserId, clerkUserId)
+        )
+      )
+    )
+    .orderBy(desc(platformOnboardingSessions.createdAt))
+    .limit(1);
+
+  const activeSession = sessionRows[0] ?? null;
+
+  if (activeSession?.id) {
+    redirect(
+      `/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(activeSession.id))}`
+    );
+  }
+
+  // 4) Normal tenant routing fallback
+  const activeTenantId = await readActiveTenantIdFromCookies();
+
+  // If a tenant is already active, go straight to admin
+  if (activeTenantId) {
+    redirect("/admin");
+  }
+
+  // Otherwise inspect tenant memberships for this clerk user
+  const memberships = await db.execute(`
+    select tenant_id
+    from tenant_members
+    where clerk_user_id = '${clerkUserId.replace(/'/g, "''")}'
+      and (status is null or status = 'active')
+    limit 2
+  ` as any);
+
+  const rows: any[] =
+    (memberships as any)?.rows ??
+    (Array.isArray(memberships) ? memberships : []);
+
+  const tenantCount = rows.length;
+
+  if (tenantCount === 0) {
+    redirect("/onboarding");
+  }
+
+  if (tenantCount === 1) {
+    redirect("/admin");
+  }
+
+  redirect("/admin/select-tenant");
 }
