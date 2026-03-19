@@ -1,6 +1,6 @@
 // src/app/auth/after-sign-in/page.tsx
 import { redirect } from "next/navigation";
-import { and, desc, eq, gt, or, sql } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import { auth, currentUser } from "@clerk/nextjs/server";
 
 import { db } from "@/lib/db/client";
@@ -50,8 +50,7 @@ export default async function AfterSignInPage({
   await requireAppUserId();
 
   const cfg = await getPlatformConfig();
-  const user = await currentUser().catch(() => null);
-  const email = safeTrim(user?.emailAddresses?.[0]?.emailAddress);
+  await currentUser().catch(() => null);
   const now = new Date();
 
   // 1) Explicit onboarding session in query always wins.
@@ -77,42 +76,12 @@ export default async function AfterSignInPage({
     }
   }
 
-  // 2) Legacy invite query fallback.
+  // 2) Legacy explicit invite query fallback.
   if (explicitInvite) {
     redirect(`/onboarding?mode=new&invite=${encodeURIComponent(explicitInvite)}`);
   }
 
-  // 3) Strong fallback: find newest active onboarding session for this user/email.
-  const sessionRows = await db
-    .select({
-      id: platformOnboardingSessions.id,
-      createdAt: platformOnboardingSessions.createdAt,
-    })
-    .from(platformOnboardingSessions)
-    .where(
-      and(
-        eq(platformOnboardingSessions.status, "active"),
-        gt(platformOnboardingSessions.expiresAt, now),
-        or(
-          eq(platformOnboardingSessions.clerkUserId, clerkUserId),
-          email
-            ? eq(platformOnboardingSessions.email, email)
-            : eq(platformOnboardingSessions.clerkUserId, clerkUserId)
-        )
-      )
-    )
-    .orderBy(desc(platformOnboardingSessions.createdAt))
-    .limit(1);
-
-  const activeSession = sessionRows[0] ?? null;
-
-  if (activeSession?.id) {
-    redirect(
-      `/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(activeSession.id))}`
-    );
-  }
-
-  // 4) Normal tenant routing fallback.
+  // 3) Normal tenant routing fallback.
   const activeTenantId = await readActiveTenantIdFromCookies();
   if (activeTenantId) {
     redirect("/admin");
@@ -133,9 +102,6 @@ export default async function AfterSignInPage({
   const tenantCount = rows.length;
 
   if (tenantCount === 0) {
-    // ✅ Critical loop breaker:
-    // In invite-only mode, do NOT fall into generic onboarding unless
-    // there is an active onboarding session (handled above).
     if (cfg.onboardingMode === "invite_only") {
       redirect("/");
     }
