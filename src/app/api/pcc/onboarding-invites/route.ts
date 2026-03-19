@@ -6,6 +6,7 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { platformOnboardingInvites } from "@/lib/db/schema";
 import { requirePlatformRole } from "@/lib/rbac/guards";
+import { sendInviteEmail } from "@/lib/platform/email/sendInviteEmail";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -103,6 +104,20 @@ function shapeInvite(row: any) {
     updatedAt: row.updatedAt,
     inviteLink: `/invite/${encodeURIComponent(String(row.code))}`,
   };
+}
+
+function absoluteInviteLink(req: NextRequest, code: string) {
+  const envBase =
+    safeTrim(process.env.NEXT_PUBLIC_APP_URL) ||
+    safeTrim(process.env.APP_URL) ||
+    safeTrim(process.env.NEXT_PUBLIC_SITE_URL);
+
+  if (envBase) {
+    const base = envBase.replace(/\/+$/, "");
+    return `${base}/invite/${encodeURIComponent(code)}`;
+  }
+
+  return `${req.nextUrl.origin}/invite/${encodeURIComponent(code)}`;
 }
 
 export async function GET() {
@@ -226,8 +241,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  let emailSendOk = true;
+  let emailSendError: string | null = null;
+  let emailProviderMessageId: string | null = null;
+
+  if (invite.email) {
+    const sendRes = await sendInviteEmail({
+      email: String(invite.email),
+      inviteCode: String(invite.code),
+      inviteLink: absoluteInviteLink(req, String(invite.code)),
+    });
+
+    emailSendOk = Boolean(sendRes?.ok);
+    emailSendError = sendRes?.ok ? null : sendRes?.error ?? "Failed to send invite email";
+    emailProviderMessageId = sendRes?.providerMessageId ?? null;
+  }
+
   return json({
     ok: true,
     invite: shapeInvite(invite),
+    emailSendOk,
+    emailSendError,
+    emailProviderMessageId,
   });
 }
