@@ -2,7 +2,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type ContextResp =
   | {
@@ -15,14 +15,30 @@ type ContextResp =
     }
   | { ok: false; error: string; message?: string };
 
+function safeInvite(v: string | null) {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
+}
+
 export default function AfterSignInPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     let cancelled = false;
 
     async function run() {
       try {
+        const inviteCode = safeInvite(searchParams.get("invite"));
+
+        // ✅ If an invite is present, force onboarding flow.
+        // This allows an existing Clerk user / existing tenant user
+        // to explicitly start a brand new invited onboarding.
+        if (inviteCode) {
+          router.replace(`/onboarding?invite=${encodeURIComponent(inviteCode)}`);
+          return;
+        }
+
         const res = await fetch("/api/tenant/context", {
           cache: "no-store",
           credentials: "include",
@@ -61,7 +77,7 @@ export default function AfterSignInPage() {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [router, searchParams]);
 
   return (
     <div className="mx-auto max-w-xl px-6 py-16">
