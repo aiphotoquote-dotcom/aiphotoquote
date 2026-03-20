@@ -113,6 +113,8 @@ type Row = {
   slug: string | null;
   ownerUserId?: any;
   ownerClerkUserId?: any;
+  ownerName?: string | null;
+  ownerEmail?: string | null;
   createdAt?: any;
 
   status?: string | null;
@@ -139,11 +141,22 @@ type StatusFilter = "all" | "active" | "archived";
 type AiFilter = "all" | "ready" | "needs_confirm" | "attention";
 
 function getOwnerLabel(t: Row) {
+  const ownerName = safeTrim(t.ownerName);
+  const ownerEmail = safeTrim(t.ownerEmail);
+
+  if (ownerName) return ownerName;
+  if (ownerEmail) return ownerEmail;
   if (t.ownerUserId || t.ownerClerkUserId) return "Owner linked";
   return "Unassigned";
 }
 
 function getOwnerSubLabel(t: Row) {
+  const ownerName = safeTrim(t.ownerName);
+  const ownerEmail = safeTrim(t.ownerEmail);
+
+  if (ownerName && ownerEmail) return ownerEmail;
+  if (ownerName) return "Platform user attached";
+  if (ownerEmail) return "Owner email on file";
   if (t.ownerUserId) return "Platform user attached";
   if (t.ownerClerkUserId) return "Clerk owner attached";
   return "No owner metadata";

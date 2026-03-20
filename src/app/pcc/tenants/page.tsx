@@ -4,7 +4,7 @@ import Link from "next/link";
 import { desc, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
-import { tenants, tenantSettings } from "@/lib/db/schema";
+import { appUsers, tenants, tenantSettings } from "@/lib/db/schema";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 import TenantsTableClient from "./TenantsTableClient";
 
@@ -37,6 +37,14 @@ export default async function PccTenantsPage(props: {
     sp.archived === "true" ||
     (Array.isArray(sp.archived) && sp.archived.includes("1"));
 
+  // Treat legacy rows with archived_at present as archived even if status was not fully set.
+  const derivedStatusExpr = sql<string>`
+    case
+      when ${(tenants as any).archivedAt ?? (tenants as any).archived_at} is not null then 'archived'
+      else coalesce(${(tenants as any).status}, 'active')
+    end
+  `;
+
   const baseRows = await db
     .select({
       id: tenants.id,
@@ -46,7 +54,10 @@ export default async function PccTenantsPage(props: {
       ownerClerkUserId: tenants.ownerClerkUserId,
       createdAt: tenants.createdAt,
 
-      status: sql<string>`coalesce(${(tenants as any).status}, 'active')`,
+      ownerName: appUsers.name,
+      ownerEmail: appUsers.email,
+
+      status: derivedStatusExpr,
       archivedAt: (tenants as any).archivedAt ?? (tenants as any).archived_at,
 
       planTier: tenantSettings.planTier,
@@ -58,7 +69,8 @@ export default async function PccTenantsPage(props: {
     })
     .from(tenants)
     .leftJoin(tenantSettings, sql`${tenantSettings.tenantId} = ${tenants.id}`)
-    .where(showArchived ? sql`true` : sql`coalesce(${(tenants as any).status}, 'active') <> 'archived'`)
+    .leftJoin(appUsers, sql`${appUsers.id} = ${tenants.ownerUserId}`)
+    .where(showArchived ? sql`true` : sql`${derivedStatusExpr} <> 'archived'`)
     .orderBy(desc(tenants.createdAt))
     .limit(200);
 
@@ -150,8 +162,12 @@ export default async function PccTenantsPage(props: {
 
     return {
       ...r,
+      ownerName: safeTrim(r.ownerName) || null,
+      ownerEmail: safeTrim(r.ownerEmail) || null,
+
       industryKey: confirmedIndustryKey,
       industryLabel: confirmedIndustryLabel,
+
       aiSuggestedIndustryKey: suggestedIndustryKey,
       aiSuggestedIndustryLabel: suggestedIndustryLabel,
       aiNeedsConfirmation: ai?.needsConfirmation ?? false,
