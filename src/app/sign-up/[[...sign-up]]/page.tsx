@@ -171,11 +171,12 @@ export default async function Page({
     redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
   }
 
+  // 2) Explicit invite context should go back through after-sign-in
   if (!isInternalClerkPath && userId && hasValidLegacyInvite && inviteCode) {
     redirect(`/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`);
   }
 
-  // 2) Signed-in recovery by already-bound session
+  // 3) Signed-in recovery only for sessions already bound to this user
   if (!isInternalClerkPath && userId && !hasValidOnboardingSession && !hasValidLegacyInvite) {
     const recoveryRows = await db
       .select({
@@ -200,50 +201,11 @@ export default async function Page({
 
     const recovered = recoveryRows[0] ?? null;
     if (recovered?.id) {
-      redirect(
-        `/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(recovered.id))}`
-      );
+      redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(recovered.id))}`);
     }
   }
 
-  // 3) Signed-in recovery by newest anonymous invite session
-  // This is the critical fix for Clerk dropping invite query context.
-  if (!isInternalClerkPath && userId && !hasValidOnboardingSession && !hasValidLegacyInvite) {
-    const anonymousRows = await db
-      .select({
-        id: platformOnboardingSessions.id,
-        createdAt: platformOnboardingSessions.createdAt,
-      })
-      .from(platformOnboardingSessions)
-      .where(
-        and(
-          eq(platformOnboardingSessions.status, "active"),
-          gt(platformOnboardingSessions.expiresAt, now),
-          isNull(platformOnboardingSessions.clerkUserId),
-          isNull(platformOnboardingSessions.tenantId)
-        )
-      )
-      .orderBy(desc(platformOnboardingSessions.createdAt))
-      .limit(1);
-
-    const anonymous = anonymousRows[0] ?? null;
-
-    if (anonymous?.id) {
-      await db.execute(sql`
-        update platform_onboarding_sessions
-        set
-          clerk_user_id = ${String(userId)},
-          email = ${signedInEmail || null},
-          updated_at = now()
-        where id = ${String(anonymous.id)}::uuid
-      `);
-
-      redirect(
-        `/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(anonymous.id))}`
-      );
-    }
-  }
-
+  // 4) No explicit invite context and no bound session -> block in invite_only mode
   if (
     cfg.onboardingMode === "invite_only" &&
     !hasValidOnboardingSession &&
