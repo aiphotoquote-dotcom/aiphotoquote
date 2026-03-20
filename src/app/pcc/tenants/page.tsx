@@ -162,10 +162,8 @@ export default async function PccTenantsPage(props: {
       ...r,
       ownerName: safeTrim(r.ownerName) || null,
       ownerEmail: safeTrim(r.ownerEmail) || null,
-
       industryKey: confirmedIndustryKey,
       industryLabel: confirmedIndustryLabel,
-
       aiSuggestedIndustryKey: suggestedIndustryKey,
       aiSuggestedIndustryLabel: suggestedIndustryLabel,
       aiNeedsConfirmation: ai?.needsConfirmation ?? false,
@@ -253,7 +251,7 @@ export default async function PccTenantsPage(props: {
               {activeCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Non-archived tenants loaded into view
+              Non-archived tenants in current view
             </div>
           </div>
 
@@ -265,7 +263,7 @@ export default async function PccTenantsPage(props: {
               {archivedCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Available to show via archived toggle or filter
+              Hidden by default unless enabled above
             </div>
           </div>
 
@@ -277,7 +275,7 @@ export default async function PccTenantsPage(props: {
               {aiReadyCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Active tenants only
+              AI complete and not awaiting confirmation
             </div>
           </div>
 
@@ -289,7 +287,7 @@ export default async function PccTenantsPage(props: {
               {needsConfirmCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Active tenants only
+              Suggested industry still needs review
             </div>
           </div>
 
@@ -301,7 +299,7 @@ export default async function PccTenantsPage(props: {
               {attentionCount}
             </div>
             <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-              Active tenants only
+              Low grace, missing industry, or AI issue
             </div>
           </div>
         </div>
