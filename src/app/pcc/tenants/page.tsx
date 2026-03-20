@@ -37,7 +37,6 @@ export default async function PccTenantsPage(props: {
     sp.archived === "true" ||
     (Array.isArray(sp.archived) && sp.archived.includes("1"));
 
-  // Always derive archived from archived_at first, then fallback to status.
   const derivedStatusExpr = sql<string>`
     case
       when ${(tenants as any).archivedAt ?? (tenants as any).archived_at} is not null then 'archived'
@@ -45,7 +44,6 @@ export default async function PccTenantsPage(props: {
     end
   `;
 
-  // ✅ Load both active + archived always.
   const baseRows = await db
     .select({
       id: tenants.id,
@@ -178,14 +176,20 @@ export default async function PccTenantsPage(props: {
     };
   });
 
-  const activeCount = rows.filter((r: any) => String(r.status ?? "active").toLowerCase() !== "archived").length;
-  const archivedCount = rows.filter((r: any) => String(r.status ?? "").toLowerCase() === "archived").length;
-  const needsConfirmCount = rows.filter((r: any) => Boolean(r.aiNeedsConfirmation)).length;
-  const aiReadyCount = rows.filter((r: any) => {
+  const activeRows = rows.filter((r: any) => String(r.status ?? "active").toLowerCase() !== "archived");
+  const archivedRows = rows.filter((r: any) => String(r.status ?? "").toLowerCase() === "archived");
+
+  const activeCount = activeRows.length;
+  const archivedCount = archivedRows.length;
+
+  const needsConfirmCount = activeRows.filter((r: any) => Boolean(r.aiNeedsConfirmation)).length;
+
+  const aiReadyCount = activeRows.filter((r: any) => {
     const aiStatus = safeTrim(r.aiStatus).toLowerCase();
     return aiStatus === "complete" && !Boolean(r.aiNeedsConfirmation);
   }).length;
-  const attentionCount = rows.filter((r: any) => {
+
+  const attentionCount = activeRows.filter((r: any) => {
     const aiStatus = safeTrim(r.aiStatus).toLowerCase();
     const graceTotal = Number(r.activationGraceCredits ?? 0);
     const graceUsed = Number(r.activationGraceUsed ?? 0);
@@ -273,7 +277,7 @@ export default async function PccTenantsPage(props: {
               {aiReadyCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              AI complete and not awaiting confirmation
+              Active tenants only
             </div>
           </div>
 
@@ -285,7 +289,7 @@ export default async function PccTenantsPage(props: {
               {needsConfirmCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Suggested industry still needs review
+              Active tenants only
             </div>
           </div>
 
@@ -297,7 +301,7 @@ export default async function PccTenantsPage(props: {
               {attentionCount}
             </div>
             <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-              Low grace, missing industry, or AI issue
+              Active tenants only
             </div>
           </div>
         </div>
