@@ -139,9 +139,14 @@ type StatusFilter = "all" | "active" | "archived";
 type AiFilter = "all" | "ready" | "needs_confirm" | "attention";
 
 function getOwnerLabel(t: Row) {
-  if (t.ownerUserId) return `user:${String(t.ownerUserId).slice(0, 8)}`;
-  if (t.ownerClerkUserId) return `clerk:${String(t.ownerClerkUserId).slice(0, 8)}`;
-  return "—";
+  if (t.ownerUserId || t.ownerClerkUserId) return "Owner linked";
+  return "Unassigned";
+}
+
+function getOwnerSubLabel(t: Row) {
+  if (t.ownerUserId) return "Platform user attached";
+  if (t.ownerClerkUserId) return "Clerk owner attached";
+  return "No owner metadata";
 }
 
 function getGraceLeft(t: Row) {
@@ -218,6 +223,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
     return rows.filter((t) => {
       const isArchived = String(t.status ?? "").toLowerCase() === "archived";
       const owner = getOwnerLabel(t);
+      const ownerSub = getOwnerSubLabel(t);
       const derived = getAiDerived(t);
 
       if (statusFilter === "active" && isArchived) return false;
@@ -232,8 +238,8 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
       const haystack = [
         t.name ?? "",
         t.slug ?? "",
-        t.id ?? "",
         owner,
+        ownerSub,
         t.industryKey ?? "",
         t.industryLabel ?? "",
         t.aiSuggestedIndustryKey ?? "",
@@ -268,16 +274,6 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
   );
 
   const canConfirm = selectedCount > 0 && confirmText.trim() === confirmPhrase;
-
-  const counts = useMemo(() => {
-    const active = rows.filter((r) => String(r.status ?? "active").toLowerCase() !== "archived").length;
-    const archived = rows.filter((r) => String(r.status ?? "").toLowerCase() === "archived").length;
-    const ready = rows.filter((r) => getAiDerived(r).ready).length;
-    const needsConfirm = rows.filter((r) => getAiDerived(r).needsConfirm).length;
-    const attention = rows.filter((r) => getAiDerived(r).needsAttention).length;
-
-    return { active, archived, ready, needsConfirm, attention };
-  }, [rows]);
 
   function toggleAll() {
     if (allChecked) {
@@ -411,113 +407,109 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
 
       <div className="rounded-3xl border border-gray-200 bg-white shadow-sm dark:border-gray-800 dark:bg-gray-950">
         <div className="border-b border-gray-200 px-5 py-5 dark:border-gray-800">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5 xl:gap-2">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => setStatusFilter("all")}
                 className={cn(
-                  "rounded-2xl border px-4 py-3 text-left transition",
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                   statusFilter === "all"
                     ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                    : "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
                 )}
               >
-                <div className="text-xs font-semibold uppercase tracking-wide opacity-80">All</div>
-                <div className="mt-1 text-lg font-semibold">{rows.length}</div>
+                All
               </button>
 
               <button
                 type="button"
                 onClick={() => setStatusFilter("active")}
                 className={cn(
-                  "rounded-2xl border px-4 py-3 text-left transition",
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                   statusFilter === "active"
                     ? "border-emerald-600 bg-emerald-600 text-white"
-                    : "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
                 )}
               >
-                <div className="text-xs font-semibold uppercase tracking-wide opacity-80">Active</div>
-                <div className="mt-1 text-lg font-semibold">{counts.active}</div>
+                Active
               </button>
 
               <button
                 type="button"
                 onClick={() => setStatusFilter("archived")}
                 className={cn(
-                  "rounded-2xl border px-4 py-3 text-left transition",
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                   statusFilter === "archived"
                     ? "border-amber-600 bg-amber-600 text-white"
-                    : "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
                 )}
               >
-                <div className="text-xs font-semibold uppercase tracking-wide opacity-80">Archived</div>
-                <div className="mt-1 text-lg font-semibold">{counts.archived}</div>
+                Archived
+              </button>
+
+              <div className="mx-1 hidden h-8 w-px bg-gray-200 xl:block dark:bg-gray-800" />
+
+              <button
+                type="button"
+                onClick={() => setAiFilter("all")}
+                className={cn(
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
+                  aiFilter === "all"
+                    ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
+                )}
+              >
+                All AI states
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setAiFilter("ready")}
+                className={cn(
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
+                  aiFilter === "ready"
+                    ? "border-emerald-600 bg-emerald-600 text-white"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
+                )}
+              >
+                AI ready
               </button>
 
               <button
                 type="button"
                 onClick={() => setAiFilter("needs_confirm")}
                 className={cn(
-                  "rounded-2xl border px-4 py-3 text-left transition",
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                   aiFilter === "needs_confirm"
                     ? "border-amber-600 bg-amber-600 text-white"
-                    : "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
                 )}
               >
-                <div className="text-xs font-semibold uppercase tracking-wide opacity-80">Needs Confirm</div>
-                <div className="mt-1 text-lg font-semibold">{counts.needsConfirm}</div>
+                Needs confirm
               </button>
 
               <button
                 type="button"
                 onClick={() => setAiFilter("attention")}
                 className={cn(
-                  "rounded-2xl border px-4 py-3 text-left transition",
+                  "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
                   aiFilter === "attention"
                     ? "border-red-600 bg-red-600 text-white"
-                    : "border-gray-200 bg-gray-50 text-gray-900 hover:bg-gray-100 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-800"
+                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
                 )}
               >
-                <div className="text-xs font-semibold uppercase tracking-wide opacity-80">Attention</div>
-                <div className="mt-1 text-lg font-semibold">{counts.attention}</div>
+                Attention
               </button>
             </div>
 
-            <div className="flex w-full flex-col gap-3 xl:w-[430px]">
+            <div className="w-full xl:w-[420px]">
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name, slug, owner, industry, AI status…"
+                placeholder="Search tenants, slug, industry, AI status…"
                 className="w-full rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 dark:border-white/10 dark:bg-white/5 dark:text-white"
               />
-
-              <div className="flex flex-wrap gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setAiFilter("all")}
-                  className={cn(
-                    "rounded-full border px-3 py-1.5 font-semibold",
-                    aiFilter === "all"
-                      ? "border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black"
-                      : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
-                  )}
-                >
-                  All AI states
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAiFilter("ready")}
-                  className={cn(
-                    "rounded-full border px-3 py-1.5 font-semibold",
-                    aiFilter === "ready"
-                      ? "border-emerald-600 bg-emerald-600 text-white"
-                      : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
-                  )}
-                >
-                  AI ready
-                </button>
-              </div>
             </div>
           </div>
 
@@ -537,6 +529,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
               const id = String(t.id);
               const isArchived = String(t.status ?? "").toLowerCase() === "archived";
               const owner = getOwnerLabel(t);
+              const ownerSub = getOwnerSubLabel(t);
               const plan = normalizePlan(t.planTier ?? "free");
               const limit = getLimitLabel(t);
               const {
@@ -592,8 +585,6 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-gray-500 dark:text-gray-400">
                               <span className="font-mono">{t.slug ?? "—"}</span>
                               <span>•</span>
-                              <span>{String(t.id).slice(0, 8)}</span>
-                              <span>•</span>
                               <span>Created {fmtDate(t.createdAt)}</span>
                               {isArchived && t.archivedAt ? (
                                 <>
@@ -648,10 +639,10 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
                               Owner
                             </div>
                             <div className="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">
-                              <span className="font-mono">{owner}</span>
+                              {owner}
                             </div>
                             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                              Current platform-linked owner reference
+                              {ownerSub}
                             </div>
                           </div>
 
