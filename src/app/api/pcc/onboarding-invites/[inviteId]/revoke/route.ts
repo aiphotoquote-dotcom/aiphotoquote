@@ -4,7 +4,10 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/lib/db/client";
-import { platformOnboardingInvites } from "@/lib/db/schema";
+import {
+  platformOnboardingInvites,
+  platformOnboardingSessions,
+} from "@/lib/db/schema";
 import { requirePlatformRole } from "@/lib/rbac/guards";
 
 export const runtime = "nodejs";
@@ -23,6 +26,27 @@ function json(data: any, status = 200) {
       expires: "0",
     },
   });
+}
+
+function shapeInvite(row: any) {
+  return {
+    id: String(row.id),
+    code: String(row.code),
+    email: row.email ? String(row.email) : null,
+    createdBy: String(row.createdBy),
+    createdByEmail: row.createdByEmail ? String(row.createdByEmail) : null,
+    campaignKey: row.campaignKey ? String(row.campaignKey) : null,
+    source: row.source ? String(row.source) : null,
+    targetIndustryKey: row.targetIndustryKey ? String(row.targetIndustryKey) : null,
+    targetIndustryLocked: Boolean(row.targetIndustryLocked ?? false),
+    status: String(row.status),
+    usedByTenantId: row.usedByTenantId ? String(row.usedByTenantId) : null,
+    usedAt: row.usedAt ?? null,
+    expiresAt: row.expiresAt ?? null,
+    meta: row.meta ?? {},
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 export async function POST(
@@ -50,10 +74,15 @@ export async function POST(
   const existing = await db
     .select({
       id: platformOnboardingInvites.id,
-      status: platformOnboardingInvites.status,
       code: platformOnboardingInvites.code,
       email: platformOnboardingInvites.email,
       createdBy: platformOnboardingInvites.createdBy,
+      createdByEmail: platformOnboardingInvites.createdByEmail,
+      campaignKey: platformOnboardingInvites.campaignKey,
+      source: platformOnboardingInvites.source,
+      targetIndustryKey: platformOnboardingInvites.targetIndustryKey,
+      targetIndustryLocked: platformOnboardingInvites.targetIndustryLocked,
+      status: platformOnboardingInvites.status,
       usedByTenantId: platformOnboardingInvites.usedByTenantId,
       usedAt: platformOnboardingInvites.usedAt,
       expiresAt: platformOnboardingInvites.expiresAt,
@@ -88,29 +117,37 @@ export async function POST(
   }
 
   if (String(row.status) === "revoked") {
+    // Defensive cleanup in case older revokes did not cancel active sessions.
+    await db
+      .update(platformOnboardingSessions)
+      .set({
+        status: "cancelled",
+        cancelledAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(platformOnboardingSessions.inviteId, inviteId),
+          eq(platformOnboardingSessions.status, "active")
+        )
+      );
+
     return json({
       ok: true,
-      invite: {
-        id: String(row.id),
-        code: String(row.code),
-        email: row.email ? String(row.email) : null,
-        createdBy: String(row.createdBy),
+      invite: shapeInvite({
+        ...row,
         status: "revoked",
-        usedByTenantId: row.usedByTenantId ? String(row.usedByTenantId) : null,
-        usedAt: row.usedAt ?? null,
-        expiresAt: row.expiresAt ?? null,
-        meta: row.meta ?? {},
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      },
+      }),
     });
   }
+
+  const now = new Date();
 
   const updated = await db
     .update(platformOnboardingInvites)
     .set({
       status: "revoked",
-      updatedAt: new Date(),
+      updatedAt: now,
     })
     .where(
       and(
@@ -123,6 +160,11 @@ export async function POST(
       code: platformOnboardingInvites.code,
       email: platformOnboardingInvites.email,
       createdBy: platformOnboardingInvites.createdBy,
+      createdByEmail: platformOnboardingInvites.createdByEmail,
+      campaignKey: platformOnboardingInvites.campaignKey,
+      source: platformOnboardingInvites.source,
+      targetIndustryKey: platformOnboardingInvites.targetIndustryKey,
+      targetIndustryLocked: platformOnboardingInvites.targetIndustryLocked,
       status: platformOnboardingInvites.status,
       usedByTenantId: platformOnboardingInvites.usedByTenantId,
       usedAt: platformOnboardingInvites.usedAt,
@@ -143,20 +185,23 @@ export async function POST(
     );
   }
 
+  // ✅ Critical: revoke must invalidate all active onboarding sessions for this invite.
+  await db
+    .update(platformOnboardingSessions)
+    .set({
+      status: "cancelled",
+      cancelledAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(platformOnboardingSessions.inviteId, inviteId),
+        eq(platformOnboardingSessions.status, "active")
+      )
+    );
+
   return json({
     ok: true,
-    invite: {
-      id: String(invite.id),
-      code: String(invite.code),
-      email: invite.email ? String(invite.email) : null,
-      createdBy: String(invite.createdBy),
-      status: String(invite.status),
-      usedByTenantId: invite.usedByTenantId ? String(invite.usedByTenantId) : null,
-      usedAt: invite.usedAt ?? null,
-      expiresAt: invite.expiresAt ?? null,
-      meta: invite.meta ?? {},
-      createdAt: invite.createdAt,
-      updatedAt: invite.updatedAt,
-    },
+    invite: shapeInvite(invite),
   });
 }
