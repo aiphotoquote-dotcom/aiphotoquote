@@ -4,7 +4,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { SignUp } from "@clerk/nextjs";
 import { auth, currentUser } from "@clerk/nextjs/server";
-import { and, desc, eq, gt, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import { db } from "@/lib/db/client";
 import {
@@ -157,9 +157,25 @@ export default async function Page({
     hasValidLegacyInvite = rows.length > 0;
   }
 
-  // ✅ Recovery path:
-  // If Clerk lands on plain /sign-up after auth and we have a signed-in user,
-  // recover the newest active onboarding session for that user and continue.
+  // 1) Direct explicit recovery
+  if (!isInternalClerkPath && userId && hasValidOnboardingSession && onboardingSessionId) {
+    await db.execute(sql`
+      update platform_onboarding_sessions
+      set
+        clerk_user_id = ${String(userId)},
+        email = ${signedInEmail || null},
+        updated_at = now()
+      where id = ${onboardingSessionId}::uuid
+    `);
+
+    redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
+  }
+
+  if (!isInternalClerkPath && userId && hasValidLegacyInvite && inviteCode) {
+    redirect(`/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`);
+  }
+
+  // 2) Signed-in recovery by already-bound session
   if (!isInternalClerkPath && userId && !hasValidOnboardingSession && !hasValidLegacyInvite) {
     const recoveryRows = await db
       .select({
@@ -190,18 +206,44 @@ export default async function Page({
     }
   }
 
-  // Let Clerk finish its internal callback/verification flows.
-  if (!isInternalClerkPath) {
-    if (userId && hasValidOnboardingSession && onboardingSessionId) {
-      redirect(`/onboarding?mode=new&onboardingSession=${encodeURIComponent(onboardingSessionId)}`);
-    }
+  // 3) Signed-in recovery by newest anonymous invite session
+  // This is the critical fix for Clerk dropping invite query context.
+  if (!isInternalClerkPath && userId && !hasValidOnboardingSession && !hasValidLegacyInvite) {
+    const anonymousRows = await db
+      .select({
+        id: platformOnboardingSessions.id,
+        createdAt: platformOnboardingSessions.createdAt,
+      })
+      .from(platformOnboardingSessions)
+      .where(
+        and(
+          eq(platformOnboardingSessions.status, "active"),
+          gt(platformOnboardingSessions.expiresAt, now),
+          isNull(platformOnboardingSessions.clerkUserId),
+          isNull(platformOnboardingSessions.tenantId)
+        )
+      )
+      .orderBy(desc(platformOnboardingSessions.createdAt))
+      .limit(1);
 
-    if (userId && hasValidLegacyInvite && inviteCode) {
-      redirect(`/onboarding?mode=new&invite=${encodeURIComponent(inviteCode)}`);
+    const anonymous = anonymousRows[0] ?? null;
+
+    if (anonymous?.id) {
+      await db.execute(sql`
+        update platform_onboarding_sessions
+        set
+          clerk_user_id = ${String(userId)},
+          email = ${signedInEmail || null},
+          updated_at = now()
+        where id = ${String(anonymous.id)}::uuid
+      `);
+
+      redirect(
+        `/onboarding?mode=new&onboardingSession=${encodeURIComponent(String(anonymous.id))}`
+      );
     }
   }
 
-  // In invite-only mode, plain /sign-up with no valid onboarding context is blocked.
   if (
     cfg.onboardingMode === "invite_only" &&
     !hasValidOnboardingSession &&
