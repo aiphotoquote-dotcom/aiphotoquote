@@ -37,7 +37,7 @@ export default async function PccTenantsPage(props: {
     sp.archived === "true" ||
     (Array.isArray(sp.archived) && sp.archived.includes("1"));
 
-  // Treat legacy rows with archived_at present as archived even if status was not fully set.
+  // Always derive archived from archived_at first, then fallback to status.
   const derivedStatusExpr = sql<string>`
     case
       when ${(tenants as any).archivedAt ?? (tenants as any).archived_at} is not null then 'archived'
@@ -45,6 +45,7 @@ export default async function PccTenantsPage(props: {
     end
   `;
 
+  // ✅ Load both active + archived always.
   const baseRows = await db
     .select({
       id: tenants.id,
@@ -70,7 +71,6 @@ export default async function PccTenantsPage(props: {
     .from(tenants)
     .leftJoin(tenantSettings, sql`${tenantSettings.tenantId} = ${tenants.id}`)
     .leftJoin(appUsers, sql`${appUsers.id} = ${tenants.ownerUserId}`)
-    .where(showArchived ? sql`true` : sql`${derivedStatusExpr} <> 'archived'`)
     .orderBy(desc(tenants.createdAt))
     .limit(200);
 
@@ -249,7 +249,7 @@ export default async function PccTenantsPage(props: {
               {activeCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Non-archived tenants in current view
+              Non-archived tenants loaded into view
             </div>
           </div>
 
@@ -261,7 +261,7 @@ export default async function PccTenantsPage(props: {
               {archivedCount}
             </div>
             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Hidden by default unless enabled above
+              Available to show via archived toggle or filter
             </div>
           </div>
 

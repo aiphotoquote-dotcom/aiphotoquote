@@ -222,7 +222,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
   const [err, setErr] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(showArchived ? "all" : "active");
   const [aiFilter, setAiFilter] = useState<AiFilter>("all");
   const [page, setPage] = useState(1);
 
@@ -238,6 +238,9 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
       const owner = getOwnerLabel(t);
       const ownerSub = getOwnerSubLabel(t);
       const derived = getAiDerived(t);
+
+      // Default behavior: archived hidden unless URL toggle enabled OR archived filter chosen.
+      if (!showArchived && statusFilter === "all" && isArchived) return false;
 
       if (statusFilter === "active" && isArchived) return false;
       if (statusFilter === "archived" && !isArchived) return false;
@@ -264,7 +267,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
 
       return haystack.includes(q);
     });
-  }, [rows, search, statusFilter, aiFilter]);
+  }, [rows, search, statusFilter, aiFilter, showArchived]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
 
@@ -530,7 +533,7 @@ export default function TenantsTableClient({ rows, showArchived }: { rows: Row[]
             <div>
               Showing {filteredRows.length === 0 ? 0 : (page - 1) * pageSize + 1}–
               {Math.min(page * pageSize, filteredRows.length)} of {filteredRows.length} tenants
-              {!showArchived ? " in active/default view" : ""}
+              {!showArchived ? " with archived hidden by default" : ""}
             </div>
             <div>Page {page} of {totalPages}</div>
           </div>
