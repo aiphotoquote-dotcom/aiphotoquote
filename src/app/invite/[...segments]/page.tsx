@@ -122,8 +122,6 @@ export default async function InvitePage({
   const existingSessionRows = await db
     .select({
       id: platformOnboardingSessions.id,
-      clerkUserId: platformOnboardingSessions.clerkUserId,
-      email: platformOnboardingSessions.email,
       createdAt: platformOnboardingSessions.createdAt,
     })
     .from(platformOnboardingSessions)
@@ -194,15 +192,17 @@ export default async function InvitePage({
   const inviteBasePath = `/invite/${encodeURIComponent(inviteCode)}`;
   const inviteSignInPath = `${inviteBasePath}/sign-in`;
 
-  // ✅ Durable handoff:
-  // always send Clerk to after-sign-in with invite code, not anonymous session id.
+  // Durable handoff to after-sign-in
   const afterUrl = `/auth/after-sign-in?invite=${encodeURIComponent(inviteCode)}`;
 
+  // ✅ Only explicit /sign-in paths render SignIn.
+  // All callback/verify/continue states remain on the SignUp component.
   if (isSignInPath(tail)) {
     return (
       <main className="flex min-h-screen items-center justify-center px-6 py-14">
         <SignIn
-          routing="virtual"
+          routing="path"
+          path={inviteSignInPath}
           signUpUrl={inviteBasePath}
           forceRedirectUrl={afterUrl}
           fallbackRedirectUrl={afterUrl}
@@ -214,7 +214,8 @@ export default async function InvitePage({
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-14">
       <SignUp
-        routing="virtual"
+        routing="path"
+        path={inviteBasePath}
         signInUrl={inviteSignInPath}
         forceRedirectUrl={afterUrl}
         fallbackRedirectUrl={afterUrl}
