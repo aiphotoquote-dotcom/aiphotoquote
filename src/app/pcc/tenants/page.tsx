@@ -37,7 +37,6 @@ export default async function PccTenantsPage(props: {
     sp.archived === "true" ||
     (Array.isArray(sp.archived) && sp.archived.includes("1"));
 
-  // Base tenant rows (existing behavior)
   const baseRows = await db
     .select({
       id: tenants.id,
@@ -55,7 +54,6 @@ export default async function PccTenantsPage(props: {
       activationGraceCredits: tenantSettings.activationGraceCredits,
       activationGraceUsed: tenantSettings.activationGraceUsed,
 
-      // confirmed industry from settings (handle snake/camel)
       industryKey: (tenantSettings as any).industryKey ?? (tenantSettings as any).industry_key,
     })
     .from(tenants)
@@ -66,7 +64,6 @@ export default async function PccTenantsPage(props: {
 
   const tenantIds = baseRows.map((r) => String(r.id)).filter(Boolean);
 
-  // AI attach map (best-effort)
   const aiByTenant = new Map<
     string,
     {
@@ -83,7 +80,6 @@ export default async function PccTenantsPage(props: {
   >();
 
   if (tenantIds.length) {
-    // Build a real uuid[] expression: array['..'::uuid, '..'::uuid]::uuid[]
     const uuidArray = sql`array[${sql.join(
       tenantIds.map((id) => sql`${id}::uuid`),
       sql`, `
@@ -96,31 +92,19 @@ export default async function PccTenantsPage(props: {
         )
         select
           v.tenant_id::text as "tenantId",
-
-          -- confirmed industry label (industries table)
           i1.label::text as "confirmedIndustryLabel",
-
-          -- suggested industry key
           (ob.ai_analysis->>'suggestedIndustryKey')::text as "suggestedIndustryKey",
-
-          -- suggested industry label candidates
           (ob.ai_analysis->>'suggestedIndustryLabel')::text as "suggestedIndustryLabel",
           (ob.ai_analysis->'industryInterview'->'proposedIndustry'->>'label')::text as "suggestedIndustryCanonicalLabel",
-
-          -- confirmation state
           case
             when (ob.ai_analysis->>'needsConfirmation')::text = 'true' then true
             when (ob.ai_analysis->>'needsConfirmation')::text = 't' then true
             when (ob.ai_analysis->>'needsConfirmation')::text = '1' then true
             else false
           end as "needsConfirmation",
-
-          -- meta/status/source/updatedAt
           (ob.ai_analysis->'meta'->>'status')::text as "aiStatus",
           (ob.ai_analysis->'meta'->>'source')::text as "aiSource",
           (ob.ai_analysis->'meta'->>'updatedAt')::text as "aiUpdatedAt",
-
-          -- rejected keys count
           coalesce(jsonb_array_length(coalesce(ob.ai_analysis->'rejectedIndustryKeys','[]'::jsonb)), 0)::int as "rejectedCount"
         from visible v
         left join tenant_onboarding ob on ob.tenant_id = v.tenant_id
@@ -146,9 +130,7 @@ export default async function PccTenantsPage(props: {
         });
       }
     } catch (e: any) {
-      // ✅ This is the key: Vercel logs will show the real DB error
       console.error("[PCC] Tenants AI attach query failed", e);
-      // We intentionally continue with baseRows only
     }
   }
 
@@ -168,12 +150,8 @@ export default async function PccTenantsPage(props: {
 
     return {
       ...r,
-
-      // confirmed industry (settings)
       industryKey: confirmedIndustryKey,
       industryLabel: confirmedIndustryLabel,
-
-      // AI suggestion signals
       aiSuggestedIndustryKey: suggestedIndustryKey,
       aiSuggestedIndustryLabel: suggestedIndustryLabel,
       aiNeedsConfirmation: ai?.needsConfirmation ?? false,
@@ -184,41 +162,126 @@ export default async function PccTenantsPage(props: {
     };
   });
 
+  const activeCount = rows.filter((r: any) => String(r.status ?? "active").toLowerCase() !== "archived").length;
+  const archivedCount = rows.filter((r: any) => String(r.status ?? "").toLowerCase() === "archived").length;
+  const needsConfirmCount = rows.filter((r: any) => Boolean(r.aiNeedsConfirmation)).length;
+  const aiReadyCount = rows.filter((r: any) => {
+    const aiStatus = safeTrim(r.aiStatus).toLowerCase();
+    return aiStatus === "complete" && !Boolean(r.aiNeedsConfirmation);
+  }).length;
+  const attentionCount = rows.filter((r: any) => {
+    const aiStatus = safeTrim(r.aiStatus).toLowerCase();
+    const graceTotal = Number(r.activationGraceCredits ?? 0);
+    const graceUsed = Number(r.activationGraceUsed ?? 0);
+    const graceLeft = Math.max(0, graceTotal - graceUsed);
+
+    return (
+      Boolean(r.aiNeedsConfirmation) ||
+      aiStatus === "error" ||
+      aiStatus === "rejected" ||
+      (!safeTrim(r.industryKey) && !safeTrim(r.aiSuggestedIndustryKey)) ||
+      graceLeft <= 3
+    );
+  }).length;
+
   return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-800 dark:bg-gray-950">
-        <div className="flex items-start justify-between gap-4">
+    <div className="space-y-5">
+      <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Tenants</h1>
-            <p className="mt-1 text-sm text-gray-600 dark:text-gray-300">
-              PCC tenant list. Use <span className="font-semibold">Archive</span> to safely disable a tenant while preserving history (no data is deleted).
-              <span className="ml-2">
-                Includes <span className="font-semibold">AI onboarding signals</span> (suggested industry, needs-confirm, status).
-              </span>
+            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-gray-500 dark:text-gray-400">
+              PCC
+            </div>
+            <h1 className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              Tenant Operations
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600 dark:text-gray-300">
+              Operational view of all tenant accounts, onboarding AI signals, plan state, and admin actions.
+              Use <span className="font-semibold">Archive</span> to safely disable a tenant while preserving history.
             </p>
+          </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-1 dark:border-gray-800 dark:bg-gray-900">
-                Showing {rows.length} {rows.length === 1 ? "tenant" : "tenants"}
-              </span>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 font-semibold text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-200">
+              Loaded {rows.length} {rows.length === 1 ? "tenant" : "tenants"}
+            </span>
 
-              {showArchived ? (
-                <Link
-                  href="/pcc/tenants"
-                  className="rounded-full border border-gray-200 bg-white px-2 py-1 font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
-                >
-                  Hide archived
-                </Link>
-              ) : (
-                <Link
-                  href="/pcc/tenants?archived=1"
-                  className="rounded-full border border-gray-200 bg-white px-2 py-1 font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
-                >
-                  Show archived
-                </Link>
-              )}
+            {showArchived ? (
+              <Link
+                href="/pcc/tenants"
+                className="rounded-full border border-gray-200 bg-white px-3 py-1.5 font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
+              >
+                Hide archived
+              </Link>
+            ) : (
+              <Link
+                href="/pcc/tenants?archived=1"
+                className="rounded-full border border-gray-200 bg-white px-3 py-1.5 font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-800 dark:bg-black dark:text-gray-200 dark:hover:bg-gray-950"
+              >
+                Show archived
+              </Link>
+            )}
+          </div>
+        </div>
 
-              {!showArchived ? <span className="text-gray-400 dark:text-gray-500">Archived tenants hidden by default</span> : null}
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              Active
+            </div>
+            <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              {activeCount}
+            </div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Non-archived tenants in current view
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              Archived
+            </div>
+            <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              {archivedCount}
+            </div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Hidden by default unless enabled above
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              AI Ready
+            </div>
+            <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              {aiReadyCount}
+            </div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              AI complete and not awaiting confirmation
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-800 dark:bg-gray-900">
+            <div className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              Needs Confirm
+            </div>
+            <div className="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              {needsConfirmCount}
+            </div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Suggested industry still needs review
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/40 dark:bg-amber-950/20">
+            <div className="text-xs font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-200">
+              Needs Attention
+            </div>
+            <div className="mt-2 text-2xl font-semibold text-amber-900 dark:text-amber-100">
+              {attentionCount}
+            </div>
+            <div className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+              Low grace, missing industry, or AI issue
             </div>
           </div>
         </div>
